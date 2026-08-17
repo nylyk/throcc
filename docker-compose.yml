@@ -1,0 +1,30 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: crates/throcc-server/Dockerfile
+      target: runtime
+    restart: unless-stopped
+    ports:
+      - "8476:8476/udp"
+    volumes:
+      - server-data:/data
+
+  dev:
+    init: true
+    build:
+      context: .
+      dockerfile: crates/throcc-server/Dockerfile
+      target: dev
+    ports:
+      - "8476:8476/udp"
+    environment:
+      RUST_LOG: "${RUST_LOG:-info}"
+    volumes:
+      - .:/app
+      - dev-target:/app/target
+      - ./data:/data
+
+volumes:
+  server-data:
+  dev-target:
