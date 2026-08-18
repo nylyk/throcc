@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
+use rustls::crypto::{CryptoProvider, verify_tls13_signature};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::{DigitallySignedStruct, SignatureScheme};
+use rustls::{DigitallySignedStruct, PeerIncompatible, SignatureScheme};
 use throcc_proto::Fingerprint;
 
 use crate::identity::Keystore;
@@ -141,16 +141,13 @@ impl ServerCertVerifier for PinVerifier {
 
     fn verify_tls12_signature(
         &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        signature: &DigitallySignedStruct,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _signature: &DigitallySignedStruct,
     ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-        verify_tls12_signature(
-            message,
-            cert,
-            signature,
-            &self.provider.signature_verification_algorithms,
-        )
+        Err(rustls::Error::PeerIncompatible(
+            PeerIncompatible::Tls12NotOffered,
+        ))
     }
 
     fn verify_tls13_signature(
