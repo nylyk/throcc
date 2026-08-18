@@ -130,7 +130,10 @@ fn decode_seed(s: &str) -> Result<[u8; 32]> {
     }
     let mut out = [0u8; 32];
     for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
+        let pair = s
+            .get(i * 2..i * 2 + 2)
+            .ok_or_else(|| Error::Keystore("identity key is not hexadecimal".into()))?;
+        *byte = u8::from_str_radix(pair, 16)
             .map_err(|_| Error::Keystore("identity key is not hexadecimal".into()))?;
     }
     Ok(out)

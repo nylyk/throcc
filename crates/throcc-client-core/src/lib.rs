@@ -26,6 +26,9 @@ pub enum Error {
     #[error("protocol: {0}")]
     Protocol(String),
 
+    #[error("command dropped: {0}")]
+    CommandDropped(String),
+
     #[error("keystore: {0}")]
     Keystore(String),
 

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use quinn::Connection;
@@ -14,6 +15,8 @@ use crate::{Connector, Error, Keystore, Result};
 
 const QUEUE_DEPTH: usize = 64;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
+/// Must stay under `SHUTDOWN_GRACE`, or the runtime tears the drain down mid-flush.
+const DRAIN_GRACE: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cmd {
@@ -31,6 +34,7 @@ pub struct Client {
     connector: Connector,
     commands: mpsc::Sender<Cmd>,
     events: broadcast::Sender<Event>,
+    disconnect_reason: Arc<Mutex<Option<String>>>,
     runtime: Runtime,
 }
 
@@ -50,18 +54,21 @@ impl Client {
 
         let (commands, command_queue) = mpsc::channel(QUEUE_DEPTH);
         let (events, _) = broadcast::channel(QUEUE_DEPTH);
+        let disconnect_reason = Arc::new(Mutex::new(None));
         runtime.spawn(control(
             connection,
             writer,
             reader,
             command_queue,
             events.clone(),
+            disconnect_reason.clone(),
         ));
 
         Ok(Self {
             connector,
             commands,
             events,
+            disconnect_reason,
             runtime,
         })
     }
@@ -70,14 +77,25 @@ impl Client {
         self.connector.keystore()
     }
 
-    pub fn cmd(&self, command: Cmd) {
-        if let Err(e) = self.commands.try_send(command) {
-            tracing::error!(error = %e, "dropped a command");
-        }
+    pub fn cmd(&self, command: Cmd) -> Result<()> {
+        self.commands
+            .try_send(command)
+            .map_err(|e| Error::CommandDropped(e.to_string()))
     }
 
     pub fn events(&self) -> broadcast::Receiver<Event> {
-        self.events.subscribe()
+        let ended = self
+            .disconnect_reason
+            .lock()
+            .expect("disconnect reason mutex poisoned");
+        match ended.clone() {
+            None => self.events.subscribe(),
+            Some(reason) => {
+                let (replay, receiver) = broadcast::channel(1);
+                let _ = replay.send(Event::Disconnected { reason });
+                receiver
+            }
+        }
     }
 
     /// Blocks until the runtime has shut down.
@@ -112,12 +130,16 @@ async fn open_control(connection: &Connection) -> Result<(ControlWriter, Control
 
 async fn control(
     connection: Connection,
-    writer: ControlWriter,
+    mut writer: ControlWriter,
     reader: ControlReader,
     mut commands: mpsc::Receiver<Cmd>,
     events: broadcast::Sender<Event>,
+    disconnect_reason: Arc<Mutex<Option<String>>>,
 ) {
-    let reason = match run(writer, reader, &mut commands, &events).await {
+    let outcome = run(&mut writer, reader, &mut commands, &events).await;
+    let _ = tokio::time::timeout(DRAIN_GRACE, writer.drain()).await;
+
+    let reason = match outcome {
         Ok(()) => connection
             .close_reason()
             .map_or_else(|| "closed".to_string(), |reason| reason.to_string()),
@@ -125,20 +147,32 @@ async fn control(
     };
 
     connection.close(0u32.into(), b"bye");
+    *disconnect_reason
+        .lock()
+        .expect("disconnect reason mutex poisoned") = Some(reason.clone());
     let _ = events.send(Event::Disconnected { reason });
 }
 
 async fn run(
-    mut writer: ControlWriter,
+    writer: &mut ControlWriter,
     mut reader: ControlReader,
     commands: &mut mpsc::Receiver<Cmd>,
     events: &broadcast::Sender<Event>,
 ) -> Result<()> {
     let (inbound, mut server_messages) = mpsc::channel(QUEUE_DEPTH);
     tokio::spawn(async move {
-        while let Ok(Some(message)) = reader.read::<ServerMessage>().await {
-            if inbound.send(message).await.is_err() {
-                break;
+        loop {
+            match reader.read::<ServerMessage>().await {
+                Ok(Some(message)) => {
+                    if inbound.send(Ok(message)).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = inbound.send(Err(e)).await;
+                    break;
+                }
             }
         }
     });
@@ -176,8 +210,9 @@ async fn run(
             message = server_messages.recv() => {
                 match message {
                     None => return Ok(()),
-                    Some(ServerMessage::Event(event)) => tracing::debug!(?event, "event"),
-                    Some(ServerMessage::Resp(RespEnvelope { id, resp })) => {
+                    Some(Err(e)) => return Err(e),
+                    Some(Ok(ServerMessage::Event(event))) => tracing::debug!(?event, "event"),
+                    Some(Ok(ServerMessage::Resp(RespEnvelope { id, resp }))) => {
                         let Some(reply) = pending.remove(&id) else {
                             return Err(Error::Protocol(format!(
                                 "response {id} answers no pending request"

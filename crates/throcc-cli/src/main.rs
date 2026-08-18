@@ -68,7 +68,7 @@ fn main() -> Result<()> {
     tracing::info!(server = %authority, "connected");
 
     let mut events = client.events();
-    client.cmd(Cmd::SetRoom(None));
+    client.cmd(Cmd::SetRoom(None))?;
 
     while let Ok(event) = events.blocking_recv() {
         match event {

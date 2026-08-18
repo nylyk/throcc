@@ -41,7 +41,7 @@ fn a_request_is_answered_over_the_control_stream() {
     let client = Client::connect(address, SERVER_LABEL, keystore).expect("connecting");
 
     let mut events = client.events();
-    client.cmd(Cmd::SetRoom(None));
+    client.cmd(Cmd::SetRoom(None)).unwrap();
 
     match next_event(&mut events) {
         Event::Failed { message } => assert!(
@@ -72,7 +72,7 @@ fn closing_the_client_reports_a_disconnect() {
     let client = Client::connect(address, SERVER_LABEL, keystore).unwrap();
     let mut events = client.events();
 
-    client.cmd(Cmd::Disconnect);
+    client.cmd(Cmd::Disconnect).unwrap();
     assert!(matches!(
         next_event(&mut events),
         Event::Disconnected { .. }

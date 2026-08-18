@@ -18,6 +18,16 @@ impl ControlWriter {
             .await
             .context("writing to the control stream")
     }
+
+    /// Waits until the peer has acknowledged every byte written.
+    pub async fn drain(&mut self) -> Result<()> {
+        self.0.finish().context("finishing the control stream")?;
+        self.0
+            .stopped()
+            .await
+            .context("waiting for the control stream to be acknowledged")?;
+        Ok(())
+    }
 }
 
 pub struct ControlReader(RecvStream);

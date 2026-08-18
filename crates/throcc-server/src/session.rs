@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use quinn::Connection;
 use rand::RngExt as _;
@@ -6,6 +8,8 @@ use throcc_proto::{
 };
 
 use crate::control::{ControlReader, ControlWriter};
+
+const DRAIN_GRACE: Duration = Duration::from_secs(1);
 
 pub async fn serve(connection: Connection) {
     tracing::info!(
@@ -16,6 +20,7 @@ pub async fn serve(connection: Connection) {
 
     if let Err(e) = control(&connection).await {
         tracing::warn!(error = ?e, "control stream ended in error");
+        connection.close(1u32.into(), b"protocol error");
     }
 
     let reason = connection.closed().await;
@@ -28,8 +33,15 @@ async fn control(connection: &Connection) -> Result<()> {
         .await
         .context("opening the control stream")?;
     let mut writer = ControlWriter::new(send);
-    let mut reader = ControlReader::new(recv);
 
+    let outcome = answer_requests(&mut writer, ControlReader::new(recv)).await;
+    if outcome.is_err() {
+        let _ = tokio::time::timeout(DRAIN_GRACE, writer.drain()).await;
+    }
+    outcome
+}
+
+async fn answer_requests(writer: &mut ControlWriter, mut reader: ControlReader) -> Result<()> {
     let server_nonce: [u8; 32] = rand::rng().random();
     writer
         .write(&ServerHello {

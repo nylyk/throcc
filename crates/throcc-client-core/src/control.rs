@@ -19,6 +19,17 @@ impl ControlWriter {
             .await
             .map_err(|e| Error::Protocol(format!("writing to the control stream: {e}")))
     }
+
+    /// Waits until the peer has acknowledged every byte written.
+    pub async fn drain(&mut self) -> Result<()> {
+        self.0
+            .finish()
+            .map_err(|e| Error::Protocol(format!("finishing the control stream: {e}")))?;
+        self.0.stopped().await.map_err(|e| {
+            Error::Protocol(format!("waiting for the control stream to drain: {e}"))
+        })?;
+        Ok(())
+    }
 }
 
 pub struct ControlReader(RecvStream);

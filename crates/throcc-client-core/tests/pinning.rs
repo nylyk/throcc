@@ -30,7 +30,12 @@ async fn pins_on_first_use_and_refuses_a_changed_key() {
         .connect(address, SERVER_LABEL)
         .await
         .expect("first connection should succeed");
-    assert_eq!(connection.remote_address(), address);
+    // The client's socket is dual-stack, so a v4 peer reports v4-mapped.
+    let remote = connection.remote_address();
+    assert_eq!(
+        SocketAddr::new(remote.ip().to_canonical(), remote.port()),
+        address
+    );
     assert_eq!(
         connector.keystore().pinned(SERVER_LABEL),
         Some(expected),

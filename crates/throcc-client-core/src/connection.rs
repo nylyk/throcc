@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -19,7 +19,11 @@ pub struct Connector {
 
 impl Connector {
     pub fn new(keystore: Keystore) -> Result<Self> {
-        let endpoint = quinn::Endpoint::client((std::net::Ipv4Addr::UNSPECIFIED, 0).into())
+        let endpoint = quinn::Endpoint::client((Ipv6Addr::UNSPECIFIED, 0).into())
+            .or_else(|e| {
+                tracing::debug!(error = %e, "no IPv6 socket, falling back to IPv4 only");
+                quinn::Endpoint::client((Ipv4Addr::UNSPECIFIED, 0).into())
+            })
             .map_err(|e| Error::Connect(format!("binding a local UDP socket: {e}")))?;
         Ok(Self { endpoint, keystore })
     }
