@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -48,10 +49,14 @@ impl Connector {
             .with_no_client_auth();
         tls.alpn_protocols = vec![throcc_proto::ALPN.to_vec()];
 
-        let config = quinn::ClientConfig::new(Arc::new(
+        let mut config = quinn::ClientConfig::new(Arc::new(
             QuicClientConfig::try_from(tls)
                 .map_err(|e| Error::Connect(format!("building the QUIC crypto config: {e}")))?,
         ));
+
+        let mut transport = quinn::TransportConfig::default();
+        transport.keep_alive_interval(Some(Duration::from_secs(10)));
+        config.transport_config(Arc::new(transport));
 
         let handshake = self
             .endpoint

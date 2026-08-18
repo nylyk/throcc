@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use throcc_proto::Fingerprint;
 use tracing::Instrument as _;
 
+pub mod control;
 pub mod identity;
 pub mod session;
 pub mod tls;

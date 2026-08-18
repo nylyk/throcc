@@ -141,13 +141,13 @@ CMD ["/usr/local/bin/throcc-server"]
 
 ---
 
-## M2 — Control stream and framing
+## M2 — Control stream and framing — done
 
 **Goal:** Typed request/response/event messages flow over one bidirectional stream in both directions.
 
-### 2.1 Length-delimited codec
+### 2.1 Length-delimited framing
 
-- **What:** `throcc-proto/codec.rs`: write a `u32` big-endian length then the postcard bytes; read the reverse.
+- **What:** `throcc-proto/framing.rs`: write a `u32` big-endian length then the postcard bytes; read the reverse.
 - **Why:** QUIC streams are byte streams, not message streams. Without explicit framing you get partial reads that decode into garbage under load and never in testing.
 - **How:** Async helpers over quinn's `SendStream`/`RecvStream`. **Check the length against the 1 MiB cap before allocating** — one line, and the difference between a protocol and a remote memory-exhaustion vector.
 

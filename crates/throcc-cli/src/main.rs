@@ -1,9 +1,9 @@
-use std::net::Ipv6Addr;
+use std::net::{Ipv6Addr, ToSocketAddrs as _};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use throcc_client_core::{Connector, Keystore};
+use throcc_client_core::{Client, Cmd, Event, Keystore};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -24,8 +24,7 @@ struct Args {
     keystore: Option<PathBuf>,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -45,15 +44,14 @@ async fn main() -> Result<()> {
     }
 
     let authority = format_authority(&args.server, args.port);
-    let address = tokio::net::lookup_host(&authority)
-        .await
+    let address = authority
+        .to_socket_addrs()
         .with_context(|| format!("resolving {authority}"))?
         .next()
         .ok_or_else(|| anyhow::anyhow!("{authority} resolved to no addresses"))?;
 
-    let mut connector = Connector::new(keystore)?;
-    let connection = match connector.connect(address, &authority).await {
-        Ok(connection) => connection,
+    let client = match Client::connect(address, &authority, keystore) {
+        Ok(client) => client,
         Err(throcc_client_core::Error::PinMismatch {
             server,
             pinned,
@@ -67,16 +65,22 @@ async fn main() -> Result<()> {
         }
         Err(e) => return Err(e).context("connecting"),
     };
+    tracing::info!(server = %authority, "connected");
 
-    tracing::info!(
-        remote = %connection.remote_address(),
-        rtt = ?connection.rtt(),
-        "connected"
-    );
+    let mut events = client.events();
+    client.cmd(Cmd::SetRoom(None));
 
-    let reason = connection.closed().await;
-    tracing::info!(%reason, "disconnected");
+    while let Ok(event) = events.blocking_recv() {
+        match event {
+            Event::Failed { message } => tracing::info!(%message, "request failed"),
+            Event::Disconnected { reason } => {
+                tracing::info!(%reason, "disconnected");
+                break;
+            }
+        }
+    }
 
+    client.shutdown();
     Ok(())
 }
 

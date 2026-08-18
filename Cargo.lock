@@ -988,6 +988,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_arrays"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94a16b99c5ea4fe3daccd14853ad260ec00ea043b2708d1fd1da3106dcd8d9df"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "serde_core"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1192,7 +1201,6 @@ dependencies = [
  "clap",
  "throcc-client-core",
  "throcc-proto",
- "tokio",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1231,6 +1239,7 @@ version = "0.1.0"
 dependencies = [
  "postcard",
  "serde",
+ "serde_arrays",
  "sha2",
  "thiserror",
 ]
@@ -1246,6 +1255,7 @@ dependencies = [
  "rand",
  "rcgen",
  "rustls",
+ "serde",
  "tempfile",
  "throcc-proto",
  "tokio",

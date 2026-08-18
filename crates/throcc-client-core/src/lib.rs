@@ -2,9 +2,12 @@
 
 use thiserror::Error;
 
+pub mod client;
 pub mod connection;
+pub mod control;
 pub mod identity;
 
+pub use client::{Client, Cmd, Event};
 pub use connection::Connector;
 pub use identity::Keystore;
 
@@ -19,6 +22,9 @@ pub enum Error {
 
     #[error("connection failed: {0}")]
     Connect(String),
+
+    #[error("protocol: {0}")]
+    Protocol(String),
 
     #[error("keystore: {0}")]
     Keystore(String),

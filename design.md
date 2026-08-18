@@ -38,7 +38,7 @@ throcc/
     │   ├── ids.rs              # UserId, RoomId, MediaId, Epoch newtypes
     │   ├── frame.rs            # media datagram header, hand-rolled fixed-width
     │   ├── fingerprint.rs      # cert DER -> SPKI hash, one shared implementation
-    │   └── codec.rs            # length-delimited + postcard framing, size-capped
+    │   └── framing.rs          # length-delimited + postcard framing, size-capped
     ├── throcc-server/
     │   ├── main.rs             # clap arguments, tracing, bind then run
     │   ├── lib.rs              # Server: bind, accept loop, one task per connection
@@ -144,6 +144,9 @@ struct Placed { room: Option<RoomId>, epoch: Epoch,
 
 // ---------- server -> client ----------
 
+// one stream carries both, so what goes down the wire is tagged.
+enum ServerMessage { Resp(RespEnvelope), Event(Event) }
+
 enum Event {
     UserEntered { room: RoomId, epoch: Epoch, peer: PeerState },
     UserExited  { room: RoomId, epoch: Epoch, user: UserId },
@@ -195,7 +198,7 @@ Reserved flag bits: the server reads bit0 only and ignores the rest, so a bit ca
 
 ### Framing limits
 
-`codec.rs` caps a control frame at 1 MiB and drops the connection on anything larger, checked before allocating. Without that, the length prefix is a one-line memory-exhaustion vector.
+`framing.rs` caps a control frame at 1 MiB and drops the connection on anything larger, checked before allocating. Without that, the length prefix is a one-line memory-exhaustion vector.
 
 Avatar uploads do not go on the control stream. That stream carries membership changes and roster events, and blocking it behind a multi-megabyte image is exactly the head-of-line problem media datagrams exist to avoid. An upload opens a fresh unidirectional stream and sends a small postcard header — `{ req_id: u32, len: u32 }`, with `req_id` from the same counter as `ReqEnvelope` — then the bytes. The server replies with a normal `RespEnvelope { id: req_id, resp: AvatarHash(..) }` on the control stream, so the upload completes through the same pending-request map as everything else. Server-side size cap, and re-encode to fixed dimensions before storing.
 
@@ -205,7 +208,7 @@ Every request carries a `u32` id from a monotonic client-side counter, and the s
 
 The client keeps a `HashMap<u32, oneshot::Sender<Resp>>` and completes by id, so requests may be in flight concurrently — which is what stops an upload or an invite generation blocking a room change. Counter wraparound is unreachable in a session; treat it as fatal rather than reusing ids.
 
-`Event` has no id. It is unsolicited and there is nothing to correlate with, so giving it one would only invite code that tries to match events to requests.
+`Event` has no id. It is unsolicited and there is nothing to correlate with, so giving it one would only invite code that tries to match events to requests. Telling a reply from an event is the `ServerMessage` tag's job, not the id's — both share the one control stream, and a reader that has to guess from the shape of what it decoded is a reader that will eventually guess wrong.
 
 ## Auth
 
@@ -581,14 +584,17 @@ Sync *within* a share is a different question with a different answer — see *S
 
 ```rust
 // throcc-client-core/lib.rs
-pub struct Client { tx: mpsc::Sender<Cmd>, events: broadcast::Sender<Event> }
+pub struct Client { commands: mpsc::Sender<Cmd>, events: broadcast::Sender<Event>,
+                    runtime: Runtime }
 
 impl Client {
-    pub async fn connect(addr: SocketAddr, ks: Keystore) -> Result<Self>;
-    pub fn cmd(&self, c: Cmd);
-    pub fn events(&self) -> impl Stream<Item = Event>;
+    pub fn connect(address: SocketAddr, server: &str, keystore: Keystore) -> Result<Self>;
+    pub fn cmd(&self, command: Cmd);
+    pub fn events(&self) -> broadcast::Receiver<Event>;
 }
 ```
+
+`connect` blocks rather than being `async`, because an `async` one would need an executor above the boundary to drive it — and the whole point of the boundary is that there isn't one. It runs the QUIC handshake, the control stream and the auth exchange on core's own runtime and returns once `AuthResult` has arrived, so a `Client` that exists is a `Client` that is authenticated and placed. That also removes a race: there is no window in which events are emitted before the caller has had a chance to subscribe.
 
 `Cmd` and `Event` are core's own types, not `throcc-proto`'s — core translates, so UI state does not churn every time the wire format moves. Internals are tasks: one owns the control stream, one owns datagram receive, and one per remote track owns its decoder. `mpsc` in, `broadcast` out.
 

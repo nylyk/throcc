@@ -3,8 +3,16 @@
 use thiserror::Error;
 
 pub mod fingerprint;
+pub mod framing;
+pub mod ids;
+pub mod msg;
 
 pub use fingerprint::Fingerprint;
+pub use ids::{Epoch, MediaId, RoomId, UserId};
+pub use msg::{
+    Auth, AuthErr, AuthResult, Codec, ErrCode, Event, PROTO_VERSION, PeerState, Placed, Req,
+    ReqEnvelope, Resp, RespEnvelope, Role, Room, ServerHello, ServerMessage, Share, Tracks, User,
+};
 
 #[derive(Debug, Error)]
 pub enum Error {
