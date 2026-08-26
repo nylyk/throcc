@@ -3,7 +3,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use tempfile::TempDir;
-use throcc_client_core::{Client, Cmd, Event, Keystore};
+use throcc_client_core::{Client, Command, Event, Keystore};
 use throcc_server::Server;
 
 const SERVER_LABEL: &str = "server.test";
@@ -41,7 +41,7 @@ fn a_request_is_answered_over_the_control_stream() {
     let client = Client::connect(address, SERVER_LABEL, keystore).expect("connecting");
 
     let mut events = client.events();
-    client.cmd(Cmd::SetRoom(None)).unwrap();
+    client.command(Command::SetRoom(None)).unwrap();
 
     match next_event(&mut events) {
         Event::Failed { message } => assert!(
@@ -72,7 +72,7 @@ fn closing_the_client_reports_a_disconnect() {
     let client = Client::connect(address, SERVER_LABEL, keystore).unwrap();
     let mut events = client.events();
 
-    client.cmd(Cmd::Disconnect).unwrap();
+    client.command(Command::Disconnect).unwrap();
     assert!(matches!(
         next_event(&mut events),
         Event::Disconnected { .. }

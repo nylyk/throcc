@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use throcc_client_core::{Client, Cmd, Event, Keystore};
+use throcc_client_core::{Client, Command, Event, Keystore};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -68,7 +68,7 @@ fn main() -> Result<()> {
     tracing::info!(server = %authority, "connected");
 
     let mut events = client.events();
-    client.cmd(Cmd::SetRoom(None))?;
+    client.command(Command::SetRoom(None))?;
 
     while let Ok(event) = events.blocking_recv() {
         match event {

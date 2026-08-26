@@ -2,12 +2,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::{Epoch, MediaId, RoomId, UserId};
 
-pub const PROTO_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 1;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ServerHello {
     pub server_nonce: [u8; 32],
-    pub proto: u16,
+    pub protocol: u16,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -17,7 +17,7 @@ pub struct Auth {
     pub invite_code: Option<String>,
     pub want_room: Option<RoomId>,
     #[serde(with = "serde_arrays")]
-    pub sig: [u8; 64],
+    pub signature: [u8; 64],
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -29,15 +29,15 @@ pub enum AuthResult {
         rooms: Vec<Room>,
         placed: Placed,
     },
-    Err(AuthErr),
+    Err(AuthError),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthErr {
+pub enum AuthError {
     UnknownKey,
-    BadSig,
+    BadSignature,
     BadInvite,
-    ProtoMismatch,
+    ProtocolMismatch,
     Banned,
 }
 
@@ -76,26 +76,26 @@ pub struct Room {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct ReqEnvelope {
+pub struct RequestEnvelope {
     pub id: u32,
-    pub req: Req,
+    pub request: Request,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct RespEnvelope {
+pub struct ResponseEnvelope {
     pub id: u32,
-    pub resp: Resp,
+    pub response: Response,
 }
 
 /// What the control stream carries from server to client once authenticated.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum ServerMessage {
-    Resp(RespEnvelope),
+    Response(ResponseEnvelope),
     Event(Event),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub enum Req {
+pub enum Request {
     SetRoom(Option<RoomId>),
 
     SetProfile {
@@ -133,16 +133,16 @@ pub enum Req {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub enum Resp {
+pub enum Response {
     Ok,
-    Err { code: ErrCode, msg: String },
+    Err { code: ErrorCode, message: String },
     Placed(Placed),
     InviteCode { code: String, expires: u64 },
     AvatarHash([u8; 32]),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrCode {
+pub enum ErrorCode {
     Denied,
     NotFound,
     Invalid,
@@ -293,14 +293,14 @@ mod tests {
     fn handshake_messages_round_trip() {
         round_trip(ServerHello {
             server_nonce: [4u8; 32],
-            proto: PROTO_VERSION,
+            protocol: PROTOCOL_VERSION,
         });
         round_trip(Auth {
             pubkey: [5u8; 32],
             client_nonce: [6u8; 32],
             invite_code: Some("K7QM2X".into()),
             want_room: Some(RoomId(3)),
-            sig: [7u8; 64],
+            signature: [7u8; 64],
         });
         round_trip(AuthResult::Ok {
             me: UserId(7),
@@ -314,11 +314,11 @@ mod tests {
             placed: placed(),
         });
         for error in [
-            AuthErr::UnknownKey,
-            AuthErr::BadSig,
-            AuthErr::BadInvite,
-            AuthErr::ProtoMismatch,
-            AuthErr::Banned,
+            AuthError::UnknownKey,
+            AuthError::BadSignature,
+            AuthError::BadInvite,
+            AuthError::ProtocolMismatch,
+            AuthError::Banned,
         ] {
             round_trip(AuthResult::Err(error));
         }
@@ -326,59 +326,59 @@ mod tests {
 
     #[test]
     fn every_request_round_trips() {
-        for req in [
-            Req::SetRoom(None),
-            Req::SetRoom(Some(RoomId(3))),
-            Req::SetProfile {
+        for request in [
+            Request::SetRoom(None),
+            Request::SetRoom(Some(RoomId(3))),
+            Request::SetProfile {
                 name: "someone".into(),
                 avatar: None,
             },
-            Req::SetMedia {
+            Request::SetMedia {
                 mic: true,
                 screen: true,
                 share_audio: true,
                 screen_kbps: 8000,
                 codec: Codec::H265,
             },
-            Req::RequestKeyframe(MediaId(2)),
-            Req::CreateRoom {
+            Request::RequestKeyframe(MediaId(2)),
+            Request::CreateRoom {
                 name: "lounge".into(),
             },
-            Req::RenameRoom {
+            Request::RenameRoom {
                 room: RoomId(3),
                 name: "quiet".into(),
             },
-            Req::DeleteRoom(RoomId(3)),
-            Req::CreateInvite {
+            Request::DeleteRoom(RoomId(3)),
+            Request::CreateInvite {
                 role: Role::User,
                 ttl_secs: 86_400,
             },
-            Req::SetRole {
+            Request::SetRole {
                 user: UserId(7),
                 role: Role::Manager,
             },
-            Req::RemoveUser(UserId(7)),
+            Request::RemoveUser(UserId(7)),
         ] {
-            round_trip(ReqEnvelope { id: 42, req });
+            round_trip(RequestEnvelope { id: 42, request });
         }
     }
 
     #[test]
     fn every_response_round_trips() {
-        for resp in [
-            Resp::Ok,
-            Resp::Err {
-                code: ErrCode::Denied,
-                msg: "not your rank".into(),
+        for response in [
+            Response::Ok,
+            Response::Err {
+                code: ErrorCode::Denied,
+                message: "not your rank".into(),
             },
-            Resp::Placed(placed()),
-            Resp::InviteCode {
+            Response::Placed(placed()),
+            Response::InviteCode {
                 code: "K7QM2X".into(),
                 expires: 1_700_000_000,
             },
-            Resp::AvatarHash([8u8; 32]),
+            Response::AvatarHash([8u8; 32]),
         ] {
-            round_trip(RespEnvelope { id: 42, resp });
+            round_trip(ResponseEnvelope { id: 42, response });
         }
     }
 

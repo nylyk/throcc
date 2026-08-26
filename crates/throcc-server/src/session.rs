@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 use quinn::Connection;
 use rand::RngExt as _;
 use throcc_proto::{
-    ErrCode, PROTO_VERSION, Req, ReqEnvelope, Resp, RespEnvelope, ServerHello, ServerMessage,
+    ErrorCode, PROTOCOL_VERSION, Request, RequestEnvelope, Response, ResponseEnvelope, ServerHello,
+    ServerMessage,
 };
 
 use crate::control::{ControlReader, ControlWriter};
@@ -46,23 +47,23 @@ async fn answer_requests(writer: &mut ControlWriter, mut reader: ControlReader) 
     writer
         .write(&ServerHello {
             server_nonce,
-            proto: PROTO_VERSION,
+            protocol: PROTOCOL_VERSION,
         })
         .await?;
 
-    while let Some(ReqEnvelope { id, req }) = reader.read().await? {
-        tracing::debug!(id, ?req, "request");
-        let resp = handle(req);
+    while let Some(RequestEnvelope { id, request }) = reader.read().await? {
+        tracing::debug!(id, ?request, "request");
+        let response = handle(request);
         writer
-            .write(&ServerMessage::Resp(RespEnvelope { id, resp }))
+            .write(&ServerMessage::Response(ResponseEnvelope { id, response }))
             .await?;
     }
     Ok(())
 }
 
-fn handle(req: Req) -> Resp {
-    Resp::Err {
-        code: ErrCode::Unimplemented,
-        msg: format!("{req:?} is not implemented"),
+fn handle(request: Request) -> Response {
+    Response::Err {
+        code: ErrorCode::Unimplemented,
+        message: format!("{request:?} is not implemented"),
     }
 }
