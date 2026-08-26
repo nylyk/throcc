@@ -6,7 +6,7 @@ use crate::{Error, Result};
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const LENGTH_PREFIX_BYTES: usize = 4;
 
-/// postcard bytes behind a big-endian `u32` length.
+/// The message as postcard bytes behind a big-endian `u32` length.
 pub fn encode<T: Serialize>(message: &T) -> Result<Vec<u8>> {
     let body = postcard::to_allocvec(message)?;
     if body.len() > MAX_FRAME_BYTES {
@@ -22,7 +22,8 @@ pub fn encode<T: Serialize>(message: &T) -> Result<Vec<u8>> {
     Ok(frame)
 }
 
-/// Rejects an oversized frame before its reader allocates for it.
+/// The body length a frame declares. An oversized one is rejected here, before
+/// its reader allocates for it.
 pub fn body_len(prefix: [u8; LENGTH_PREFIX_BYTES]) -> Result<usize> {
     let len = u32::from_be_bytes(prefix) as usize;
     if len > MAX_FRAME_BYTES {

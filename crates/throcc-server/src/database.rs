@@ -1,0 +1,245 @@
+use std::path::Path;
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result};
+use rusqlite::types::Type;
+use rusqlite::{Connection, OptionalExtension as _, Row, Transaction, params};
+use throcc_proto::{Role, User, UserId};
+
+use crate::invite;
+
+pub const DATABASE_FILE: &str = "throcc.sqlite";
+
+const SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS users (
+        id          INTEGER PRIMARY KEY,
+        pubkey      BLOB    NOT NULL UNIQUE,
+        name        TEXT    NOT NULL,
+        avatar_hash BLOB,
+        role        INTEGER NOT NULL,
+        created_at  INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS invites (
+        secret_hash BLOB    PRIMARY KEY,
+        role        INTEGER NOT NULL,
+        expires_at  INTEGER NOT NULL,
+        redeemed_by INTEGER REFERENCES users(id),
+        redeemed_at INTEGER
+    ) STRICT;
+";
+
+/// A redeemed invite is kept as an enrollment record for this long before it is
+/// pruned.
+const REDEEMED_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// A generated invite. The code goes to whoever will redeem it, and the server
+/// keeps only its hash.
+pub struct Invite {
+    pub code: String,
+    pub expires_at: u64,
+}
+
+/// SQLite has no unsigned integers, so times are `i64` seconds internally.
+fn unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock is before the unix epoch")
+        .as_secs() as i64
+}
+
+pub enum Admission {
+    Admitted {
+        user: User,
+        users: Vec<User>,
+        enrolled: bool,
+    },
+    NotAllowlisted,
+    InviteRefused,
+}
+
+pub struct Database {
+    connection: Mutex<Connection>,
+}
+
+impl Database {
+    pub fn open(data_dir: &Path) -> Result<Self> {
+        let path = data_dir.join(DATABASE_FILE);
+        let connection = Connection::open(&path)
+            .with_context(|| format!("opening the database at {}", path.display()))?;
+        connection
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA foreign_keys = ON;
+                 PRAGMA busy_timeout = 5000;",
+            )
+            .context("configuring the database")?;
+        connection
+            .execute_batch(SCHEMA)
+            .context("applying the schema")?;
+
+        Ok(Self {
+            connection: Mutex::new(connection),
+        })
+    }
+
+    pub fn user_count(&self) -> Result<i64> {
+        let connection = self.lock();
+        Ok(connection.query_row("SELECT count(*) FROM users", [], |row| row.get(0))?)
+    }
+
+    /// A public key is matched against the allowlist, redeeming the invite presented
+    /// with it if the key is new. The roster comes from that same transaction, so it
+    /// cannot shift between admitting and answering.
+    pub fn admit(&self, pubkey: &[u8; 32], invite_code: Option<&str>) -> Result<Admission> {
+        let mut connection = self.lock();
+        let transaction = connection.transaction()?;
+
+        let existing = transaction
+            .query_row(
+                "SELECT id, pubkey, name, avatar_hash, role FROM users WHERE pubkey = ?1",
+                params![pubkey.as_slice()],
+                user_from_row,
+            )
+            .optional()?;
+
+        let (user, enrolled) = match existing {
+            Some(user) => (user, false),
+            None => {
+                let Some(code) = invite_code else {
+                    return Ok(Admission::NotAllowlisted);
+                };
+                match redeem(&transaction, code, pubkey)? {
+                    Some(user) => (user, true),
+                    None => return Ok(Admission::InviteRefused),
+                }
+            }
+        };
+
+        let users = transaction
+            .prepare("SELECT id, pubkey, name, avatar_hash, role FROM users ORDER BY id")?
+            .query_map([], user_from_row)?
+            .collect::<rusqlite::Result<Vec<User>>>()?;
+        transaction.commit()?;
+
+        Ok(Admission::Admitted {
+            user,
+            users,
+            enrolled,
+        })
+    }
+
+    pub fn create_invite(&self, role: Role, ttl: Duration) -> Result<Invite> {
+        let connection = self.lock();
+        insert_invite(&connection, role, ttl)
+    }
+
+    /// Every unredeemed invite is invalidated and one is minted in their place. This
+    /// is meaningful only while the allowlist is empty, where no invite can have come
+    /// from a user.
+    pub fn replace_unredeemed_invites(&self, role: Role, ttl: Duration) -> Result<Invite> {
+        let connection = self.lock();
+        connection.execute("DELETE FROM invites WHERE redeemed_by IS NULL", [])?;
+        insert_invite(&connection, role, ttl)
+    }
+
+    pub fn prune_invites(&self) -> Result<usize> {
+        let connection = self.lock();
+        let now = unix_seconds();
+        Ok(connection.execute(
+            "DELETE FROM invites
+             WHERE (redeemed_by IS NULL AND expires_at <= ?1)
+                OR (redeemed_at IS NOT NULL AND redeemed_at <= ?2)",
+            params![now, now - REDEEMED_RETENTION.as_secs() as i64],
+        )?)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.connection.lock().expect("database mutex poisoned")
+    }
+}
+
+fn insert_invite(connection: &Connection, role: Role, ttl: Duration) -> Result<Invite> {
+    let expires_at = unix_seconds() + ttl.as_secs() as i64;
+
+    // A hash that is already present belongs to a code nobody can redeem, so this
+    // draws again rather than handing out a dead one.
+    for _ in 0..8 {
+        let code = invite::generate_code();
+        let inserted = connection.execute(
+            "INSERT OR IGNORE INTO invites (secret_hash, role, expires_at) VALUES (?1, ?2, ?3)",
+            params![invite::hash(&code), role.rank(), expires_at],
+        )?;
+        if inserted == 1 {
+            return Ok(Invite {
+                code,
+                expires_at: expires_at as u64,
+            });
+        }
+    }
+    anyhow::bail!("could not draw an unused invite code")
+}
+
+fn redeem(transaction: &Transaction<'_>, code: &str, pubkey: &[u8; 32]) -> Result<Option<User>> {
+    let hash = invite::hash(code);
+    let now = unix_seconds();
+
+    let rank: Option<u8> = transaction
+        .query_row(
+            "SELECT role FROM invites
+             WHERE secret_hash = ?1 AND redeemed_by IS NULL AND expires_at > ?2",
+            params![hash, now],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(rank) = rank else {
+        return Ok(None);
+    };
+    let role = Role::from_rank(rank).with_context(|| format!("invite carries rank {rank}"))?;
+
+    transaction.execute(
+        "INSERT INTO users (pubkey, name, avatar_hash, role, created_at)
+         VALUES (?1, '', NULL, ?2, ?3)",
+        params![pubkey.as_slice(), rank, now],
+    )?;
+    let id = transaction.last_insert_rowid();
+    transaction.execute(
+        "UPDATE invites SET redeemed_by = ?1, redeemed_at = ?2 WHERE secret_hash = ?3",
+        params![id, now, hash],
+    )?;
+
+    Ok(Some(User {
+        id: UserId(id as u64),
+        pubkey: *pubkey,
+        name: String::new(),
+        avatar: None,
+        role,
+    }))
+}
+
+fn user_from_row(row: &Row<'_>) -> rusqlite::Result<User> {
+    let rank: u8 = row.get("role")?;
+    Ok(User {
+        id: UserId(row.get::<_, i64>("id")? as u64),
+        pubkey: fixed_blob(row.get("pubkey")?, "pubkey")?,
+        name: row.get("name")?,
+        avatar: row
+            .get::<_, Option<Vec<u8>>>("avatar_hash")?
+            .map(|bytes| fixed_blob(bytes, "avatar_hash"))
+            .transpose()?,
+        role: Role::from_rank(rank)
+            .ok_or(rusqlite::Error::IntegralValueOutOfRange(0, rank as i64))?,
+    })
+}
+
+fn fixed_blob<const N: usize>(bytes: Vec<u8>, column: &str) -> rusqlite::Result<[u8; N]> {
+    let found = bytes.len();
+    bytes.try_into().map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            Type::Blob,
+            format!("{column} is {found} bytes, expected {N}").into(),
+        )
+    })
+}

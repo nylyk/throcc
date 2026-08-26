@@ -5,58 +5,78 @@ use std::time::Duration;
 
 use quinn::Connection;
 use throcc_proto::{
-    PROTOCOL_VERSION, Request, RequestEnvelope, Response, ResponseEnvelope, RoomId, ServerHello,
-    ServerMessage,
+    Request, RequestEnvelope, Response, ResponseEnvelope, Role, RoomId, ServerMessage,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::task::JoinHandle;
 
+use crate::auth::{self, Welcome};
 use crate::control::{ControlReader, ControlWriter};
 use crate::{Connector, Error, Keystore, Result};
 
 const QUEUE_DEPTH: usize = 64;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
-/// Must stay under `SHUTDOWN_GRACE`, or the runtime tears the drain down mid-flush.
+/// This must stay under `SHUTDOWN_GRACE`, or the runtime tears the drain down
+/// mid-flush.
 const DRAIN_GRACE: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     SetRoom(Option<RoomId>),
+    CreateInvite { role: Role, ttl_secs: u32 },
     Disconnect,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
+    Invited { code: String, expires: u64 },
     Failed { message: String },
     Disconnected { reason: String },
 }
 
 pub struct Client {
+    welcome: Welcome,
     connector: Connector,
     commands: mpsc::Sender<Command>,
     events: broadcast::Sender<Event>,
     disconnect_reason: Arc<Mutex<Option<String>>>,
+    control: JoinHandle<()>,
     runtime: Runtime,
 }
 
 impl Client {
-    /// Blocks until the control stream is up; it then runs on the client's own runtime.
-    pub fn connect(address: SocketAddr, server: &str, keystore: Keystore) -> Result<Self> {
+    /// This blocks until the client is authenticated, and the session then runs on
+    /// the client's own runtime.
+    pub fn connect(
+        address: SocketAddr,
+        server: &str,
+        keystore: Keystore,
+        invite_code: Option<String>,
+    ) -> Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
 
-        let (connector, connection, writer, reader) = runtime.block_on(async {
+        let (connector, connection, writer, reader, welcome) = runtime.block_on(async {
             let mut connector = Connector::new(keystore)?;
             let connection = connector.connect(address, server).await?;
-            let (writer, reader) = open_control(&connection).await?;
-            Ok::<_, Error>((connector, connection, writer, reader))
+            let (mut writer, mut reader) = open_control(&connection).await?;
+            let welcome = auth::handshake(
+                &connection,
+                &mut writer,
+                &mut reader,
+                connector.keystore().identity(),
+                invite_code,
+            )
+            .await?;
+            Ok::<_, Error>((connector, connection, writer, reader, welcome))
         })?;
 
         let (commands, command_queue) = mpsc::channel(QUEUE_DEPTH);
         let (events, _) = broadcast::channel(QUEUE_DEPTH);
         let disconnect_reason = Arc::new(Mutex::new(None));
-        runtime.spawn(control(
+        let control = runtime.spawn(control(
             connection,
             writer,
             reader,
@@ -66,12 +86,18 @@ impl Client {
         ));
 
         Ok(Self {
+            welcome,
             connector,
             commands,
             events,
             disconnect_reason,
+            control,
             runtime,
         })
+    }
+
+    pub fn welcome(&self) -> &Welcome {
+        &self.welcome
     }
 
     pub fn keystore(&self) -> &Keystore {
@@ -99,11 +125,28 @@ impl Client {
         }
     }
 
-    /// Blocks until the runtime has shut down.
+    /// This blocks until the server has been told the session is over, so the server
+    /// sees a close rather than an idle timeout.
     pub fn shutdown(self) {
-        let _ = self.commands.try_send(Command::Disconnect);
-        drop(self.commands);
-        self.runtime.shutdown_timeout(SHUTDOWN_GRACE);
+        let Self {
+            connector,
+            commands,
+            control,
+            runtime,
+            ..
+        } = self;
+
+        let _ = commands.try_send(Command::Disconnect);
+        drop(commands);
+
+        runtime.block_on(async {
+            let _ = tokio::time::timeout(SHUTDOWN_GRACE, async {
+                let _ = control.await;
+                connector.wait_idle().await;
+            })
+            .await;
+        });
+        runtime.shutdown_timeout(SHUTDOWN_GRACE);
     }
 }
 
@@ -112,21 +155,7 @@ async fn open_control(connection: &Connection) -> Result<(ControlWriter, Control
         .accept_bi()
         .await
         .map_err(|e| Error::Protocol(format!("accepting the control stream: {e}")))?;
-    let writer = ControlWriter::new(send);
-    let mut reader = ControlReader::new(recv);
-
-    let hello: ServerHello = reader
-        .read()
-        .await?
-        .ok_or_else(|| Error::Protocol("the control stream closed before the hello".into()))?;
-    if hello.protocol != PROTOCOL_VERSION {
-        return Err(Error::Protocol(format!(
-            "server speaks protocol {}, this client speaks {PROTOCOL_VERSION}",
-            hello.protocol
-        )));
-    }
-
-    Ok((writer, reader))
+    Ok((ControlWriter::new(send), ControlReader::new(recv)))
 }
 
 async fn control(
@@ -187,6 +216,9 @@ async fn run(
                 let request = match command {
                     None | Some(Command::Disconnect) => return Ok(()),
                     Some(Command::SetRoom(room)) => Request::SetRoom(room),
+                    Some(Command::CreateInvite { role, ttl_secs }) => {
+                        Request::CreateInvite { role, ttl_secs }
+                    }
                 };
 
                 let id = next_request_id;
@@ -229,6 +261,7 @@ async fn run(
 
 fn event_for(response: Response) -> Option<Event> {
     match response {
+        Response::InviteCode { code, expires } => Some(Event::Invited { code, expires }),
         Response::Err { code, message } => Some(Event::Failed {
             message: format!("{code:?}: {message}"),
         }),

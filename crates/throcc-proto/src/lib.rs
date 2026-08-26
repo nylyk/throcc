@@ -2,6 +2,7 @@
 
 use thiserror::Error;
 
+pub mod auth;
 pub mod fingerprint;
 pub mod framing;
 pub mod ids;

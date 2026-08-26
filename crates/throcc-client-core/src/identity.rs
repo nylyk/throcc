@@ -10,9 +10,9 @@ use crate::{Error, Result};
 
 #[derive(Serialize, Deserialize)]
 struct KeystoreFile {
-    /// The Ed25519 seed, hex.
+    /// The Ed25519 seed, in hex.
     identity: String,
-    /// authority → pinned SPKI hash.
+    /// A map from authority to pinned SPKI hash.
     #[serde(default)]
     known_servers: BTreeMap<String, Fingerprint>,
 }
@@ -24,7 +24,8 @@ pub struct Keystore {
 }
 
 impl Keystore {
-    /// `None` selects the default location. Generates an identity on first launch.
+    /// A `None` path selects the default location. An identity is generated on
+    /// first launch.
     pub fn open(path: Option<PathBuf>) -> Result<Self> {
         let path = match path {
             Some(path) => path,
@@ -73,8 +74,8 @@ impl Keystore {
         self.save()
     }
 
-    /// Writes to a temporary file and renames, so an interrupted write cannot
-    /// truncate the identity key away.
+    /// The file is written to a temporary path and renamed, so an interrupted write
+    /// cannot truncate the identity key away.
     fn save(&self) -> Result<()> {
         let stored = KeystoreFile {
             identity: hex(&self.identity.to_bytes()),

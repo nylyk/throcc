@@ -9,11 +9,12 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser, Debug)]
 #[command(name = "throcc-server", version, about = "Voice + screenshare server")]
 struct Args {
-    /// Directory holding `server_key` and the database. The only persistent state.
+    /// The directory holding `server_key` and the database. It is the only
+    /// persistent state.
     #[arg(long, env = "THROCC_DATA_DIR", default_value = "/data")]
     data_dir: PathBuf,
 
-    /// UDP address to listen on. There is no TCP fallback.
+    /// The UDP address to listen on. There is no TCP fallback.
     #[arg(
         long,
         env = "THROCC_LISTEN",
@@ -40,6 +41,13 @@ async fn main() -> Result<()> {
         fingerprint = %server.fingerprint(),
         "listening on UDP"
     );
+
+    if let Some(code) = server.bootstrap_invite() {
+        let hours = throcc_server::invite::DEFAULT_TTL.as_secs() / 3600;
+        tracing::info!(
+            "\n\nnobody is enrolled yet. the first admin joins with invite code {code}\nit is single use and expires in {hours} hours\n"
+        );
+    }
 
     server.run().await
 }
