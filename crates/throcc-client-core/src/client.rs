@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 
 use crate::auth::{self, Welcome};
 use crate::control::{ControlReader, ControlWriter};
+use crate::media::audio::capture::{self, Capture};
 use crate::media::receive;
 use crate::media::send::{self, MediaSender};
 use crate::{Connector, Error, Keystore, Result};
@@ -73,6 +74,8 @@ pub enum Event {
 pub struct Client {
     welcome: Welcome,
     media: Arc<MediaSender>,
+    microphone: Mutex<Option<Capture>>,
+    encoded_frames: mpsc::Sender<bytes::Bytes>,
     connector: Connector,
     commands: mpsc::Sender<Command>,
     events: broadcast::Sender<Event>,
@@ -112,10 +115,12 @@ impl Client {
         let (commands, command_queue) = mpsc::channel(QUEUE_DEPTH);
         let (events, _) = broadcast::channel(QUEUE_DEPTH);
         let (datagrams, datagram_queue) = mpsc::channel(send::QUEUE_DEPTH);
-        let media = Arc::new(MediaSender::new(datagrams, welcome.placed.epoch));
+        let media = Arc::new(MediaSender::new(datagrams, &welcome.placed));
+        let (encoded_frames, frame_queue) = mpsc::channel(capture::QUEUE_DEPTH);
         let disconnect_reason = Arc::new(Mutex::new(None));
 
         runtime.spawn(send::drain(connection.clone(), datagram_queue));
+        runtime.spawn(send_microphone(frame_queue, media.clone()));
         runtime.spawn(receive::receive(connection.clone(), events.clone()));
         let control = runtime.spawn(control(
             connection,
@@ -130,6 +135,8 @@ impl Client {
         Ok(Self {
             welcome,
             media,
+            microphone: Mutex::new(None),
+            encoded_frames,
             connector,
             commands,
             events,
@@ -151,6 +158,36 @@ impl Client {
         self.commands
             .try_send(command)
             .map_err(|e| Error::CommandDropped(e.to_string()))
+    }
+
+    /// Opens the microphone. Its audio reaches the room only while this client is
+    /// in one, since the ids to send on come with the placement.
+    pub fn start_microphone(&self, device: Option<&str>) -> Result<()> {
+        let capture = capture::start(device, self.encoded_frames.clone())?;
+        *self.microphone() = Some(capture);
+        Ok(())
+    }
+
+    pub fn stop_microphone(&self) {
+        *self.microphone() = None;
+    }
+
+    pub fn set_microphone_muted(&self, muted: bool) {
+        if let Some(capture) = self.microphone().as_ref() {
+            capture.set_muted(muted);
+        }
+    }
+
+    /// Encoded frames the send queue refused, which is the local half of the
+    /// sender-side loss signal.
+    pub fn dropped_frames(&self) -> u64 {
+        self.microphone()
+            .as_ref()
+            .map_or(0, |capture| capture.dropped_frames())
+    }
+
+    fn microphone(&self) -> std::sync::MutexGuard<'_, Option<Capture>> {
+        self.microphone.lock().expect("microphone mutex poisoned")
     }
 
     /// The handle media is sent through, cloneable so a capture thread can hold
@@ -205,6 +242,17 @@ async fn open_control(connection: &Connection) -> Result<(ControlWriter, Control
         .await
         .map_err(|e| Error::Protocol(format!("accepting the control stream: {e}")))?;
     Ok((ControlWriter::new(send), ControlReader::new(recv)))
+}
+
+/// Stamping happens here rather than in the device callback, so the realtime
+/// thread never waits on the placement lock.
+async fn send_microphone(mut frames: mpsc::Receiver<bytes::Bytes>, sending: Arc<MediaSender>) {
+    while let Some(frame) = frames.recv().await {
+        match sending.microphone() {
+            None => tracing::trace!("dropping a frame captured while in no room"),
+            Some(media_id) => sending.send(media_id, &frame, None, false),
+        }
+    }
 }
 
 async fn control(
@@ -308,7 +356,7 @@ async fn run(
                     }
                     Some(Ok(ServerMessage::Response(ResponseEnvelope { id, response }))) => {
                         if let Response::Placed(placed) = &response {
-                            media.observe(placed.epoch);
+                            media.observe_placement(placed);
                         }
                         let Some(reply) = pending.remove(&id) else {
                             return Err(Error::Protocol(format!(
@@ -325,7 +373,7 @@ async fn run(
 
 fn observe_epoch(media: &MediaSender, event: &Event) {
     match event {
-        Event::Placed(placed) => media.observe(placed.epoch),
+        Event::Placed(placed) => media.observe_placement(placed),
         Event::UserEntered { epoch, .. } | Event::UserExited { epoch, .. } => media.observe(*epoch),
         _ => {}
     }

@@ -10,8 +10,8 @@ use throcc_client_core::{Client, Command, Event, Keystore, MediaSender, Welcome}
 use throcc_proto::{Role, RoomId, Tracks};
 use tracing_subscriber::EnvFilter;
 
-const HELP: &str = "commands: room <id>|none, create <name>, rename <id> <name>, \
-delete <id>, invite [user|manager|admin], quit";
+const HELP: &str = "commands: room <id>|none, mic on|off, mute on|off, create <name>, \
+rename <id> <name>, delete <id>, invite [user|manager|admin], quit";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -149,7 +149,21 @@ fn main() -> Result<()> {
     println!("{HELP}");
     for line in std::io::stdin().lock().lines() {
         match command(&line?) {
-            Ok(Some(command)) => client.command(command)?,
+            Ok(Some(Spoken::ToServer(command))) => client.command(command)?,
+            Ok(Some(Spoken::Microphone(on))) => match on {
+                true => match client.start_microphone(None) {
+                    Ok(()) => println!("microphone open"),
+                    Err(e) => println!("{e}"),
+                },
+                false => {
+                    client.stop_microphone();
+                    println!("microphone closed");
+                }
+            },
+            Ok(Some(Spoken::Muted(muted))) => {
+                client.set_microphone_muted(muted);
+                println!("microphone {}", if muted { "muted" } else { "live" });
+            }
             Ok(None) => break,
             Err(message) => println!("{message}"),
         }
@@ -191,31 +205,47 @@ fn counter_of(unit: &[u8]) -> u64 {
         .map_or(0, u64::from_be_bytes)
 }
 
-/// The parsed command, or `None` when the line ends the session.
-fn command(line: &str) -> std::result::Result<Option<Command>, String> {
+/// What a typed line asks for. Only some of it reaches the server: the
+/// microphone is local.
+#[derive(Debug, PartialEq)]
+enum Spoken {
+    ToServer(Command),
+    Microphone(bool),
+    Muted(bool),
+}
+
+/// The parsed line, or `None` when it ends the session.
+fn command(line: &str) -> std::result::Result<Option<Spoken>, String> {
     let (word, rest) = split_word(line.trim());
     match word {
         "" => Err(HELP.to_string()),
         "quit" => Ok(None),
-        "room" if rest == "none" => Ok(Some(Command::SetRoom(None))),
-        "room" => parse_room(rest).map(|room| Some(Command::SetRoom(Some(room)))),
+        "mic" => parse_switch(rest).map(|on| Some(Spoken::Microphone(on))),
+        "mute" => parse_switch(rest).map(|muted| Some(Spoken::Muted(muted))),
+        "room" if rest == "none" => Ok(Some(Spoken::ToServer(Command::SetRoom(None)))),
+        "room" => parse_room(rest).map(|room| Some(Spoken::ToServer(Command::SetRoom(Some(room))))),
         "create" => match rest {
             "" => Err("create takes a name".to_string()),
-            name => Ok(Some(Command::CreateRoom {
+            name => Ok(Some(Spoken::ToServer(Command::CreateRoom {
                 name: name.to_string(),
-            })),
+            }))),
         },
         "rename" => match split_word(rest) {
             (_, "") => Err("rename takes an id and a name".to_string()),
             (id, name) => parse_room(id).map(|room| {
-                Some(Command::RenameRoom {
+                Some(Spoken::ToServer(Command::RenameRoom {
                     room,
                     name: name.to_string(),
-                })
+                }))
             }),
         },
-        "delete" => parse_room(rest).map(|room| Some(Command::DeleteRoom(room))),
-        "invite" => parse_role(rest).map(|role| Some(Command::CreateInvite { role, ttl_secs: 0 })),
+        "delete" => parse_room(rest).map(|room| Some(Spoken::ToServer(Command::DeleteRoom(room)))),
+        "invite" => parse_role(rest).map(|role| {
+            Some(Spoken::ToServer(Command::CreateInvite {
+                role,
+                ttl_secs: 0,
+            }))
+        }),
         other => Err(format!("{other} is not a command. {HELP}")),
     }
 }
@@ -232,6 +262,14 @@ fn parse_room(word: &str) -> std::result::Result<RoomId, String> {
     word.parse()
         .map(RoomId)
         .map_err(|_| format!("{word} is not a room id"))
+}
+
+fn parse_switch(word: &str) -> std::result::Result<bool, String> {
+    match word {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        other => Err(format!("{other} is not on or off")),
+    }
 }
 
 fn parse_role(word: &str) -> std::result::Result<Role, String> {
@@ -284,41 +322,48 @@ mod tests {
         assert_eq!(format_authority("example.com", 8476), "example.com:8476");
     }
 
+    fn to_server(command: Command) -> std::result::Result<Option<Spoken>, String> {
+        Ok(Some(Spoken::ToServer(command)))
+    }
+
     #[test]
     fn commands_parse() {
-        assert_eq!(command("room none"), Ok(Some(Command::SetRoom(None))));
+        assert_eq!(command("room none"), to_server(Command::SetRoom(None)));
         assert_eq!(
             command("room 7"),
-            Ok(Some(Command::SetRoom(Some(RoomId(7)))))
+            to_server(Command::SetRoom(Some(RoomId(7))))
         );
         assert_eq!(
             command("create the lounge"),
-            Ok(Some(Command::CreateRoom {
+            to_server(Command::CreateRoom {
                 name: "the lounge".into()
-            }))
+            })
         );
         assert_eq!(
             command("rename 7 the lounge"),
-            Ok(Some(Command::RenameRoom {
+            to_server(Command::RenameRoom {
                 room: RoomId(7),
                 name: "the lounge".into()
-            }))
+            })
         );
         assert_eq!(
             command("delete 7"),
-            Ok(Some(Command::DeleteRoom(RoomId(7))))
+            to_server(Command::DeleteRoom(RoomId(7)))
         );
         assert_eq!(
             command("invite manager"),
-            Ok(Some(Command::CreateInvite {
+            to_server(Command::CreateInvite {
                 role: Role::Manager,
                 ttl_secs: 0
-            }))
+            })
         );
+        assert_eq!(command("mic on"), Ok(Some(Spoken::Microphone(true))));
+        assert_eq!(command("mute off"), Ok(Some(Spoken::Muted(false))));
         assert_eq!(command("quit"), Ok(None));
         assert!(command("room later").is_err());
         assert!(command("create").is_err());
         assert!(command("rename 7").is_err());
+        assert!(command("mic").is_err());
         assert!(command("dance").is_err());
     }
 }

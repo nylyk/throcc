@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use bytes::{BufMut as _, Bytes, BytesMut};
 use quinn::Connection;
-use throcc_proto::{Epoch, FrameHeader, HEADER_BYTES, MediaId, frame};
+use throcc_proto::{Epoch, FrameHeader, HEADER_BYTES, MediaId, Placed, Tracks, frame};
 use tokio::sync::mpsc;
 
 use crate::media::fragment;
@@ -24,18 +24,36 @@ pub async fn drain(connection: Connection, mut queue: mpsc::Receiver<Bytes>) {
 pub struct MediaSender {
     datagrams: mpsc::Sender<Bytes>,
     epoch: AtomicU32,
+    tracks: Mutex<Option<Tracks>>,
     next_seq: Mutex<HashMap<MediaId, u32>>,
     dropped_units: AtomicU64,
 }
 
 impl MediaSender {
-    pub fn new(datagrams: mpsc::Sender<Bytes>, epoch: Epoch) -> Self {
+    pub fn new(datagrams: mpsc::Sender<Bytes>, placed: &Placed) -> Self {
         Self {
             datagrams,
-            epoch: AtomicU32::new(epoch.0),
+            epoch: AtomicU32::new(placed.epoch.0),
+            tracks: Mutex::new(placed.tracks.clone()),
             next_seq: Mutex::new(HashMap::new()),
             dropped_units: AtomicU64::new(0),
         }
+    }
+
+    /// Every membership change allocates fresh ids, so what may be sent on comes
+    /// from the placement rather than from anything the caller remembers.
+    pub fn observe_placement(&self, placed: &Placed) {
+        self.observe(placed.epoch);
+        *self.tracks.lock().expect("tracks mutex poisoned") = placed.tracks.clone();
+    }
+
+    /// `None` while in no room, where no capture device is open either.
+    pub fn microphone(&self) -> Option<MediaId> {
+        self.tracks
+            .lock()
+            .expect("tracks mutex poisoned")
+            .as_ref()
+            .map(|tracks| tracks.mic)
     }
 
     /// Senders stamp the latest epoch they have seen, and receivers ignore it.
