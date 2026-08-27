@@ -7,6 +7,7 @@ pub mod client;
 pub mod connection;
 pub mod control;
 pub mod identity;
+pub mod media;
 
 pub use auth::Welcome;
 pub use client::{Client, Command, Event};
