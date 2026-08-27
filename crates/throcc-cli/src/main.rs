@@ -1,11 +1,13 @@
 use std::io::BufRead as _;
 use std::net::{Ipv6Addr, ToSocketAddrs as _};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use throcc_client_core::{Client, Command, Event, Keystore, Welcome};
-use throcc_proto::{Role, RoomId};
+use throcc_client_core::{Client, Command, Event, Keystore, MediaSender, Welcome};
+use throcc_proto::{Role, RoomId, Tracks};
 use tracing_subscriber::EnvFilter;
 
 const HELP: &str = "commands: room <id>|none, create <name>, rename <id> <name>, \
@@ -32,6 +34,11 @@ struct Args {
     /// The keystore's location.
     #[arg(long)]
     keystore: Option<PathBuf>,
+
+    /// Send counted dummy packets on every track of the room this client enters,
+    /// so the transport can be watched without a codec in the way.
+    #[arg(long)]
+    synthetic: bool,
 }
 
 fn main() -> Result<()> {
@@ -81,17 +88,39 @@ fn main() -> Result<()> {
     tracing::info!(server = %authority, "connected");
     report(client.welcome());
 
+    let tracks = Arc::new(Mutex::new(client.welcome().placed.tracks.clone()));
+    if args.synthetic {
+        let sending = client.media();
+        let tracks = tracks.clone();
+        std::thread::spawn(move || send_synthetic(&sending, &tracks));
+    }
+
     let mut events = client.events();
+    let seen_tracks = tracks.clone();
     std::thread::spawn(move || {
         while let Ok(event) = events.blocking_recv() {
             match event {
-                Event::Placed(placed) => tracing::info!(
-                    room = ?placed.room,
-                    epoch = %placed.epoch,
-                    tracks = ?placed.tracks,
-                    peers = placed.peers.len(),
-                    "placed"
+                Event::Media {
+                    media_id,
+                    timestamp,
+                    bytes,
+                } => tracing::info!(
+                    %media_id,
+                    ?timestamp,
+                    bytes = bytes.len(),
+                    counter = counter_of(&bytes),
+                    "a unit arrived"
                 ),
+                Event::Placed(placed) => {
+                    tracing::info!(
+                        room = ?placed.room,
+                        epoch = %placed.epoch,
+                        tracks = ?placed.tracks,
+                        peers = placed.peers.len(),
+                        "placed"
+                    );
+                    *seen_tracks.lock().expect("tracks mutex poisoned") = placed.tracks;
+                }
                 Event::UserEntered { room, epoch, peer } => {
                     tracing::info!(%room, %epoch, user = %peer.user, "a user entered")
                 }
@@ -128,6 +157,38 @@ fn main() -> Result<()> {
 
     client.shutdown();
     Ok(())
+}
+
+/// One counted unit per track every 20 ms: a small one on the microphone id, and
+/// one that has to fragment on the share id.
+fn send_synthetic(sending: &MediaSender, tracks: &Mutex<Option<Tracks>>) {
+    let mut counter: u64 = 0;
+    loop {
+        counter += 1;
+        let current = tracks.lock().expect("tracks mutex poisoned").clone();
+        if let Some(tracks) = current {
+            sending.send(tracks.mic, &counted(counter, 80), None, false);
+            for share in &tracks.shares {
+                sending.send(share.video, &counted(counter, 3_000), Some(90), false);
+                if let Some(audio) = share.audio {
+                    sending.send(audio, &counted(counter, 160), Some(90), false);
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn counted(counter: u64, len: usize) -> Vec<u8> {
+    let mut unit = counter.to_be_bytes().to_vec();
+    unit.resize(len.max(size_of::<u64>()), 0);
+    unit
+}
+
+fn counter_of(unit: &[u8]) -> u64 {
+    unit.get(..size_of::<u64>())
+        .and_then(|counter| counter.try_into().ok())
+        .map_or(0, u64::from_be_bytes)
 }
 
 /// The parsed command, or `None` when the line ends the session.

@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+bytes.workspace = true
 directories.workspace = true
 ed25519-dalek.workspace = true
 quinn.workspace = true

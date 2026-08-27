@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use quinn::Connection;
 use throcc_proto::{
-    Epoch, PeerState, Placed, Request, RequestEnvelope, Response, ResponseEnvelope, Role, Room,
-    RoomId, ServerMessage, UserId,
+    Epoch, MediaId, PeerState, Placed, Request, RequestEnvelope, Response, ResponseEnvelope, Role,
+    Room, RoomId, ServerMessage, UserId,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -14,6 +14,8 @@ use tokio::task::JoinHandle;
 
 use crate::auth::{self, Welcome};
 use crate::control::{ControlReader, ControlWriter};
+use crate::media::receive;
+use crate::media::send::{self, MediaSender};
 use crate::{Connector, Error, Keystore, Result};
 
 const QUEUE_DEPTH: usize = 64;
@@ -35,6 +37,11 @@ pub enum Command {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     Placed(Placed),
+    Media {
+        media_id: MediaId,
+        timestamp: Option<u32>,
+        bytes: Vec<u8>,
+    },
     UserEntered {
         room: RoomId,
         epoch: Epoch,
@@ -65,6 +72,7 @@ pub enum Event {
 
 pub struct Client {
     welcome: Welcome,
+    media: Arc<MediaSender>,
     connector: Connector,
     commands: mpsc::Sender<Command>,
     events: broadcast::Sender<Event>,
@@ -103,18 +111,25 @@ impl Client {
 
         let (commands, command_queue) = mpsc::channel(QUEUE_DEPTH);
         let (events, _) = broadcast::channel(QUEUE_DEPTH);
+        let (datagrams, datagram_queue) = mpsc::channel(send::QUEUE_DEPTH);
+        let media = Arc::new(MediaSender::new(datagrams, welcome.placed.epoch));
         let disconnect_reason = Arc::new(Mutex::new(None));
+
+        runtime.spawn(send::drain(connection.clone(), datagram_queue));
+        runtime.spawn(receive::receive(connection.clone(), events.clone()));
         let control = runtime.spawn(control(
             connection,
             writer,
             reader,
             command_queue,
             events.clone(),
+            media.clone(),
             disconnect_reason.clone(),
         ));
 
         Ok(Self {
             welcome,
+            media,
             connector,
             commands,
             events,
@@ -136,6 +151,12 @@ impl Client {
         self.commands
             .try_send(command)
             .map_err(|e| Error::CommandDropped(e.to_string()))
+    }
+
+    /// The handle media is sent through, cloneable so a capture thread can hold
+    /// one of its own.
+    pub fn media(&self) -> Arc<MediaSender> {
+        self.media.clone()
     }
 
     pub fn events(&self) -> broadcast::Receiver<Event> {
@@ -192,9 +213,10 @@ async fn control(
     reader: ControlReader,
     mut commands: mpsc::Receiver<Command>,
     events: broadcast::Sender<Event>,
+    media: Arc<MediaSender>,
     disconnect_reason: Arc<Mutex<Option<String>>>,
 ) {
-    let outcome = run(&mut writer, reader, &mut commands, &events).await;
+    let outcome = run(&mut writer, reader, &mut commands, &events, &media).await;
     let _ = tokio::time::timeout(DRAIN_GRACE, writer.drain()).await;
 
     let reason = match outcome {
@@ -216,6 +238,7 @@ async fn run(
     mut reader: ControlReader,
     commands: &mut mpsc::Receiver<Command>,
     events: &broadcast::Sender<Event>,
+    media: &MediaSender,
 ) -> Result<()> {
     let (inbound, mut server_messages) = mpsc::channel(QUEUE_DEPTH);
     tokio::spawn(async move {
@@ -279,10 +302,14 @@ async fn run(
                     Some(Err(e)) => return Err(e),
                     Some(Ok(ServerMessage::Event(event))) => {
                         if let Some(event) = translate(event) {
+                            observe_epoch(media, &event);
                             let _ = events.send(event);
                         }
                     }
                     Some(Ok(ServerMessage::Response(ResponseEnvelope { id, response }))) => {
+                        if let Response::Placed(placed) = &response {
+                            media.observe(placed.epoch);
+                        }
                         let Some(reply) = pending.remove(&id) else {
                             return Err(Error::Protocol(format!(
                                 "response {id} answers no pending request"
@@ -293,6 +320,14 @@ async fn run(
                 }
             }
         }
+    }
+}
+
+fn observe_epoch(media: &MediaSender, event: &Event) {
+    match event {
+        Event::Placed(placed) => media.observe(placed.epoch),
+        Event::UserEntered { epoch, .. } | Event::UserExited { epoch, .. } => media.observe(*epoch),
+        _ => {}
     }
 }
 

@@ -1317,6 +1317,7 @@ dependencies = [
 name = "throcc-client-core"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "directories",
  "ed25519-dalek",
  "quinn",

@@ -13,6 +13,7 @@ pub use auth::Welcome;
 pub use client::{Client, Command, Event};
 pub use connection::Connector;
 pub use identity::Keystore;
+pub use media::send::MediaSender;
 
 #[derive(Debug, Error)]
 pub enum Error {
