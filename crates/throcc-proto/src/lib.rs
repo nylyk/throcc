@@ -4,11 +4,13 @@ use thiserror::Error;
 
 pub mod auth;
 pub mod fingerprint;
+pub mod frame;
 pub mod framing;
 pub mod ids;
 pub mod messages;
 
 pub use fingerprint::Fingerprint;
+pub use frame::{FrameHeader, HEADER_BYTES, MIN_DATAGRAM_BYTES, PAYLOAD_BUDGET};
 pub use ids::{Epoch, MediaId, RoomId, UserId};
 pub use messages::{
     Auth, AuthError, AuthResult, Codec, ErrorCode, Event, PROTOCOL_VERSION, PeerState, Placed,
