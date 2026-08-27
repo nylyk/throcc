@@ -58,15 +58,12 @@ pub fn decide(
             if enrolled {
                 tracing::info!(user = %user.id, role = ?user.role, "enrolled a new user");
             }
-            if let Some(room) = auth.want_room {
-                tracing::debug!(%room, "no such room; placing in no room");
-            }
             Ok(Decision {
                 result: AuthResult::Ok {
                     me: user.id,
                     role: user.role,
                     users,
-                    rooms: Vec::new(),
+                    rooms: state.database.list_rooms()?,
                     placed: Placed {
                         room: None,
                         epoch: Epoch(0),

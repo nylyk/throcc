@@ -8,7 +8,8 @@ use throcc_client_core::{Client, Command, Event, Keystore, Welcome};
 use throcc_proto::{Role, RoomId};
 use tracing_subscriber::EnvFilter;
 
-const HELP: &str = "commands: room <id>|none, invite [user|manager|admin], quit";
+const HELP: &str = "commands: room <id>|none, create <name>, rename <id> <name>, \
+delete <id>, invite [user|manager|admin], quit";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -84,6 +85,13 @@ fn main() -> Result<()> {
     std::thread::spawn(move || {
         while let Ok(event) = events.blocking_recv() {
             match event {
+                Event::RoomCreated(room) => {
+                    tracing::info!(id = %room.id, name = %room.name, "a room was created")
+                }
+                Event::RoomRenamed { room, name } => {
+                    tracing::info!(id = %room, %name, "a room was renamed")
+                }
+                Event::RoomDeleted(room) => tracing::info!(id = %room, "a room was deleted"),
                 Event::Invited { code, expires } => {
                     tracing::info!(%code, expires, "minted an invite")
                 }
@@ -111,26 +119,50 @@ fn main() -> Result<()> {
 
 /// The parsed command, or `None` when the line ends the session.
 fn command(line: &str) -> std::result::Result<Option<Command>, String> {
-    let mut words = line.split_whitespace();
-    match (words.next(), words.next()) {
-        (None, _) => Err(HELP.to_string()),
-        (Some("quit"), _) => Ok(None),
-        (Some("room"), Some("none")) => Ok(Some(Command::SetRoom(None))),
-        (Some("room"), Some(id)) => id
-            .parse()
-            .map(|id| Some(Command::SetRoom(Some(RoomId(id)))))
-            .map_err(|_| format!("{id} is not a room id")),
-        (Some("room"), None) => Err("room takes an id, or none".to_string()),
-        (Some("invite"), role) => role
-            .map_or(Ok(Role::User), parse_role)
-            .map(|role| Some(Command::CreateInvite { role, ttl_secs: 0 })),
-        (Some(other), _) => Err(format!("{other} is not a command. {HELP}")),
+    let (word, rest) = split_word(line.trim());
+    match word {
+        "" => Err(HELP.to_string()),
+        "quit" => Ok(None),
+        "room" if rest == "none" => Ok(Some(Command::SetRoom(None))),
+        "room" => parse_room(rest).map(|room| Some(Command::SetRoom(Some(room)))),
+        "create" => match rest {
+            "" => Err("create takes a name".to_string()),
+            name => Ok(Some(Command::CreateRoom {
+                name: name.to_string(),
+            })),
+        },
+        "rename" => match split_word(rest) {
+            (_, "") => Err("rename takes an id and a name".to_string()),
+            (id, name) => parse_room(id).map(|room| {
+                Some(Command::RenameRoom {
+                    room,
+                    name: name.to_string(),
+                })
+            }),
+        },
+        "delete" => parse_room(rest).map(|room| Some(Command::DeleteRoom(room))),
+        "invite" => parse_role(rest).map(|role| Some(Command::CreateInvite { role, ttl_secs: 0 })),
+        other => Err(format!("{other} is not a command. {HELP}")),
     }
+}
+
+/// The first word and whatever follows it, both trimmed.
+fn split_word(line: &str) -> (&str, &str) {
+    match line.split_once(char::is_whitespace) {
+        Some((word, rest)) => (word, rest.trim()),
+        None => (line, ""),
+    }
+}
+
+fn parse_room(word: &str) -> std::result::Result<RoomId, String> {
+    word.parse()
+        .map(RoomId)
+        .map_err(|_| format!("{word} is not a room id"))
 }
 
 fn parse_role(word: &str) -> std::result::Result<Role, String> {
     match word {
-        "user" => Ok(Role::User),
+        "" | "user" => Ok(Role::User),
         "manager" => Ok(Role::Manager),
         "admin" => Ok(Role::Admin),
         other => Err(format!("{other} is not a role")),
@@ -186,6 +218,23 @@ mod tests {
             Ok(Some(Command::SetRoom(Some(RoomId(7)))))
         );
         assert_eq!(
+            command("create the lounge"),
+            Ok(Some(Command::CreateRoom {
+                name: "the lounge".into()
+            }))
+        );
+        assert_eq!(
+            command("rename 7 the lounge"),
+            Ok(Some(Command::RenameRoom {
+                room: RoomId(7),
+                name: "the lounge".into()
+            }))
+        );
+        assert_eq!(
+            command("delete 7"),
+            Ok(Some(Command::DeleteRoom(RoomId(7))))
+        );
+        assert_eq!(
             command("invite manager"),
             Ok(Some(Command::CreateInvite {
                 role: Role::Manager,
@@ -194,6 +243,8 @@ mod tests {
         );
         assert_eq!(command("quit"), Ok(None));
         assert!(command("room later").is_err());
+        assert!(command("create").is_err());
+        assert!(command("rename 7").is_err());
         assert!(command("dance").is_err());
     }
 }

@@ -11,6 +11,7 @@ use tracing::Instrument as _;
 
 use crate::database::Database;
 use crate::invite::RedemptionLimiter;
+use crate::rooms::Registry;
 
 pub mod auth;
 pub mod bootstrap;
@@ -19,6 +20,7 @@ pub mod database;
 pub mod identity;
 pub mod invite;
 pub mod perms;
+pub mod rooms;
 pub mod session;
 pub mod tls;
 
@@ -27,6 +29,7 @@ const PRUNE_INTERVAL: Duration = Duration::from_mins(60);
 pub struct State {
     pub database: Database,
     redemptions: Mutex<RedemptionLimiter>,
+    rooms: Mutex<Registry>,
 }
 
 impl State {
@@ -34,11 +37,16 @@ impl State {
         Self {
             database,
             redemptions: Mutex::new(RedemptionLimiter::default()),
+            rooms: Mutex::new(Registry::default()),
         }
     }
 
     pub fn redemptions(&self) -> MutexGuard<'_, RedemptionLimiter> {
         self.redemptions.lock().expect("redemption mutex poisoned")
+    }
+
+    pub fn rooms(&self) -> MutexGuard<'_, Registry> {
+        self.rooms.lock().expect("room registry mutex poisoned")
     }
 }
 

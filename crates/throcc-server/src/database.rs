@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension as _, Row, Transaction, params};
-use throcc_proto::{Role, User, UserId};
+use throcc_proto::{Epoch, Role, Room, RoomId, User, UserId};
 
 use crate::invite;
 
@@ -19,6 +19,12 @@ const SCHEMA: &str = "
         avatar_hash BLOB,
         role        INTEGER NOT NULL,
         created_at  INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS rooms (
+        id    INTEGER PRIMARY KEY,
+        name  TEXT    NOT NULL,
+        epoch INTEGER NOT NULL
     ) STRICT;
 
     CREATE TABLE IF NOT EXISTS invites (
@@ -130,6 +136,42 @@ impl Database {
         })
     }
 
+    pub fn list_rooms(&self) -> Result<Vec<Room>> {
+        let connection = self.lock();
+        let rooms = connection
+            .prepare("SELECT id, name, epoch FROM rooms ORDER BY id")?
+            .query_map([], room_from_row)?
+            .collect::<rusqlite::Result<Vec<Room>>>()?;
+        Ok(rooms)
+    }
+
+    pub fn create_room(&self, name: &str) -> Result<Room> {
+        let connection = self.lock();
+        Ok(connection.query_row(
+            "INSERT INTO rooms (name, epoch) VALUES (?1, 0) RETURNING id, name, epoch",
+            params![name],
+            room_from_row,
+        )?)
+    }
+
+    /// False when no room carries that id.
+    pub fn rename_room(&self, room: RoomId, name: &str) -> Result<bool> {
+        let connection = self.lock();
+        let renamed = connection.execute(
+            "UPDATE rooms SET name = ?1 WHERE id = ?2",
+            params![name, room.0 as i64],
+        )?;
+        Ok(renamed == 1)
+    }
+
+    /// False when no room carries that id.
+    pub fn delete_room(&self, room: RoomId) -> Result<bool> {
+        let connection = self.lock();
+        let deleted =
+            connection.execute("DELETE FROM rooms WHERE id = ?1", params![room.0 as i64])?;
+        Ok(deleted == 1)
+    }
+
     pub fn create_invite(&self, role: Role, ttl: Duration) -> Result<Invite> {
         let connection = self.lock();
         insert_invite(&connection, role, ttl)
@@ -216,6 +258,14 @@ fn redeem(transaction: &Transaction<'_>, code: &str, pubkey: &[u8; 32]) -> Resul
         avatar: None,
         role,
     }))
+}
+
+fn room_from_row(row: &Row<'_>) -> rusqlite::Result<Room> {
+    Ok(Room {
+        id: RoomId(row.get::<_, i64>("id")? as u64),
+        name: row.get("name")?,
+        epoch: Epoch(row.get::<_, i64>("epoch")? as u32),
+    })
 }
 
 fn user_from_row(row: &Row<'_>) -> rusqlite::Result<User> {

@@ -5,14 +5,17 @@ use anyhow::{Context, Result};
 use quinn::Connection;
 use rand::RngExt as _;
 use throcc_proto::{
-    Auth, ErrorCode, PROTOCOL_VERSION, Request, RequestEnvelope, Response, ResponseEnvelope, Role,
-    ServerHello, ServerMessage, User,
+    Auth, ErrorCode, Event, PROTOCOL_VERSION, Request, RequestEnvelope, Response, ResponseEnvelope,
+    Role, RoomId, ServerHello, ServerMessage, User,
 };
+use tokio::sync::mpsc;
 
 use crate::control::{ControlReader, ControlWriter};
 use crate::{State, auth, invite, perms};
 
 const DRAIN_GRACE: Duration = Duration::from_secs(1);
+const OUTBOUND_DEPTH: usize = 256;
+const ROOM_NAME_MAX: usize = 64;
 
 pub async fn serve(connection: Connection, state: Arc<State>) {
     tracing::info!(
@@ -30,24 +33,45 @@ pub async fn serve(connection: Connection, state: Arc<State>) {
     tracing::info!(%reason, "disconnected");
 }
 
-async fn control(connection: &Connection, state: &State) -> Result<()> {
+async fn control(connection: &Connection, state: &Arc<State>) -> Result<()> {
     let (send, recv) = connection
         .open_bi()
         .await
         .context("opening the control stream")?;
     let mut writer = ControlWriter::new(send);
+    let mut reader = ControlReader::new(recv);
 
-    let outcome = converse(connection, state, &mut writer, ControlReader::new(recv)).await;
-    let _ = tokio::time::timeout(DRAIN_GRACE, writer.drain()).await;
+    let Some(actor) = authenticate(connection, state, &mut writer, &mut reader).await? else {
+        let _ = tokio::time::timeout(DRAIN_GRACE, writer.drain()).await;
+        return Ok(());
+    };
+
+    let (outbound, queue) = mpsc::channel(OUTBOUND_DEPTH);
+    if let Some(displaced) = state
+        .rooms()
+        .attach(actor.id, outbound.clone(), connection.clone())
+    {
+        tracing::info!(user = %actor.id, "a newer connection for this key displaces this one");
+        displaced.close(3u32.into(), b"displaced by a newer connection");
+    }
+    let writing = tokio::spawn(write_outbound(writer, queue));
+
+    let outcome = serve_requests(&mut reader, &actor, state, &outbound).await;
+
+    state.rooms().detach(actor.id);
+    drop(outbound);
+    let _ = writing.await;
     outcome
 }
 
-async fn converse(
+/// The authenticated user, or `None` when the client was refused and the reason
+/// has already been sent.
+async fn authenticate(
     connection: &Connection,
     state: &State,
     writer: &mut ControlWriter,
-    mut reader: ControlReader,
-) -> Result<()> {
+    reader: &mut ControlReader,
+) -> Result<Option<User>> {
     let server_nonce: [u8; 32] = rand::rng().random();
     writer
         .write(&ServerHello {
@@ -69,17 +93,38 @@ async fn converse(
     )?;
     writer.write(&decision.result).await?;
 
-    let Some(actor) = decision.user else {
-        return Ok(());
-    };
-    tracing::info!(user = %actor.id, role = ?actor.role, "authenticated");
+    if let Some(actor) = &decision.user {
+        tracing::info!(user = %actor.id, role = ?actor.role, "authenticated");
+    }
+    Ok(decision.user)
+}
 
+async fn write_outbound(mut writer: ControlWriter, mut queue: mpsc::Receiver<ServerMessage>) {
+    while let Some(message) = queue.recv().await {
+        if let Err(e) = writer.write(&message).await {
+            tracing::warn!(error = ?e, "could not write to the control stream");
+            return;
+        }
+    }
+    let _ = tokio::time::timeout(DRAIN_GRACE, writer.drain()).await;
+}
+
+async fn serve_requests(
+    reader: &mut ControlReader,
+    actor: &User,
+    state: &State,
+    outbound: &mpsc::Sender<ServerMessage>,
+) -> Result<()> {
     while let Some(RequestEnvelope { id, request }) = reader.read().await? {
         tracing::debug!(id, ?request, "request");
-        let response = handle(request, &actor, state);
-        writer
-            .write(&ServerMessage::Response(ResponseEnvelope { id, response }))
-            .await?;
+        let response = handle(request, actor, state);
+        if outbound
+            .send(ServerMessage::Response(ResponseEnvelope { id, response }))
+            .await
+            .is_err()
+        {
+            return Ok(());
+        }
     }
     Ok(())
 }
@@ -87,10 +132,94 @@ async fn converse(
 fn handle(request: Request, actor: &User, state: &State) -> Response {
     match request {
         Request::CreateInvite { role, ttl_secs } => create_invite(actor, state, role, ttl_secs),
+        Request::CreateRoom { name } => create_room(actor, state, name),
+        Request::RenameRoom { room, name } => rename_room(actor, state, room, name),
+        Request::DeleteRoom(room) => delete_room(actor, state, room),
         other => Response::Err {
             code: ErrorCode::Unimplemented,
             message: format!("{other:?} is not implemented"),
         },
+    }
+}
+
+fn create_room(actor: &User, state: &State, name: String) -> Response {
+    if let Err(denied) = perms::require_role(actor.role, Role::Manager) {
+        return denied;
+    }
+    let name = match room_name(name) {
+        Ok(name) => name,
+        Err(invalid) => return invalid,
+    };
+
+    match state.database.create_room(&name) {
+        Ok(room) => {
+            tracing::info!(by = %actor.id, room = %room.id, %name, "created a room");
+            state.rooms().broadcast(Event::RoomCreated(room));
+            Response::Ok
+        }
+        Err(e) => failed(e, "create a room"),
+    }
+}
+
+fn rename_room(actor: &User, state: &State, room: RoomId, name: String) -> Response {
+    if let Err(denied) = perms::require_role(actor.role, Role::Manager) {
+        return denied;
+    }
+    let name = match room_name(name) {
+        Ok(name) => name,
+        Err(invalid) => return invalid,
+    };
+
+    match state.database.rename_room(room, &name) {
+        Ok(false) => no_such_room(room),
+        Ok(true) => {
+            tracing::info!(by = %actor.id, %room, %name, "renamed a room");
+            state.rooms().broadcast(Event::RoomRenamed { room, name });
+            Response::Ok
+        }
+        Err(e) => failed(e, "rename a room"),
+    }
+}
+
+fn delete_room(actor: &User, state: &State, room: RoomId) -> Response {
+    if let Err(denied) = perms::require_role(actor.role, Role::Manager) {
+        return denied;
+    }
+
+    match state.database.delete_room(room) {
+        Ok(false) => no_such_room(room),
+        Ok(true) => {
+            tracing::info!(by = %actor.id, %room, "deleted a room");
+            state.rooms().broadcast(Event::RoomDeleted(room));
+            Response::Ok
+        }
+        Err(e) => failed(e, "delete a room"),
+    }
+}
+
+fn room_name(name: String) -> Result<String, Response> {
+    let name = name.trim().to_string();
+    if name.is_empty() || name.chars().count() > ROOM_NAME_MAX {
+        return Err(Response::Err {
+            code: ErrorCode::Invalid,
+            message: format!("a room name is 1 to {ROOM_NAME_MAX} characters"),
+        });
+    }
+    Ok(name)
+}
+
+fn no_such_room(room: RoomId) -> Response {
+    Response::Err {
+        code: ErrorCode::NotFound,
+        message: format!("no room {room}"),
+    }
+}
+
+fn failed(error: anyhow::Error, attempt: &str) -> Response {
+    tracing::error!(error = ?error, "could not {attempt}");
+    Response::Err {
+        code: ErrorCode::Invalid,
+        message: format!("the server could not {attempt}"),
     }
 }
 
@@ -115,12 +244,6 @@ fn create_invite(actor: &User, state: &State, role: Role, ttl_secs: u32) -> Resp
                 expires: created.expires_at,
             }
         }
-        Err(e) => {
-            tracing::error!(error = ?e, "could not mint an invite");
-            Response::Err {
-                code: ErrorCode::Invalid,
-                message: "the server could not mint an invite".into(),
-            }
-        }
+        Err(e) => failed(e, "mint an invite"),
     }
 }

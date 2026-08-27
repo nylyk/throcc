@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use quinn::Connection;
 use throcc_proto::{
-    Request, RequestEnvelope, Response, ResponseEnvelope, Role, RoomId, ServerMessage,
+    Request, RequestEnvelope, Response, ResponseEnvelope, Role, Room, RoomId, ServerMessage,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -24,12 +24,18 @@ const DRAIN_GRACE: Duration = Duration::from_millis(500);
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     SetRoom(Option<RoomId>),
+    CreateRoom { name: String },
+    RenameRoom { room: RoomId, name: String },
+    DeleteRoom(RoomId),
     CreateInvite { role: Role, ttl_secs: u32 },
     Disconnect,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
+    RoomCreated(Room),
+    RoomRenamed { room: RoomId, name: String },
+    RoomDeleted(RoomId),
     Invited { code: String, expires: u64 },
     Failed { message: String },
     Disconnected { reason: String },
@@ -216,6 +222,11 @@ async fn run(
                 let request = match command {
                     None | Some(Command::Disconnect) => return Ok(()),
                     Some(Command::SetRoom(room)) => Request::SetRoom(room),
+                    Some(Command::CreateRoom { name }) => Request::CreateRoom { name },
+                    Some(Command::RenameRoom { room, name }) => {
+                        Request::RenameRoom { room, name }
+                    }
+                    Some(Command::DeleteRoom(room)) => Request::DeleteRoom(room),
                     Some(Command::CreateInvite { role, ttl_secs }) => {
                         Request::CreateInvite { role, ttl_secs }
                     }
@@ -244,7 +255,11 @@ async fn run(
                 match message {
                     None => return Ok(()),
                     Some(Err(e)) => return Err(e),
-                    Some(Ok(ServerMessage::Event(event))) => tracing::debug!(?event, "event"),
+                    Some(Ok(ServerMessage::Event(event))) => {
+                        if let Some(event) = translate(event) {
+                            let _ = events.send(event);
+                        }
+                    }
                     Some(Ok(ServerMessage::Response(ResponseEnvelope { id, response }))) => {
                         let Some(reply) = pending.remove(&id) else {
                             return Err(Error::Protocol(format!(
@@ -255,6 +270,18 @@ async fn run(
                     }
                 }
             }
+        }
+    }
+}
+
+fn translate(event: throcc_proto::Event) -> Option<Event> {
+    match event {
+        throcc_proto::Event::RoomCreated(room) => Some(Event::RoomCreated(room)),
+        throcc_proto::Event::RoomRenamed { room, name } => Some(Event::RoomRenamed { room, name }),
+        throcc_proto::Event::RoomDeleted(room) => Some(Event::RoomDeleted(room)),
+        other => {
+            tracing::debug!(?other, "event");
+            None
         }
     }
 }
