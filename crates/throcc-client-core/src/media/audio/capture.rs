@@ -7,6 +7,7 @@ use ropus::{Application, Bitrate, Channels, Encoder, InbandFec};
 use sonora_common_audio::push_resampler::PushResampler;
 use tokio::sync::mpsc;
 
+use crate::media::audio::cleanup::{Cleanup, RenderReference};
 use crate::media::audio::{SAMPLE_RATE, SAMPLES_PER_BLOCK, SAMPLES_PER_PACKET, devices};
 use crate::{Error, Result};
 
@@ -43,10 +44,14 @@ impl Capture {
 
 /// Opens the microphone and encodes 20 ms Opus frames into `frames`. The work
 /// runs on the device's realtime thread, so it must never block or await.
-pub fn start(device_id: Option<&str>, frames: mpsc::Sender<Bytes>) -> Result<Capture> {
+pub fn start(
+    device_id: Option<&str>,
+    frames: mpsc::Sender<Bytes>,
+    reference: Arc<RenderReference>,
+) -> Result<Capture> {
     let device = devices::input(device_id)?;
     let config = negotiate(&device)?;
-    let mut pipeline = Pipeline::new(config.sample_rate, config.channels)?;
+    let mut pipeline = Pipeline::new(config.sample_rate, config.channels, reference)?;
 
     let muted = Arc::new(AtomicBool::new(false));
     let dropped_frames = Arc::new(AtomicU64::new(0));
@@ -123,7 +128,10 @@ struct Pipeline {
     channels: usize,
     resampler: Option<Resampler>,
     mono: Vec<f32>,
+    block: [f32; SAMPLES_PER_BLOCK],
     packet: Vec<f32>,
+    cleanup: Cleanup,
+    reference: Arc<RenderReference>,
     encoder: Encoder,
     encoded: Vec<u8>,
 }
@@ -135,7 +143,7 @@ struct Resampler {
 }
 
 impl Pipeline {
-    fn new(sample_rate: u32, channels: u16) -> Result<Self> {
+    fn new(sample_rate: u32, channels: u16, reference: Arc<RenderReference>) -> Result<Self> {
         let resampler = (sample_rate != SAMPLE_RATE).then(|| {
             let samples_per_block = (sample_rate / 100) as usize;
             tracing::info!(
@@ -160,7 +168,10 @@ impl Pipeline {
             channels: channels.max(1) as usize,
             resampler,
             mono: Vec::with_capacity(SAMPLES_PER_PACKET * 2),
+            block: [0.0; SAMPLES_PER_BLOCK],
             packet: Vec::with_capacity(SAMPLES_PER_PACKET),
+            cleanup: Cleanup::new(),
+            reference,
             encoder,
             encoded: vec![0; MAX_PACKET_BYTES],
         })
@@ -185,15 +196,21 @@ impl Pipeline {
             .map_or(SAMPLES_PER_BLOCK, |resampler| resampler.samples_per_block);
         while self.mono.len() >= block {
             match self.resampler.as_mut() {
-                None => self.packet.extend_from_slice(&self.mono[..block]),
+                None => self.block.copy_from_slice(&self.mono[..block]),
                 Some(resampler) => {
                     resampler
                         .resampler
                         .resample_mono(&self.mono[..block], &mut resampler.block);
-                    self.packet.extend_from_slice(&resampler.block);
+                    self.block.copy_from_slice(&resampler.block);
                 }
             }
             self.mono.drain(..block);
+
+            while let Some(played) = self.reference.take() {
+                self.cleanup.played(&played);
+            }
+            self.cleanup.captured(&mut self.block);
+            self.packet.extend_from_slice(&self.block);
 
             if self.packet.len() >= SAMPLES_PER_PACKET {
                 if let Some(frame) = self.encode_packet() {
@@ -222,6 +239,10 @@ impl Pipeline {
 mod tests {
     use super::*;
 
+    fn pipeline(sample_rate: u32, channels: u16) -> Pipeline {
+        Pipeline::new(sample_rate, channels, Arc::new(RenderReference::default())).unwrap()
+    }
+
     fn tone(samples: usize, channels: usize) -> Vec<f32> {
         (0..samples * channels)
             .map(|index| ((index / channels) as f32 * 0.05).sin() * 0.3)
@@ -230,7 +251,7 @@ mod tests {
 
     #[test]
     fn one_opus_frame_comes_out_per_twenty_milliseconds() {
-        let mut pipeline = Pipeline::new(SAMPLE_RATE, 1).unwrap();
+        let mut pipeline = pipeline(SAMPLE_RATE, 1);
         let mut frames = Vec::new();
         pipeline.encode(&tone(SAMPLES_PER_PACKET * 5, 1), |frame| frames.push(frame));
 
@@ -247,7 +268,7 @@ mod tests {
 
     #[test]
     fn a_stereo_device_at_another_rate_still_yields_whole_frames() {
-        let mut pipeline = Pipeline::new(44_100, 2).unwrap();
+        let mut pipeline = pipeline(44_100, 2);
         let mut frames = Vec::new();
         pipeline.encode(&tone(44_100 / 10, 2), |frame| frames.push(frame));
 
@@ -260,7 +281,7 @@ mod tests {
 
     #[test]
     fn a_partial_block_is_kept_until_it_is_whole() {
-        let mut pipeline = Pipeline::new(SAMPLE_RATE, 1).unwrap();
+        let mut pipeline = pipeline(SAMPLE_RATE, 1);
         let mut frames = Vec::new();
         for _ in 0..4 {
             pipeline.encode(&tone(SAMPLES_PER_BLOCK / 2, 1), |frame| frames.push(frame));
@@ -270,7 +291,7 @@ mod tests {
 
     #[test]
     fn muting_drops_what_was_buffered() {
-        let mut pipeline = Pipeline::new(SAMPLE_RATE, 1).unwrap();
+        let mut pipeline = pipeline(SAMPLE_RATE, 1);
         let mut frames = Vec::new();
         pipeline.encode(&tone(SAMPLES_PER_BLOCK, 1), |frame| frames.push(frame));
         assert!(frames.is_empty(), "half a packet is not sent");

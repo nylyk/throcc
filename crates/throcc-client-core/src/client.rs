@@ -15,6 +15,7 @@ use tokio::task::JoinHandle;
 use crate::auth::{self, Welcome};
 use crate::control::{ControlReader, ControlWriter};
 use crate::media::audio::capture::{self, Capture};
+use crate::media::audio::cleanup::RenderReference;
 use crate::media::audio::playout::{self, Playout, TrackFeed};
 use crate::media::receive;
 use crate::media::send::{self, MediaSender};
@@ -79,6 +80,7 @@ pub struct Client {
     encoded_frames: mpsc::Sender<bytes::Bytes>,
     playout: Mutex<Option<Playout>>,
     track_feeds: Mutex<Option<mpsc::Receiver<TrackFeed>>>,
+    reference: Arc<RenderReference>,
     connector: Connector,
     commands: mpsc::Sender<Command>,
     events: broadcast::Sender<Event>,
@@ -154,6 +156,7 @@ impl Client {
             encoded_frames,
             playout: Mutex::new(None),
             track_feeds: Mutex::new(Some(track_feeds)),
+            reference: Arc::new(RenderReference::default()),
             connector,
             commands,
             events,
@@ -180,7 +183,7 @@ impl Client {
     /// Opens the microphone. Its audio reaches the room only while this client is
     /// in one, since the ids to send on come with the placement.
     pub fn start_microphone(&self, device: Option<&str>) -> Result<()> {
-        let capture = capture::start(device, self.encoded_frames.clone())?;
+        let capture = capture::start(device, self.encoded_frames.clone(), self.reference.clone())?;
         *self.microphone() = Some(capture);
         Ok(())
     }
@@ -194,7 +197,7 @@ impl Client {
             .expect("playout mutex poisoned")
             .take()
             .ok_or_else(|| Error::Audio("playback has already been started once".into()))?;
-        let playing = playout::start(device, feeds)?;
+        let playing = playout::start(device, feeds, self.reference.clone())?;
         *self.playout.lock().expect("playout mutex poisoned") = Some(playing);
         Ok(())
     }

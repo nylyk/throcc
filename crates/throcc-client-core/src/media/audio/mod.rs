@@ -1,4 +1,5 @@
 pub mod capture;
+pub mod cleanup;
 pub mod devices;
 pub mod jitter;
 pub mod playout;

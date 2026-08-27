@@ -1,9 +1,12 @@
+use std::sync::Arc;
+
 use cpal::traits::{DeviceTrait as _, StreamTrait as _};
 use neteq::AudioPacket;
 use sonora_common_audio::push_resampler::PushResampler;
 use throcc_proto::MediaId;
 use tokio::sync::mpsc;
 
+use crate::media::audio::cleanup::RenderReference;
 use crate::media::audio::jitter::JitterBuffer;
 use crate::media::audio::{SAMPLE_RATE, SAMPLES_PER_BLOCK, devices};
 use crate::{Error, Result};
@@ -25,10 +28,14 @@ pub struct Playout {
     _stream: cpal::Stream,
 }
 
-pub fn start(device_id: Option<&str>, feeds: mpsc::Receiver<TrackFeed>) -> Result<Playout> {
+pub fn start(
+    device_id: Option<&str>,
+    feeds: mpsc::Receiver<TrackFeed>,
+    reference: Arc<RenderReference>,
+) -> Result<Playout> {
     let device = devices::output(device_id)?;
     let config = negotiate(&device)?;
-    let mut mixer = Mixer::new(feeds, config.sample_rate, config.channels);
+    let mut mixer = Mixer::new(feeds, config.sample_rate, config.channels, reference);
 
     let stream = device
         .build_output_stream(
@@ -85,6 +92,7 @@ struct Track {
 /// the realtime thread, so it must never block or await.
 struct Mixer {
     feeds: mpsc::Receiver<TrackFeed>,
+    reference: Arc<RenderReference>,
     tracks: Vec<Track>,
     block: [f32; SAMPLES_PER_BLOCK],
     mixed: Vec<f32>,
@@ -99,7 +107,12 @@ struct Resampler {
 }
 
 impl Mixer {
-    fn new(feeds: mpsc::Receiver<TrackFeed>, sample_rate: u32, channels: u16) -> Self {
+    fn new(
+        feeds: mpsc::Receiver<TrackFeed>,
+        sample_rate: u32,
+        channels: u16,
+        reference: Arc<RenderReference>,
+    ) -> Self {
         let resampler = (sample_rate != SAMPLE_RATE).then(|| {
             let samples_per_block = (sample_rate / 100) as usize;
             tracing::info!(sample_rate, "resampling playback from {SAMPLE_RATE}");
@@ -111,6 +124,7 @@ impl Mixer {
 
         Self {
             feeds,
+            reference,
             tracks: Vec::with_capacity(EXPECTED_TRACKS),
             block: [0.0; SAMPLES_PER_BLOCK],
             mixed: vec![0.0; SAMPLES_PER_BLOCK],
@@ -176,6 +190,7 @@ impl Mixer {
         for sample in &mut self.mixed {
             *sample = sample.clamp(-1.0, 1.0);
         }
+        self.reference.played(&self.mixed);
 
         match self.resampler.as_mut() {
             None => self.ready.extend_from_slice(&self.mixed),
@@ -210,7 +225,7 @@ mod tests {
     #[test]
     fn an_empty_room_plays_silence_rather_than_noise() {
         let (_registration, feeds) = mpsc::channel(TRACK_QUEUE_DEPTH);
-        let mut mixer = Mixer::new(feeds, SAMPLE_RATE, 2);
+        let mut mixer = Mixer::new(feeds, SAMPLE_RATE, 2, Arc::new(RenderReference::default()));
 
         let mut output = vec![7.0f32; SAMPLES_PER_BLOCK * 2];
         mixer.fill(&mut output);
@@ -223,7 +238,7 @@ mod tests {
     #[test]
     fn a_track_is_torn_down_when_its_peer_goes() {
         let (registration, feeds) = mpsc::channel(TRACK_QUEUE_DEPTH);
-        let mut mixer = Mixer::new(feeds, SAMPLE_RATE, 1);
+        let mut mixer = Mixer::new(feeds, SAMPLE_RATE, 1, Arc::new(RenderReference::default()));
         let (packets, track) = feed(MediaId(7));
         registration.blocking_send(track).unwrap();
 
@@ -242,7 +257,7 @@ mod tests {
     #[test]
     fn what_a_peer_sent_reaches_the_device_buffer() {
         let (registration, feeds) = mpsc::channel(TRACK_QUEUE_DEPTH);
-        let mut mixer = Mixer::new(feeds, SAMPLE_RATE, 2);
+        let mut mixer = Mixer::new(feeds, SAMPLE_RATE, 2, Arc::new(RenderReference::default()));
         let (packets, track) = feed(MediaId(7));
         registration.blocking_send(track).unwrap();
 
