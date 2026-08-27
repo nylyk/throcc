@@ -10,7 +10,9 @@ pub mod ids;
 pub mod messages;
 
 pub use fingerprint::Fingerprint;
-pub use frame::{FrameHeader, HEADER_BYTES, MIN_DATAGRAM_BYTES, PAYLOAD_BUDGET};
+pub use frame::{
+    FrameHeader, HEADER_BYTES, MIN_DATAGRAM_BYTES, PAYLOAD_BUDGET, check_datagram_size,
+};
 pub use ids::{Epoch, MediaId, RoomId, UserId};
 pub use messages::{
     Auth, AuthError, AuthResult, Codec, ErrorCode, Event, PROTOCOL_VERSION, PeerState, Placed,
@@ -25,6 +27,9 @@ pub enum Error {
 
     #[error("frame of {len} bytes exceeds the {max} byte cap")]
     TooLarge { len: usize, max: usize },
+
+    #[error("{0}")]
+    Datagram(String),
 
     #[error("malformed certificate: {0}")]
     Certificate(&'static str),

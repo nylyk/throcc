@@ -89,6 +89,8 @@ impl Connector {
             }
         };
 
+        throcc_proto::check_datagram_size(connection.max_datagram_size())?;
+
         let presented = verifier
             .presented()
             .ok_or_else(|| Error::Connect("handshake completed without a certificate".into()))?;

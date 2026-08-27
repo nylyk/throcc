@@ -14,6 +14,20 @@ pub const TRANSFORM_OVERHEAD_BYTES: usize = 16;
 
 pub const PAYLOAD_BUDGET: usize = MIN_DATAGRAM_BYTES - HEADER_BYTES - TRANSFORM_OVERHEAD_BYTES;
 
+/// What the peer reported it can carry, against the budget every sender uses.
+/// There is no TCP fallback and no smaller frame, so falling short is fatal.
+pub fn check_datagram_size(reported: Option<usize>) -> Result<()> {
+    match reported {
+        None => Err(Error::Datagram(
+            "the peer accepts no QUIC datagrams, which is how all media travels".into(),
+        )),
+        Some(size) if size < MIN_DATAGRAM_BYTES => Err(Error::Datagram(format!(
+            "the peer accepts datagrams of {size} bytes, and media needs {MIN_DATAGRAM_BYTES}"
+        ))),
+        Some(_) => Ok(()),
+    }
+}
+
 pub const KEYFRAME: u8 = 1 << 0;
 const KNOWN_FLAGS: u8 = KEYFRAME;
 
@@ -155,6 +169,15 @@ mod tests {
         header.flags |= 1 << 3;
         assert!(header.is_keyframe());
         assert!(header.has_unknown_flags());
+    }
+
+    #[test]
+    fn a_peer_that_cannot_carry_the_budget_is_refused() {
+        assert!(check_datagram_size(None).is_err());
+        assert!(check_datagram_size(Some(0)).is_err());
+        assert!(check_datagram_size(Some(MIN_DATAGRAM_BYTES - 1)).is_err());
+        assert!(check_datagram_size(Some(MIN_DATAGRAM_BYTES)).is_ok());
+        assert!(check_datagram_size(Some(1500)).is_ok());
     }
 
     #[test]

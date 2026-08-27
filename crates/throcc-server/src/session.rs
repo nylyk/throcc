@@ -25,6 +25,12 @@ pub async fn serve(connection: Connection, state: Arc<State>) {
         "connected"
     );
 
+    if let Err(e) = throcc_proto::check_datagram_size(connection.max_datagram_size()) {
+        tracing::warn!(error = %e, "refusing a connection that cannot carry media");
+        connection.close(4u32.into(), e.to_string().as_bytes());
+        return;
+    }
+
     if let Err(e) = control(&connection, &state).await {
         tracing::warn!(error = ?e, "control stream ended in error");
         connection.close(1u32.into(), b"protocol error");
