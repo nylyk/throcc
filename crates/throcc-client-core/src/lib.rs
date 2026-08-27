@@ -36,6 +36,9 @@ pub enum Error {
     #[error("command dropped: {0}")]
     CommandDropped(String),
 
+    #[error("audio: {0}")]
+    Audio(String),
+
     #[error("keystore: {0}")]
     Keystore(String),
 

@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod fragment;
 pub mod receive;
 pub mod send;
