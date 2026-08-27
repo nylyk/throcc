@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension as _, Row, Transaction, params};
-use throcc_proto::{Epoch, Role, Room, RoomId, User, UserId};
+use throcc_proto::{Epoch, MediaId, Role, Room, RoomId, Share, Tracks, User, UserId};
 
 use crate::invite;
 
@@ -25,6 +25,11 @@ const SCHEMA: &str = "
         id    INTEGER PRIMARY KEY,
         name  TEXT    NOT NULL,
         epoch INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS counters (
+        name  TEXT    PRIMARY KEY,
+        value INTEGER NOT NULL
     ) STRICT;
 
     CREATE TABLE IF NOT EXISTS invites (
@@ -54,6 +59,16 @@ fn unix_seconds() -> i64 {
         .expect("the clock is before the unix epoch")
         .as_secs() as i64
 }
+
+/// The epoch each room a membership change touched now carries, and the media
+/// ids allocated for the room entered.
+pub struct Transition {
+    pub leaving: Option<Epoch>,
+    pub entering: Option<Epoch>,
+    pub tracks: Option<Tracks>,
+}
+
+const MEDIA_ID_COUNTER: &str = "media_id";
 
 pub enum Admission {
     Admitted {
@@ -172,6 +187,41 @@ impl Database {
         Ok(deleted == 1)
     }
 
+    /// The epoch each room the change touched now carries. `None` when the room
+    /// being entered no longer exists, in which case nothing was written.
+    pub fn transition(
+        &self,
+        leaving: Option<RoomId>,
+        entering: Option<RoomId>,
+    ) -> Result<Option<Transition>> {
+        let mut connection = self.lock();
+        let transaction = connection.transaction()?;
+
+        let entering_epoch = match entering {
+            None => None,
+            Some(room) => match bump_epoch(&transaction, room)? {
+                None => return Ok(None),
+                epoch => epoch,
+            },
+        };
+        let leaving_epoch = match leaving {
+            None => None,
+            Some(_) if leaving == entering => entering_epoch,
+            // A room deleted while it was occupied leaves nothing to bump.
+            Some(room) => bump_epoch(&transaction, room)?,
+        };
+        let tracks = entering
+            .map(|_| allocate_tracks(&transaction))
+            .transpose()?;
+        transaction.commit()?;
+
+        Ok(Some(Transition {
+            leaving: leaving_epoch,
+            entering: entering_epoch,
+            tracks,
+        }))
+    }
+
     pub fn create_invite(&self, role: Role, ttl: Duration) -> Result<Invite> {
         let connection = self.lock();
         insert_invite(&connection, role, ttl)
@@ -258,6 +308,47 @@ fn redeem(transaction: &Transaction<'_>, code: &str, pubkey: &[u8; 32]) -> Resul
         avatar: None,
         role,
     }))
+}
+
+/// One mic id and one share, all fresh. A media id is never reused, so
+/// exhaustion is fatal rather than a wrap.
+fn allocate_tracks(transaction: &Transaction<'_>) -> Result<Tracks> {
+    let allocated: i64 = transaction.query_row(
+        "INSERT INTO counters (name, value) VALUES (?1, 3)
+         ON CONFLICT(name) DO UPDATE SET value = value + 3
+         RETURNING value",
+        params![MEDIA_ID_COUNTER],
+        |row| row.get(0),
+    )?;
+    if allocated > u32::MAX as i64 {
+        anyhow::bail!("this deployment has run out of media ids");
+    }
+
+    let first = (allocated - 3) as u32;
+    Ok(Tracks {
+        mic: MediaId(first),
+        shares: vec![Share {
+            video: MediaId(first + 1),
+            audio: Some(MediaId(first + 2)),
+        }],
+    })
+}
+
+/// `None` when no room carries that id. Overflow is fatal: the epoch is what a
+/// future rekey selects a key by, so it must never repeat.
+fn bump_epoch(transaction: &Transaction<'_>, room: RoomId) -> Result<Option<Epoch>> {
+    let bumped: Option<i64> = transaction
+        .query_row(
+            "UPDATE rooms SET epoch = epoch + 1 WHERE id = ?1 RETURNING epoch",
+            params![room.0 as i64],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match bumped {
+        None => Ok(None),
+        Some(epoch) if epoch <= u32::MAX as i64 => Ok(Some(Epoch(epoch as u32))),
+        Some(epoch) => anyhow::bail!("room {room} has run out of epochs at {epoch}"),
+    }
 }
 
 fn room_from_row(row: &Row<'_>) -> rusqlite::Result<Room> {

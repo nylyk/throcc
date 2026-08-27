@@ -21,10 +21,7 @@ fn a_request_is_answered_over_the_control_stream() {
     client.command(Command::SetRoom(None)).unwrap();
 
     match next_event(&mut events) {
-        Event::Failed { message } => assert!(
-            message.contains("Unimplemented"),
-            "unexpected failure: {message}"
-        ),
+        Event::Placed(placed) => assert_eq!(placed.room, None),
         other => panic!("expected the server's answer, got {other:?}"),
     }
 

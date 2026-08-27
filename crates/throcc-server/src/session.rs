@@ -11,6 +11,7 @@ use throcc_proto::{
 use tokio::sync::mpsc;
 
 use crate::control::{ControlReader, ControlWriter};
+use crate::rooms::Placement;
 use crate::{State, auth, invite, perms};
 
 const DRAIN_GRACE: Duration = Duration::from_secs(1);
@@ -58,7 +59,9 @@ async fn control(connection: &Connection, state: &Arc<State>) -> Result<()> {
 
     let outcome = serve_requests(&mut reader, &actor, state, &outbound).await;
 
-    state.rooms().detach(actor.id);
+    if let Err(e) = state.rooms().detach(&state.database, actor.id) {
+        tracing::warn!(error = ?e, user = %actor.id, "could not record a departure");
+    }
     drop(outbound);
     let _ = writing.await;
     outcome
@@ -131,6 +134,7 @@ async fn serve_requests(
 
 fn handle(request: Request, actor: &User, state: &State) -> Response {
     match request {
+        Request::SetRoom(room) => set_room(actor, state, room),
         Request::CreateInvite { role, ttl_secs } => create_invite(actor, state, role, ttl_secs),
         Request::CreateRoom { name } => create_room(actor, state, name),
         Request::RenameRoom { room, name } => rename_room(actor, state, room, name),
@@ -139,6 +143,17 @@ fn handle(request: Request, actor: &User, state: &State) -> Response {
             code: ErrorCode::Unimplemented,
             message: format!("{other:?} is not implemented"),
         },
+    }
+}
+
+fn set_room(actor: &User, state: &State, target: Option<RoomId>) -> Response {
+    match state.rooms().set_room(&state.database, actor.id, target) {
+        Ok(Placement::Placed(placed)) => {
+            tracing::info!(user = %actor.id, room = ?placed.room, epoch = %placed.epoch, "placed");
+            Response::Placed(placed)
+        }
+        Ok(Placement::NoSuchRoom(room)) => no_such_room(room),
+        Err(e) => failed(e, "change rooms"),
     }
 }
 
@@ -190,7 +205,9 @@ fn delete_room(actor: &User, state: &State, room: RoomId) -> Response {
         Ok(false) => no_such_room(room),
         Ok(true) => {
             tracing::info!(by = %actor.id, %room, "deleted a room");
-            state.rooms().broadcast(Event::RoomDeleted(room));
+            let mut rooms = state.rooms();
+            rooms.clear_room(room);
+            rooms.broadcast(Event::RoomDeleted(room));
             Response::Ok
         }
         Err(e) => failed(e, "delete a room"),

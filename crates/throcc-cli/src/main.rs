@@ -85,6 +85,19 @@ fn main() -> Result<()> {
     std::thread::spawn(move || {
         while let Ok(event) = events.blocking_recv() {
             match event {
+                Event::Placed(placed) => tracing::info!(
+                    room = ?placed.room,
+                    epoch = %placed.epoch,
+                    tracks = ?placed.tracks,
+                    peers = placed.peers.len(),
+                    "placed"
+                ),
+                Event::UserEntered { room, epoch, peer } => {
+                    tracing::info!(%room, %epoch, user = %peer.user, "a user entered")
+                }
+                Event::UserExited { room, epoch, user } => {
+                    tracing::info!(%room, %epoch, %user, "a user left")
+                }
                 Event::RoomCreated(room) => {
                     tracing::info!(id = %room.id, name = %room.name, "a room was created")
                 }

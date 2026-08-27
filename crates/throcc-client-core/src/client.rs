@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use quinn::Connection;
 use throcc_proto::{
-    Request, RequestEnvelope, Response, ResponseEnvelope, Role, Room, RoomId, ServerMessage,
+    Epoch, PeerState, Placed, Request, RequestEnvelope, Response, ResponseEnvelope, Role, Room,
+    RoomId, ServerMessage, UserId,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -33,12 +34,33 @@ pub enum Command {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
+    Placed(Placed),
+    UserEntered {
+        room: RoomId,
+        epoch: Epoch,
+        peer: PeerState,
+    },
+    UserExited {
+        room: RoomId,
+        epoch: Epoch,
+        user: UserId,
+    },
     RoomCreated(Room),
-    RoomRenamed { room: RoomId, name: String },
+    RoomRenamed {
+        room: RoomId,
+        name: String,
+    },
     RoomDeleted(RoomId),
-    Invited { code: String, expires: u64 },
-    Failed { message: String },
-    Disconnected { reason: String },
+    Invited {
+        code: String,
+        expires: u64,
+    },
+    Failed {
+        message: String,
+    },
+    Disconnected {
+        reason: String,
+    },
 }
 
 pub struct Client {
@@ -276,6 +298,12 @@ async fn run(
 
 fn translate(event: throcc_proto::Event) -> Option<Event> {
     match event {
+        throcc_proto::Event::UserEntered { room, epoch, peer } => {
+            Some(Event::UserEntered { room, epoch, peer })
+        }
+        throcc_proto::Event::UserExited { room, epoch, user } => {
+            Some(Event::UserExited { room, epoch, user })
+        }
         throcc_proto::Event::RoomCreated(room) => Some(Event::RoomCreated(room)),
         throcc_proto::Event::RoomRenamed { room, name } => Some(Event::RoomRenamed { room, name }),
         throcc_proto::Event::RoomDeleted(room) => Some(Event::RoomDeleted(room)),
@@ -288,6 +316,7 @@ fn translate(event: throcc_proto::Event) -> Option<Event> {
 
 fn event_for(response: Response) -> Option<Event> {
     match response {
+        Response::Placed(placed) => Some(Event::Placed(placed)),
         Response::InviteCode { code, expires } => Some(Event::Invited { code, expires }),
         Response::Err { code, message } => Some(Event::Failed {
             message: format!("{code:?}: {message}"),
