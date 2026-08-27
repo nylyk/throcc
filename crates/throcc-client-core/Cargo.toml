@@ -10,6 +10,7 @@ bytes.workspace = true
 cpal.workspace = true
 directories.workspace = true
 ed25519-dalek.workspace = true
+neteq.workspace = true
 quinn.workspace = true
 ropus.workspace = true
 rand.workspace = true

@@ -15,6 +15,7 @@ use tokio::task::JoinHandle;
 use crate::auth::{self, Welcome};
 use crate::control::{ControlReader, ControlWriter};
 use crate::media::audio::capture::{self, Capture};
+use crate::media::audio::playout::{self, Playout, TrackFeed};
 use crate::media::receive;
 use crate::media::send::{self, MediaSender};
 use crate::{Connector, Error, Keystore, Result};
@@ -76,6 +77,8 @@ pub struct Client {
     media: Arc<MediaSender>,
     microphone: Mutex<Option<Capture>>,
     encoded_frames: mpsc::Sender<bytes::Bytes>,
+    playout: Mutex<Option<Playout>>,
+    track_feeds: Mutex<Option<mpsc::Receiver<TrackFeed>>>,
     connector: Connector,
     commands: mpsc::Sender<Command>,
     events: broadcast::Sender<Event>,
@@ -117,11 +120,23 @@ impl Client {
         let (datagrams, datagram_queue) = mpsc::channel(send::QUEUE_DEPTH);
         let media = Arc::new(MediaSender::new(datagrams, &welcome.placed));
         let (encoded_frames, frame_queue) = mpsc::channel(capture::QUEUE_DEPTH);
+        let (feeds, track_feeds) = mpsc::channel(playout::TRACK_QUEUE_DEPTH);
+        let peers = welcome
+            .placed
+            .peers
+            .iter()
+            .map(|peer| (peer.user, peer.tracks.clone()))
+            .collect();
         let disconnect_reason = Arc::new(Mutex::new(None));
 
         runtime.spawn(send::drain(connection.clone(), datagram_queue));
         runtime.spawn(send_microphone(frame_queue, media.clone()));
-        runtime.spawn(receive::receive(connection.clone(), events.clone()));
+        runtime.spawn(receive::receive(
+            connection.clone(),
+            events.clone(),
+            feeds,
+            peers,
+        ));
         let control = runtime.spawn(control(
             connection,
             writer,
@@ -137,6 +152,8 @@ impl Client {
             media,
             microphone: Mutex::new(None),
             encoded_frames,
+            playout: Mutex::new(None),
+            track_feeds: Mutex::new(Some(track_feeds)),
             connector,
             commands,
             events,
@@ -166,6 +183,24 @@ impl Client {
         let capture = capture::start(device, self.encoded_frames.clone())?;
         *self.microphone() = Some(capture);
         Ok(())
+    }
+
+    /// Opens playback and mixes every peer's audio into it. Each remote track
+    /// gets its own jitter buffer as it is first heard from.
+    pub fn start_playout(&self, device: Option<&str>) -> Result<()> {
+        let feeds = self
+            .track_feeds
+            .lock()
+            .expect("playout mutex poisoned")
+            .take()
+            .ok_or_else(|| Error::Audio("playback has already been started once".into()))?;
+        let playing = playout::start(device, feeds)?;
+        *self.playout.lock().expect("playout mutex poisoned") = Some(playing);
+        Ok(())
+    }
+
+    pub fn stop_playout(&self) {
+        *self.playout.lock().expect("playout mutex poisoned") = None;
     }
 
     pub fn stop_microphone(&self) {

@@ -1,5 +1,7 @@
 pub mod capture;
 pub mod devices;
+pub mod jitter;
+pub mod playout;
 
 pub const SAMPLE_RATE: u32 = 48_000;
 

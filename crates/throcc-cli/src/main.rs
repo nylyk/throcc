@@ -10,8 +10,8 @@ use throcc_client_core::{Client, Command, Event, Keystore, MediaSender, Welcome}
 use throcc_proto::{Role, RoomId, Tracks};
 use tracing_subscriber::EnvFilter;
 
-const HELP: &str = "commands: room <id>|none, mic on|off, mute on|off, create <name>, \
-rename <id> <name>, delete <id>, invite [user|manager|admin], quit";
+const HELP: &str = "commands: room <id>|none, mic on|off, mute on|off, listen on|off, \
+create <name>, rename <id> <name>, delete <id>, invite [user|manager|admin], quit";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -160,6 +160,16 @@ fn main() -> Result<()> {
                     println!("microphone closed");
                 }
             },
+            Ok(Some(Spoken::Playout(on))) => match on {
+                true => match client.start_playout(None) {
+                    Ok(()) => println!("playing out"),
+                    Err(e) => println!("{e}"),
+                },
+                false => {
+                    client.stop_playout();
+                    println!("playback stopped");
+                }
+            },
             Ok(Some(Spoken::Muted(muted))) => {
                 client.set_microphone_muted(muted);
                 println!("microphone {}", if muted { "muted" } else { "live" });
@@ -212,6 +222,7 @@ enum Spoken {
     ToServer(Command),
     Microphone(bool),
     Muted(bool),
+    Playout(bool),
 }
 
 /// The parsed line, or `None` when it ends the session.
@@ -222,6 +233,7 @@ fn command(line: &str) -> std::result::Result<Option<Spoken>, String> {
         "quit" => Ok(None),
         "mic" => parse_switch(rest).map(|on| Some(Spoken::Microphone(on))),
         "mute" => parse_switch(rest).map(|muted| Some(Spoken::Muted(muted))),
+        "listen" => parse_switch(rest).map(|on| Some(Spoken::Playout(on))),
         "room" if rest == "none" => Ok(Some(Spoken::ToServer(Command::SetRoom(None)))),
         "room" => parse_room(rest).map(|room| Some(Spoken::ToServer(Command::SetRoom(Some(room))))),
         "create" => match rest {
@@ -359,6 +371,7 @@ mod tests {
         );
         assert_eq!(command("mic on"), Ok(Some(Spoken::Microphone(true))));
         assert_eq!(command("mute off"), Ok(Some(Spoken::Muted(false))));
+        assert_eq!(command("listen on"), Ok(Some(Spoken::Playout(true))));
         assert_eq!(command("quit"), Ok(None));
         assert!(command("room later").is_err());
         assert!(command("create").is_err());
