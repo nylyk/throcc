@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use crate::control::{ControlReader, ControlWriter};
 use crate::rooms::Placement;
-use crate::{State, auth, invite, perms};
+use crate::{State, auth, invite, perms, sfu};
 
 const DRAIN_GRACE: Duration = Duration::from_secs(1);
 const OUTBOUND_DEPTH: usize = 256;
@@ -49,13 +49,14 @@ async fn control(connection: &Connection, state: &Arc<State>) -> Result<()> {
     let actor = admitted.user.clone();
 
     let (outbound, queue) = mpsc::channel(OUTBOUND_DEPTH);
-    if let Some(displaced) = state
+    let attached = state
         .rooms()
-        .attach(actor.id, outbound.clone(), connection.clone())
-    {
+        .attach(actor.id, outbound.clone(), connection.clone());
+    if let Some(displaced) = attached.displaced {
         tracing::info!(user = %actor.id, "a newer connection for this key displaces this one");
         displaced.close(3u32.into(), b"displaced by a newer connection");
     }
+    let forwarding = tokio::spawn(sfu::forward(connection.clone(), attached.route));
 
     let welcomed = welcome(state, &mut writer, admitted).await;
     let writing = tokio::spawn(write_outbound(writer, queue));
@@ -71,6 +72,7 @@ async fn control(connection: &Connection, state: &Arc<State>) -> Result<()> {
     }
     drop(outbound);
     let _ = writing.await;
+    forwarding.abort();
     outcome
 }
 

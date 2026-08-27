@@ -3,9 +3,10 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use quinn::Connection;
 use throcc_proto::{Codec, Epoch, Event, PeerState, Placed, RoomId, ServerMessage, Tracks, UserId};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::database::Database;
+use crate::sfu::Route;
 
 /// A client this far behind on control events has a divergent roster, so its
 /// connection is closed rather than left to carry on with one.
@@ -16,6 +17,13 @@ pub struct Registry {
     sessions: HashMap<UserId, Session>,
 }
 
+/// What a freshly attached session needs: the route its datagrams follow, and
+/// the older connection for the same key, if there was one.
+pub struct Attached {
+    pub route: watch::Receiver<Route>,
+    pub displaced: Option<Connection>,
+}
+
 pub enum Placement {
     Placed(Placed),
     NoSuchRoom(RoomId),
@@ -24,6 +32,7 @@ pub enum Placement {
 struct Session {
     outbound: mpsc::Sender<ServerMessage>,
     connection: Connection,
+    route: watch::Sender<Route>,
     room: Option<RoomId>,
     tracks: Option<Tracks>,
     media: Media,
@@ -38,24 +47,30 @@ struct Media {
 }
 
 impl Registry {
-    /// The connection this one displaces, when the same key was already
-    /// connected. One key is one session, and the newer one wins.
+    /// One key is one session, and the newer one wins: an older connection for
+    /// the same key comes back to be closed.
     pub fn attach(
         &mut self,
         user: UserId,
         outbound: mpsc::Sender<ServerMessage>,
         connection: Connection,
-    ) -> Option<Connection> {
+    ) -> Attached {
+        let (route, follow) = watch::channel(Route::default());
         let session = Session {
             outbound,
             connection,
+            route,
             room: None,
             tracks: None,
             media: Media::default(),
         };
-        self.sessions
-            .insert(user, session)
-            .map(|displaced| displaced.connection)
+        Attached {
+            route: follow,
+            displaced: self
+                .sessions
+                .insert(user, session)
+                .map(|displaced| displaced.connection),
+        }
     }
 
     pub fn detach(&mut self, database: &Database, user: UserId) -> Result<()> {
@@ -69,6 +84,7 @@ impl Registry {
         let transition = database
             .transition(Some(room), None)?
             .context("only the room being entered can be missing")?;
+        self.publish_routes(room);
         self.announce_exit(room, transition.leaving, user);
         Ok(())
     }
@@ -109,7 +125,12 @@ impl Registry {
         };
 
         if let Some(room) = leaving.filter(|room| Some(*room) != target) {
+            self.publish_routes(room);
             self.announce_exit(room, transition.leaving, user);
+        }
+        match target {
+            Some(room) => self.publish_routes(room),
+            None => self.clear_route(user),
         }
         if let (Some(room), Some(peer)) = (target, self.peer_state(user)) {
             self.send_to_room(room, Event::UserEntered { room, epoch, peer }, Some(user));
@@ -148,6 +169,7 @@ impl Registry {
             if session.room == Some(room) {
                 session.room = None;
                 session.tracks = None;
+                session.route.send_replace(Route::default());
             }
         }
     }
@@ -156,6 +178,38 @@ impl Registry {
         let recipients: Vec<UserId> = self.sessions.keys().copied().collect();
         for user in recipients {
             self.send(user, event.clone());
+        }
+    }
+
+    /// Each occupant is given its own tracks and every other occupant's
+    /// connection, so the forwarding path holds no lock on the rest of the server.
+    fn publish_routes(&self, room: RoomId) {
+        let occupants: Vec<(UserId, Connection)> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.room == Some(room))
+            .map(|(user, session)| (*user, session.connection.clone()))
+            .collect();
+
+        for (user, session) in &self.sessions {
+            if session.room != Some(room) {
+                continue;
+            }
+            let subscribers = occupants
+                .iter()
+                .filter(|(occupant, _)| occupant != user)
+                .map(|(_, connection)| connection.clone())
+                .collect();
+            session.route.send_replace(Route {
+                tracks: session.tracks.clone(),
+                subscribers,
+            });
+        }
+    }
+
+    fn clear_route(&self, user: UserId) {
+        if let Some(session) = self.sessions.get(&user) {
+            session.route.send_replace(Route::default());
         }
     }
 

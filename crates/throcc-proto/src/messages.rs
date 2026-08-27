@@ -237,6 +237,18 @@ pub struct Tracks {
     pub shares: Vec<Share>,
 }
 
+impl Tracks {
+    /// Whether one of these tracks carries that id, which is what the SFU checks
+    /// a sender against before forwarding anything.
+    pub fn owns(&self, media_id: MediaId) -> bool {
+        self.mic == media_id
+            || self
+                .shares
+                .iter()
+                .any(|share| share.video == media_id || share.audio == Some(media_id))
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Codec {
     Av1,
@@ -455,6 +467,17 @@ mod tests {
             },
         ] {
             round_trip(event);
+        }
+    }
+
+    #[test]
+    fn tracks_own_exactly_their_own_ids() {
+        let tracks = tracks();
+        for owned in [MediaId(1), MediaId(2), MediaId(3)] {
+            assert!(tracks.owns(owned));
+        }
+        for other in [MediaId(0), MediaId(4), MediaId(u32::MAX)] {
+            assert!(!tracks.owns(other));
         }
     }
 

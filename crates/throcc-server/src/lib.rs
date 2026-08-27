@@ -22,6 +22,7 @@ pub mod invite;
 pub mod perms;
 pub mod rooms;
 pub mod session;
+pub mod sfu;
 pub mod tls;
 
 const PRUNE_INTERVAL: Duration = Duration::from_mins(60);

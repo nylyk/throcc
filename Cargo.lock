@@ -1349,6 +1349,7 @@ name = "throcc-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "clap",
  "ed25519-dalek",
  "quinn",
