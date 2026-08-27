@@ -8,6 +8,7 @@ use throcc_proto::{Epoch, FrameHeader, HEADER_BYTES, MediaId, Placed, Tracks, fr
 use tokio::sync::mpsc;
 
 use crate::media::fragment;
+use crate::media::transform::{FrameTransform, Passthrough};
 
 pub const QUEUE_DEPTH: usize = 64;
 
@@ -26,6 +27,7 @@ pub struct MediaSender {
     epoch: AtomicU32,
     tracks: Mutex<Option<Tracks>>,
     next_seq: Mutex<HashMap<MediaId, u32>>,
+    transform: Mutex<Box<dyn FrameTransform>>,
     dropped_units: AtomicU64,
 }
 
@@ -36,6 +38,7 @@ impl MediaSender {
             epoch: AtomicU32::new(placed.epoch.0),
             tracks: Mutex::new(placed.tracks.clone()),
             next_seq: Mutex::new(HashMap::new()),
+            transform: Mutex::new(Box::new(Passthrough)),
             dropped_units: AtomicU64::new(0),
         }
     }
@@ -73,7 +76,7 @@ impl MediaSender {
 
         let epoch = Epoch(self.epoch.load(Ordering::Relaxed));
         let flags = if keyframe { frame::KEYFRAME } else { 0 };
-        for payload in payloads {
+        for mut payload in payloads {
             let seq = self.take_seq(media_id);
             let header = FrameHeader {
                 media_id,
@@ -81,6 +84,15 @@ impl MediaSender {
                 seq,
                 flags,
             };
+            if let Err(e) = self
+                .transform
+                .lock()
+                .expect("transform mutex poisoned")
+                .outbound(&header, &mut payload)
+            {
+                tracing::debug!(error = %e, %media_id, seq, "the transform refused a fragment");
+                return;
+            }
 
             let mut datagram = BytesMut::with_capacity(HEADER_BYTES + payload.len());
             datagram.put_slice(&header.encode());

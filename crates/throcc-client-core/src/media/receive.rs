@@ -7,6 +7,7 @@ use tokio::sync::broadcast;
 use crate::client::Event;
 use crate::media::fragment::Reassembler;
 use crate::media::sequence::SequenceWindow;
+use crate::media::transform::{FrameTransform, Passthrough};
 
 #[derive(Default)]
 struct Track {
@@ -18,6 +19,7 @@ struct Track {
 /// must never do work that can block on one peer.
 pub async fn receive(connection: Connection, events: broadcast::Sender<Event>) {
     let mut tracks: HashMap<MediaId, Track> = HashMap::new();
+    let mut transform: Box<dyn FrameTransform> = Box::new(Passthrough);
 
     while let Ok(datagram) = connection.read_datagram().await {
         let Ok(header) = FrameHeader::decode(&datagram) else {
@@ -34,10 +36,13 @@ pub async fn receive(connection: Connection, events: broadcast::Sender<Event>) {
             continue;
         }
 
-        for unit in track
-            .reassembler
-            .push(header.seq, &datagram[HEADER_BYTES..])
-        {
+        let mut payload = datagram[HEADER_BYTES..].to_vec();
+        if let Err(e) = transform.inbound(&header, &mut payload) {
+            tracing::debug!(error = %e, media_id = %header.media_id, "the transform refused a fragment");
+            continue;
+        }
+
+        for unit in track.reassembler.push(header.seq, &payload) {
             let delivered = events.send(Event::Media {
                 media_id: header.media_id,
                 timestamp: unit.timestamp,
