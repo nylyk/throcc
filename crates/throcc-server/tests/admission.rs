@@ -3,7 +3,8 @@ use std::net::IpAddr;
 use ed25519_dalek::{Signer as _, SigningKey};
 use tempfile::TempDir;
 use throcc_proto::auth::signing_input;
-use throcc_proto::{Auth, AuthError, AuthResult, Role};
+use throcc_proto::{Auth, AuthError, Role, User};
+use throcc_server::auth::Decision;
 use throcc_server::database::Database;
 use throcc_server::{State, auth, invite};
 
@@ -33,10 +34,17 @@ fn signed(
     }
 }
 
-fn refusal(result: AuthResult) -> AuthError {
-    match result {
-        AuthResult::Err(error) => error,
-        AuthResult::Ok { .. } => panic!("expected a refusal"),
+fn refusal(decision: Decision) -> AuthError {
+    match decision {
+        Decision::Refused(error) => error,
+        Decision::Admitted { user, .. } => panic!("expected a refusal, {user:?} was admitted"),
+    }
+}
+
+fn admitted(decision: Decision) -> Option<User> {
+    match decision {
+        Decision::Admitted { user, .. } => Some(user),
+        Decision::Refused(_) => None,
     }
 }
 
@@ -54,14 +62,14 @@ fn a_signature_is_bound_to_this_connection_and_this_nonce() {
     let relayed = signed(&key, &SERVER_NONCE, &[9u8; 32], Some(&code));
     let decision = auth::decide(&state, &relayed, &SERVER_NONCE, &EXPORTER, PEER).unwrap();
     assert_eq!(
-        refusal(decision.result),
+        refusal(decision),
         AuthError::BadSignature,
         "a signature made against another connection's exporter must not be accepted"
     );
 
     let replayed = signed(&key, &[8u8; 32], &EXPORTER, Some(&code));
     let decision = auth::decide(&state, &replayed, &SERVER_NONCE, &EXPORTER, PEER).unwrap();
-    assert_eq!(refusal(decision.result), AuthError::BadSignature);
+    assert_eq!(refusal(decision), AuthError::BadSignature);
 
     assert_eq!(
         state.database.user_count().unwrap(),
@@ -89,7 +97,7 @@ fn a_code_enrolls_once() {
         PEER,
     )
     .unwrap();
-    let enrolled = decision.user.expect("the code should enroll");
+    let enrolled = admitted(decision).expect("the code should enroll");
     assert_eq!(enrolled.role, Role::Manager);
 
     let second = SigningKey::generate(&mut rand::rng());
@@ -101,7 +109,7 @@ fn a_code_enrolls_once() {
         PEER,
     )
     .unwrap();
-    assert_eq!(refusal(decision.result), AuthError::BadInvite);
+    assert_eq!(refusal(decision), AuthError::BadInvite);
     assert_eq!(state.database.user_count().unwrap(), 1);
 }
 
@@ -124,7 +132,7 @@ fn a_lower_case_code_is_accepted() {
         PEER,
     )
     .unwrap();
-    assert!(decision.user.is_some());
+    assert!(admitted(decision).is_some());
 }
 
 #[test]
@@ -152,7 +160,7 @@ fn guessing_stops_being_attempted_once_the_budget_is_spent() {
             PEER,
         )
         .unwrap();
-        assert_eq!(refusal(decision.result), AuthError::BadInvite);
+        assert_eq!(refusal(decision), AuthError::BadInvite);
     }
 
     let decision = auth::decide(
@@ -164,7 +172,7 @@ fn guessing_stops_being_attempted_once_the_budget_is_spent() {
     )
     .unwrap();
     assert_eq!(
-        refusal(decision.result),
+        refusal(decision),
         AuthError::BadInvite,
         "a spent budget must refuse even a code that would have worked"
     );
@@ -190,5 +198,5 @@ fn an_expired_code_does_not_enroll() {
         PEER,
     )
     .unwrap();
-    assert_eq!(refusal(decision.result), AuthError::BadInvite);
+    assert_eq!(refusal(decision), AuthError::BadInvite);
 }

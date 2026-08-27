@@ -20,5 +20,6 @@ tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tracing-subscriber.workspace = true
 throcc-server.workspace = true
 tokio.workspace = true

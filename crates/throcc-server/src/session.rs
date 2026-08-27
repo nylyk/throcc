@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use quinn::Connection;
 use rand::RngExt as _;
 use throcc_proto::{
-    Auth, ErrorCode, Event, PROTOCOL_VERSION, Request, RequestEnvelope, Response, ResponseEnvelope,
-    Role, RoomId, ServerHello, ServerMessage, User,
+    Auth, AuthResult, ErrorCode, Event, PROTOCOL_VERSION, Request, RequestEnvelope, Response,
+    ResponseEnvelope, Role, RoomId, ServerHello, ServerMessage, User,
 };
 use tokio::sync::mpsc;
 
@@ -42,10 +42,11 @@ async fn control(connection: &Connection, state: &Arc<State>) -> Result<()> {
     let mut writer = ControlWriter::new(send);
     let mut reader = ControlReader::new(recv);
 
-    let Some(actor) = authenticate(connection, state, &mut writer, &mut reader).await? else {
+    let Some(admitted) = greet(connection, state, &mut writer, &mut reader).await? else {
         let _ = tokio::time::timeout(DRAIN_GRACE, writer.drain()).await;
         return Ok(());
     };
+    let actor = admitted.user.clone();
 
     let (outbound, queue) = mpsc::channel(OUTBOUND_DEPTH);
     if let Some(displaced) = state
@@ -55,10 +56,16 @@ async fn control(connection: &Connection, state: &Arc<State>) -> Result<()> {
         tracing::info!(user = %actor.id, "a newer connection for this key displaces this one");
         displaced.close(3u32.into(), b"displaced by a newer connection");
     }
+
+    let welcomed = welcome(state, &mut writer, admitted).await;
     let writing = tokio::spawn(write_outbound(writer, queue));
+    let outcome = match welcomed {
+        Ok(()) => serve_requests(&mut reader, &actor, state, &outbound).await,
+        Err(e) => Err(e),
+    };
 
-    let outcome = serve_requests(&mut reader, &actor, state, &outbound).await;
-
+    // The registry holds a clone of the sender, so the writer task cannot see the
+    // queue close until this session is out of the registry.
     if let Err(e) = state.rooms().detach(&state.database, actor.id) {
         tracing::warn!(error = ?e, user = %actor.id, "could not record a departure");
     }
@@ -67,14 +74,41 @@ async fn control(connection: &Connection, state: &Arc<State>) -> Result<()> {
     outcome
 }
 
-/// The authenticated user, or `None` when the client was refused and the reason
-/// has already been sent.
-async fn authenticate(
+async fn welcome(state: &State, writer: &mut ControlWriter, admitted: Admitted) -> Result<()> {
+    let placed = state
+        .rooms()
+        .place(&state.database, admitted.user.id, admitted.want_room)?;
+    tracing::info!(
+        user = %admitted.user.id,
+        room = ?placed.room,
+        epoch = %placed.epoch,
+        "placed"
+    );
+
+    writer
+        .write(&AuthResult::Ok {
+            me: admitted.user.id,
+            role: admitted.user.role,
+            users: admitted.users,
+            rooms: state.database.list_rooms()?,
+            placed,
+        })
+        .await
+}
+
+struct Admitted {
+    user: User,
+    users: Vec<User>,
+    want_room: Option<RoomId>,
+}
+
+/// The admitted client, or `None` when it was refused and told why.
+async fn greet(
     connection: &Connection,
     state: &State,
     writer: &mut ControlWriter,
     reader: &mut ControlReader,
-) -> Result<Option<User>> {
+) -> Result<Option<Admitted>> {
     let server_nonce: [u8; 32] = rand::rng().random();
     writer
         .write(&ServerHello {
@@ -87,19 +121,33 @@ async fn authenticate(
         .read()
         .await?
         .context("the client closed before authenticating")?;
-    let decision = auth::decide(
+    match auth::decide(
         state,
         &auth,
         &server_nonce,
         &auth::keying_material(connection)?,
         connection.remote_address().ip(),
-    )?;
-    writer.write(&decision.result).await?;
-
-    if let Some(actor) = &decision.user {
-        tracing::info!(user = %actor.id, role = ?actor.role, "authenticated");
+    )? {
+        auth::Decision::Refused(error) => {
+            writer.write(&AuthResult::Err(error)).await?;
+            Ok(None)
+        }
+        auth::Decision::Admitted {
+            user,
+            users,
+            enrolled,
+        } => {
+            if enrolled {
+                tracing::info!(user = %user.id, role = ?user.role, "enrolled a new user");
+            }
+            tracing::info!(user = %user.id, role = ?user.role, "authenticated");
+            Ok(Some(Admitted {
+                user,
+                users,
+                want_room: auth.want_room,
+            }))
+        }
     }
-    Ok(decision.user)
 }
 
 async fn write_outbound(mut writer: ControlWriter, mut queue: mpsc::Receiver<ServerMessage>) {

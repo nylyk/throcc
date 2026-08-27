@@ -1330,6 +1330,7 @@ dependencies = [
  "throcc-server",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

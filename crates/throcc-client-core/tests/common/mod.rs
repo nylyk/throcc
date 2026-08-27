@@ -1,5 +1,4 @@
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::mpsc;
 use std::time::Duration;
 
 use tempfile::TempDir;
@@ -19,6 +18,10 @@ pub struct TestServer {
 
 impl TestServer {
     pub fn start() -> Self {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_test_writer()
+            .try_init();
         let data_dir = TempDir::new().unwrap();
         let runtime = Runtime::new().unwrap();
         let _inside = runtime.enter();
@@ -50,13 +53,10 @@ pub fn keystore(directory: &TempDir) -> Keystore {
 }
 
 pub fn next_event(events: &mut tokio::sync::broadcast::Receiver<Event>) -> Event {
-    let (sender, receiver) = mpsc::channel();
-    std::thread::scope(|scope| {
-        scope.spawn(|| {
-            let _ = sender.send(events.blocking_recv());
-        });
-        receiver
-            .recv_timeout(PATIENCE)
+    let runtime = Runtime::new().unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(PATIENCE, events.recv())
+            .await
             .expect("the client should have produced an event")
             .expect("the event channel should still be open")
     })

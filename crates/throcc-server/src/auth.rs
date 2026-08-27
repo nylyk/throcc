@@ -6,15 +6,20 @@ use quinn::Connection;
 use throcc_proto::auth::{
     EXPORTER_BYTES, EXPORTER_CONTEXT, EXPORTER_LABEL, NONCE_BYTES, signing_input,
 };
-use throcc_proto::{Auth, AuthError, AuthResult, Epoch, Placed, User};
+use throcc_proto::{Auth, AuthError, User};
 
 use crate::State;
 use crate::database::Admission;
 
-/// The reply to send back, with the user it admits when that reply is an `Ok`.
-pub struct Decision {
-    pub result: AuthResult,
-    pub user: Option<User>,
+pub enum Decision {
+    /// The roster comes from the transaction that admitted the user, so it cannot
+    /// shift between admitting and answering.
+    Admitted {
+        user: User,
+        users: Vec<User>,
+        enrolled: bool,
+    },
+    Refused(AuthError),
 }
 
 pub fn keying_material(connection: &Connection) -> Result<[u8; EXPORTER_BYTES]> {
@@ -54,35 +59,17 @@ pub fn decide(
             user,
             users,
             enrolled,
-        } => {
-            if enrolled {
-                tracing::info!(user = %user.id, role = ?user.role, "enrolled a new user");
-            }
-            Ok(Decision {
-                result: AuthResult::Ok {
-                    me: user.id,
-                    role: user.role,
-                    users,
-                    rooms: state.database.list_rooms()?,
-                    placed: Placed {
-                        room: None,
-                        epoch: Epoch(0),
-                        tracks: None,
-                        peers: Vec::new(),
-                    },
-                },
-                user: Some(user),
-            })
-        }
+        } => Ok(Decision::Admitted {
+            user,
+            users,
+            enrolled,
+        }),
     }
 }
 
 fn refused(error: AuthError) -> Decision {
     tracing::info!(?error, "refused a client");
-    Decision {
-        result: AuthResult::Err(error),
-        user: None,
-    }
+    Decision::Refused(error)
 }
 
 fn signature_is_valid(

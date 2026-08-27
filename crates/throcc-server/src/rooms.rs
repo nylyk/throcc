@@ -118,6 +118,29 @@ impl Registry {
         Ok(Placement::Placed(placed))
     }
 
+    /// The room asked for on auth, or no room when that room no longer exists.
+    /// Substituting a different one would put somebody somewhere they never asked
+    /// to be.
+    pub fn place(
+        &mut self,
+        database: &Database,
+        user: UserId,
+        want_room: Option<RoomId>,
+    ) -> Result<Placed> {
+        match self.set_room(database, user, want_room)? {
+            Placement::Placed(placed) => Ok(placed),
+            Placement::NoSuchRoom(room) => {
+                tracing::info!(%user, %room, "the room asked for is gone; placing in no room");
+                match self.set_room(database, user, None)? {
+                    Placement::Placed(placed) => Ok(placed),
+                    Placement::NoSuchRoom(room) => {
+                        unreachable!("no room cannot be missing, unlike {room}")
+                    }
+                }
+            }
+        }
+    }
+
     /// The occupants of a deleted room are moved to no room. The room is gone,
     /// so `RoomDeleted` is the event that carries the news.
     pub fn clear_room(&mut self, room: RoomId) {
