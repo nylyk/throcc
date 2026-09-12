@@ -153,20 +153,20 @@ CMD ["/usr/local/bin/throcc-server"]
 
 ### 2.2 Message types
 
-- **What:** `ServerHello`, `Auth`, `AuthResult`, `Req`, `Resp`, `Placed`, `Event` in `throcc-proto/msg.rs`; `UserId`, `RoomId`, `MediaId`, `Epoch` newtypes in `throcc-proto/ids.rs`.
+- **What:** `ServerHello`, `Auth`, `AuthResult`, `Request`, `Response`, `Placed`, `Event` in `throcc-proto/messages.rs`; `UserId`, `RoomId`, `MediaId`, `Epoch` newtypes in `throcc-proto/ids.rs`.
 - **Why:** Newtypes because you will otherwise pass a `RoomId` where a `MediaId` belongs, and both are integers so the compiler won't save you.
-- **How:** `#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]`; newtypes also get `Copy`, `Eq`, `Hash`, `Ord`. Round-trip test every variant. Note `Placed` is shared by `AuthResult::Ok` and `Resp::Placed` — one type, one construction path.
+- **How:** `#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]`; newtypes also get `Copy`, `Eq`, `Hash`, `Ord`. Round-trip test every variant. Note `Placed` is shared by `AuthResult::Ok` and `Response::Placed` — one type, one construction path.
 
 ### 2.3 Request/response correlation
 
-- **What:** `ReqEnvelope { id, req }` / `RespEnvelope { id, resp }`, client-allocated monotonic ids, server echoes. `Event` has no id. (Design: *Request correlation*.)
-- **How:** Client keeps `HashMap<u32, oneshot::Sender<Resp>>` and completes by id. An id with no pending entry is a protocol error: log and drop the connection, don't ignore it. Server side the id is opaque — read it off the envelope, hand `req` to the handler, put it back on the reply; handlers never see it. Wraparound is fatal, not a reuse.
+- **What:** `RequestEnvelope { id, request }` / `ResponseEnvelope { id, response }`, client-allocated monotonic ids, server echoes. `Event` has no id. (Design: *Request correlation*.)
+- **How:** Client keeps `HashMap<u32, oneshot::Sender<Response>>` and completes by id. An id with no pending entry is a protocol error: log and drop the connection, don't ignore it. Server side the id is opaque — read it off the envelope, hand `request` to the handler, put it back on the reply; handlers never see it. Wraparound is fatal, not a reuse.
 
 ### 2.4 Connection tasks and the runtime boundary
 
-- **What:** Server: a per-connection task reading requests in a loop. Client: a tokio runtime on its own dedicated thread, one task owning the control stream, `mpsc<Cmd>` in, `broadcast<Event>` out.
+- **What:** Server: a per-connection task reading requests in a loop. Client: a tokio runtime on its own dedicated thread, one task owning the control stream, `mpsc<Command>` in, `broadcast<Event>` out.
 - **Why:** gpui has its own executor and owns the main thread, so `throcc-client-core` cannot assume it's being driven by tokio from above — it has to bring its own runtime. Doing that now, while the only consumer is the CLI, means M7 is purely UI work. And `tokio::sync` channels are runtime-agnostic (awaiting one needs no reactor), so the same two channels work unchanged from the CLI, from gpui's executor, and from tests.
-- **How:** `tokio::select!` over the command channel and the stream reader. Public surface is `Client::cmd()` and `Client::events()`; `Cmd` and `Event` are core's own types, translated from `throcc-proto`, so UI state doesn't churn when the wire format moves. Nothing above `throcc-client-core` ever sees a `quinn` type or a `Runtime` handle — if it does, the boundary has leaked.
+- **How:** `tokio::select!` over the command channel and the stream reader. Public surface is `Client::command()` and `Client::events()`; `Command` and `Event` are core's own types, translated from `throcc-proto`, so UI state doesn't churn when the wire format moves. Nothing above `throcc-client-core` ever sees a `quinn` type or a `Runtime` handle — if it does, the boundary has leaked.
 
 **Done when:** `throcc-cli` sends a hardcoded no-op request and prints the response.
 
@@ -183,7 +183,7 @@ CMD ["/usr/local/bin/throcc-server"]
 
 ### 3.2 Handshake with exporter binding
 
-- **What:** Server sends `ServerHello { server_nonce, proto }` on accept. Client replies with `Auth { pubkey, client_nonce, invite_code, want_room, sig }`, signing `b"throcc-auth-v1" || server_nonce || client_nonce || tls_exporter`. (Design: *Auth* for what each element does.)
+- **What:** Server sends `ServerHello { server_nonce, protocol }` on accept. Client replies with `Auth { pubkey, client_nonce, invite_code, want_room, signature }`, signing `b"throcc-auth-v1" || server_nonce || client_nonce || tls_exporter`. (Design: *Auth* for what each element does.)
 - **How:** `Connection::export_keying_material(&mut buf, label, context)` on both sides with identical label and context. Verify the signature *before* touching the database. `want_room` is `None` on a first connect and set on reconnect (9.2).
 
 ### 3.3 Allowlist and roles
@@ -200,9 +200,9 @@ CMD ["/usr/local/bin/throcc-server"]
 
 ### 3.5 Bootstrap invite
 
-- **What:** On an empty users table, mint an Admin invite and write it to a `0600` file in the data directory.
-- **Why:** Otherwise there's no way in. A file rather than stdout because stdout on a systemd service lands in the journal, which is readable by more people than you think.
-- **How:** Log the *path*, never the code.
+- **What:** On an empty users table, mint an Admin invite, replacing any unredeemed one, and log it.
+- **Why:** Otherwise there's no way in. The log rather than a file in the data directory, because that directory is normally a container volume: making an operator exec into a container to read their own first-run code is how first runs get abandoned. (Design: *Invites and roles* for what bounds the exposure instead.)
+- **How:** Mint it during `bind` and hand it back from `Server::bootstrap_invite()`, so the library never decides where it is printed. The binary logs it with a blank line either side, since it is the one line of that startup output the operator has to act on.
 
 ### 3.6 `AuthResult::Ok` carries the world
 
@@ -534,8 +534,8 @@ CMD ["/usr/local/bin/throcc-server"]
 
 ### 9.5 Avatar upload off the control stream
 
-- **What:** A fresh unidirectional stream per upload: a `{ req_id, len }` postcard header then the bytes, with the hash returned as a normal `RespEnvelope` on the control stream.
-- **Why:** Blocking the control stream behind a multi-megabyte image is exactly the head-of-line problem datagrams exist to avoid. Reusing `req_id` from the same counter means the reply completes through the same pending-request map as everything else, instead of needing a second matching mechanism.
+- **What:** A fresh unidirectional stream per upload: a `{ request_id, len }` postcard header then the bytes, with the hash returned as a normal `ResponseEnvelope` on the control stream.
+- **Why:** Blocking the control stream behind a multi-megabyte image is exactly the head-of-line problem datagrams exist to avoid. Reusing `request_id` from the same counter means the reply completes through the same pending-request map as everything else, instead of needing a second matching mechanism.
 - **How:** Server-side size cap, re-encode to fixed dimensions, store by content hash. Clients cache by hash and never refetch.
 
 **Done when:** a call survives 5% loss and 200ms jitter intelligibly, a throttled uplink produces a correct on-screen explanation rather than mystery stutter, and a server restart mid-call reconnects everyone into their previous rooms without intervention.

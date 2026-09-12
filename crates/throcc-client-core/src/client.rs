@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use quinn::Connection;
 use throcc_proto::{
-    PROTO_VERSION, Req, ReqEnvelope, Resp, RespEnvelope, RoomId, ServerHello, ServerMessage,
+    PROTOCOL_VERSION, Request, RequestEnvelope, Response, ResponseEnvelope, RoomId, ServerHello,
+    ServerMessage,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -19,7 +20,7 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 const DRAIN_GRACE: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Cmd {
+pub enum Command {
     SetRoom(Option<RoomId>),
     Disconnect,
 }
@@ -32,7 +33,7 @@ pub enum Event {
 
 pub struct Client {
     connector: Connector,
-    commands: mpsc::Sender<Cmd>,
+    commands: mpsc::Sender<Command>,
     events: broadcast::Sender<Event>,
     disconnect_reason: Arc<Mutex<Option<String>>>,
     runtime: Runtime,
@@ -77,7 +78,7 @@ impl Client {
         self.connector.keystore()
     }
 
-    pub fn cmd(&self, command: Cmd) -> Result<()> {
+    pub fn command(&self, command: Command) -> Result<()> {
         self.commands
             .try_send(command)
             .map_err(|e| Error::CommandDropped(e.to_string()))
@@ -100,7 +101,7 @@ impl Client {
 
     /// Blocks until the runtime has shut down.
     pub fn shutdown(self) {
-        let _ = self.commands.try_send(Cmd::Disconnect);
+        let _ = self.commands.try_send(Command::Disconnect);
         drop(self.commands);
         self.runtime.shutdown_timeout(SHUTDOWN_GRACE);
     }
@@ -118,10 +119,10 @@ async fn open_control(connection: &Connection) -> Result<(ControlWriter, Control
         .read()
         .await?
         .ok_or_else(|| Error::Protocol("the control stream closed before the hello".into()))?;
-    if hello.proto != PROTO_VERSION {
+    if hello.protocol != PROTOCOL_VERSION {
         return Err(Error::Protocol(format!(
-            "server speaks protocol {}, this client speaks {PROTO_VERSION}",
-            hello.proto
+            "server speaks protocol {}, this client speaks {PROTOCOL_VERSION}",
+            hello.protocol
         )));
     }
 
@@ -132,7 +133,7 @@ async fn control(
     connection: Connection,
     mut writer: ControlWriter,
     reader: ControlReader,
-    mut commands: mpsc::Receiver<Cmd>,
+    mut commands: mpsc::Receiver<Command>,
     events: broadcast::Sender<Event>,
     disconnect_reason: Arc<Mutex<Option<String>>>,
 ) {
@@ -156,7 +157,7 @@ async fn control(
 async fn run(
     writer: &mut ControlWriter,
     mut reader: ControlReader,
-    commands: &mut mpsc::Receiver<Cmd>,
+    commands: &mut mpsc::Receiver<Command>,
     events: &broadcast::Sender<Event>,
 ) -> Result<()> {
     let (inbound, mut server_messages) = mpsc::channel(QUEUE_DEPTH);
@@ -177,15 +178,15 @@ async fn run(
         }
     });
 
-    let mut pending: HashMap<u32, oneshot::Sender<Resp>> = HashMap::new();
+    let mut pending: HashMap<u32, oneshot::Sender<Response>> = HashMap::new();
     let mut next_request_id: u32 = 0;
 
     loop {
         tokio::select! {
             command = commands.recv() => {
-                let req = match command {
-                    None | Some(Cmd::Disconnect) => return Ok(()),
-                    Some(Cmd::SetRoom(room)) => Req::SetRoom(room),
+                let request = match command {
+                    None | Some(Command::Disconnect) => return Ok(()),
+                    Some(Command::SetRoom(room)) => Request::SetRoom(room),
                 };
 
                 let id = next_request_id;
@@ -195,12 +196,12 @@ async fn run(
 
                 let (reply, wait_for_reply) = oneshot::channel();
                 pending.insert(id, reply);
-                writer.write(&ReqEnvelope { id, req }).await?;
+                writer.write(&RequestEnvelope { id, request }).await?;
 
                 let events = events.clone();
                 tokio::spawn(async move {
-                    if let Ok(resp) = wait_for_reply.await
-                        && let Some(event) = event_for(resp)
+                    if let Ok(response) = wait_for_reply.await
+                        && let Some(event) = event_for(response)
                     {
                         let _ = events.send(event);
                     }
@@ -212,13 +213,13 @@ async fn run(
                     None => return Ok(()),
                     Some(Err(e)) => return Err(e),
                     Some(Ok(ServerMessage::Event(event))) => tracing::debug!(?event, "event"),
-                    Some(Ok(ServerMessage::Resp(RespEnvelope { id, resp }))) => {
+                    Some(Ok(ServerMessage::Response(ResponseEnvelope { id, response }))) => {
                         let Some(reply) = pending.remove(&id) else {
                             return Err(Error::Protocol(format!(
                                 "response {id} answers no pending request"
                             )));
                         };
-                        let _ = reply.send(resp);
+                        let _ = reply.send(response);
                     }
                 }
             }
@@ -226,10 +227,10 @@ async fn run(
     }
 }
 
-fn event_for(resp: Resp) -> Option<Event> {
-    match resp {
-        Resp::Err { code, msg } => Some(Event::Failed {
-            message: format!("{code:?}: {msg}"),
+fn event_for(response: Response) -> Option<Event> {
+    match response {
+        Response::Err { code, message } => Some(Event::Failed {
+            message: format!("{code:?}: {message}"),
         }),
         other => {
             tracing::debug!(?other, "response");

@@ -7,7 +7,7 @@ pub mod connection;
 pub mod control;
 pub mod identity;
 
-pub use client::{Client, Cmd, Event};
+pub use client::{Client, Command, Event};
 pub use connection::Connector;
 pub use identity::Keystore;
 

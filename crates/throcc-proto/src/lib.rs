@@ -5,13 +5,14 @@ use thiserror::Error;
 pub mod fingerprint;
 pub mod framing;
 pub mod ids;
-pub mod msg;
+pub mod messages;
 
 pub use fingerprint::Fingerprint;
 pub use ids::{Epoch, MediaId, RoomId, UserId};
-pub use msg::{
-    Auth, AuthErr, AuthResult, Codec, ErrCode, Event, PROTO_VERSION, PeerState, Placed, Req,
-    ReqEnvelope, Resp, RespEnvelope, Role, Room, ServerHello, ServerMessage, Share, Tracks, User,
+pub use messages::{
+    Auth, AuthError, AuthResult, Codec, ErrorCode, Event, PROTOCOL_VERSION, PeerState, Placed,
+    Request, RequestEnvelope, Response, ResponseEnvelope, Role, Room, ServerHello, ServerMessage,
+    Share, Tracks, User,
 };
 
 #[derive(Debug, Error)]

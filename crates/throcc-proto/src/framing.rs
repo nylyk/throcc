@@ -41,9 +41,9 @@ pub fn decode<T: DeserializeOwned>(body: &[u8]) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::msg::{ErrCode, Resp};
+    use crate::messages::{ErrorCode, Response};
 
-    fn round_trip(message: &Resp) -> Resp {
+    fn round_trip(message: &Response) -> Response {
         let frame = encode(message).unwrap();
         let len = body_len(frame[..LENGTH_PREFIX_BYTES].try_into().unwrap()).unwrap();
         assert_eq!(len, frame.len() - LENGTH_PREFIX_BYTES);
@@ -52,9 +52,9 @@ mod tests {
 
     #[test]
     fn a_frame_survives_encoding() {
-        let message = Resp::Err {
-            code: ErrCode::Denied,
-            msg: "nope".into(),
+        let message = Response::Err {
+            code: ErrorCode::Denied,
+            message: "nope".into(),
         };
         assert_eq!(round_trip(&message), message);
     }

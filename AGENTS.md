@@ -48,8 +48,12 @@ Nothing above `throcc-client-core` may see a `quinn` type or a tokio handle.
   than the code, and the only person it ever spoke to was the reviewer of the
   commit that added it.
 - Doc comments on public items only where the name cannot carry it, and then
-  at most two lines. A fragment is fine, obscurity is not: say plainly what the
-  item is or does, so it reads without the reader supplying a missing subject.
+  at most two lines. Write them as declarative statements: open by naming the
+  thing, and give every clause after the first an explicit subject. "Stored in
+  the database in place of the code. The code is normalized first, so a
+  lower-case or padded code cannot fail to match." — not "What the database
+  stores in place of the code. Normalizes first, so ...", which heads a question
+  and then leaves a verb with no subject for the reader to supply.
 - No module docs. A rule binding a whole file or crate belongs here, in this
   file, where it governs every crate at once and cannot drift out of sync with
   the code it describes.

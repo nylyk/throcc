@@ -34,7 +34,7 @@ throcc/
 └── crates/
     ├── throcc-proto/           # types + pure codecs. no tokio, no media, no I/O
     │   ├── lib.rs              # Error, the ALPN token, the default port
-    │   ├── msg.rs              # ServerHello, Auth, AuthResult, Req, Resp, Event
+    │   ├── messages.rs         # ServerHello, Auth, AuthResult, Request, Response, Event
     │   ├── ids.rs              # UserId, RoomId, MediaId, Epoch newtypes
     │   ├── frame.rs            # media datagram header, hand-rolled fixed-width
     │   ├── fingerprint.rs      # cert DER -> SPKI hash, one shared implementation
@@ -44,14 +44,14 @@ throcc/
     │   ├── lib.rs              # Server: bind, accept loop, one task per connection
     │   ├── identity.rs         # server_key load or create, certificate derivation
     │   ├── tls.rs              # rustls and quinn server config
-    │   ├── session.rs          # per-connection task: hello, auth, then req loop
+    │   ├── session.rs          # per-connection task: hello, auth, then request loop
     │   ├── auth.rs             # signature verify, invite redemption
-    │   ├── db.rs               # sqlite: users, rooms, invites, blobs, counters
+    │   ├── database.rs         # sqlite: users, rooms, invites, blobs, counters
     │   ├── rooms.rs            # roster, membership transitions, media id allocation
     │   ├── sfu.rs              # datagram -> ownership check -> fanout
     │   └── perms.rs            # rank checks, one place
     ├── throcc-client-core/
-    │   ├── lib.rs              # Client: cmd(Cmd) in, Stream<Event> out. owns the tokio runtime
+    │   ├── lib.rs              # Client: command(Command) in, Stream<Event> out. owns the tokio runtime
     │   ├── connection.rs       # connect, pinning verifier, control stream, reconnect
     │   ├── identity.rs         # keystore: identity key, known servers, settings
     │   ├── state.rs            # mirrored roster/rooms the UI renders
@@ -83,16 +83,16 @@ throcc/
 ```rust
 // ---------- handshake. server speaks first, saves a round trip ----------
 
-struct ServerHello { server_nonce: [u8; 32], proto: u16 }
+struct ServerHello { server_nonce: [u8; 32], protocol: u16 }
 
 struct Auth {
     pubkey: [u8; 32],
     client_nonce: [u8; 32],
     invite_code: Option<String>,      // only on first enrollment
     want_room: Option<RoomId>,        // None = connect without entering a room
-    sig: [u8; 64],
+    signature: [u8; 64],
 }
-// sig = ed25519(id_key, b"throcc-auth-v1" || server_nonce || client_nonce || tls_exporter)
+// signature = ed25519(id_key, b"throcc-auth-v1" || server_nonce || client_nonce || tls_exporter)
 
 enum AuthResult {
     Ok {
@@ -102,19 +102,19 @@ enum AuthResult {
         rooms: Vec<Room>,
         placed: Placed,               // same type SetRoom returns. room is None unless want_room was set
     },
-    Err(AuthErr),   // UnknownKey, BadSig, BadInvite, ProtoMismatch, Banned
+    Err(AuthError),   // UnknownKey, BadSignature, BadInvite, ProtocolMismatch, Banned
 }
 
 // ---------- client -> server ----------
 
 // every client->server message carries an id the server echoes in its reply.
-struct ReqEnvelope  { id: u32, req: Req }
-struct RespEnvelope { id: u32, resp: Resp }
+struct RequestEnvelope  { id: u32, request: Request }
+struct ResponseEnvelope { id: u32, response: Response }
 // Event has no id: it is unsolicited and answers nothing.
 
-enum Req {
+enum Request {
     // membership is one piece of state: you are in one room, or none.
-    SetRoom(Option<RoomId>),                    // -> Resp::Placed
+    SetRoom(Option<RoomId>),                    // -> Response::Placed
 
     SetProfile { name: String, avatar: Option<[u8; 32]> },   // full replace
     SetMedia { mic: bool, screen: bool, share_audio: bool,
@@ -131,9 +131,9 @@ enum Req {
     RemoveUser(UserId),
 }
 
-enum Resp {
+enum Response {
     Ok,
-    Err { code: ErrCode, msg: String },
+    Err { code: ErrorCode, message: String },
     Placed(Placed),
     InviteCode { code: String, expires: u64 },
     AvatarHash([u8; 32]),                       // reply to an upload stream, see below
@@ -145,7 +145,7 @@ struct Placed { room: Option<RoomId>, epoch: Epoch,
 // ---------- server -> client ----------
 
 // one stream carries both, so what goes down the wire is tagged.
-enum ServerMessage { Resp(RespEnvelope), Event(Event) }
+enum ServerMessage { Response(ResponseEnvelope), Event(Event) }
 
 enum Event {
     UserEntered { room: RoomId, epoch: Epoch, peer: PeerState },
@@ -188,7 +188,7 @@ Four bytes matters more than it looks: on a 90-byte Opus packet, 17 bytes of hea
 
 Reserved flag bits: the server reads bit0 only and ignores the rest, so a bit can be introduced later without a server upgrade. Clients reject unknown bits, so a client never silently misinterprets a frame it doesn't understand.
 
-`Placed` is one type used by both `AuthResult::Ok` and `Resp::Placed`, and `Auth` carries `want_room`, so a reconnecting client lands directly back in the room it was in. Without that, reconnect is "connect, then move", which is an extra round trip before anyone's audio comes back and a visible gap in the roster for everyone else. A client that was in no room reconnects with `want_room: None` and the whole question does not arise.
+`Placed` is one type used by both `AuthResult::Ok` and `Response::Placed`, and `Auth` carries `want_room`, so a reconnecting client lands directly back in the room it was in. Without that, reconnect is "connect, then move", which is an extra round trip before anyone's audio comes back and a visible gap in the roster for everyone else. A client that was in no room reconnects with `want_room: None` and the whole question does not arise.
 
 `SetProfile` replaces the whole profile rather than patching fields. A patch needs `Option<Option<_>>` to distinguish "leave alone" from "clear", which is a wart, and profiles are two small fields.
 
@@ -200,13 +200,13 @@ Reserved flag bits: the server reads bit0 only and ignores the rest, so a bit ca
 
 `framing.rs` caps a control frame at 1 MiB and drops the connection on anything larger, checked before allocating. Without that, the length prefix is a one-line memory-exhaustion vector.
 
-Avatar uploads do not go on the control stream. That stream carries membership changes and roster events, and blocking it behind a multi-megabyte image is exactly the head-of-line problem media datagrams exist to avoid. An upload opens a fresh unidirectional stream and sends a small postcard header — `{ req_id: u32, len: u32 }`, with `req_id` from the same counter as `ReqEnvelope` — then the bytes. The server replies with a normal `RespEnvelope { id: req_id, resp: AvatarHash(..) }` on the control stream, so the upload completes through the same pending-request map as everything else. Server-side size cap, and re-encode to fixed dimensions before storing.
+Avatar uploads do not go on the control stream. That stream carries membership changes and roster events, and blocking it behind a multi-megabyte image is exactly the head-of-line problem media datagrams exist to avoid. An upload opens a fresh unidirectional stream and sends a small postcard header — `{ request_id: u32, len: u32 }`, with `request_id` from the same counter as `RequestEnvelope` — then the bytes. The server replies with a normal `ResponseEnvelope { id: request_id, response: AvatarHash(..) }` on the control stream, so the upload completes through the same pending-request map as everything else. Server-side size cap, and re-encode to fixed dimensions before storing.
 
 ### Request correlation
 
 Every request carries a `u32` id from a monotonic client-side counter, and the server echoes it. Replies over one QUIC stream do arrive in order, so matching by position would work, but an explicit id is four bytes and removes the need for anyone to know that. It also makes a mismatch loud: a client receiving an id it has no pending request for logs a protocol error and drops the connection, where a position-matched design would quietly pair a reply with the wrong request and corrupt state in a way that is very hard to trace.
 
-The client keeps a `HashMap<u32, oneshot::Sender<Resp>>` and completes by id, so requests may be in flight concurrently — which is what stops an upload or an invite generation blocking a room change. Counter wraparound is unreachable in a session; treat it as fatal rather than reusing ids.
+The client keeps a `HashMap<u32, oneshot::Sender<Response>>` and completes by id, so requests may be in flight concurrently — which is what stops an upload or an invite generation blocking a room change. Counter wraparound is unreachable in a session; treat it as fatal rather than reusing ids.
 
 `Event` has no id. It is unsolicited and there is nothing to correlate with, so giving it one would only invite code that tries to match events to requests. Telling a reply from an event is the `ServerMessage` tag's job, not the id's — both share the one control stream, and a reader that has to guess from the shape of what it decoded is a reader that will eventually guess wrong.
 
@@ -263,7 +263,7 @@ So the budget is global, not per-connection and not only per-address: a per-conn
 
 If a deployment needs a wider margin, the lever is TTL rather than length: an invite that lives one hour instead of twenty-four cuts the exposure by the same factor as adding a character, and costs nothing to read aloud.
 
-The first-run bootstrap code is written by the headless server to a `0600` file rather than stdout, so it does not land in a shared journal.
+The first-run bootstrap code is logged by the headless server, on every start where the allowlist is empty, and each start invalidates the previous unredeemed one. A `0600` file in the data directory would keep it out of a shared journal, but that directory is normally a container volume the operator cannot read without extra work, and a first run nobody can complete is the worse failure. What bounds the exposure instead is that the code exists only while nobody is enrolled, and a restart replaces it.
 
 Three roles, each with an integer rank:
 
@@ -584,23 +584,23 @@ Sync *within* a share is a different question with a different answer — see *S
 
 ```rust
 // throcc-client-core/lib.rs
-pub struct Client { commands: mpsc::Sender<Cmd>, events: broadcast::Sender<Event>,
+pub struct Client { commands: mpsc::Sender<Command>, events: broadcast::Sender<Event>,
                     runtime: Runtime }
 
 impl Client {
     pub fn connect(address: SocketAddr, server: &str, keystore: Keystore) -> Result<Self>;
-    pub fn cmd(&self, command: Cmd);
+    pub fn command(&self, command: Command);
     pub fn events(&self) -> broadcast::Receiver<Event>;
 }
 ```
 
 `connect` blocks rather than being `async`, because an `async` one would need an executor above the boundary to drive it — and the whole point of the boundary is that there isn't one. It runs the QUIC handshake, the control stream and the auth exchange on core's own runtime and returns once `AuthResult` has arrived, so a `Client` that exists is a `Client` that is authenticated and placed. That also removes a race: there is no window in which events are emitted before the caller has had a chance to subscribe.
 
-`Cmd` and `Event` are core's own types, not `throcc-proto`'s — core translates, so UI state does not churn every time the wire format moves. Internals are tasks: one owns the control stream, one owns datagram receive, and one per remote track owns its decoder. `mpsc` in, `broadcast` out.
+`Command` and `Event` are core's own types, not `throcc-proto`'s — core translates, so UI state does not churn every time the wire format moves. Internals are tasks: one owns the control stream, one owns datagram receive, and one per remote track owns its decoder. `mpsc` in, `broadcast` out.
 
 **Two executors, one channel between them.** gpui runs its own executor on its own main thread; quinn needs tokio. So `throcc-client-core` starts a tokio runtime on a dedicated thread and owns everything network- and media-shaped behind it, and the UI never sees quinn or a `Runtime` handle. The channels cross the boundary unchanged, because `tokio::sync`'s channels are runtime-agnostic — they need no reactor to be awaited — so gpui's executor can await a `broadcast::Receiver` directly. Only quinn and `tokio::time` have to live inside the runtime thread.
 
-The UI side is then one long-lived spawned task: await an event, update the root entity, `cx.notify()`. Which is why `Cmd`/`Event` being core's own types matters more with gpui than it would have with iced — the framework boundary is a channel, and nothing about gpui appears below it. Swapping the frontend again would touch `throcc-client` only.
+The UI side is then one long-lived spawned task: await an event, update the root entity, `cx.notify()`. Which is why `Command`/`Event` being core's own types matters more with gpui than it would have with iced — the framework boundary is a channel, and nothing about gpui appears below it. Swapping the frontend again would touch `throcc-client` only.
 
 Reconnect re-runs the full handshake with `want_room` set to the last requested room, so a dropped connection is a brief absence from the roster rather than a state to repair. Media ids change on reconnect by construction; peers learn the new ones from `UserEntered`.
 
