@@ -181,9 +181,9 @@ CMD ["/usr/local/bin/throcc-server"]
 - **What:** Ed25519 keypair generated on first launch into the keystore.
 - **How:** `ed25519_dalek::SigningKey::generate(&mut OsRng)`. Store the 32-byte seed, not the expanded form. Never log it. `UserId` is the `users` rowid assigned at enrollment, not derived from the key — the pubkey is the identity, the integer is a compact handle for it on the wire and in foreign keys.
 
-### 3.2 Handshake with exporter binding
+### 3.2 Handshake with TLS channel binding
 
-- **What:** Server sends `ServerHello { server_nonce, protocol }` on accept. Client replies with `Auth { pubkey, client_nonce, invite_code, want_room, signature }`, signing `b"throcc-auth-v1" || server_nonce || client_nonce || tls_exporter`. (Design: *Auth* for what each element does.)
+- **What:** Server sends `ServerHello { server_nonce, protocol }` on accept. Client replies with `Auth { pubkey, client_nonce, invite_code, want_room, signature }`, signing `b"throcc-auth-v1" || server_nonce || client_nonce || tls_channel_binding`. (Design: *Auth* for what each element does.)
 - **How:** `Connection::export_keying_material(&mut buf, label, context)` on both sides with identical label and context. Verify the signature *before* touching the database. `want_room` is `None` on a first connect and set on reconnect (9.2).
 
 ### 3.3 Allowlist and roles

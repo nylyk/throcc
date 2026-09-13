@@ -2,6 +2,7 @@
 
 use thiserror::Error;
 
+pub mod auth;
 pub mod fingerprint;
 pub mod framing;
 pub mod ids;
@@ -10,9 +11,9 @@ pub mod messages;
 pub use fingerprint::Fingerprint;
 pub use ids::{Epoch, MediaId, RoomId, UserId};
 pub use messages::{
-    Auth, AuthError, AuthResult, Codec, ErrorCode, Event, PROTOCOL_VERSION, PeerState, Placed,
-    Request, RequestEnvelope, Response, ResponseEnvelope, Role, Room, ServerHello, ServerMessage,
-    Share, Tracks, User,
+    Auth, AuthError, AuthResult, Codec, ErrorCode, Event, InitialState, PROTOCOL_VERSION,
+    PeerState, Placed, Request, RequestEnvelope, Response, ResponseEnvelope, Role, Room,
+    ServerHello, ServerMessage, Share, Tracks, User,
 };
 
 #[derive(Debug, Error)]

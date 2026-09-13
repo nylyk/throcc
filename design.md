@@ -92,7 +92,7 @@ struct Auth {
     want_room: Option<RoomId>,        // None = connect without entering a room
     signature: [u8; 64],
 }
-// signature = ed25519(id_key, b"throcc-auth-v1" || server_nonce || client_nonce || tls_exporter)
+// signature = ed25519(id_key, b"throcc-auth-v1" || server_nonce || client_nonce || tls_channel_binding)
 
 enum AuthResult {
     Ok {
@@ -126,7 +126,7 @@ enum Request {
     RenameRoom { room: RoomId, name: String },
     DeleteRoom(RoomId),
 
-    CreateInvite { role: Role, ttl_secs: u32 },
+    CreateInvite,
     SetRole { user: UserId, role: Role },
     RemoveUser(UserId),
 }

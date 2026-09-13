@@ -1,3 +1,5 @@
+use core::fmt;
+
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{Epoch, MediaId, RoomId, UserId};
@@ -22,14 +24,19 @@ pub struct Auth {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum AuthResult {
-    Ok {
-        me: UserId,
-        role: Role,
-        users: Vec<User>,
-        rooms: Vec<Room>,
-        placed: Placed,
-    },
+    Ok(InitialState),
     Err(AuthError),
+}
+
+/// Everything a client is handed on admission: enough to render without a
+/// second fetch.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct InitialState {
+    pub me: UserId,
+    pub role: Role,
+    pub users: Vec<User>,
+    pub rooms: Vec<Room>,
+    pub placed: Placed,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +46,21 @@ pub enum AuthError {
     BadInvite,
     ProtocolMismatch,
     Banned,
+}
+
+impl fmt::Display for AuthError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let reason = match self {
+            AuthError::UnknownKey => {
+                "this key is not on the server's allowlist and no invite code was given"
+            }
+            AuthError::BadSignature => "the server rejected the signature over this connection",
+            AuthError::BadInvite => "the invite code is unknown, expired, or already used",
+            AuthError::ProtocolMismatch => "the server speaks a different protocol version",
+            AuthError::Banned => "this key has been removed from the server",
+        };
+        f.write_str(reason)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -56,6 +78,12 @@ impl Role {
             Role::Manager => 1,
             Role::Admin => 2,
         }
+    }
+
+    pub fn from_rank(rank: u8) -> Option<Self> {
+        [Role::User, Role::Manager, Role::Admin]
+            .into_iter()
+            .find(|role| role.rank() == rank)
     }
 }
 
@@ -87,7 +115,8 @@ pub struct ResponseEnvelope {
     pub response: Response,
 }
 
-/// What the control stream carries from server to client once authenticated.
+/// A reply or an event, tagged, since one stream carries both from server to
+/// client once authenticated.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum ServerMessage {
     Response(ResponseEnvelope),
@@ -121,10 +150,7 @@ pub enum Request {
     },
     DeleteRoom(RoomId),
 
-    CreateInvite {
-        role: Role,
-        ttl_secs: u32,
-    },
+    CreateInvite,
     SetRole {
         user: UserId,
         role: Role,
@@ -302,7 +328,7 @@ mod tests {
             want_room: Some(RoomId(3)),
             signature: [7u8; 64],
         });
-        round_trip(AuthResult::Ok {
+        round_trip(AuthResult::Ok(InitialState {
             me: UserId(7),
             role: Role::Admin,
             users: vec![user()],
@@ -312,7 +338,7 @@ mod tests {
                 epoch: Epoch(9),
             }],
             placed: placed(),
-        });
+        }));
         for error in [
             AuthError::UnknownKey,
             AuthError::BadSignature,
@@ -349,10 +375,7 @@ mod tests {
                 name: "quiet".into(),
             },
             Request::DeleteRoom(RoomId(3)),
-            Request::CreateInvite {
-                role: Role::User,
-                ttl_secs: 86_400,
-            },
+            Request::CreateInvite,
             Request::SetRole {
                 user: UserId(7),
                 role: Role::Manager,
@@ -438,5 +461,13 @@ mod tests {
     fn ranks_order_the_roles() {
         assert!(Role::Admin.rank() > Role::Manager.rank());
         assert!(Role::Manager.rank() > Role::User.rank());
+    }
+
+    #[test]
+    fn ranks_round_trip_through_their_role() {
+        for role in [Role::User, Role::Manager, Role::Admin] {
+            assert_eq!(Role::from_rank(role.rank()), Some(role));
+        }
+        assert_eq!(Role::from_rank(3), None);
     }
 }
