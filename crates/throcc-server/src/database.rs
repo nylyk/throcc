@@ -111,7 +111,7 @@ impl Database {
         };
 
         let users = transaction
-            .prepare("SELECT id, pubkey, name, avatar_hash, role FROM users ORDER BY id")?
+            .prepare_cached("SELECT id, pubkey, name, avatar_hash, role FROM users ORDER BY id")?
             .query_map([], user_from_row)?
             .collect::<rusqlite::Result<Vec<User>>>()?;
         transaction.commit()?;
@@ -192,12 +192,11 @@ fn redeem(transaction: &Transaction<'_>, code: &str, pubkey: &[u8; 32]) -> Resul
     } else {
         Role::User
     };
-    let rank = role.rank();
 
     transaction.execute(
         "INSERT INTO users (pubkey, name, avatar_hash, role, created_at)
          VALUES (?1, '', NULL, ?2, ?3)",
-        params![pubkey.as_slice(), rank, now],
+        params![pubkey.as_slice(), role.rank(), now],
     )?;
     let id = transaction.last_insert_rowid();
 

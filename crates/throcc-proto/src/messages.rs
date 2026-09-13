@@ -2,20 +2,21 @@ use core::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::auth::NONCE_BYTES;
 use crate::ids::{Epoch, MediaId, RoomId, UserId};
 
 pub const PROTOCOL_VERSION: u16 = 1;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ServerHello {
-    pub server_nonce: [u8; 32],
+    pub server_nonce: [u8; NONCE_BYTES],
     pub protocol: u16,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Auth {
     pub pubkey: [u8; 32],
-    pub client_nonce: [u8; 32],
+    pub client_nonce: [u8; NONCE_BYTES],
     pub invite_code: Option<String>,
     pub want_room: Option<RoomId>,
     #[serde(with = "serde_arrays")]
@@ -81,9 +82,12 @@ impl Role {
     }
 
     pub fn from_rank(rank: u8) -> Option<Self> {
-        [Role::User, Role::Manager, Role::Admin]
-            .into_iter()
-            .find(|role| role.rank() == rank)
+        match rank {
+            0 => Some(Role::User),
+            1 => Some(Role::Manager),
+            2 => Some(Role::Admin),
+            _ => None,
+        }
     }
 }
 
@@ -173,6 +177,7 @@ pub enum ErrorCode {
     NotFound,
     Invalid,
     Unimplemented,
+    Internal,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

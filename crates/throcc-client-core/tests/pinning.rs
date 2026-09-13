@@ -1,10 +1,12 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
 use tempfile::TempDir;
-use throcc_client_core::{Endpoint, Error, Keystore};
+use throcc_client_core::{Endpoint, Error};
 use throcc_server::Server;
 
-const SERVER_LABEL: &str = "server.test";
+#[allow(dead_code)]
+mod common;
+use common::{SERVER_LABEL, keystore};
 
 fn spawn_server(data_dir: &TempDir) -> (SocketAddr, throcc_proto::Fingerprint) {
     let any_loopback_port: SocketAddr = (Ipv4Addr::LOCALHOST, 0).into();
@@ -21,10 +23,9 @@ fn spawn_server(data_dir: &TempDir) -> (SocketAddr, throcc_proto::Fingerprint) {
 async fn pins_on_first_use_and_refuses_a_changed_key() {
     let server_dir = TempDir::new().unwrap();
     let client_dir = TempDir::new().unwrap();
-    let keystore_path = client_dir.path().join("keystore.json");
 
     let (address, expected) = spawn_server(&server_dir);
-    let mut endpoint = Endpoint::new(Keystore::open(Some(keystore_path)).unwrap()).unwrap();
+    let mut endpoint = Endpoint::new(keystore(&client_dir)).unwrap();
 
     let connection = endpoint
         .connect(address, SERVER_LABEL)
@@ -81,9 +82,7 @@ async fn a_pin_survives_the_server_moving() {
     let client_dir = TempDir::new().unwrap();
     let (address, expected) = spawn_server(&server_dir);
 
-    let mut endpoint =
-        Endpoint::new(Keystore::open(Some(client_dir.path().join("keystore.json"))).unwrap())
-            .unwrap();
+    let mut endpoint = Endpoint::new(keystore(&client_dir)).unwrap();
     endpoint.connect(address, SERVER_LABEL).await.unwrap();
 
     let (moved, _) = spawn_server(&server_dir);

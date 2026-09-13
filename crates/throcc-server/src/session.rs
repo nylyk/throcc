@@ -4,9 +4,10 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use quinn::Connection;
 use rand::RngExt as _;
+use throcc_proto::auth::NONCE_BYTES;
 use throcc_proto::{
-    Auth, AuthResult, ErrorCode, PROTOCOL_VERSION, Request, RequestEnvelope, Response,
-    ResponseEnvelope, Role, ServerHello, ServerMessage, User,
+    Auth, AuthResult, Epoch, ErrorCode, InitialState, PROTOCOL_VERSION, Placed, Request,
+    RequestEnvelope, Response, ResponseEnvelope, Role, ServerHello, ServerMessage, User,
 };
 
 use crate::auth::Decision;
@@ -49,7 +50,7 @@ async fn control_loop(
     writer: &mut ControlWriter,
     mut reader: ControlReader,
 ) -> Result<()> {
-    let server_nonce: [u8; 32] = rand::rng().random();
+    let server_nonce: [u8; NONCE_BYTES] = rand::rng().random();
     writer
         .write(&ServerHello {
             server_nonce,
@@ -69,11 +70,21 @@ async fn control_loop(
         connection.remote_address().ip(),
     )?;
     let actor = match decision {
-        Decision::Admitted {
-            user,
-            initial_state,
-        } => {
-            writer.write(&AuthResult::Ok(*initial_state)).await?;
+        Decision::Admitted { user, users } => {
+            writer
+                .write(&AuthResult::Ok(InitialState {
+                    me: user.id,
+                    role: user.role,
+                    users,
+                    rooms: Vec::new(),
+                    placed: Placed {
+                        room: None,
+                        epoch: Epoch(0),
+                        tracks: None,
+                        peers: Vec::new(),
+                    },
+                }))
+                .await?;
             user
         }
         Decision::Refused(error) => {
@@ -119,7 +130,7 @@ fn create_invite(actor: &User, state: &State) -> Response {
         Err(e) => {
             tracing::error!(error = ?e, "could not mint an invite");
             Response::Err {
-                code: ErrorCode::Invalid,
+                code: ErrorCode::Internal,
                 message: "the server could not mint an invite".into(),
             }
         }

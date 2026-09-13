@@ -13,7 +13,7 @@ fn a_request_is_answered_over_the_control_stream() {
         server.address,
         SERVER_LABEL,
         keystore(&client_dir),
-        Some(server.bootstrap_invite()),
+        Some(server.bootstrap_invite.clone()),
     )
     .expect("connecting");
 
@@ -40,7 +40,7 @@ fn closing_the_client_reports_a_disconnect() {
         server.address,
         SERVER_LABEL,
         keystore(&client_dir),
-        Some(server.bootstrap_invite()),
+        Some(server.bootstrap_invite.clone()),
     )
     .unwrap();
     let mut events = client.events();

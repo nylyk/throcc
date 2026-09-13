@@ -216,9 +216,7 @@ async fn control_loop(
                 let request = match command {
                     None | Some(Command::Disconnect) => return Ok(()),
                     Some(Command::SetRoom(room)) => Request::SetRoom(room),
-                    Some(Command::CreateInvite) => {
-                        Request::CreateInvite
-                    }
+                    Some(Command::CreateInvite) => Request::CreateInvite,
                 };
 
                 let id = next_request_id;

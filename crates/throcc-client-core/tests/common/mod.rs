@@ -12,7 +12,7 @@ const PATIENCE: Duration = Duration::from_secs(5);
 
 pub struct TestServer {
     pub address: SocketAddr,
-    bootstrap_invite: String,
+    pub bootstrap_invite: String,
     _data_dir: TempDir,
     _runtime: Runtime,
 }
@@ -38,10 +38,6 @@ impl TestServer {
             _data_dir: data_dir,
             _runtime: runtime,
         }
-    }
-
-    pub fn bootstrap_invite(&self) -> String {
-        self.bootstrap_invite.clone()
     }
 }
 

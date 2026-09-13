@@ -29,7 +29,7 @@ fn the_bootstrap_code_enrolls_one_admin_and_is_then_spent() {
     let server = TestServer::start();
     let admin_dir = TempDir::new().unwrap();
     let second_dir = TempDir::new().unwrap();
-    let code = server.bootstrap_invite();
+    let code = server.bootstrap_invite.clone();
 
     let admin = connect(&server, &admin_dir, Some(code.clone())).expect("the code should enroll");
     assert_eq!(admin.initial_state().role, Role::Admin);
@@ -52,7 +52,7 @@ fn an_enrolled_key_reconnects_without_a_code() {
     let server = TestServer::start();
     let client_dir = TempDir::new().unwrap();
 
-    let first = connect(&server, &client_dir, Some(server.bootstrap_invite())).unwrap();
+    let first = connect(&server, &client_dir, Some(server.bootstrap_invite.clone())).unwrap();
     let me = first.initial_state().me;
     first.shutdown();
 
@@ -71,7 +71,7 @@ fn an_admin_mints_a_code_that_enrolls_a_second_user() {
     let admin_dir = TempDir::new().unwrap();
     let user_dir = TempDir::new().unwrap();
 
-    let admin = connect(&server, &admin_dir, Some(server.bootstrap_invite())).unwrap();
+    let admin = connect(&server, &admin_dir, Some(server.bootstrap_invite.clone())).unwrap();
     let mut events = admin.events();
     admin.command(Command::CreateInvite).unwrap();
 
@@ -97,7 +97,7 @@ fn a_user_cannot_mint_a_code() {
     let admin_dir = TempDir::new().unwrap();
     let user_dir = TempDir::new().unwrap();
 
-    let admin = connect(&server, &admin_dir, Some(server.bootstrap_invite())).unwrap();
+    let admin = connect(&server, &admin_dir, Some(server.bootstrap_invite.clone())).unwrap();
     let mut minted = admin.events();
     admin.command(Command::CreateInvite).unwrap();
     let code = match next_event(&mut minted) {

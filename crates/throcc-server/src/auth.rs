@@ -7,16 +7,13 @@ use throcc_proto::auth::{
     NONCE_BYTES, TLS_CHANNEL_BINDING_BYTES, TLS_CHANNEL_BINDING_CONTEXT, TLS_CHANNEL_BINDING_LABEL,
     signing_input,
 };
-use throcc_proto::{Auth, AuthError, Epoch, InitialState, Placed, User};
+use throcc_proto::{Auth, AuthError, User};
 
 use crate::State;
 use crate::database::Admission;
 
 pub enum Decision {
-    Admitted {
-        user: User,
-        initial_state: Box<InitialState>,
-    },
+    Admitted { user: User, users: Vec<User> },
     Refused(AuthError),
 }
 
@@ -65,24 +62,7 @@ pub fn decide(
             if enrolled {
                 tracing::info!(user = %user.id, role = ?user.role, "enrolled a new user");
             }
-            if let Some(room) = auth.want_room {
-                tracing::debug!(%room, "no such room; placing in no room");
-            }
-            Ok(Decision::Admitted {
-                initial_state: Box::new(InitialState {
-                    me: user.id,
-                    role: user.role,
-                    users,
-                    rooms: Vec::new(),
-                    placed: Placed {
-                        room: None,
-                        epoch: Epoch(0),
-                        tracks: None,
-                        peers: Vec::new(),
-                    },
-                }),
-                user,
-            })
+            Ok(Decision::Admitted { user, users })
         }
     }
 }
