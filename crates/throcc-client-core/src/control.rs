@@ -20,7 +20,8 @@ impl ControlWriter {
             .map_err(|e| Error::Protocol(format!("writing to the control stream: {e}")))
     }
 
-    /// Waits until the peer has acknowledged every byte written.
+    /// The stream is finished, and this returns once the peer has acknowledged
+    /// every byte written.
     pub async fn drain(&mut self) -> Result<()> {
         self.0
             .finish()
@@ -39,7 +40,7 @@ impl ControlReader {
         Self(recv)
     }
 
-    /// `None` once the peer has closed the stream cleanly.
+    /// The next frame, or `None` once the peer has closed the stream cleanly.
     pub async fn read<T: DeserializeOwned>(&mut self) -> Result<Option<T>> {
         let mut prefix = [0u8; LENGTH_PREFIX_BYTES];
         match self.0.read_exact(&mut prefix).await {

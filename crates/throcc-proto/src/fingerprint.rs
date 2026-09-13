@@ -99,7 +99,7 @@ fn spki_of_cert(der: &[u8]) -> Result<&[u8]> {
         to_be_signed = skip_element(to_be_signed, TAG_VERSION)?;
     }
     to_be_signed = skip_element(to_be_signed, TAG_INTEGER)?;
-    // signature, issuer, validity, subject
+    // skipped: signature, issuer, validity, subject
     for _ in 0..4 {
         to_be_signed = skip_element(to_be_signed, TAG_SEQUENCE)?;
     }

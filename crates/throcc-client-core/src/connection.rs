@@ -36,7 +36,7 @@ impl Connector {
         &mut self.keystore
     }
 
-    /// Pins the server's key on first contact, and enforces it on every later one.
+    /// The server's key is pinned on first contact and enforced on every later one.
     pub async fn connect(
         &mut self,
         address: SocketAddr,
@@ -96,7 +96,7 @@ impl Connector {
     }
 }
 
-/// Accepts a certificate only if its SPKI hash matches the pin
+/// A certificate is accepted only if its SPKI hash matches the pin.
 #[derive(Debug)]
 struct PinVerifier {
     pinned: Option<Fingerprint>,
