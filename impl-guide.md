@@ -189,20 +189,20 @@ CMD ["/usr/local/bin/throcc-server"]
 ### 3.3 Allowlist and roles
 
 - **What:** `users(id INTEGER PRIMARY KEY, pubkey UNIQUE, name, avatar_hash, role, created_at)` and rank checks in one module.
-- **Why:** One `perms.rs` states "you can only act on strictly lower ranks" once, which gets "admins can't remove other admins" with no fourth role and no special cases.
+- **Why:** One `permissions.rs` states "you can only act on strictly lower ranks" once, which gets "admins can't remove other admins" with no fourth role and no special cases.
 - **How:** `rusqlite` with `bundled`. Roles as integer ranks: User 0, Manager 1, Admin 2. Every mutating handler calls one `require_rank_above(actor, target)`. Resist inlining the check "just this once".
 
 ### 3.4 Invite codes
 
-- **What:** Six characters from `OsRng` over the 36-symbol alphanumeric alphabet (`K7QM2X`), hash stored, single use, default 24h TTL. (Design: *Invites and roles*.)
-- **How:** Draw one byte per character and reject values at or above 252 before taking it modulo 36 — 36 does not divide 256, so masking or a bare modulo skews the first four symbols and quietly costs you entropy you cannot spare at this length. Uppercase on input, trim whitespace, and accept lowercase. `invites(secret_hash, role, expires_at, redeemed_by, redeemed_at)`. Redemption is one SQL transaction: check unexpired and unredeemed, insert the user, mark redeemed — mark, don't delete, so the enrollment trail survives; prune expired and redeemed rows on a timer.
-- **The rate limit ships with the feature, not after it.** Six characters is ~31 bits, so a global failure budget is load-bearing rather than hygiene: per-address limits alone are defeated by rotating IPs. Refuse all redemption once the server-wide budget is exceeded, until an operator clears it, and log every failure with its source. (Design: *Invites and roles* for the arithmetic.)
+- **What:** Six characters from `OsRng` over the 36-symbol alphanumeric alphabet (`K7QM2X`), hash stored, single use, a fixed 24h lifetime, no role. (Design: *Invites and roles*.)
+- **How:** Draw one byte per character and reject values at or above 252 before taking it modulo 36 — 36 does not divide 256, so masking or a bare modulo skews the first four symbols and quietly costs you entropy you cannot spare at this length. Uppercase on input, trim whitespace, and accept lowercase. `invites(secret_hash, expires_at)`. Redemption is one SQL transaction: delete the row if it is unexpired, and insert the user only if that delete matched — one statement then decides both that the code was good and that this caller, not a concurrent one, spent it. Prune expired rows on a timer.
+- **The rate limit ships with the feature, not after it.** Six characters is ~31 bits, so a global failure budget is load-bearing rather than hygiene: per-address limits alone are defeated by rotating IPs. Refuse all redemption once the server-wide budget is exceeded, decay both counters by one failure every fifteen minutes so a lockout heals on its own, and log every failure with its source. The decay doubles as eviction: an address counter that reaches zero is dropped, so scanning a prefix cannot grow the map without bound. (Design: *Invites and roles* for the arithmetic.)
 
 ### 3.5 Bootstrap invite
 
-- **What:** On an empty users table, mint an Admin invite, replacing any unredeemed one, and log it.
+- **What:** On an empty users table, mint an invite, replacing any unredeemed one, and log it. Redeeming it against an empty users table enrols an Admin; every later redemption enrols a User.
 - **Why:** Otherwise there's no way in. The log rather than a file in the data directory, because that directory is normally a container volume: making an operator exec into a container to read their own first-run code is how first runs get abandoned. (Design: *Invites and roles* for what bounds the exposure instead.)
-- **How:** Mint it during `bind` and hand it back from `Server::bootstrap_invite()`, so the library never decides where it is printed. The binary logs it with a blank line either side, since it is the one line of that startup output the operator has to act on.
+- **How:** `Server::mint_bootstrap_invite()` mints on call and hands the code back, so the library never decides where it is printed. Minting rather than storing keeps the plaintext out of the server for its lifetime, at the price of a method that retires the previous code every time it is called — name it for that. The binary logs it with a blank line either side, since it is the one line of that startup output the operator has to act on.
 
 ### 3.6 `AuthResult::Ok` carries the world
 

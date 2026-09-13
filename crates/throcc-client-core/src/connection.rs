@@ -12,12 +12,12 @@ use throcc_proto::Fingerprint;
 use crate::identity::Keystore;
 use crate::{Error, Result};
 
-pub struct Connector {
+pub struct Endpoint {
     endpoint: quinn::Endpoint,
     keystore: Keystore,
 }
 
-impl Connector {
+impl Endpoint {
     pub fn new(keystore: Keystore) -> Result<Self> {
         let endpoint = quinn::Endpoint::client((Ipv6Addr::UNSPECIFIED, 0).into())
             .or_else(|e| {
@@ -34,6 +34,12 @@ impl Connector {
 
     pub fn keystore_mut(&mut self) -> &mut Keystore {
         &mut self.keystore
+    }
+
+    /// This resolves once every connection has been closed and acknowledged by its
+    /// peer, which is what puts the close frame on the wire.
+    pub async fn wait_idle(&self) {
+        self.endpoint.wait_idle().await;
     }
 
     /// The server's key is pinned on first contact and enforced on every later one.

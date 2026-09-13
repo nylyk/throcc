@@ -2,13 +2,14 @@
 
 use thiserror::Error;
 
+pub mod auth;
 pub mod client;
 pub mod connection;
 pub mod control;
 pub mod identity;
 
 pub use client::{Client, Command, Event};
-pub use connection::Connector;
+pub use connection::Endpoint;
 pub use identity::Keystore;
 
 #[derive(Debug, Error)]
@@ -19,6 +20,9 @@ pub enum Error {
         pinned: String,
         presented: String,
     },
+
+    #[error("the server rejected this client: {0}")]
+    Rejected(throcc_proto::AuthError),
 
     #[error("connection failed: {0}")]
     Connect(String),

@@ -1,7 +1,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
 use tempfile::TempDir;
-use throcc_client_core::{Connector, Error, Keystore};
+use throcc_client_core::{Endpoint, Error, Keystore};
 use throcc_server::Server;
 
 const SERVER_LABEL: &str = "server.test";
@@ -24,9 +24,9 @@ async fn pins_on_first_use_and_refuses_a_changed_key() {
     let keystore_path = client_dir.path().join("keystore.json");
 
     let (address, expected) = spawn_server(&server_dir);
-    let mut connector = Connector::new(Keystore::open(Some(keystore_path)).unwrap()).unwrap();
+    let mut endpoint = Endpoint::new(Keystore::open(Some(keystore_path)).unwrap()).unwrap();
 
-    let connection = connector
+    let connection = endpoint
         .connect(address, SERVER_LABEL)
         .await
         .expect("first connection should succeed");
@@ -37,7 +37,7 @@ async fn pins_on_first_use_and_refuses_a_changed_key() {
         address
     );
     assert_eq!(
-        connector.keystore().pinned(SERVER_LABEL),
+        endpoint.keystore().pinned(SERVER_LABEL),
         Some(expected),
         "a successful first connection must store the pin"
     );
@@ -50,7 +50,7 @@ async fn pins_on_first_use_and_refuses_a_changed_key() {
         "a regenerated identity must not hash to the old one"
     );
 
-    let err = connector
+    let err = endpoint
         .connect(new_address, SERVER_LABEL)
         .await
         .expect_err("a changed server key must be refused");
@@ -69,7 +69,7 @@ async fn pins_on_first_use_and_refuses_a_changed_key() {
     }
 
     assert_eq!(
-        connector.keystore().pinned(SERVER_LABEL),
+        endpoint.keystore().pinned(SERVER_LABEL),
         Some(expected),
         "a refused connection must not overwrite the stored pin"
     );
@@ -81,16 +81,16 @@ async fn a_pin_survives_the_server_moving() {
     let client_dir = TempDir::new().unwrap();
     let (address, expected) = spawn_server(&server_dir);
 
-    let mut connector =
-        Connector::new(Keystore::open(Some(client_dir.path().join("keystore.json"))).unwrap())
+    let mut endpoint =
+        Endpoint::new(Keystore::open(Some(client_dir.path().join("keystore.json"))).unwrap())
             .unwrap();
-    connector.connect(address, SERVER_LABEL).await.unwrap();
+    endpoint.connect(address, SERVER_LABEL).await.unwrap();
 
     let (moved, _) = spawn_server(&server_dir);
     assert_ne!(moved, address);
-    connector
+    endpoint
         .connect(moved, SERVER_LABEL)
         .await
         .expect("a server that changed port is still the same server");
-    assert_eq!(connector.keystore().pinned(SERVER_LABEL), Some(expected));
+    assert_eq!(endpoint.keystore().pinned(SERVER_LABEL), Some(expected));
 }

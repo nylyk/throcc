@@ -49,7 +49,7 @@ throcc/
     │   ├── database.rs         # sqlite: users, rooms, invites, blobs, counters
     │   ├── rooms.rs            # roster, membership transitions, media id allocation
     │   ├── sfu.rs              # datagram -> ownership check -> fanout
-    │   └── perms.rs            # rank checks, one place
+    │   └── permissions.rs      # rank checks, one place
     ├── throcc-client-core/
     │   ├── lib.rs              # Client: command(Command) in, Stream<Event> out. owns the tokio runtime
     │   ├── connection.rs       # connect, pinning verifier, control stream, reconnect
@@ -212,12 +212,12 @@ The client keeps a `HashMap<u32, oneshot::Sender<Response>>` and completes by id
 
 ## Auth
 
-The server sends `ServerHello` with a nonce immediately on accept. The client signs a domain prefix, both nonces, and the QUIC TLS keying-material exporter, then sends `Auth`.
+The server sends `ServerHello` with a nonce immediately on accept. The client signs a domain prefix, both nonces, and the QUIC TLS channel binding, then sends `Auth`.
 
 - The domain prefix stops the identity key from ever producing a signature valid in another context added later.
 - The server nonce stops replay.
 - The client nonce is cheap hygiene against signing bytes the server chose entirely.
-- The TLS exporter binds the signature to this exact connection, so a captured or relayed signature is useless.
+- The TLS channel binding binds the signature to this exact connection, so a captured or relayed signature is useless.
 
 The server verifies the signature, then checks the key against the allowlist, or redeems the invite code and inserts a new user. `AuthResult::Ok` ships the full roster, the room list, and your placement, so the UI renders from one message with no bootstrap fetch.
 
@@ -239,7 +239,7 @@ A pin mismatch is a hard failure showing both fingerprints, with an explicit re-
 
 This is a deliberate trade of first-contact authentication for an onboarding that people complete. A fingerprint in the address would authenticate the first connection, but it makes the thing an admin sends over chat a 90-character string, and the failure mode of an unusable flow is that people paste from wherever is convenient and stop reading it anyway.
 
-What limits the damage is that the invite is single use and the auth signature covers the TLS keying-material exporter. An attacker who terminates TLS in the middle cannot forward the client's signature to the real server, so it cannot impersonate the user and cannot transparently proxy the session. The worst outcome is a dead-end fake server that burns one invite code and shows an empty room — noticed immediately, fixed by issuing another. What TOFU does not survive is an attacker in position *during* first contact who then stays there, which is the same exposure SSH has carried for thirty years.
+What limits the damage is that the invite is single use and the auth signature covers the TLS channel binding. An attacker who terminates TLS in the middle cannot forward the client's signature to the real server, so it cannot impersonate the user and cannot transparently proxy the session. The worst outcome is a dead-end fake server that burns one invite code and shows an empty room — noticed immediately, fixed by issuing another. What TOFU does not survive is an attacker in position *during* first contact who then stays there, which is the same exposure SSH has carried for thirty years.
 
 The server prints its fingerprint at startup anyway. It is not needed to connect, but it is the only source for an operator who wants to verify a pin out of band, and it is what the mismatch dialog compares against.
 
@@ -251,17 +251,17 @@ That is a deliberate step away from the more reachable choice. UDP/443 passes mo
 
 An invite code is a short opaque string and nothing more — no key material, no server identity, no role encoding, no structure a client parses.
 
-Admins generate one from the client UI with a TTL. The code is six characters from `OsRng` over the full alphanumeric alphabet — the ten digits and the twenty-six uppercase letters, `K7QM2X`. Six characters is short enough to read over the phone, type from memory, or put in a text message without anyone reaching for copy-paste, which is the entire point: this plus an address is the whole join flow. Input is uppercased before lookup, so case never matters. The server stores only a hash, so reading the database yields nothing redeemable. Single use, default TTL 24 hours. The row is kept and marked redeemed rather than deleted, so "who enrolled with which invite" survives as an audit trail; expired and redeemed rows are pruned on a timer.
+Admins generate one from the client UI, and it carries no role. The code is six characters from `OsRng` over the full alphanumeric alphabet — the ten digits and the twenty-six uppercase letters, `K7QM2X`. Six characters is short enough to read over the phone, type from memory, or put in a text message without anyone reaching for copy-paste, which is the entire point: this plus an address is the whole join flow. Input is uppercased before lookup, so case never matters. The server stores only a hash, so reading the database yields nothing redeemable. Single use, redeemable for twenty-four hours. The lifetime is fixed rather than chosen per code: it is the number the attempt-limit arithmetic below is built on, and a caller who can widen it can widen the exposure that arithmetic bounds. Redemption deletes the row: what it would record — which key enrolled, and when — is already in the user it created, and a row nobody can redeem is only something else to keep secret. Expired rows are pruned on a timer.
 
 Thirty-six symbols rather than a confusable-free subset is a deliberate choice for a code this short: dropping `0`/`O` and `1`/`I` would cost about a bit and a half of an already small budget. The cost is paid at the point of entry instead — the client shows the code in a font that distinguishes them, and a failed redemption says "check O versus zero" rather than only "invalid".
 
-Redemption is the whole mechanism: a client presents a valid unexpired code alongside the public key it generated on first launch, and the server inserts that key into the allowlist with the role recorded against the invite. The key persists; the code is gone. Revocation therefore stays per-user forever, and a leaked invite grants exactly one enrollment rather than standing access.
+Redemption is the whole mechanism: a client presents a valid unexpired code alongside the public key it generated on first launch, and the server inserts that key into the allowlist as a User. Rank is granted afterwards with `SetRole`, by someone who already outranks it, so a leaked code is worth one ordinary account rather than whatever rank the admin chose when minting it. The one exception is the deployment's first enrollment, which enrols as Admin because an empty allowlist has nobody to promote it. The key persists; the code is gone. Revocation therefore stays per-user forever, and a leaked invite grants exactly one enrollment rather than standing access.
 
 **The attempt limit is what makes six characters safe, so it is not optional.** Thirty-six to the sixth is 2.18 billion codes, a little over 31 bits — enough that nobody guesses one by hand, and not enough to leave unguarded. A script at a thousand attempts a second covers about four percent of that space in the twenty-four hours a code is live, and a hit is an allowlisted account rather than a failed login.
 
-So the budget is global, not per-connection and not only per-address: a per-connection limit is defeated by reconnecting and a per-address one by rotating through a botnet or an IPv6 prefix. Limit failed attempts per source address *and* keep a server-wide failure budget that, once exceeded, refuses all redemption until an operator clears it. Refusing redemption is a mild failure — an admin reissues a code — while the alternative is silent enrollment. Log every failed attempt with its source; a burst is the signal that someone is scanning.
+So the budget is global, not per-connection and not only per-address: a per-connection limit is defeated by reconnecting and a per-address one by rotating through a botnet or an IPv6 prefix. Limit failed attempts per source address *and* keep a server-wide failure budget that, once exceeded, refuses all redemption. Both counters forget one failure every fifteen minutes, so a lockout heals without an operator and honest typos clear on their own. The decay is what caps a sustained guessing rate, at four attempts an hour: against a code live for a day that is a hit roughly once in twenty-three million days, while a counter that only grew would take invites down for good on ordinary mistakes. Refusing redemption is a mild failure — an admin reissues a code — while the alternative is silent enrollment. Log every failed attempt with its source; a burst is the signal that someone is scanning.
 
-If a deployment needs a wider margin, the lever is TTL rather than length: an invite that lives one hour instead of twenty-four cuts the exposure by the same factor as adding a character, and costs nothing to read aloud.
+If a deployment needs a wider margin, the levers are the budget and the decay interval, both server-wide constants: halving either halves the sustained rate an attacker is allowed. Shortening the code is not a lever — it is the one number the rest of this section exists to protect.
 
 The first-run bootstrap code is logged by the headless server, on every start where the allowlist is empty, and each start invalidates the previous unredeemed one. A `0600` file in the data directory would keep it out of a shared journal, but that directory is normally a container volume the operator cannot read without extra work, and a first run nobody can complete is the worse failure. What bounds the exposure instead is that the code exists only while nobody is enrolled, and a restart replaces it.
 
