@@ -233,7 +233,7 @@ async fn control_loop(
                 let events = events.clone();
                 tokio::spawn(async move {
                     if let Ok(response) = wait_for_reply.await
-                        && let Some(event) = event_for(response)
+                        && let Some(event) = event_from_response(response)
                     {
                         let _ = events.send(event);
                     }
@@ -259,7 +259,7 @@ async fn control_loop(
     }
 }
 
-fn event_for(response: Response) -> Option<Event> {
+fn event_from_response(response: Response) -> Option<Event> {
     match response {
         Response::InviteCode { code, expires } => Some(Event::Invited { code, expires }),
         Response::Err { code, message } => Some(Event::Failed {

@@ -13,19 +13,19 @@ use crate::identity::Keystore;
 use crate::{Error, Result};
 
 pub struct Endpoint {
-    endpoint: quinn::Endpoint,
+    socket: quinn::Endpoint,
     keystore: Keystore,
 }
 
 impl Endpoint {
     pub fn new(keystore: Keystore) -> Result<Self> {
-        let endpoint = quinn::Endpoint::client((Ipv6Addr::UNSPECIFIED, 0).into())
+        let socket = quinn::Endpoint::client((Ipv6Addr::UNSPECIFIED, 0).into())
             .or_else(|e| {
                 tracing::debug!(error = %e, "no IPv6 socket, falling back to IPv4 only");
                 quinn::Endpoint::client((Ipv4Addr::UNSPECIFIED, 0).into())
             })
             .map_err(|e| Error::Connect(format!("binding a local UDP socket: {e}")))?;
-        Ok(Self { endpoint, keystore })
+        Ok(Self { socket, keystore })
     }
 
     pub fn keystore(&self) -> &Keystore {
@@ -39,7 +39,7 @@ impl Endpoint {
     /// This resolves once every connection has been closed and acknowledged by its
     /// peer, which is what puts the close frame on the wire.
     pub async fn wait_idle(&self) {
-        self.endpoint.wait_idle().await;
+        self.socket.wait_idle().await;
     }
 
     /// The server's key is pinned on first contact and enforced on every later one.
@@ -69,7 +69,7 @@ impl Endpoint {
         config.transport_config(Arc::new(transport));
 
         let handshake = self
-            .endpoint
+            .socket
             .connect_with(config, address, "throcc")
             .map_err(|e| Error::Connect(e.to_string()))?;
 

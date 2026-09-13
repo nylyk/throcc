@@ -24,7 +24,7 @@ pub fn encode<T: Serialize>(message: &T) -> Result<Vec<u8>> {
 
 /// The body length a frame declares. An oversized one is rejected here, before
 /// its reader allocates for it.
-pub fn body_len(prefix: [u8; LENGTH_PREFIX_BYTES]) -> Result<usize> {
+pub fn body_length(prefix: [u8; LENGTH_PREFIX_BYTES]) -> Result<usize> {
     let len = u32::from_be_bytes(prefix) as usize;
     if len > MAX_FRAME_BYTES {
         return Err(Error::TooLarge {
@@ -46,7 +46,7 @@ mod tests {
 
     fn round_trip(message: &Response) -> Response {
         let frame = encode(message).unwrap();
-        let len = body_len(frame[..LENGTH_PREFIX_BYTES].try_into().unwrap()).unwrap();
+        let len = body_length(frame[..LENGTH_PREFIX_BYTES].try_into().unwrap()).unwrap();
         assert_eq!(len, frame.len() - LENGTH_PREFIX_BYTES);
         decode(&frame[LENGTH_PREFIX_BYTES..]).unwrap()
     }
@@ -63,7 +63,7 @@ mod tests {
     #[test]
     fn an_oversized_length_is_refused_before_allocating() {
         let prefix = ((MAX_FRAME_BYTES + 1) as u32).to_be_bytes();
-        assert!(matches!(body_len(prefix), Err(Error::TooLarge { .. })));
-        assert!(body_len((MAX_FRAME_BYTES as u32).to_be_bytes()).is_ok());
+        assert!(matches!(body_length(prefix), Err(Error::TooLarge { .. })));
+        assert!(body_length((MAX_FRAME_BYTES as u32).to_be_bytes()).is_ok());
     }
 }

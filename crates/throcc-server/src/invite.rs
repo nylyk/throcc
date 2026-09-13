@@ -12,7 +12,7 @@ pub const TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const ALPHABET: &[u8; 36] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 /// 36 does not divide 256, so a bare modulo would skew the first four symbols.
 /// 252 is the largest multiple of 36 that fits in a byte.
-const REJECT_FROM: u8 = 252;
+const SMALLEST_REJECTED_DRAW: u8 = 252;
 
 /// A fresh code of six symbols, roughly 31 bits.
 pub fn generate_code() -> String {
@@ -20,7 +20,7 @@ pub fn generate_code() -> String {
     let mut code = String::with_capacity(CODE_LENGTH);
     while code.len() < CODE_LENGTH {
         let draw: u8 = random.random();
-        if draw < REJECT_FROM {
+        if draw < SMALLEST_REJECTED_DRAW {
             code.push(ALPHABET[(draw % 36) as usize] as char);
         }
     }

@@ -125,13 +125,13 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn decode_seed(s: &str) -> Result<[u8; 32]> {
-    if s.len() != 64 {
+fn decode_seed(seed: &str) -> Result<[u8; 32]> {
+    if seed.len() != 64 {
         return Err(Error::Keystore("identity key is not 32 bytes".into()));
     }
     let mut out = [0u8; 32];
     for (i, byte) in out.iter_mut().enumerate() {
-        let pair = s
+        let pair = seed
             .get(i * 2..i * 2 + 2)
             .ok_or_else(|| Error::Keystore("identity key is not hexadecimal".into()))?;
         *byte = u8::from_str_radix(pair, 16)

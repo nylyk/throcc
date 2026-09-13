@@ -22,19 +22,21 @@ pub mod tls;
 
 pub struct State {
     pub database: Database,
-    redemptions: Mutex<RedemptionLimiter>,
+    redemption_limiter: Mutex<RedemptionLimiter>,
 }
 
 impl State {
     pub fn new(database: Database) -> Self {
         Self {
             database,
-            redemptions: Mutex::new(RedemptionLimiter::default()),
+            redemption_limiter: Mutex::new(RedemptionLimiter::default()),
         }
     }
 
-    pub fn redemptions(&self) -> MutexGuard<'_, RedemptionLimiter> {
-        self.redemptions.lock().expect("redemption mutex poisoned")
+    pub fn redemption_limiter(&self) -> MutexGuard<'_, RedemptionLimiter> {
+        self.redemption_limiter
+            .lock()
+            .expect("redemption mutex poisoned")
     }
 }
 
@@ -101,7 +103,7 @@ async fn maintain_invites(state: Arc<State>) {
     let mut ticker = tokio::time::interval(invite::DECAY_INTERVAL);
     loop {
         ticker.tick().await;
-        state.redemptions().decay();
+        state.redemption_limiter().decay();
         match state.database.prune_invites() {
             Ok(0) => {}
             Ok(pruned) => tracing::info!(pruned, "pruned expired invites"),

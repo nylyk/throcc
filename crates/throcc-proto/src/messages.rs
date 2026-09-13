@@ -260,7 +260,7 @@ pub struct PeerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::framing::{LENGTH_PREFIX_BYTES, body_len, decode, encode};
+    use crate::framing::{LENGTH_PREFIX_BYTES, body_length, decode, encode};
     use core::fmt::Debug;
 
     fn round_trip<T>(message: T)
@@ -268,7 +268,7 @@ mod tests {
         T: Serialize + serde::de::DeserializeOwned + PartialEq + Debug,
     {
         let frame = encode(&message).unwrap();
-        let len = body_len(frame[..LENGTH_PREFIX_BYTES].try_into().unwrap()).unwrap();
+        let len = body_length(frame[..LENGTH_PREFIX_BYTES].try_into().unwrap()).unwrap();
         assert_eq!(len, frame.len() - LENGTH_PREFIX_BYTES);
         let decoded: T = decode(&frame[LENGTH_PREFIX_BYTES..]).unwrap();
         assert_eq!(decoded, message);

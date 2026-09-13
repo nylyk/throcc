@@ -22,7 +22,7 @@ pub async fn serve(connection: Connection, state: Arc<State>) {
         "connected"
     );
 
-    if let Err(e) = control(&connection, &state).await {
+    if let Err(e) = serve_control(&connection, &state).await {
         tracing::warn!(error = ?e, "control stream ended in error");
         connection.close(1u32.into(), b"protocol error");
     }
@@ -31,19 +31,19 @@ pub async fn serve(connection: Connection, state: Arc<State>) {
     tracing::info!(%reason, "disconnected");
 }
 
-async fn control(connection: &Connection, state: &State) -> Result<()> {
+async fn serve_control(connection: &Connection, state: &State) -> Result<()> {
     let (send, recv) = connection
         .open_bi()
         .await
         .context("opening the control stream")?;
     let mut writer = ControlWriter::new(send);
 
-    let outcome = converse(connection, state, &mut writer, ControlReader::new(recv)).await;
+    let outcome = control_loop(connection, state, &mut writer, ControlReader::new(recv)).await;
     let _ = tokio::time::timeout(DRAIN_GRACE, writer.drain()).await;
     outcome
 }
 
-async fn converse(
+async fn control_loop(
     connection: &Connection,
     state: &State,
     writer: &mut ControlWriter,
@@ -85,7 +85,7 @@ async fn converse(
 
     while let Some(RequestEnvelope { id, request }) = reader.read().await? {
         tracing::debug!(id, ?request, "request");
-        let response = handle(request, &actor, state);
+        let response = handle_request(request, &actor, state);
         writer
             .write(&ServerMessage::Response(ResponseEnvelope { id, response }))
             .await?;
@@ -93,7 +93,7 @@ async fn converse(
     Ok(())
 }
 
-fn handle(request: Request, actor: &User, state: &State) -> Response {
+fn handle_request(request: Request, actor: &User, state: &State) -> Response {
     match request {
         Request::CreateInvite => create_invite(actor, state),
         other => Response::Err {

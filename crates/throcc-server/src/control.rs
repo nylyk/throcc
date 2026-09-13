@@ -47,7 +47,7 @@ impl ControlReader {
             Err(e) => return Err(e).context("reading a control frame length"),
         }
 
-        let mut body = vec![0u8; framing::body_len(prefix)?];
+        let mut body = vec![0u8; framing::body_length(prefix)?];
         self.0
             .read_exact(&mut body)
             .await

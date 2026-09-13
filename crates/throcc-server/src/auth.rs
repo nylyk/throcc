@@ -46,7 +46,7 @@ pub fn decide(
     }
 
     let invite_code = auth.invite_code.as_deref();
-    if invite_code.is_some() && !state.redemptions().permits(peer) {
+    if invite_code.is_some() && !state.redemption_limiter().permits(peer) {
         tracing::warn!(%peer, "refusing redemption: the failure budget is exhausted");
         return Ok(refused(AuthError::BadInvite));
     }
@@ -54,7 +54,7 @@ pub fn decide(
     match state.database.admit(&auth.pubkey, invite_code)? {
         Admission::NotAllowlisted => Ok(refused(AuthError::UnknownKey)),
         Admission::InviteRefused => {
-            state.redemptions().record_failure(peer);
+            state.redemption_limiter().record_failure(peer);
             Ok(refused(AuthError::BadInvite))
         }
         Admission::Admitted {

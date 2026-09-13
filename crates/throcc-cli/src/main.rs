@@ -78,7 +78,7 @@ fn main() -> Result<()> {
         Err(e) => return Err(e).context("connecting"),
     };
     tracing::info!(server = %authority, "connected");
-    report(client.initial_state());
+    print_initial_state(client.initial_state());
 
     let mut events = client.events();
     std::thread::spawn(move || {
@@ -98,7 +98,7 @@ fn main() -> Result<()> {
 
     println!("{HELP}");
     for line in std::io::stdin().lock().lines() {
-        match command(&line?) {
+        match parse_command(&line?) {
             Ok(Some(command)) => client.command(command)?,
             Ok(None) => break,
             Err(message) => println!("{message}"),
@@ -110,7 +110,7 @@ fn main() -> Result<()> {
 }
 
 /// The parsed command, or `None` when the line ends the session.
-fn command(line: &str) -> std::result::Result<Option<Command>, String> {
+fn parse_command(line: &str) -> std::result::Result<Option<Command>, String> {
     let mut words = line.split_whitespace();
     match (words.next(), words.next()) {
         (None, _) => Err(HELP.to_string()),
@@ -135,7 +135,7 @@ fn format_authority(host: &str, port: u16) -> String {
     }
 }
 
-fn report(initial_state: &InitialState) {
+fn print_initial_state(initial_state: &InitialState) {
     println!(
         "you are user {} with role {:?}",
         initial_state.me, initial_state.role
@@ -173,15 +173,15 @@ mod tests {
 
     #[test]
     fn commands_parse() {
-        assert_eq!(command("room none"), Ok(Some(Command::SetRoom(None))));
+        assert_eq!(parse_command("room none"), Ok(Some(Command::SetRoom(None))));
         assert_eq!(
-            command("room 7"),
+            parse_command("room 7"),
             Ok(Some(Command::SetRoom(Some(RoomId(7)))))
         );
-        assert_eq!(command("invite"), Ok(Some(Command::CreateInvite)));
-        assert!(command("invite manager").is_err());
-        assert_eq!(command("quit"), Ok(None));
-        assert!(command("room later").is_err());
-        assert!(command("dance").is_err());
+        assert_eq!(parse_command("invite"), Ok(Some(Command::CreateInvite)));
+        assert!(parse_command("invite manager").is_err());
+        assert_eq!(parse_command("quit"), Ok(None));
+        assert!(parse_command("room later").is_err());
+        assert!(parse_command("dance").is_err());
     }
 }
