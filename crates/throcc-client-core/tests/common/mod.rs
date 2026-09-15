@@ -1,5 +1,4 @@
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::mpsc;
 use std::time::Duration;
 
 use tempfile::TempDir;
@@ -46,14 +45,14 @@ pub fn keystore(directory: &TempDir) -> Keystore {
 }
 
 pub fn next_event(events: &mut tokio::sync::broadcast::Receiver<Event>) -> Event {
-    let (sender, receiver) = mpsc::channel();
-    std::thread::scope(|scope| {
-        scope.spawn(|| {
-            let _ = sender.send(events.blocking_recv());
-        });
-        receiver
-            .recv_timeout(PATIENCE)
-            .expect("the client should have produced an event")
-            .expect("the event channel should still be open")
-    })
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
+        .block_on(async {
+            tokio::time::timeout(PATIENCE, events.recv())
+                .await
+                .expect("the client should have produced an event")
+                .expect("the event channel should still be open")
+        })
 }

@@ -89,6 +89,8 @@ async fn control_loop(
         }
         Decision::Refused(error) => {
             writer.write(&AuthResult::Err(error)).await?;
+            let _ = tokio::time::timeout(DRAIN_GRACE, writer.drain()).await;
+            connection.close(0u32.into(), b"refused");
             return Ok(());
         }
     };

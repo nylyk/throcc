@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -8,7 +8,7 @@ use throcc_proto::{
     InitialState, Request, RequestEnvelope, Response, ResponseEnvelope, RoomId, ServerMessage,
 };
 use tokio::runtime::Runtime;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::auth;
@@ -190,6 +190,7 @@ async fn control_loop(
     events: &broadcast::Sender<Event>,
 ) -> Result<()> {
     let (inbound, mut server_messages) = mpsc::channel(QUEUE_DEPTH);
+    // Frame reads are not cancel-safe, send over channel to be able to use select below
     tokio::spawn(async move {
         loop {
             match reader.read::<ServerMessage>().await {
@@ -207,7 +208,7 @@ async fn control_loop(
         }
     });
 
-    let mut pending: HashMap<u32, oneshot::Sender<Response>> = HashMap::new();
+    let mut outstanding: HashSet<u32> = HashSet::new();
     let mut next_request_id: u32 = 0;
 
     loop {
@@ -224,18 +225,8 @@ async fn control_loop(
                     .checked_add(1)
                     .ok_or_else(|| Error::Protocol("request ids exhausted".into()))?;
 
-                let (reply, wait_for_reply) = oneshot::channel();
-                pending.insert(id, reply);
+                outstanding.insert(id);
                 writer.write(&RequestEnvelope { id, request }).await?;
-
-                let events = events.clone();
-                tokio::spawn(async move {
-                    if let Ok(response) = wait_for_reply.await
-                        && let Some(event) = event_from_response(response)
-                    {
-                        let _ = events.send(event);
-                    }
-                });
             }
 
             message = server_messages.recv() => {
@@ -244,12 +235,14 @@ async fn control_loop(
                     Some(Err(e)) => return Err(e),
                     Some(Ok(ServerMessage::Event(event))) => tracing::debug!(?event, "event"),
                     Some(Ok(ServerMessage::Response(ResponseEnvelope { id, response }))) => {
-                        let Some(reply) = pending.remove(&id) else {
+                        if !outstanding.remove(&id) {
                             return Err(Error::Protocol(format!(
                                 "response {id} answers no pending request"
                             )));
-                        };
-                        let _ = reply.send(response);
+                        }
+                        if let Some(event) = event_from_response(response) {
+                            let _ = events.send(event);
+                        }
                     }
                 }
             }

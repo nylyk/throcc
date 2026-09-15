@@ -206,7 +206,7 @@ Avatar uploads do not go on the control stream. That stream carries membership c
 
 Every request carries a `u32` id from a monotonic client-side counter, and the server echoes it. Replies over one QUIC stream do arrive in order, so matching by position would work, but an explicit id is four bytes and removes the need for anyone to know that. It also makes a mismatch loud: a client receiving an id it has no pending request for logs a protocol error and drops the connection, where a position-matched design would quietly pair a reply with the wrong request and corrupt state in a way that is very hard to trace.
 
-The client keeps a `HashMap<u32, oneshot::Sender<Response>>` and completes by id, so requests may be in flight concurrently — which is what stops an upload or an invite generation blocking a room change. Counter wraparound is unreachable in a session; treat it as fatal rather than reusing ids.
+The client keeps the ids it is still owed a reply for and clears each as the reply lands, so requests may be in flight concurrently — which is what stops an upload or an invite generation blocking a room change. The replies are acted on where they are read, in arrival order: handing each to a task of its own would publish two answers in whatever order the scheduler woke them. Counter wraparound is unreachable in a session; treat it as fatal rather than reusing ids.
 
 `Event` has no id. It is unsolicited and there is nothing to correlate with, so giving it one would only invite code that tries to match events to requests. Telling a reply from an event is the `ServerMessage` tag's job, not the id's — both share the one control stream, and a reader that has to guess from the shape of what it decoded is a reader that will eventually guess wrong.
 

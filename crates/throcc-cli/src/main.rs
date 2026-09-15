@@ -96,6 +96,12 @@ fn main() -> Result<()> {
         }
     });
 
+    let outcome = read_commands(&client);
+    client.shutdown();
+    outcome
+}
+
+fn read_commands(client: &Client) -> Result<()> {
     println!("{HELP}");
     for line in std::io::stdin().lock().lines() {
         match parse_command(&line?) {
@@ -104,8 +110,6 @@ fn main() -> Result<()> {
             Err(message) => println!("{message}"),
         }
     }
-
-    client.shutdown();
     Ok(())
 }
 

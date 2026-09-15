@@ -160,7 +160,7 @@ CMD ["/usr/local/bin/throcc-server"]
 ### 2.3 Request/response correlation
 
 - **What:** `RequestEnvelope { id, request }` / `ResponseEnvelope { id, response }`, client-allocated monotonic ids, server echoes. `Event` has no id. (Design: *Request correlation*.)
-- **How:** Client keeps `HashMap<u32, oneshot::Sender<Response>>` and completes by id. An id with no pending entry is a protocol error: log and drop the connection, don't ignore it. Server side the id is opaque — read it off the envelope, hand `request` to the handler, put it back on the reply; handlers never see it. Wraparound is fatal, not a reuse.
+- **How:** Client keeps the set of ids it is owed a reply for and clears each by id, acting on the reply where it is read so answers are published in arrival order. An id that is not outstanding is a protocol error: log and drop the connection, don't ignore it. Server side the id is opaque — read it off the envelope, hand `request` to the handler, put it back on the reply; handlers never see it. Wraparound is fatal, not a reuse.
 
 ### 2.4 Connection tasks and the runtime boundary
 
@@ -172,7 +172,7 @@ CMD ["/usr/local/bin/throcc-server"]
 
 ---
 
-## M3 — Authentication and enrollment
+## M3 — Authentication and enrollment — done
 
 **Goal:** Only allowlisted keys connect. New users enroll with a one-time invite code.
 
