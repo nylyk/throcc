@@ -590,11 +590,11 @@ WantedBy=multi-user.target
 
 ### M1 QUIC transport and server identity
 
-- [ ] `server_key` load-or-create at `0600`, certificate derived with `rcgen`, fingerprint printed.
-- [ ] quinn server and client configs with the transport settings in §5.1. ALPN `throcc/1`.
-- [ ] Client pinning verifier and the `known_servers` store.
-- [ ] Datagram assertion at handshake. Measure the real payload floor for the pinned quinn version and set the constant.
-- [ ] Spikes S1–S4 dispatched to subagents.
+- [x] `server_key` load-or-create at `0600`, certificate derived with `rcgen`, fingerprint printed.
+- [x] quinn server and client configs with the transport settings in §5.1. ALPN `throcc/1`.
+- [x] Client pinning verifier and the `known_servers` store.
+- [x] Datagram assertion at handshake. Measure the real payload floor for the pinned quinn version and set the constant.
+- [x] Spikes S1–S4 dispatched to subagents.
 
 **Done when:**
 

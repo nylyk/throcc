@@ -11,3 +11,13 @@ workspace = true
 [dependencies]
 throcc-proto.workspace = true
 throcc-crypto = { workspace = true, features = ["media"] }
+anyhow.workspace = true
+quinn.workspace = true
+rustls.workspace = true
+rustls-webpki.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

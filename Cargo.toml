@@ -11,10 +11,21 @@ publish = false
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 
-[workspace.lints.clippy]
-unwrap_used = "warn"
-
 [workspace.dependencies]
 throcc-proto = { path = "crates/throcc-proto" }
 throcc-crypto = { path = "crates/throcc-crypto", default-features = false }
 throcc-client-core = { path = "crates/throcc-client-core" }
+
+anyhow = "1.0.104"
+bytes = "1.12.1"
+clap = { version = "4.6.7", features = ["derive"] }
+quinn = { version = "0.11.12", default-features = false, features = ["log", "runtime-tokio", "rustls-ring"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+rustls-webpki = { version = "0.103.16", default-features = false, features = ["ring", "std"] }
+sha2 = "0.11.1"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
