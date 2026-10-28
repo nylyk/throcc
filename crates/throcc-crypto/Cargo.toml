@@ -10,9 +10,10 @@ workspace = true
 
 [features]
 default = []
-media = ["dep:hpke"]
+media = ["dep:hpke", "dep:aes-gcm"]
 
 [dependencies]
+aes-gcm = { workspace = true, optional = true }
 throcc-proto.workspace = true
 ed25519-dalek.workspace = true
 getrandom.workspace = true
@@ -24,3 +25,7 @@ subtle.workspace = true
 thiserror.workspace = true
 hpke = { workspace = true, optional = true }
 zeroize.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+ring.workspace = true

@@ -1,8 +1,11 @@
+mod synthetic;
+
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use throcc_client_core::account;
+use throcc_client_core::call::Call;
 use throcc_client_core::control::{Link, Requester};
 use throcc_client_core::keystore::Keystore;
 use throcc_proto::ids::RoomId;
@@ -40,6 +43,33 @@ enum Command {
     CreateRoom { address: String, name: String },
     /// Sets your display name.
     Name { address: String, name: String },
+    /// Joins a room and sends fake access units through the encrypted media path.
+    SendSynthetic {
+        address: String,
+        room: String,
+        #[arg(long, value_enum, default_value = "video")]
+        track: synthetic::Track,
+        /// Bytes per unit.
+        #[arg(long, default_value_t = 2500)]
+        size: usize,
+        /// Units per second.
+        #[arg(long, default_value_t = 1000)]
+        rate: u32,
+        #[arg(long, default_value_t = 10_000)]
+        count: u32,
+    },
+    /// Joins a room and receives another member's units, checking each one.
+    Recv {
+        address: String,
+        room: String,
+        /// Name or user id of the sender.
+        #[arg(long)]
+        from: String,
+        #[arg(long, value_enum, default_value = "video")]
+        track: synthetic::Track,
+        #[arg(long, default_value_t = 10_000)]
+        count: u32,
+    },
 }
 
 #[tokio::main]
@@ -91,6 +121,31 @@ async fn main() -> Result<()> {
         }
         Command::Name { address, name } => {
             one_shot(&keystore, &address, &format!("name {name}")).await?
+        }
+        Command::SendSynthetic {
+            address,
+            room,
+            track,
+            size,
+            rate,
+            count,
+        } => {
+            let link = sign_in(&keystore, &address).await?;
+            let room = find_room(&link.welcome.rooms, &room)?;
+            let call = Call::start(link, &keystore)?;
+            synthetic::send(&call, room, track, size, rate, count).await?;
+        }
+        Command::Recv {
+            address,
+            room,
+            from,
+            track,
+            count,
+        } => {
+            let link = sign_in(&keystore, &address).await?;
+            let room = find_room(&link.welcome.rooms, &room)?;
+            let mut call = Call::start(link, &keystore)?;
+            synthetic::recv(&mut call, room, &from, track, count).await?;
         }
     }
     Ok(())

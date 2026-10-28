@@ -1,9 +1,11 @@
 pub mod auth;
 pub mod database;
+pub mod egress;
 pub mod identity;
 pub mod permissions;
 pub mod rooms;
 pub mod session;
+pub mod sfu;
 pub mod tls;
 
 use std::net::SocketAddr;
@@ -20,10 +22,12 @@ use crate::auth::SourceLimiter;
 use crate::database::Database;
 use crate::identity::ServerIdentity;
 use crate::rooms::{Hub, unix_now};
+use crate::sfu::Sfu;
 pub use crate::tls::Congestion;
 
 const DATABASE_FILE: &str = "throcc.sqlite";
 const MAX_HANDSHAKES: usize = 128;
+const KEYFRAME_TICK: std::time::Duration = std::time::Duration::from_millis(100);
 
 pub struct Config {
     pub data_dir: PathBuf,
@@ -34,6 +38,7 @@ pub struct Config {
 /// State shared by every connection.
 pub struct Shared {
     pub fingerprint: Fingerprint,
+    pub sfu: Arc<Sfu>,
     hub: Mutex<Hub>,
     limiter: Mutex<SourceLimiter>,
     /// Bounds connections that haven't authenticated yet.
@@ -62,7 +67,11 @@ impl Server {
     pub fn bind(config: &Config) -> Result<Self> {
         create_private_dir(&config.data_dir)?;
         let identity = ServerIdentity::load_or_create(&config.data_dir)?;
-        let mut hub = Hub::new(Database::open(&config.data_dir.join(DATABASE_FILE))?)?;
+        let sfu = Arc::new(Sfu::default());
+        let mut hub = Hub::new(
+            Database::open(&config.data_dir.join(DATABASE_FILE))?,
+            sfu.clone(),
+        )?;
         let bootstrap = if hub.db.user_count()? == 0 {
             hub.db.delete_bootstrap_invites()?;
             Some(hub.mint_invite(None, unix_now())?.0)
@@ -75,6 +84,7 @@ impl Server {
             .with_context(|| format!("binding {}", config.listen))?;
         let shared = Arc::new(Shared {
             fingerprint: identity.fingerprint,
+            sfu,
             hub: Mutex::new(hub),
             limiter: Mutex::default(),
             handshakes: tokio::sync::Semaphore::new(MAX_HANDSHAKES),
@@ -104,6 +114,15 @@ impl Server {
     }
 
     pub async fn run(self) -> Result<()> {
+        let ticker = Arc::downgrade(&self.shared);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(KEYFRAME_TICK);
+            while let Some(shared) = ticker.upgrade() {
+                shared.hub().flush_keyframes();
+                drop(shared);
+                interval.tick().await;
+            }
+        });
         while let Some(incoming) = self.endpoint.accept().await {
             let shared = self.shared.clone();
             tokio::spawn(async move {

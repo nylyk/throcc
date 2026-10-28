@@ -15,6 +15,7 @@ use tracing::{debug, info, warn};
 
 use crate::Shared;
 use crate::auth::{self, Refused};
+use crate::egress;
 use crate::rooms::{Link, Outgoing};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -126,6 +127,7 @@ async fn serve(shared: &Shared, connection: &quinn::Connection) -> Result<(), Re
     let link = Link {
         outgoing: outgoing.clone(),
         connection: connection.clone(),
+        egress: egress::spawn(connection.clone(), outgoing.clone()),
     };
     let connected = shared
         .hub()
@@ -135,6 +137,7 @@ async fn serve(shared: &Shared, connection: &quinn::Connection) -> Result<(), Re
         return Ok(());
     };
     drop(permit);
+    let ingress = tokio::spawn(shared.sfu.clone().ingress(conn_id, connection.clone()));
     info!(user = user.0, "authenticated");
 
     let FrameStream { mut send, mut recv } = stream;
@@ -146,6 +149,7 @@ async fn serve(shared: &Shared, connection: &quinn::Connection) -> Result<(), Re
     };
     shared.hub().disconnect(user, conn_id);
     writer.abort();
+    ingress.abort();
     result
 }
 

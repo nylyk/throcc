@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
@@ -7,19 +8,23 @@ use throcc_proto::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
     ErrorCode, Event, MAX_AVATAR_BYTES, MAX_NAME_CHARS, MediaState, Placed, Presence, PublicKey,
-    Request, Response, Room, RoomPeer, ServerMessage, Share, Signature, Tracks, Welcome,
+    Recovery, Request, Response, Room, RoomPeer, ServerMessage, Share, Signature, Tracks, Welcome,
 };
 use throcc_proto::transport::close;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::database::{Database, InviteRow, UserRow};
+use crate::egress::{EgressHandle, TrackKind};
 use crate::permissions;
+use crate::sfu::{ForwardingTable, KeyframeAggregator, Route, Sfu};
 
 pub const INVITE_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 const PROFILE_INTERVAL: Duration = Duration::from_secs(10);
 const TRACKS_PER_MEMBERSHIP: u32 = 3;
 const MINT_ATTEMPTS: usize = 64;
+const MAX_WATCHING: usize = 16;
+const MAX_WRAPPED_BYTES: usize = 256;
 
 pub struct Refusal(pub ErrorCode, pub String);
 
@@ -50,6 +55,7 @@ pub enum Outgoing {
 pub struct Link {
     pub outgoing: mpsc::Sender<Outgoing>,
     pub connection: quinn::Connection,
+    pub egress: EgressHandle,
 }
 
 impl Link {
@@ -84,13 +90,15 @@ struct RoomEntry {
 /// Rooms, presence and every connected session. One lock guards all of it.
 pub struct Hub {
     pub db: Database,
+    sfu: Arc<Sfu>,
+    keyframes: KeyframeAggregator,
     sessions: HashMap<UserId, Session>,
     rooms: BTreeMap<RoomId, RoomEntry>,
     next_conn: u64,
 }
 
 impl Hub {
-    pub fn new(db: Database) -> anyhow::Result<Self> {
+    pub fn new(db: Database, sfu: Arc<Sfu>) -> anyhow::Result<Self> {
         let rooms = db
             .rooms()?
             .into_iter()
@@ -107,6 +115,8 @@ impl Hub {
             .collect();
         Ok(Self {
             db,
+            sfu,
+            keyframes: KeyframeAggregator::default(),
             sessions: HashMap::new(),
             rooms,
             next_conn: 0,
@@ -173,6 +183,7 @@ impl Hub {
         {
             self.place(user, None).ok();
             self.sessions.remove(&user);
+            self.rebuild_routes();
         }
     }
 
@@ -194,11 +205,11 @@ impl Hub {
                 user: target,
                 cascade,
             } => self.remove_user(user, target, cascade),
-            Request::SetWatching(_)
-            | Request::RequestKeyframe { .. }
-            | Request::PublishKey { .. } => {
-                Err(Refusal::new(ErrorCode::Invalid, "not available yet"))
+            Request::SetWatching(ids) => self.set_watching(user, ids),
+            Request::RequestKeyframe { media_id, kind } => {
+                self.request_keyframe(user, media_id, kind)
             }
+            Request::PublishKey { epoch, wrapped } => self.publish_key(user, epoch, wrapped),
         };
         outcome.unwrap_or_else(|Refusal(code, message)| Response::Err { code, message })
     }
@@ -351,6 +362,7 @@ impl Hub {
             Some(p) => self.emit_all(Event::PresenceChanged(p)),
             None => self.emit_all(Event::PresenceEnded(user)),
         }
+        self.rebuild_routes();
         Ok(self.placed(user))
     }
 
@@ -458,9 +470,13 @@ impl Hub {
             return Err(Refusal::new(ErrorCode::Invalid, "join a room first"));
         };
         let share_changed = session.media.share != media.share;
+        let deafened_changed = session.media.deafened != media.deafened;
         session.media = media;
         if share_changed && let Some(event) = self.room_state(room) {
             self.emit_room(room, event, None);
+        }
+        if deafened_changed {
+            self.rebuild_routes();
         }
         if let Some(p) = self.sessions.get(&user).and_then(presence) {
             self.emit_all(Event::PresenceChanged(p));
@@ -619,6 +635,185 @@ impl Hub {
         }
         info!(?removed, "removed users");
         Ok(Response::Ok)
+    }
+
+    fn set_watching(&mut self, user: UserId, ids: Vec<MediaId>) -> Outcome {
+        if ids.len() > MAX_WATCHING {
+            return Err(Refusal::new(
+                ErrorCode::TooLarge,
+                "watching too many tracks",
+            ));
+        }
+        let room = self
+            .session(user)?
+            .room
+            .ok_or_else(|| Refusal::new(ErrorCode::Invalid, "join a room first"))?;
+        for id in &ids {
+            match self.share_track(*id) {
+                Some((owner, _))
+                    if owner != user
+                        && self.sessions.get(&owner).and_then(|s| s.room) == Some(room) => {}
+                _ => return Err(Refusal::new(ErrorCode::Invalid, "not a share in your room")),
+            }
+        }
+        let session = self.session_mut(user)?;
+        let started: Vec<MediaId> = ids
+            .iter()
+            .filter(|id| !session.watching.contains(id))
+            .copied()
+            .collect();
+        session.watching = ids;
+        self.rebuild_routes();
+        let now = Instant::now();
+        for id in started {
+            if let Some((owner, TrackKind::Video)) = self.share_track(id)
+                && let Some(kind) = self.keyframes.request(id, Recovery::Idr, now)
+            {
+                self.emit_to(owner, Event::KeyframeWanted { media_id: id, kind });
+            }
+        }
+        Ok(Response::Ok)
+    }
+
+    fn request_keyframe(&mut self, user: UserId, media_id: MediaId, kind: Recovery) -> Outcome {
+        if !self.session(user)?.watching.contains(&media_id) {
+            return Err(Refusal::new(
+                ErrorCode::Invalid,
+                "you aren't watching that track",
+            ));
+        }
+        let Some((owner, TrackKind::Video)) = self.share_track(media_id) else {
+            return Err(Refusal::new(ErrorCode::Invalid, "not a video track"));
+        };
+        if let Some(kind) = self.keyframes.request(media_id, kind, Instant::now()) {
+            self.emit_to(owner, Event::KeyframeWanted { media_id, kind });
+        }
+        Ok(Response::Ok)
+    }
+
+    /// Forwards keyframe requests that waited out their interval.
+    pub fn flush_keyframes(&mut self) {
+        for (media_id, kind) in self.keyframes.due(Instant::now()) {
+            match self.share_track(media_id) {
+                Some((owner, _)) => self.emit_to(owner, Event::KeyframeWanted { media_id, kind }),
+                None => self.keyframes.forget(media_id),
+            }
+        }
+    }
+
+    fn publish_key(
+        &mut self,
+        user: UserId,
+        epoch: Epoch,
+        wrapped: Vec<(UserId, Vec<u8>)>,
+    ) -> Outcome {
+        let room = self
+            .session(user)?
+            .room
+            .ok_or_else(|| Refusal::new(ErrorCode::Invalid, "join a room first"))?;
+        let entry = self
+            .rooms
+            .get(&room)
+            .ok_or_else(|| Refusal::new(ErrorCode::NotFound, "no such room"))?;
+        if epoch != entry.epoch {
+            return Err(Refusal::new(
+                ErrorCode::StaleEpoch,
+                "the room has moved to a newer epoch",
+            ));
+        }
+        let mut recipients = BTreeSet::new();
+        for (to, blob) in &wrapped {
+            if *to == user || !entry.members.contains(to) || !recipients.insert(*to) {
+                return Err(Refusal::new(
+                    ErrorCode::Invalid,
+                    "every recipient must be another member of the room, once",
+                ));
+            }
+            if blob.len() > MAX_WRAPPED_BYTES {
+                return Err(Refusal::new(ErrorCode::TooLarge, "wrapped key too large"));
+            }
+        }
+        for (to, wrapped) in wrapped {
+            self.emit_to(
+                to,
+                Event::SenderKey {
+                    from: user,
+                    epoch,
+                    wrapped,
+                },
+            );
+        }
+        Ok(Response::Ok)
+    }
+
+    /// The owner and kind of a share track.
+    fn share_track(&self, media_id: MediaId) -> Option<(UserId, TrackKind)> {
+        self.sessions.values().find_map(|s| {
+            let share = s
+                .tracks
+                .as_ref()?
+                .shares
+                .iter()
+                .find(|sh| sh.video == media_id || sh.audio == media_id)?;
+            let kind = if share.video == media_id {
+                TrackKind::Video
+            } else {
+                TrackKind::Audio
+            };
+            Some((s.row.id, kind))
+        })
+    }
+
+    /// Recomputes who receives what and publishes it to the ingress loops.
+    fn rebuild_routes(&self) {
+        let mut table = ForwardingTable::default();
+        for entry in self.rooms.values() {
+            let members: Vec<&Session> = entry
+                .members
+                .iter()
+                .filter_map(|m| self.sessions.get(m))
+                .collect();
+            for sender in &members {
+                let Some(tracks) = &sender.tracks else {
+                    continue;
+                };
+                let others = || members.iter().filter(|m| m.row.id != sender.row.id);
+                let hearing = || others().filter(|m| !m.media.deafened);
+                table.routes.insert(
+                    tracks.mic,
+                    Route {
+                        owner: sender.conn_id,
+                        kind: TrackKind::Audio,
+                        subscribers: hearing().map(|m| m.link.egress.clone()).collect(),
+                    },
+                );
+                for share in &tracks.shares {
+                    let watchers = |id: MediaId| others().filter(move |m| m.watching.contains(&id));
+                    table.routes.insert(
+                        share.video,
+                        Route {
+                            owner: sender.conn_id,
+                            kind: TrackKind::Video,
+                            subscribers: watchers(share.video)
+                                .map(|m| m.link.egress.clone())
+                                .collect(),
+                        },
+                    );
+                    table.routes.insert(
+                        share.audio,
+                        Route {
+                            owner: sender.conn_id,
+                            kind: TrackKind::Audio,
+                            subscribers: watchers(share.audio)
+                                .filter(|m| !m.media.deafened)
+                                .map(|m| m.link.egress.clone())
+                                .collect(),
+                        },
+                    );
+                }
+            }
+        }
+        self.sfu.table.store(Arc::new(table));
     }
 
     fn require(&self, allowed: bool) -> Result<(), Refusal> {

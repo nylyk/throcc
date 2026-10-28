@@ -17,6 +17,7 @@ throcc-proto = { path = "crates/throcc-proto" }
 throcc-crypto = { path = "crates/throcc-crypto", default-features = false }
 throcc-client-core = { path = "crates/throcc-client-core" }
 
+aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "zeroize"] }
 anyhow = "1.0.104"
 arc-swap = "1.9.3"
 bytes = "1.12.1"
@@ -34,6 +35,7 @@ proptest = "1.12.0"
 quinn = { version = "0.11.12", default-features = false, features = ["log", "runtime-tokio", "rustls-ring"] }
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+ring = "0.17.14"
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 rustls-webpki = { version = "0.103.16", default-features = false, features = ["ring", "std"] }

@@ -75,3 +75,14 @@ A fresh subagent reviewed `pake.rs`, `identity.rs`, `auth.rs`, `permissions.rs`,
 7. **Low, fixed:** the limiter drops sources whose window is empty.
 8. **Nit, accepted:** a known id costs one SQLite write before `PakeReply`; an unknown id doesn't. Each id yields at most 3 samples before it burns, and ids are only 15 bits, so learning which exist gains nothing.
 9. **Nit, fixed:** a failed write of the try count refuses the run.
+
+## 2026-10-28 M5 media path
+
+- **Media AEAD is RustCrypto `aes-gcm` with `zeroize`**, not `ring` or `aws-lc-rs`. Its key schedule is wiped on drop, which §5.7's "zeroized" needs; `ring` keys can't be wiped. It is already in the tree through `hpke`. A property test checks every output against `ring`. `scripts/check-server-deps.sh` bans `aes-gcm` and `hpke` from the server.
+- **Safety numbers use Signal's numeric fingerprint** (SHA-512, 5200 iterations, 30 bytes as six 5-digit groups per key, the lower half first), with the identity key as its own stable identifier. The test vector was computed independently with Python's `hashlib`.
+- **A user whose identity key changed is left out of key distribution until the change is accepted**, matching the mockup's "Accept new key". A peer whose encryption key signature fails is left out too.
+- **Sender keys that arrive before their room state are held for 2 s and applied with it.** The `Placed` reply and peers' `SenderKey` events travel separate paths in the client and can be processed in either order.
+- **The receive loop checks the replay window before decryption**, as §5.12 lays out. Only the server can inject datagrams on the connection, and it can already deny service, so a forged high `seq` costs nothing new.
+- **The SFU's video budget counts both ways:** queued bytes over the path rate quinn reports (congestion window over RTT), and the age of the oldest unit not yet sent. Either over 150 ms triggers drops.
+- **The sender drops video older than 100 ms when its turn comes** (`SEND_BUDGET`), before it gets a `seq`, and tells the encoder to recover unless the unit was discardable.
+- **The reorder window lives in `media/reorder.rs`**, shared by future video and the synthetic path, not under `media/video/`.

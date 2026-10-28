@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-banned='^(rsmpeg|rusty_ffmpeg|ffmpeg-sys|ffmpeg-sys-next|ffmpeg-next|cpal|sonora|sonora-common-audio|ropus|neteq|hpke|gpui-pre|gpui-component|screencapturekit|windows-capture|pipewire) '
+banned='^(aes-gcm|rsmpeg|rusty_ffmpeg|ffmpeg-sys|ffmpeg-sys-next|ffmpeg-next|cpal|sonora|sonora-common-audio|ropus|neteq|hpke|gpui-pre|gpui-component|screencapturekit|windows-capture|pipewire) '
 
 tree=$(cargo tree -p throcc-server -e normal,build --target all --prefix none -f '{p} [{f}]')
 

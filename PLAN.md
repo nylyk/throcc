@@ -650,14 +650,14 @@ WantedBy=multi-user.target
 
 ### M5 Media wire format and E2EE (freeze)
 
-- [ ] `frame.rs` header encode/decode. Flags. Size constants with `const` assertions.
-- [ ] Fragmenter and reassembler, media timestamp, 2048-bit dedup window.
-- [ ] `throcc-crypto::media` (AES-128-GCM transform) and `hpke.rs` (auth-mode wrap and unwrap).
-- [ ] Client key manager: per-epoch secrets, `PublishKey`, `SenderKey`, 500 ms pending buffer, 2 s grace, zeroize.
-- [ ] Server key relay checks: current epoch, recipients in room.
-- [ ] Contact pinning, key-change detection, safety-number derivation with test vectors.
-- [ ] CLI `send-synthetic` and `recv` that move fake access units of configurable size and rate through the real path.
-- [ ] Fuzz targets for header parsing and reassembly.
+- [x] `frame.rs` header encode/decode. Flags. Size constants with `const` assertions.
+- [x] Fragmenter and reassembler, media timestamp, 2048-bit dedup window.
+- [x] `throcc-crypto::media` (AES-128-GCM transform) and `hpke.rs` (auth-mode wrap and unwrap).
+- [x] Client key manager: per-epoch secrets, `PublishKey`, `SenderKey`, 500 ms pending buffer, 2 s grace, zeroize.
+- [x] Server key relay checks: current epoch, recipients in room.
+- [x] Contact pinning, key-change detection, safety-number derivation with test vectors.
+- [x] CLI `send-synthetic` and `recv` that move fake access units of configurable size and rate through the real path.
+- [x] Fuzz targets for header parsing and reassembly.
 - [ ] **Parallel:** M7a (audio pipeline against WAV files) and M9a (encode/decode against recorded frames) start now in worktrees.
 - [ ] **Review subagent** on everything in this milestone.
 

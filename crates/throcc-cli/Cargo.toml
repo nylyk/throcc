@@ -12,12 +12,14 @@ workspace = true
 throcc-client-core.workspace = true
 throcc-proto.workspace = true
 anyhow.workspace = true
+bytes.workspace = true
 clap.workspace = true
 tokio = { workspace = true, features = ["io-std", "io-util", "signal"] }
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
+bytes.workspace = true
 tokio = { workspace = true, features = ["io-util"] }
 postcard.workspace = true
 quinn.workspace = true
