@@ -1,0 +1,13 @@
+[package]
+name = "throcc-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+throcc-proto.workspace = true
+throcc-crypto.workspace = true

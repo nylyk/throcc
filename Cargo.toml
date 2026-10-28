@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+
+[workspace.dependencies]
+throcc-proto = { path = "crates/throcc-proto" }
+throcc-crypto = { path = "crates/throcc-crypto", default-features = false }
+throcc-client-core = { path = "crates/throcc-client-core" }
