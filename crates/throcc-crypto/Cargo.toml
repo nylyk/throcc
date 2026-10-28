@@ -10,7 +10,17 @@ workspace = true
 
 [features]
 default = []
-media = []
+media = ["dep:hpke"]
 
 [dependencies]
 throcc-proto.workspace = true
+ed25519-dalek.workspace = true
+getrandom.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+spake2.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+hpke = { workspace = true, optional = true }
+zeroize.workspace = true

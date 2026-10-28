@@ -46,3 +46,18 @@ Each entry: date, decision, why, alternatives.
 - **Decision:** `DATAGRAM_PAYLOAD_FLOOR` is 1162, measured with quinn 0.11.12 at a 1200-byte MTU with discovery off (`payload_floor_matches_quinn_at_1200_bytes`). TLS uses rustls with the `ring` provider, TLS 1.3 only.
 - **Why:** the measured value matches PLAN.md §5.5. `ring` avoids aws-lc's C and CMake build on Windows.
 - **Alternatives:** `aws-lc-rs` as the provider.
+
+## 2026-10-28 M2–M4 protocol details
+
+- **`PakeStep = Result<PakeReply, AuthError>`.** The server answers `Hello::Enroll` with this, so a rate-limited client gets a reason instead of a PAKE reply it can't parse. Postcard isn't self-describing, so the two shapes need one tagged type. Alternative: one handshake enum for every server-to-client handshake message.
+- **`AuthResult::Ok` boxes a `Welcome` struct** with the spec's fields, to keep the enum small.
+- **Failed enrollments count per source, whether the id is unknown or the secret is wrong.** Ten failures per 10 minutes per IPv4 address or IPv6 /64, then `RateLimited`. Unknown ids run the PAKE against a random decoy secret, so they fail at the same step as a wrong secret. Counting only unknown ids would let the limiter itself reveal which ids exist.
+- **An invite's try is counted before the server sends `PakeReply`**, and the burn check runs whenever a run ends without success. A client that disconnects mid-run still uses a try.
+- **The bootstrap invite has no minter**; whoever enrolls with it becomes Admin.
+- **Only admins set roles, and only to a rank below their own.** The mockup offers only Manager and User, so there is one Admin. Cascade removal is refused if anyone in the invite tree has a rank at or above the actor's.
+- **A second connection by the same user kicks the first**, because presence is keyed by user.
+- **Lobby clients publish no presence.** `Presence.room` is always `Some`; leaving to the lobby sends `PresenceEnded`.
+- **`SetEncKey` is verified by the server** against the identity key and is required before `SetRoom`. Changing it while in a room bumps the epoch.
+- **`SetMedia` only bumps nothing**: a share change re-sends `RoomState` at the same epoch, so peers learn the codec without rekeying.
+- **The X25519 encryption key's private half lives in a 0600 file** next to the keystore, with its creation time, and is replaced after 30 days. The identity key uses the OS keychain. Alternative: both in the keychain.
+- **A kicked session's writer sends `Kicked`, finishes the stream and waits up to 2 s for the client to read it before closing.** Closing at once dropped the event.

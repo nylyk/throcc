@@ -32,5 +32,8 @@ async fn main() -> Result<()> {
     })?;
     tracing::info!("listening on {}", server.local_addr()?);
     tracing::info!("server fingerprint {}", server.fingerprint());
+    if let Some(code) = server.bootstrap_invite() {
+        tracing::info!("no users yet; the first to join with invite {code} becomes admin");
+    }
     server.run().await
 }

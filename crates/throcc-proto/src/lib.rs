@@ -1,5 +1,9 @@
 pub mod fingerprint;
 pub mod frame;
+pub mod framing;
+pub mod ids;
+pub mod invite;
+pub mod messages;
 pub mod transport;
 
 pub use fingerprint::Fingerprint;

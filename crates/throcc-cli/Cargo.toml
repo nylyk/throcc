@@ -10,10 +10,17 @@ workspace = true
 
 [dependencies]
 throcc-client-core.workspace = true
+throcc-proto.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio = { workspace = true, features = ["io-std", "io-util", "signal"] }
+tracing-subscriber.workspace = true
 
 [dev-dependencies]
+anyhow.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+postcard.workspace = true
 quinn.workspace = true
+throcc-crypto.workspace = true
 tempfile.workspace = true
-throcc-proto.workspace = true
 throcc-server = { path = "../throcc-server" }
-tokio.workspace = true

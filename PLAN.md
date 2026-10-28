@@ -605,10 +605,10 @@ WantedBy=multi-user.target
 
 ### M2 Control protocol and CLI
 
-- [ ] `throcc-proto`: ids, every message in §5.2, framing with the 1 MiB cap.
-- [ ] Request ids, pending map, `ServerMessage` tagging, protocol-error handling.
-- [ ] `throcc-cli` with subcommands: `enroll`, `connect`, `rooms`, `join`, `leave`, `invite`, `users`.
-- [ ] Fuzz target for framing (cargo-fuzz), run 10 minutes in CI nightly.
+- [x] `throcc-proto`: ids, every message in §5.2, framing with the 1 MiB cap.
+- [x] Request ids, pending map, `ServerMessage` tagging, protocol-error handling.
+- [x] `throcc-cli` with subcommands: `enroll`, `connect`, `rooms`, `join`, `leave`, `invite`, `users`.
+- [x] Fuzz target for framing (cargo-fuzz), run 10 minutes in CI nightly.
 - [ ] **Parallel (M8a):** a subagent builds the gpui shell and the Join, Lobby and Room screens against `MockClient`.
 
 **Done when:**
@@ -620,10 +620,10 @@ WantedBy=multi-user.target
 
 ### M3 Identity, enrollment, roles
 
-- [ ] `throcc-crypto::pake` per S1. `identity.rs` for signing and verification.
-- [ ] Enrollment flow §5.3 with channel binding, invite storage, 3-strike burn, per-source limiter, `InviteBurned`.
-- [ ] Returning-client auth. Bootstrap invite. Daily cap. Roles and rank checks in one module, `permissions.rs`.
-- [ ] Keystore using the OS keychain with a file fallback.
+- [x] `throcc-crypto::pake` per S1. `identity.rs` for signing and verification.
+- [x] Enrollment flow §5.3 with channel binding, invite storage, 3-strike burn, per-source limiter, `InviteBurned`.
+- [x] Returning-client auth. Bootstrap invite. Daily cap. Roles and rank checks in one module, `permissions.rs`.
+- [x] Keystore using the OS keychain with a file fallback.
 - [ ] **Review subagent** on `pake.rs`, `auth.rs` and `permissions.rs`.
 
 **Done when:**
@@ -637,10 +637,10 @@ WantedBy=multi-user.target
 
 ### M4 Rooms and presence
 
-- [ ] `SetRoom` transaction, media id allocation, epoch bump, `Placed`, `RoomState`, presence events.
-- [ ] Room create, rename and delete with permissions. Deleting an occupied room moves people to `None`.
+- [x] `SetRoom` transaction, media id allocation, epoch bump, `Placed`, `RoomState`, presence events.
+- [x] Room create, rename and delete with permissions. Deleting an occupied room moves people to `None`.
 - [ ] `SetProfile` rate limit, avatars with lazy fetch.
-- [ ] Reconnect with `want_room`.
+- [x] Reconnect with `want_room`.
 
 **Done when:**
 
