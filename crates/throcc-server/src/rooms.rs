@@ -19,6 +19,7 @@ use crate::permissions;
 pub const INVITE_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 const PROFILE_INTERVAL: Duration = Duration::from_secs(10);
 const TRACKS_PER_MEMBERSHIP: u32 = 3;
+const MINT_ATTEMPTS: usize = 64;
 
 pub struct Refusal(pub ErrorCode, pub String);
 
@@ -113,14 +114,21 @@ impl Hub {
     }
 
     /// Registers a connection that has authenticated as `row`. A previous connection of the
-    /// same user is kicked. Returns the connection id and the welcome snapshot.
+    /// same user is kicked. Returns the connection id and the welcome snapshot, or `None`
+    /// if the user was removed after authenticating.
     pub fn connect(
         &mut self,
         row: UserRow,
         link: Link,
         want_room: Option<RoomId>,
-    ) -> (u64, Welcome) {
+    ) -> Option<(u64, Welcome)> {
         let user = row.id;
+        let row = self
+            .db
+            .user(user)
+            .ok()
+            .flatten()
+            .filter(|current| current.pubkey == row.pubkey)?;
         if self.sessions.contains_key(&user) {
             self.place(user, None).ok();
             if let Some(old) = self.sessions.remove(&user) {
@@ -154,7 +162,7 @@ impl Hub {
             presence: self.sessions.values().filter_map(presence).collect(),
             placed,
         };
-        (conn_id, welcome)
+        Some((conn_id, welcome))
     }
 
     pub fn disconnect(&mut self, user: UserId, conn_id: u64) {
@@ -538,7 +546,7 @@ impl Hub {
     ) -> anyhow::Result<(InviteCode, u64)> {
         self.db.purge_expired_invites(now)?;
         let expires_at = now + INVITE_LIFETIME.as_secs();
-        loop {
+        for _ in 0..MINT_ATTEMPTS {
             let code = InviteCode::from_random(random());
             let row = InviteRow {
                 code_id: code.id.clone(),
@@ -551,6 +559,7 @@ impl Hub {
                 return Ok((code, expires_at));
             }
         }
+        anyhow::bail!("no free invite id; too many live invites")
     }
 
     fn list_users(&mut self, user: UserId) -> Outcome {

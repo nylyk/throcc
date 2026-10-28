@@ -6,7 +6,8 @@ use serde::de::DeserializeOwned;
 use throcc_crypto::identity::random;
 use throcc_proto::framing::{self, FrameError, HEADER_BYTES};
 use throcc_proto::messages::{
-    AuthResult, ClientMessage, Event, Hello, PROTOCOL, PakeStep, ServerHello, ServerMessage,
+    AuthError, AuthResult, ClientMessage, Event, Hello, PROTOCOL, PakeStep, ServerHello,
+    ServerMessage,
 };
 use throcc_proto::transport::close;
 use tokio::sync::mpsc;
@@ -17,6 +18,7 @@ use crate::auth::{self, Refused};
 use crate::rooms::{Link, Outgoing};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+pub const HANDSHAKE_FRAME_BYTES: usize = 4096;
 const EVENT_QUEUE: usize = 1024;
 /// How long a closing session waits for the client to read its last message.
 const LINGER: Duration = Duration::from_secs(2);
@@ -36,11 +38,29 @@ pub enum ReadError {
 
 /// Reads one frame. The body is allocated only after its length passes the cap.
 pub async fn read_frame<T: DeserializeOwned>(recv: &mut quinn::RecvStream) -> Result<T, ReadError> {
+    read_capped(recv, framing::MAX_FRAME_BYTES).await
+}
+
+/// Reads one handshake frame, which is never larger than [`HANDSHAKE_FRAME_BYTES`].
+pub async fn read_handshake<T: DeserializeOwned>(
+    recv: &mut quinn::RecvStream,
+) -> Result<T, ReadError> {
+    read_capped(recv, HANDSHAKE_FRAME_BYTES).await
+}
+
+async fn read_capped<T: DeserializeOwned>(
+    recv: &mut quinn::RecvStream,
+    cap: usize,
+) -> Result<T, ReadError> {
     let mut header = [0u8; HEADER_BYTES];
     recv.read_exact(&mut header)
         .await
         .map_err(|_| ReadError::Closed)?;
-    let mut body = vec![0u8; framing::body_len(header)?];
+    let len = framing::body_len(header)?;
+    if len > cap {
+        return Err(FrameError::TooLarge(len).into());
+    }
+    let mut body = vec![0u8; len];
     recv.read_exact(&mut body)
         .await
         .map_err(|_| ReadError::Closed)?;
@@ -80,7 +100,14 @@ async fn serve(shared: &Shared, connection: &quinn::Connection) -> Result<(), Re
     )
     .await
     .map_err(|_| ReadError::Closed)?;
-    let hello: Hello = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_frame(&mut stream.recv))
+    let Ok(permit) = shared.handshakes.try_acquire() else {
+        connection.close(
+            close::SERVER_BUSY.into(),
+            b"too many connections are signing in",
+        );
+        return Ok(());
+    };
+    let hello: Hello = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_handshake(&mut stream.recv))
         .await
         .map_err(|_| ReadError::Closed)??;
 
@@ -100,9 +127,14 @@ async fn serve(shared: &Shared, connection: &quinn::Connection) -> Result<(), Re
         outgoing: outgoing.clone(),
         connection: connection.clone(),
     };
-    let (conn_id, welcome) = shared
+    let connected = shared
         .hub()
         .connect(authenticated.row, link, authenticated.want_room);
+    let Some((conn_id, welcome)) = connected else {
+        refuse(connection, stream, Refused::Hello(AuthError::UnknownKey)).await;
+        return Ok(());
+    };
+    drop(permit);
     info!(user = user.0, "authenticated");
 
     let FrameStream { mut send, mut recv } = stream;

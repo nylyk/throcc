@@ -624,7 +624,7 @@ WantedBy=multi-user.target
 - [x] Enrollment flow §5.3 with channel binding, invite storage, 3-strike burn, per-source limiter, `InviteBurned`.
 - [x] Returning-client auth. Bootstrap invite. Daily cap. Roles and rank checks in one module, `permissions.rs`.
 - [x] Keystore using the OS keychain with a file fallback.
-- [ ] **Review subagent** on `pake.rs`, `auth.rs` and `permissions.rs`.
+- [x] **Review subagent** on `pake.rs`, `auth.rs` and `permissions.rs`.
 
 **Done when:**
 

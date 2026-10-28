@@ -4,19 +4,19 @@ use std::time::{Duration, Instant};
 
 use throcc_crypto::identity::{self, random};
 use throcc_crypto::pake::{ServerPake, Transcript};
-use throcc_proto::ids::{Role, RoomId};
+use throcc_proto::ids::RoomId;
 use throcc_proto::invite::{self, ID_CHARS, SECRET_CHARS};
 use throcc_proto::messages::{AuthError, Event, Hello, PakeFinish, PakeReply, PakeStep, PublicKey};
 use tracing::{info, warn};
 
 use crate::Shared;
-use crate::database::UserRow;
+use crate::database::{InviteRow, UserRow};
 use crate::rooms::unix_now;
-use crate::session::{FrameStream, read_frame, write_frame};
+use crate::session::{FrameStream, read_handshake, write_frame};
 
 pub const INVITE_TRIES: u32 = 3;
 const PAKE_TIMEOUT: Duration = Duration::from_secs(30);
-const SOURCE_FAILURES: usize = 10;
+const SOURCE_RUNS: usize = 10;
 const SOURCE_WINDOW: Duration = Duration::from_secs(10 * 60);
 
 /// A refusal, tagged with the message type the client is waiting for.
@@ -94,29 +94,13 @@ struct Enrollment<'a> {
 
 impl Enrollment<'_> {
     async fn run(&self, stream: &mut FrameStream, pake_a: &[u8]) -> Result<UserRow, Refused> {
-        if !self.shared.limiter().allows(self.source) {
+        // A run counts against its source from the start, so parallel runs can't outpace the limit.
+        if !self.shared.limiter().begin(self.source) {
             warn!(source = ?self.source, "enrollment rate-limited");
             return Err(Refused::Enroll(AuthError::RateLimited));
         }
         let now = unix_now();
-        let invite = {
-            let hub = self.shared.hub();
-            let invite = hub
-                .db
-                .invite(&self.code_id)
-                .ok()
-                .flatten()
-                .filter(|i| i.expires_at > now && i.failures < INVITE_TRIES);
-            if invite.is_some() {
-                // A run counts as failed until it completes, so dropping the connection
-                // halfway still uses up one of the invite's tries.
-                hub.db.record_invite_failure(&self.code_id).ok();
-            }
-            invite
-        };
-        if invite.is_none() {
-            warn!(source = ?self.source, code_id = %self.code_id, "enrollment with an unknown invite id");
-        }
+        let invite = self.claim_try(now)?;
         let secret = match &invite {
             Some(invite) => invite.secret.clone(),
             None => decoy_secret(),
@@ -124,47 +108,67 @@ impl Enrollment<'_> {
 
         let outcome = self.exchange(stream, &secret, pake_a).await;
         let mut hub = self.shared.hub();
-        match (outcome, &invite) {
-            (Ok(()), Some(invite)) => {
-                let role = if invite.minted_by.is_none() {
-                    Role::Admin
-                } else {
-                    Role::User
-                };
-                let row = hub
-                    .db
-                    .enroll(&self.pubkey, role, invite.minted_by, &self.code_id, now)
-                    .map_err(|_| Refused::Hello(AuthError::BadInvite))?;
-                info!(user = row.id.0, ?role, "enrolled");
-                hub.emit_admins(Event::UserAdded(row.to_user()));
-                Ok(row)
-            }
-            _ => {
-                drop(hub);
-                self.shared.limiter().record_failure(self.source);
-                let hub = self.shared.hub();
-                if let Some(invite) = &invite
-                    && hub
-                        .db
-                        .invite(&self.code_id)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|i| i.failures >= INVITE_TRIES)
-                {
-                    hub.db.delete_invite(&self.code_id).ok();
-                    warn!(code_id = %self.code_id, "invite burned after {INVITE_TRIES} failed runs");
-                    if let Some(minter) = invite.minted_by {
-                        hub.emit_to(
-                            minter,
-                            Event::InviteBurned {
-                                code_id: self.code_id.clone(),
-                            },
-                        );
-                    }
+        if let (Ok(()), Some(_)) = (&outcome, &invite) {
+            match hub.db.enroll(&self.pubkey, &self.code_id, now) {
+                Ok(Some(row)) => {
+                    drop(hub);
+                    self.shared.limiter().forgive(self.source);
+                    info!(user = row.id.0, role = ?row.role, "enrolled");
+                    self.shared
+                        .hub()
+                        .emit_admins(Event::UserAdded(row.to_user()));
+                    return Ok(row);
                 }
-                Err(Refused::Hello(AuthError::BadInvite))
+                Ok(None) => info!(code_id = %self.code_id, "invite was used up during the run"),
+                Err(e) => warn!("enrollment failed: {e:#}"),
             }
         }
+        if let Some(invite) = &invite
+            && hub
+                .db
+                .invite(&self.code_id)
+                .ok()
+                .flatten()
+                .is_some_and(|i| i.failures >= INVITE_TRIES)
+        {
+            hub.db.delete_invite(&self.code_id).ok();
+            warn!(code_id = %self.code_id, "invite burned after {INVITE_TRIES} failed runs");
+            if let Some(minter) = invite.minted_by {
+                hub.emit_to(
+                    minter,
+                    Event::InviteBurned {
+                        code_id: self.code_id.clone(),
+                    },
+                );
+            }
+        }
+        Err(Refused::Hello(AuthError::BadInvite))
+    }
+
+    /// Looks up the invite and uses up one of its tries before any PAKE message is sent,
+    /// so a run that is dropped halfway still costs a try.
+    fn claim_try(&self, now: u64) -> Result<Option<InviteRow>, Refused> {
+        let hub = self.shared.hub();
+        let invite = if self.code_id.len() == ID_CHARS {
+            hub.db
+                .invite(&self.code_id)
+                .map_err(|_| Refused::Enroll(AuthError::BadInvite))?
+                .filter(|i| i.expires_at > now && i.failures < INVITE_TRIES)
+        } else {
+            None
+        };
+        match &invite {
+            Some(_) => {
+                hub.db
+                    .record_invite_failure(&self.code_id)
+                    .map_err(|_| Refused::Enroll(AuthError::BadInvite))?;
+            }
+            None => {
+                let shown: String = self.code_id.chars().take(8).collect();
+                warn!(source = ?self.source, code_id = %shown, "enrollment with an unknown invite id");
+            }
+        }
+        Ok(invite)
     }
 
     async fn exchange(
@@ -194,10 +198,11 @@ impl Enrollment<'_> {
         write_frame(&mut stream.send, &step)
             .await
             .map_err(|_| AuthError::BadInvite)?;
-        let finish: PakeFinish = tokio::time::timeout(PAKE_TIMEOUT, read_frame(&mut stream.recv))
-            .await
-            .map_err(|_| AuthError::BadInvite)?
-            .map_err(|_| AuthError::BadInvite)?;
+        let finish: PakeFinish =
+            tokio::time::timeout(PAKE_TIMEOUT, read_handshake(&mut stream.recv))
+                .await
+                .map_err(|_| AuthError::BadInvite)?
+                .map_err(|_| AuthError::BadInvite)?;
         pake.check_confirm_a(&transcript, &finish.confirm_a)
             .map_err(|_| AuthError::BadInvite)?;
         identity::verify(&self.pubkey, &transcript.to_bytes(), &finish.signature)
@@ -238,28 +243,33 @@ impl SourceKey {
     }
 }
 
-/// Counts failed enrollments per source in a sliding window.
+/// Counts enrollment runs per source in a sliding window. Successful runs are forgiven.
 #[derive(Default)]
 pub struct SourceLimiter {
-    failures: HashMap<SourceKey, VecDeque<Instant>>,
+    runs: HashMap<SourceKey, VecDeque<Instant>>,
 }
 
 impl SourceLimiter {
-    pub fn allows(&mut self, source: SourceKey) -> bool {
-        let Some(times) = self.failures.get_mut(&source) else {
-            return true;
-        };
-        while times.front().is_some_and(|t| t.elapsed() > SOURCE_WINDOW) {
-            times.pop_front();
+    /// Records the start of a run, or returns false if the source is over its limit.
+    pub fn begin(&mut self, source: SourceKey) -> bool {
+        self.runs.retain(|_, times| {
+            while times.front().is_some_and(|t| t.elapsed() > SOURCE_WINDOW) {
+                times.pop_front();
+            }
+            !times.is_empty()
+        });
+        let times = self.runs.entry(source).or_default();
+        if times.len() >= SOURCE_RUNS {
+            return false;
         }
-        times.len() < SOURCE_FAILURES
+        times.push_back(Instant::now());
+        true
     }
 
-    pub fn record_failure(&mut self, source: SourceKey) {
-        self.failures
-            .entry(source)
-            .or_default()
-            .push_back(Instant::now());
+    pub fn forgive(&mut self, source: SourceKey) {
+        if let Some(times) = self.runs.get_mut(&source) {
+            times.pop_back();
+        }
     }
 }
 
@@ -283,11 +293,12 @@ mod tests {
     fn limiter_blocks_after_repeated_failures() {
         let mut limiter = SourceLimiter::default();
         let source = SourceKey::of("192.0.2.1".parse().unwrap());
-        for _ in 0..SOURCE_FAILURES {
-            assert!(limiter.allows(source));
-            limiter.record_failure(source);
+        for _ in 0..SOURCE_RUNS {
+            assert!(limiter.begin(source));
         }
-        assert!(!limiter.allows(source));
-        assert!(limiter.allows(SourceKey::of("192.0.2.2".parse().unwrap())));
+        assert!(!limiter.begin(source));
+        limiter.forgive(source);
+        assert!(limiter.begin(source));
+        assert!(limiter.begin(SourceKey::of("192.0.2.2".parse().unwrap())));
     }
 }

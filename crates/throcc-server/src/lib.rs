@@ -23,6 +23,7 @@ use crate::rooms::{Hub, unix_now};
 pub use crate::tls::Congestion;
 
 const DATABASE_FILE: &str = "throcc.sqlite";
+const MAX_HANDSHAKES: usize = 128;
 
 pub struct Config {
     pub data_dir: PathBuf,
@@ -35,6 +36,8 @@ pub struct Shared {
     pub fingerprint: Fingerprint,
     hub: Mutex<Hub>,
     limiter: Mutex<SourceLimiter>,
+    /// Bounds connections that haven't authenticated yet.
+    pub handshakes: tokio::sync::Semaphore,
 }
 
 impl Shared {
@@ -74,6 +77,7 @@ impl Server {
             fingerprint: identity.fingerprint,
             hub: Mutex::new(hub),
             limiter: Mutex::default(),
+            handshakes: tokio::sync::Semaphore::new(MAX_HANDSHAKES),
         });
         Ok(Self {
             endpoint,

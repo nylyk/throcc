@@ -29,6 +29,7 @@ pub fn server_config(
 
     let mut config = quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls)?));
     config.transport_config(Arc::new(transport));
+    config.max_incoming(256);
     Ok(config)
 }
 

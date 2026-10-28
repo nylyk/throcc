@@ -7,7 +7,7 @@ use throcc_proto::messages::{PublicKey, Room, Signature, User};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     pubkey BLOB NOT NULL UNIQUE,
     enc_key BLOB,
     enc_key_sig BLOB,
@@ -160,17 +160,34 @@ impl Database {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Adds a user and consumes the invite they used, in one transaction.
+    /// Consumes the invite and adds its user, in one transaction. Returns `None`, changing
+    /// nothing, when the invite is gone or expired. The bootstrap invite enrolls an admin;
+    /// an existing key keeps its user and role.
     pub fn enroll(
         &mut self,
         pubkey: &PublicKey,
-        role: Role,
-        invited_by: Option<UserId>,
         code_id: &str,
         now: u64,
-    ) -> Result<UserRow> {
+    ) -> Result<Option<UserRow>> {
         let tx = self.conn.transaction()?;
-        tx.execute("DELETE FROM invites WHERE code_id = ?1", [code_id])?;
+        let minted_by: Option<Option<i64>> = tx
+            .query_row(
+                "SELECT minted_by FROM invites WHERE code_id = ?1 AND expires_at > ?2",
+                params![code_id, now as i64],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(minted_by) = minted_by else {
+            return Ok(None);
+        };
+        if tx.execute("DELETE FROM invites WHERE code_id = ?1", [code_id])? != 1 {
+            return Ok(None);
+        }
+        let role = if minted_by.is_none() {
+            Role::Admin
+        } else {
+            Role::User
+        };
         let existing: Option<i64> = tx
             .query_row(
                 "SELECT id FROM users WHERE pubkey = ?1",
@@ -183,7 +200,7 @@ impl Database {
             None => {
                 tx.execute(
                     "INSERT INTO users (pubkey, name, role, invited_by, created_at) VALUES (?1, '', ?2, ?3, ?4)",
-                    params![pubkey.as_slice(), role.rank(), invited_by.map(|u| u.0 as i64), now as i64],
+                    params![pubkey.as_slice(), role.rank(), minted_by, now as i64],
                 )?;
                 let id = tx.last_insert_rowid();
                 tx.execute(
@@ -194,8 +211,7 @@ impl Database {
             }
         };
         tx.commit()?;
-        self.user(UserId(id as u64))?
-            .context("enrolled user vanished")
+        self.user(UserId(id as u64))
     }
 
     pub fn set_enc_key(&self, user: UserId, key: &PublicKey, sig: &Signature) -> Result<()> {
@@ -435,7 +451,16 @@ mod tests {
     use super::*;
 
     fn enroll(db: &mut Database, key: u8, by: Option<UserId>) -> UserId {
-        db.enroll(&[key; 32], Role::User, by, "X", 100).unwrap().id
+        let code = format!("C{key:02}");
+        db.insert_invite(&InviteRow {
+            code_id: code.clone(),
+            secret: "S".into(),
+            minted_by: by,
+            expires_at: 1000,
+            failures: 0,
+        })
+        .unwrap();
+        db.enroll(&[key; 32], &code, 100).unwrap().unwrap().id
     }
 
     #[test]
@@ -490,9 +515,33 @@ mod tests {
     #[test]
     fn re_enrolling_an_existing_key_keeps_the_user() {
         let mut db = Database::open_in_memory().unwrap();
-        let first = enroll(&mut db, 1, None);
-        db.set_role(first, Role::Admin).unwrap();
-        let again = db.enroll(&[1; 32], Role::User, None, "Y", 200).unwrap();
-        assert_eq!((again.id, again.role), (first, Role::Admin));
+        let root = enroll(&mut db, 1, None);
+        assert_eq!(db.user(root).unwrap().unwrap().role, Role::Admin);
+        let first = enroll(&mut db, 2, Some(root));
+        db.set_role(first, Role::Manager).unwrap();
+        let again = enroll(&mut db, 2, Some(root));
+        assert_eq!(again, first);
+        assert_eq!(db.user(first).unwrap().unwrap().role, Role::Manager);
+    }
+
+    #[test]
+    fn an_invite_enrolls_once() {
+        let mut db = Database::open_in_memory().unwrap();
+        enroll(&mut db, 1, None);
+        assert_eq!(db.enroll(&[9; 32], "C01", 100).unwrap(), None);
+    }
+
+    #[test]
+    fn expired_invites_do_not_enroll() {
+        let mut db = Database::open_in_memory().unwrap();
+        let invite = InviteRow {
+            code_id: "OLD".into(),
+            secret: "S".into(),
+            minted_by: None,
+            expires_at: 50,
+            failures: 0,
+        };
+        db.insert_invite(&invite).unwrap();
+        assert_eq!(db.enroll(&[1; 32], "OLD", 100).unwrap(), None);
     }
 }

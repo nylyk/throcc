@@ -286,3 +286,46 @@ async fn removal_closes_the_connection_and_cascades() {
         "{err}"
     );
 }
+
+#[tokio::test]
+async fn concurrent_runs_on_one_invite_enroll_at_most_one_user() {
+    let server = start_server();
+    let alice = admin(&server).await;
+    let code = invite(&alice).await;
+    let runs: Vec<_> = (0..3)
+        .map(|_| {
+            let (addr, code) = (server.addr.clone(), code.clone());
+            tokio::spawn(async move { try_enroll(&addr, &code).await.is_ok() })
+        })
+        .collect();
+    let mut enrolled = 0;
+    for run in runs {
+        enrolled += usize::from(run.await.unwrap());
+    }
+    assert_eq!(enrolled, 1);
+    let Response::Users(users) = alice.request(Request::ListUsers).await else {
+        panic!()
+    };
+    assert_eq!(users.len(), 2);
+}
+
+#[tokio::test]
+async fn parallel_runs_from_one_source_are_rate_limited() {
+    let server = start_server();
+    let unknown: InviteCode = "ZZZ-ZZZZZ".parse().unwrap();
+    let runs: Vec<_> = (0..20)
+        .map(|_| {
+            let (addr, code) = (server.addr.clone(), unknown.clone());
+            tokio::spawn(async move { try_enroll(&addr, &code).await.err().unwrap() })
+        })
+        .collect();
+    let mut limited = 0;
+    for run in runs {
+        let err = run.await.unwrap();
+        limited += usize::from(matches!(
+            err,
+            SignInError::Login(LoginError::Refused(AuthError::RateLimited))
+        ));
+    }
+    assert_eq!(limited, 10);
+}

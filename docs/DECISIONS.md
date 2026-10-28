@@ -58,6 +58,20 @@ Each entry: date, decision, why, alternatives.
 - **A second connection by the same user kicks the first**, because presence is keyed by user.
 - **Lobby clients publish no presence.** `Presence.room` is always `Some`; leaving to the lobby sends `PresenceEnded`.
 - **`SetEncKey` is verified by the server** against the identity key and is required before `SetRoom`. Changing it while in a room bumps the epoch.
-- **`SetMedia` only bumps nothing**: a share change re-sends `RoomState` at the same epoch, so peers learn the codec without rekeying.
+- **`SetMedia` never bumps the epoch.** A share change re-sends `RoomState` at the same epoch, so peers learn the codec without rekeying.
 - **The X25519 encryption key's private half lives in a 0600 file** next to the keystore, with its creation time, and is replaced after 30 days. The identity key uses the OS keychain. Alternative: both in the keychain.
 - **A kicked session's writer sends `Kicked`, finishes the stream and waits up to 2 s for the client to read it before closing.** Closing at once dropped the event.
+
+## 2026-10-28 M3 review
+
+A fresh subagent reviewed `pake.rs`, `identity.rs`, `auth.rs`, `permissions.rs`, the handshake and the client's enroll path. It found channel binding, offline-guess resistance, replay protection, the pin verifier and rank checks sound. Its findings and what was done:
+
+1. **High, fixed:** concurrent runs on one invite could each enroll a user. `Database::enroll` now re-checks the invite inside its transaction and requires the delete to remove exactly one row. `users.id` is `AUTOINCREMENT`, so a removed user's id is never reused. Test: `concurrent_runs_on_one_invite_enroll_at_most_one_user`.
+2. **Medium, fixed:** parallel runs bypassed the per-source limiter, which counted only finished failures. A run now counts when it starts and is forgiven on success. Test: `parallel_runs_from_one_source_are_rate_limited`.
+3. **Low, fixed:** handshake frames are capped at 4 KiB, at most 128 connections may be unauthenticated at once, and quinn's `max_incoming` is 256.
+4. **Low, fixed:** an invite id that isn't 3 characters is treated as unknown, and only 8 characters of it are logged.
+5. **Low, fixed:** `Hub::connect` re-reads the user, so one removed between authentication and connect is refused.
+6. **Low, fixed:** minting gives up after 64 id collisions instead of looping with the hub locked.
+7. **Low, fixed:** the limiter drops sources whose window is empty.
+8. **Nit, accepted:** a known id costs one SQLite write before `PakeReply`; an unknown id doesn't. Each id yields at most 3 samples before it burns, and ids are only 15 bits, so learning which exist gains nothing.
+9. **Nit, fixed:** a failed write of the try count refuses the run.
