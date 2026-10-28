@@ -2,6 +2,7 @@ use hpke::aead::AesGcm128;
 use hpke::kdf::HkdfSha256;
 use hpke::kem::X25519HkdfSha256;
 use hpke::{Deserializable, Kem, OpModeR, OpModeS, Serializable};
+use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Epoch, RoomId, UserId};
 use throcc_proto::messages::PublicKey;
 use zeroize::Zeroizing;
@@ -59,6 +60,7 @@ impl EncKeyPair {
 
 /// Binds a wrapped sender secret to one room generation, sender and recipient.
 pub struct WrapContext {
+    pub server: Fingerprint,
     pub room: RoomId,
     pub epoch: Epoch,
     pub from: UserId,
@@ -68,6 +70,7 @@ pub struct WrapContext {
 impl WrapContext {
     fn info(&self) -> Vec<u8> {
         let mut info = b"throcc/sender-key/1".to_vec();
+        info.extend_from_slice(&self.server.0);
         info.extend_from_slice(&self.room.0.to_be_bytes());
         info.extend_from_slice(&self.epoch.0.to_be_bytes());
         info.extend_from_slice(&self.from.0.to_be_bytes());
@@ -134,6 +137,7 @@ mod tests {
 
     fn context(epoch: u32) -> WrapContext {
         WrapContext {
+            server: Fingerprint([8; 32]),
             room: RoomId(1),
             epoch: Epoch(epoch),
             from: UserId(2),

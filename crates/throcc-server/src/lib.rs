@@ -71,6 +71,7 @@ impl Server {
         let mut hub = Hub::new(
             Database::open(&config.data_dir.join(DATABASE_FILE))?,
             sfu.clone(),
+            identity.fingerprint,
         )?;
         let bootstrap = if hub.db.user_count()? == 0 {
             hub.db.delete_bootstrap_invites()?;

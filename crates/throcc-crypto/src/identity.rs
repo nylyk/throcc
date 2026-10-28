@@ -1,4 +1,5 @@
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use throcc_proto::ids::UserId;
 use throcc_proto::messages::{PublicKey, Signature};
 use zeroize::Zeroizing;
 
@@ -56,9 +57,22 @@ pub fn auth_message(
     .concat()
 }
 
-/// What an identity key signs to vouch for an X25519 encryption key.
-pub fn enc_key_message(enc_key: &PublicKey) -> Vec<u8> {
-    [b"throcc/enc-key/1".as_slice(), enc_key].concat()
+/// What an identity key signs to vouch for an X25519 encryption key: bound to one server
+/// (by its SPKI hash), one user and an expiry.
+pub fn enc_key_message(
+    server: &[u8; 32],
+    user: UserId,
+    not_after: u64,
+    enc_key: &PublicKey,
+) -> Vec<u8> {
+    [
+        b"throcc/enc-key/1".as_slice(),
+        server,
+        &user.0.to_be_bytes(),
+        &not_after.to_be_bytes(),
+        enc_key,
+    ]
+    .concat()
 }
 
 /// Bytes from the operating system's CSPRNG.

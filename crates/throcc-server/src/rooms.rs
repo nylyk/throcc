@@ -4,11 +4,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use throcc_crypto::identity::{self, random};
+use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
-    ErrorCode, Event, MAX_AVATAR_BYTES, MAX_NAME_CHARS, MediaState, Placed, Presence, PublicKey,
-    Recovery, Request, Response, Room, RoomPeer, ServerMessage, Share, Signature, Tracks, Welcome,
+    ErrorCode, Event, MAX_AVATAR_BYTES, MAX_NAME_CHARS, MediaState, Placed, Presence, Recovery,
+    Request, Response, Room, RoomPeer, ServerMessage, Share, SignedEncKey, Tracks, Welcome,
 };
 use throcc_proto::transport::close;
 use tokio::sync::mpsc;
@@ -24,6 +25,8 @@ const PROFILE_INTERVAL: Duration = Duration::from_secs(10);
 const TRACKS_PER_MEMBERSHIP: u32 = 3;
 const MINT_ATTEMPTS: usize = 64;
 const MAX_WATCHING: usize = 16;
+/// Clients rotate encryption keys every 30 days; a day of slack covers clock skew.
+const MAX_ENC_KEY_LIFETIME: Duration = Duration::from_secs(31 * 24 * 60 * 60);
 const MAX_WRAPPED_BYTES: usize = 256;
 
 pub struct Refusal(pub ErrorCode, pub String);
@@ -90,6 +93,7 @@ struct RoomEntry {
 /// Rooms, presence and every connected session. One lock guards all of it.
 pub struct Hub {
     pub db: Database,
+    fingerprint: Fingerprint,
     sfu: Arc<Sfu>,
     keyframes: KeyframeAggregator,
     sessions: HashMap<UserId, Session>,
@@ -98,7 +102,7 @@ pub struct Hub {
 }
 
 impl Hub {
-    pub fn new(db: Database, sfu: Arc<Sfu>) -> anyhow::Result<Self> {
+    pub fn new(db: Database, sfu: Arc<Sfu>, fingerprint: Fingerprint) -> anyhow::Result<Self> {
         let rooms = db
             .rooms()?
             .into_iter()
@@ -115,6 +119,7 @@ impl Hub {
             .collect();
         Ok(Self {
             db,
+            fingerprint,
             sfu,
             keyframes: KeyframeAggregator::default(),
             sessions: HashMap::new(),
@@ -193,7 +198,7 @@ impl Hub {
             Request::SetProfile { name, avatar } => self.set_profile(user, name, avatar),
             Request::SetAvatar(bytes) => self.set_avatar(bytes),
             Request::GetAvatar(hash) => self.get_avatar(hash),
-            Request::SetEncKey { key, sig } => self.set_enc_key(user, key, sig),
+            Request::SetEncKey(enc_key) => self.set_enc_key(user, enc_key),
             Request::SetMedia(media) => self.set_media(user, media),
             Request::CreateRoom { name } => self.create_room(user, name),
             Request::RenameRoom { room, name } => self.rename_room(user, room, name),
@@ -344,7 +349,11 @@ impl Hub {
         }
         let session = self.session_mut(user)?;
         session.room = target;
-        session.tracks = tracks;
+        let old_tracks = std::mem::replace(&mut session.tracks, tracks);
+        for share in old_tracks.iter().flat_map(|t| &t.shares) {
+            self.keyframes.forget(share.video);
+        }
+        let session = self.session_mut(user)?;
         session.media = MediaState::default();
         session.watching.clear();
 
@@ -440,21 +449,28 @@ impl Hub {
         }
     }
 
-    fn set_enc_key(&mut self, user: UserId, key: PublicKey, sig: Signature) -> Outcome {
+    fn set_enc_key(&mut self, user: UserId, enc_key: SignedEncKey) -> Outcome {
         let session = self.session(user)?;
-        identity::verify(&session.row.pubkey, &identity::enc_key_message(&key), &sig).map_err(
-            |_| {
-                Refusal::new(
-                    ErrorCode::Invalid,
-                    "the encryption key's signature is wrong",
-                )
-            },
-        )?;
+        let now = unix_now();
+        if enc_key.not_after <= now || enc_key.not_after > now + MAX_ENC_KEY_LIFETIME.as_secs() {
+            return Err(Refusal::new(
+                ErrorCode::Invalid,
+                "the encryption key's expiry is out of range",
+            ));
+        }
+        let message =
+            identity::enc_key_message(&self.fingerprint.0, user, enc_key.not_after, &enc_key.key);
+        identity::verify(&session.row.pubkey, &message, &enc_key.sig).map_err(|_| {
+            Refusal::new(
+                ErrorCode::Invalid,
+                "the encryption key's signature is wrong",
+            )
+        })?;
         self.db
-            .set_enc_key(user, &key, &sig)
+            .set_enc_key(user, &enc_key)
             .map_err(Refusal::internal)?;
         let session = self.session_mut(user)?;
-        session.row.enc_key = Some((key, sig));
+        session.row.enc_key = Some(enc_key);
         if let Some(room) = session.room {
             self.bump_epoch(room)?;
             if let Some(event) = self.room_state(room) {
@@ -849,14 +865,12 @@ fn presence(session: &Session) -> Option<Presence> {
 }
 
 fn peer(session: &Session) -> Option<RoomPeer> {
-    let (enc_key, enc_key_sig) = session.row.enc_key?;
     Some(RoomPeer {
         user: session.row.id,
         tracks: session.tracks.clone()?,
         share: session.media.share,
         identity_key: session.row.pubkey,
-        enc_key,
-        enc_key_sig,
+        enc_key: session.row.enc_key?,
     })
 }
 

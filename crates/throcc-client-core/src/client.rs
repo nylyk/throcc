@@ -1,0 +1,339 @@
+use std::sync::{Arc, Mutex, PoisonError};
+
+use throcc_proto::Fingerprint;
+use throcc_proto::ids::{Role, RoomId, UserId};
+use throcc_proto::messages::{Codec, ShareConfig, User};
+use tokio::sync::broadcast;
+
+use crate::state::{
+    ConnectionStatus, CurrentRoom, Health, KeyWarning, Person, RoomView, ServerView, State,
+    TrackHealth,
+};
+
+const EVENTS: usize = 256;
+
+/// What the UI asks the core to do. The core's own type, never `throcc-proto`'s.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Command {
+    Join(Option<RoomId>),
+    SetMic(bool),
+    SetDeafened(bool),
+    StartShare(ShareConfig),
+    StopShare,
+    Watch(UserId),
+    Unwatch(UserId),
+    SetVolume(UserId, f32),
+    SetName(String),
+    CreateRoom(String),
+    RenameRoom(RoomId, String),
+    DeleteRoom(RoomId),
+    CreateInvite,
+    ListUsers,
+    SetRole(UserId, Role),
+    RemoveUser { user: UserId, cascade: bool },
+    AcceptKey(UserId),
+    SetVerified(UserId, bool),
+    Disconnect,
+}
+
+/// What the core tells the UI.
+#[derive(Clone, Debug)]
+pub enum Event {
+    State(Arc<State>),
+    Invite { code: String, expires: u64 },
+    Users(Vec<User>),
+    Notice(String),
+    Kicked(String),
+}
+
+/// The UI's view of a client. Implemented by the real client and by [`MockClient`].
+pub trait ClientApi: Send + Sync {
+    fn command(&self, command: Command);
+    fn events(&self) -> broadcast::Receiver<Event>;
+    fn state(&self) -> Arc<State>;
+    /// The 60-digit safety number with `user`, if both identity keys are known.
+    fn safety_number(&self, user: UserId) -> Option<String>;
+}
+
+/// A client with canned people and rooms that reacts to commands locally.
+pub struct MockClient {
+    state: Mutex<Arc<State>>,
+    events: broadcast::Sender<Event>,
+}
+
+impl Default for MockClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MockClient {
+    pub fn new() -> Self {
+        let (events, _) = broadcast::channel(EVENTS);
+        Self {
+            state: Mutex::new(Arc::new(sample_state())),
+            events,
+        }
+    }
+
+    fn update(&self, change: impl FnOnce(&mut State)) {
+        let mut guard = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = (**guard).clone();
+        change(&mut state);
+        *guard = Arc::new(state);
+        self.events.send(Event::State(guard.clone())).ok();
+    }
+
+    fn me(&self) -> UserId {
+        self.state().me.unwrap_or(UserId(0))
+    }
+}
+
+impl ClientApi for MockClient {
+    fn command(&self, command: Command) {
+        let me = self.me();
+        match command {
+            Command::Join(room) => self.update(|s| {
+                if let Some(person) = s.people.get_mut(&me) {
+                    person.room = room;
+                    person.mic = false;
+                    person.sharing = None;
+                }
+                s.current = room.map(|room| CurrentRoom {
+                    room,
+                    mic: false,
+                    deafened: false,
+                    sharing: None,
+                    watching: vec![],
+                });
+            }),
+            Command::SetMic(on) => self.update(|s| {
+                set_mine(s, me, |c, p| {
+                    c.mic = on;
+                    p.mic = on;
+                })
+            }),
+            Command::SetDeafened(on) => self.update(|s| {
+                set_mine(s, me, |c, p| {
+                    c.deafened = on;
+                    p.deafened = on;
+                })
+            }),
+            Command::StartShare(config) => self.update(|s| {
+                set_mine(s, me, |c, p| {
+                    c.sharing = Some(config);
+                    p.sharing = Some(config);
+                })
+            }),
+            Command::StopShare => self.update(|s| {
+                set_mine(s, me, |c, p| {
+                    c.sharing = None;
+                    p.sharing = None;
+                })
+            }),
+            Command::Watch(user) => self.update(|s| {
+                if let Some(c) = s.current.as_mut()
+                    && !c.watching.contains(&user)
+                {
+                    c.watching.push(user);
+                }
+            }),
+            Command::Unwatch(user) => self.update(|s| {
+                if let Some(c) = s.current.as_mut() {
+                    c.watching.retain(|u| *u != user);
+                }
+            }),
+            Command::SetVolume(user, volume) => self.update(|s| {
+                if let Some(p) = s.people.get_mut(&user) {
+                    p.volume = volume;
+                }
+            }),
+            Command::SetName(name) => self.update(|s| {
+                if let Some(p) = s.people.get_mut(&me) {
+                    p.name = name;
+                }
+            }),
+            Command::CreateRoom(name) => self.update(|s| {
+                let id = RoomId(s.rooms.iter().map(|r| r.id.0).max().unwrap_or(0) + 1);
+                s.rooms.push(RoomView { id, name });
+            }),
+            Command::RenameRoom(room, name) => self.update(|s| {
+                if let Some(r) = s.rooms.iter_mut().find(|r| r.id == room) {
+                    r.name = name;
+                }
+            }),
+            Command::DeleteRoom(room) => self.update(|s| {
+                s.rooms.retain(|r| r.id != room);
+                for p in s.people.values_mut().filter(|p| p.room == Some(room)) {
+                    p.room = None;
+                }
+                if s.current.as_ref().is_some_and(|c| c.room == room) {
+                    s.current = None;
+                }
+            }),
+            Command::CreateInvite => {
+                self.events
+                    .send(Event::Invite {
+                        code: "K7Q-M2XPD".into(),
+                        expires: 0,
+                    })
+                    .ok();
+            }
+            Command::ListUsers => {
+                self.events.send(Event::Users(sample_users())).ok();
+            }
+            Command::SetRole(..) | Command::RemoveUser { .. } => {
+                self.events.send(Event::Users(sample_users())).ok();
+            }
+            Command::AcceptKey(user) => self.update(|s| s.key_warnings.retain(|w| w.user != user)),
+            Command::SetVerified(user, verified) => self.update(|s| {
+                if let Some(p) = s.people.get_mut(&user) {
+                    p.verified = verified;
+                }
+            }),
+            Command::Disconnect => self.update(|s| s.connection = ConnectionStatus::Disconnected),
+        }
+    }
+
+    fn events(&self) -> broadcast::Receiver<Event> {
+        self.events.subscribe()
+    }
+
+    fn state(&self) -> Arc<State> {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn safety_number(&self, _user: UserId) -> Option<String> {
+        Some("482139057716024733195580241196087436295031487266089415270031".into())
+    }
+}
+
+fn set_mine(state: &mut State, me: UserId, change: impl FnOnce(&mut CurrentRoom, &mut Person)) {
+    if let (Some(current), Some(person)) = (state.current.as_mut(), state.people.get_mut(&me)) {
+        change(current, person);
+    }
+}
+
+fn person(name: &str, room: Option<u64>) -> Person {
+    Person {
+        name: name.into(),
+        avatar: None,
+        room: room.map(RoomId),
+        mic: room.is_some(),
+        deafened: false,
+        sharing: None,
+        speaking: false,
+        volume: 1.0,
+        verified: false,
+    }
+}
+
+fn sample_state() -> State {
+    let mut people = std::collections::BTreeMap::new();
+    let ilse_share = ShareConfig {
+        audio: true,
+        kbps: 10_000,
+        codec: Codec::Av1,
+        width: 2560,
+        height: 1440,
+        fps: 60,
+    };
+    for (id, name, room) in [
+        (1, "Felix", None),
+        (2, "Mara", Some(1)),
+        (3, "Jonas", Some(1)),
+        (4, "Ilse", Some(1)),
+        (5, "Teo", Some(2)),
+        (6, "Ren", Some(2)),
+        (7, "Kaya", Some(4)),
+    ] {
+        people.insert(UserId(id), person(name, room));
+    }
+    if let Some(p) = people.get_mut(&UserId(2)) {
+        p.speaking = true;
+    }
+    if let Some(p) = people.get_mut(&UserId(3)) {
+        p.mic = false;
+    }
+    if let Some(p) = people.get_mut(&UserId(4)) {
+        p.sharing = Some(ilse_share);
+    }
+    if let Some(p) = people.get_mut(&UserId(7)) {
+        p.deafened = true;
+    }
+    State {
+        server: Some(ServerView { address: "voice.example.net".into(), fingerprint: Fingerprint([0x2c; 32]) }),
+        connection: ConnectionStatus::Connected,
+        me: Some(UserId(1)),
+        role: Some(Role::Admin),
+        rooms: ["General", "Gaming", "Work", "AFK"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| RoomView { id: RoomId(i as u64 + 1), name: (*name).into() })
+            .collect(),
+        people,
+        current: None,
+        key_warnings: vec![KeyWarning { user: UserId(3), pinned: Fingerprint([0x7c; 32]), now: Fingerprint([0xb8; 32]) }],
+        health: Health {
+            rtt_ms: 18.0,
+            upload_loss: 0.0,
+            download_loss: 0.3,
+            dropped_for_you: 0,
+            verdict: "Ilse's screen arrives at 6.1 of the 10 Mbps she set. Nothing was dropped for you, so her upload is the bottleneck.".into(),
+            receiving: vec![
+                TrackHealth { label: "Ilse, screen".into(), set_kbps: Some(10_000), arriving_kbps: Some(6_100), loss: Some(4.2) },
+                TrackHealth { label: "Ilse, screen audio".into(), set_kbps: Some(128), arriving_kbps: Some(128), loss: Some(0.0) },
+                TrackHealth { label: "Mara, mic".into(), set_kbps: Some(32), arriving_kbps: Some(31), loss: Some(0.3) },
+                TrackHealth { label: "Jonas, mic".into(), set_kbps: Some(32), arriving_kbps: None, loss: None },
+            ],
+            sending: "mic 32 kbps, 0 dropped".into(),
+        },
+    }
+}
+
+fn sample_users() -> Vec<User> {
+    [
+        (1, "Felix", Role::Admin, None),
+        (3, "Jonas", Role::Manager, Some(1)),
+        (2, "Mara", Role::User, Some(3)),
+        (4, "Ilse", Role::User, Some(3)),
+        (5, "Teo", Role::User, Some(2)),
+        (6, "Ren", Role::User, Some(5)),
+    ]
+    .into_iter()
+    .map(|(id, name, role, by)| User {
+        id: UserId(id),
+        name: name.into(),
+        role,
+        invited_by: by.map(UserId),
+        identity_key: [id as u8 * 37; 32],
+        created_at: 0,
+    })
+    .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mock_reacts_to_commands() {
+        let client = MockClient::new();
+        let mut events = client.events();
+        client.command(Command::Join(Some(RoomId(1))));
+        let Ok(Event::State(state)) = events.try_recv() else {
+            panic!("no state")
+        };
+        assert_eq!(state.current.as_ref().map(|c| c.room), Some(RoomId(1)));
+        client.command(Command::SetMic(true));
+        assert!(client.state().current.as_ref().is_some_and(|c| c.mic));
+        client.command(Command::Watch(UserId(4)));
+        assert_eq!(
+            client.state().current.as_ref().map(|c| c.watching.clone()),
+            Some(vec![UserId(4)])
+        );
+    }
+}

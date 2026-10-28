@@ -15,6 +15,8 @@ use crate::rooms::Outgoing;
 pub const VIDEO_BUDGET: Duration = Duration::from_millis(150);
 const LINK_STATS_INTERVAL: Duration = Duration::from_secs(2);
 const INBOX: usize = 8192;
+/// About 5 s of 20 mic tracks: a cap against a receiver that stops reading, not a policy.
+const MAX_QUEUED_AUDIO: usize = 2000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrackKind {
@@ -67,13 +69,21 @@ pub struct Queues {
     /// Tracks whose current unit was dropped; their fragments are discarded until the next first.
     dropping: HashMap<MediaId, ()>,
     stats: BTreeMap<MediaId, Counters>,
+    /// Audio dropped by the safety cap, which only a receiver that stops reading reaches.
+    pub audio_overflow: u64,
 }
 
 impl Queues {
     pub fn push(&mut self, packet: Packet, now: Instant) {
         let media_id = packet.header.media_id;
         match packet.kind {
-            TrackKind::Audio => self.audio.push_back((media_id, packet.bytes)),
+            TrackKind::Audio => {
+                if self.audio.len() >= MAX_QUEUED_AUDIO {
+                    self.audio.pop_front();
+                    self.audio_overflow += 1;
+                }
+                self.audio.push_back((media_id, packet.bytes));
+            }
             TrackKind::Video => self.push_video(packet, now),
         }
     }
@@ -83,6 +93,7 @@ impl Queues {
         let media_id = packet.header.media_id;
         if flags.contains(Flags::FIRST) {
             self.dropping.remove(&media_id);
+            self.close_open_unit(media_id);
             self.video.push_back(VideoUnit {
                 media_id,
                 packets: VecDeque::new(),
@@ -106,6 +117,27 @@ impl Queues {
         unit.bytes += packet.bytes.len();
         unit.packets.push_back(packet.bytes);
         unit.complete = flags.contains(Flags::LAST);
+    }
+
+    /// Ends the track's unfinished unit, whose last fragment was lost upstream: a started
+    /// unit sends what it has, one not yet started is dropped.
+    fn close_open_unit(&mut self, media_id: MediaId) {
+        let Some(index) = self
+            .video
+            .iter()
+            .position(|u| u.media_id == media_id && !u.complete)
+        else {
+            return;
+        };
+        if self.video[index].started {
+            self.video[index].complete = true;
+            if self.video[index].packets.is_empty() {
+                self.video.remove(index);
+            }
+        } else {
+            self.video.remove(index);
+            self.stats.entry(media_id).or_default().dropped_units += 1;
+        }
     }
 
     /// Drops video until the queue fits the budget at `bytes_per_sec`: first discardable
@@ -302,6 +334,40 @@ mod tests {
         assert!(queues.pop().is_none());
         unit(&mut queues, 1, 2, 1, false, later);
         assert_eq!(queues.pop().unwrap()[0], 2);
+    }
+
+    #[test]
+    fn a_unit_whose_last_fragment_was_lost_does_not_stay_queued() {
+        let now = Instant::now();
+        let mut queues = Queues::default();
+        queues.push(packet(TrackKind::Video, 1, 0, Flags::FIRST, 1000), now);
+        queues.pop();
+        queues.push(packet(TrackKind::Video, 1, 2, Flags::FIRST, 1000), now);
+        unit(&mut queues, 1, 3, 1, false, now);
+        let sent: Vec<u8> = std::iter::from_fn(|| queues.pop()).map(|b| b[0]).collect();
+        assert_eq!(sent, vec![3]);
+        assert!(queues.video.is_empty());
+        assert_eq!(queues.stats[&MediaId(1)].dropped_units, 1);
+    }
+
+    #[test]
+    fn queued_audio_has_a_hard_cap() {
+        let now = Instant::now();
+        let mut queues = Queues::default();
+        for seq in 0..MAX_QUEUED_AUDIO as u32 + 10 {
+            queues.push(
+                packet(
+                    TrackKind::Audio,
+                    2,
+                    seq,
+                    Flags::FIRST.with(Flags::LAST, true),
+                    10,
+                ),
+                now,
+            );
+        }
+        assert_eq!(queues.audio.len(), MAX_QUEUED_AUDIO);
+        assert_eq!(queues.audio_overflow, 10);
     }
 
     #[test]

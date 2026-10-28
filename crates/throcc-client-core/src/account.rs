@@ -67,12 +67,8 @@ pub async fn enroll(
 }
 
 async fn publish_enc_key(keystore: &Keystore, link: &Link) -> Result<(), SignInError> {
-    let (key, sig) = keystore.signed_enc_key();
-    match link
-        .requester
-        .request(Request::SetEncKey { key, sig })
-        .await?
-    {
+    let signed = keystore.signed_enc_key(&link.connected.fingerprint, link.welcome.me);
+    match link.requester.request(Request::SetEncKey(signed)).await? {
         Response::Ok => Ok(()),
         Response::Err { message, .. } => Err(SignInError::EncKey(message)),
         other => Err(SignInError::EncKey(format!("unexpected reply {other:?}"))),

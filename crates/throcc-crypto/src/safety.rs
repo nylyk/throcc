@@ -5,7 +5,8 @@ const ITERATIONS: usize = 5200;
 const VERSION: [u8; 2] = [0, 0];
 
 /// A 60-digit safety number for two identity keys, the same from either side.
-/// Signal's numeric fingerprint construction, with the key as its own stable identifier.
+/// Signal's numeric fingerprint construction, with the key as its own stable identifier:
+/// `SHA-512(version || key || key)`, then 5200 rounds of `SHA-512(hash || key)`.
 pub fn safety_number(a: &PublicKey, b: &PublicKey) -> String {
     let (a, b) = (half(a), half(b));
     if a <= b { a + &b } else { b + &a }
@@ -22,6 +23,7 @@ pub fn groups(number: &str) -> Vec<&str> {
 fn half(key: &PublicKey) -> String {
     let mut hash = Sha512::new()
         .chain_update(VERSION)
+        .chain_update(key)
         .chain_update(key)
         .finalize();
     for _ in 0..ITERATIONS {
@@ -49,7 +51,7 @@ mod tests {
 
     #[test]
     fn matches_independent_vector() {
-        let expected = "585933386924667261696566133704653481277809870204720547886502";
+        let expected = "175484055375002258331488126542671466019735658033095130103269";
         assert_eq!(safety_number(&[1; 32], &counting()), expected);
         assert_eq!(safety_number(&counting(), &[1; 32]), expected);
     }

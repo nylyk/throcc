@@ -1,5 +1,6 @@
 pub mod account;
 pub mod call;
+pub mod client;
 pub mod connection;
 pub mod contacts;
 pub mod control;
@@ -7,3 +8,4 @@ pub mod keys;
 pub mod keystore;
 pub mod known_servers;
 pub mod media;
+pub mod state;

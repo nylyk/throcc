@@ -43,8 +43,13 @@ impl Call {
         let connection = connected.connection.clone();
         let enc = EncKeyPair::from_secret(&keystore.enc_key().secret())?;
         let contacts = Contacts::load(keystore.dir(), &connected.fingerprint)?;
-        let (engine, mut engine_requests, recovery) =
-            MediaEngine::start(connection.clone(), welcome.me, enc, contacts);
+        let (engine, mut engine_requests, recovery) = MediaEngine::start(
+            connection.clone(),
+            welcome.me,
+            enc,
+            connected.fingerprint,
+            contacts,
+        );
         let engine = Arc::new(engine);
 
         let (events_tx, events) = mpsc::channel(EVENTS);

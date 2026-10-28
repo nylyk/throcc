@@ -99,11 +99,7 @@ pub enum Request {
     },
     SetAvatar(Vec<u8>),
     GetAvatar(Hash),
-    SetEncKey {
-        key: PublicKey,
-        #[serde(with = "sig")]
-        sig: Signature,
-    },
+    SetEncKey(SignedEncKey),
     SetMedia(MediaState),
     SetWatching(Vec<MediaId>),
     RequestKeyframe {
@@ -282,9 +278,17 @@ pub struct RoomPeer {
     pub tracks: Tracks,
     pub share: Option<ShareConfig>,
     pub identity_key: PublicKey,
-    pub enc_key: PublicKey,
+    pub enc_key: SignedEncKey,
+}
+
+/// An X25519 encryption key, signed by its owner's identity key for one server and user,
+/// valid until `not_after` (unix seconds).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedEncKey {
+    pub key: PublicKey,
+    pub not_after: u64,
     #[serde(with = "sig")]
-    pub enc_key_sig: Signature,
+    pub sig: Signature,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

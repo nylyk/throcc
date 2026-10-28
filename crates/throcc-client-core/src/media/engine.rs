@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use throcc_crypto::hpke::EncKeyPair;
 use throcc_crypto::media::TrackKey;
+use throcc_proto::Fingerprint;
 use throcc_proto::frame::{Flags, Header};
 use throcc_proto::ids::{Epoch, MediaId, UserId};
 use throcc_proto::messages::{Event, Placed, Recovery, Request};
@@ -73,9 +74,12 @@ pub struct KeyState {
     pub contacts: Contacts,
 }
 
+/// One remote track's replay window, which outlives subscriptions until the room changes,
+/// and its track task's inbox while subscribed.
+#[derive(Default)]
 struct Sink {
     window: ReplayWindow,
-    inbox: mpsc::Sender<Bytes>,
+    inbox: Option<mpsc::Sender<Bytes>>,
 }
 
 /// Moves media between this client's tracks and the connection, end-to-end encrypted.
@@ -96,6 +100,7 @@ impl MediaEngine {
         connection: quinn::Connection,
         me: UserId,
         enc: EncKeyPair,
+        server: Fingerprint,
         contacts: Contacts,
     ) -> (
         Self,
@@ -103,7 +108,7 @@ impl MediaEngine {
         mpsc::Receiver<MediaId>,
     ) {
         let keys = Arc::new(Mutex::new(KeyState {
-            keys: KeyManager::new(me, enc),
+            keys: KeyManager::new(me, enc, server),
             contacts,
         }));
         let sinks: Arc<Mutex<HashMap<MediaId, Sink>>> = Arc::default();
@@ -157,7 +162,8 @@ impl MediaEngine {
     pub fn placed(&self, placed: &Placed) -> Vec<KeyNotice> {
         let mut state = self.keys();
         let KeyState { keys, contacts } = &mut *state;
-        let (request, notices) = keys.placed(
+        let room_changed = keys.room() != placed.room;
+        let (requests, notices) = keys.placed(
             placed.room,
             placed.epoch,
             placed.tracks.clone(),
@@ -166,10 +172,12 @@ impl MediaEngine {
             Instant::now(),
         );
         drop(state);
-        if placed.room.is_none() {
+        if room_changed {
             lock(&self.sinks).clear();
         }
-        self.send_request(request);
+        for request in requests {
+            self.send_request(Some(request));
+        }
         notices
     }
 
@@ -223,13 +231,7 @@ impl MediaEngine {
     ) -> mpsc::Receiver<Received> {
         let (inbox, inbox_rx) = mpsc::channel(TRACK_INBOX);
         let (out, out_rx) = mpsc::channel(capacity);
-        lock(&self.sinks).insert(
-            media_id,
-            Sink {
-                window: ReplayWindow::default(),
-                inbox,
-            },
-        );
+        lock(&self.sinks).entry(media_id).or_default().inbox = Some(inbox);
         let track = Track {
             media_id,
             kind,
@@ -238,6 +240,7 @@ impl MediaEngine {
             requests: self.requests.clone(),
             out,
             pending: VecDeque::new(),
+            tried_generation: 0,
             reassembler: Reassembler::default(),
             reorder: Reorder::default(),
         };
@@ -246,7 +249,9 @@ impl MediaEngine {
     }
 
     pub fn unsubscribe(&self, media_id: MediaId) {
-        lock(&self.sinks).remove(&media_id);
+        if let Some(sink) = lock(&self.sinks).get_mut(&media_id) {
+            sink.inbox = None;
+        }
     }
 
     /// Datagrams that never arrived on `media_id`, from its replay window.
@@ -287,9 +292,13 @@ async fn receive_loop(
             stats.unknown_track.fetch_add(1, Ordering::Relaxed);
             continue;
         };
+        let Some(inbox) = &sink.inbox else {
+            stats.unknown_track.fetch_add(1, Ordering::Relaxed);
+            continue;
+        };
         match sink.window.check(header.seq) {
             Seen::New => {
-                if sink.inbox.try_send(datagram).is_err() {
+                if inbox.try_send(datagram).is_err() {
                     stats.track_overflow.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -312,6 +321,8 @@ struct Track {
     requests: mpsc::UnboundedSender<Request>,
     out: mpsc::Sender<Received>,
     pending: VecDeque<(Instant, Epoch, Bytes)>,
+    /// The key generation the pending datagrams were last tried against.
+    tried_generation: u64,
     reassembler: Reassembler,
     reorder: Reorder,
 }
@@ -335,7 +346,6 @@ impl Track {
                 return;
             }
             let now = Instant::now();
-            self.tick(now);
             if let Ok(header) = Header::parse_strict(&datagram) {
                 self.handle(header.epoch, datagram, now);
             }
@@ -350,13 +360,24 @@ impl Track {
         }
     }
 
+    /// Expires pending datagrams, and retries the rest only if new keys have arrived.
     fn tick(&mut self, now: Instant) {
-        let waiting = std::mem::take(&mut self.pending);
-        for (arrived, epoch, datagram) in waiting {
-            if now.duration_since(arrived) >= PENDING_KEY_WAIT {
-                self.stats.missing_keys.fetch_add(1, Ordering::Relaxed);
-                self.stats.decrypt_failures.fetch_add(1, Ordering::Relaxed);
-            } else {
+        let expired = self
+            .pending
+            .iter()
+            .take_while(|(arrived, ..)| now.duration_since(*arrived) >= PENDING_KEY_WAIT)
+            .count();
+        self.pending.drain(..expired);
+        self.stats
+            .missing_keys
+            .fetch_add(expired as u64, Ordering::Relaxed);
+        self.stats
+            .decrypt_failures
+            .fetch_add(expired as u64, Ordering::Relaxed);
+        let generation = lock(&self.keys).keys.generation();
+        if generation != self.tried_generation && !self.pending.is_empty() {
+            self.tried_generation = generation;
+            for (arrived, epoch, datagram) in std::mem::take(&mut self.pending) {
                 self.handle_at(epoch, datagram, arrived, now);
             }
         }

@@ -659,7 +659,7 @@ WantedBy=multi-user.target
 - [x] CLI `send-synthetic` and `recv` that move fake access units of configurable size and rate through the real path.
 - [x] Fuzz targets for header parsing and reassembly.
 - [ ] **Parallel:** M7a (audio pipeline against WAV files) and M9a (encode/decode against recorded frames) start now in worktrees.
-- [ ] **Review subagent** on everything in this milestone.
+- [x] **Review subagent** on everything in this milestone.
 
 **Done when** these property and integration tests pass:
 

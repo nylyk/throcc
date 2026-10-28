@@ -86,3 +86,27 @@ A fresh subagent reviewed `pake.rs`, `identity.rs`, `auth.rs`, `permissions.rs`,
 - **The SFU's video budget counts both ways:** queued bytes over the path rate quinn reports (congestion window over RTT), and the age of the oldest unit not yet sent. Either over 150 ms triggers drops.
 - **The sender drops video older than 100 ms when its turn comes** (`SEND_BUDGET`), before it gets a `seq`, and tells the encoder to recover unless the unit was discardable.
 - **The reorder window lives in `media/reorder.rs`**, shared by future video and the synthetic path, not under `media/video/`.
+
+## 2026-10-29 M5 review
+
+A fresh subagent reviewed the wire format, media AEAD, HPKE wrapping, safety numbers, key manager, media engine, SFU and egress. It found the header layout, nonce and AAD construction, nonce uniqueness, key derivation, HPKE context binding, the server's ownership, routing, watching and key-relay checks, and the hostile-input parsing sound. Its findings and what was done:
+
+1. **High, fixed:** a sender rekeyed only when the epoch number changed, so a server could add a member without bumping the epoch and hand it the current secret. A sender now takes a fresh secret whenever the trusted peer set differs from the set the secret was wrapped to. Test: `a_peer_added_without_an_epoch_bump_gets_a_fresh_secret`.
+2. **Medium, fixed (format change):** the signed encryption key now covers `"throcc/enc-key/1" || server SPKI hash || user id || not_after || key`, travels as `SignedEncKey`, and expires after 30 days. Server and clients reject expired keys. A replayed old key no longer works.
+3. **Medium, fixed:** cached track keys of a departed peer outlived the grace period. The cache stores each key's owner and drops it with the owner's secret. Test: `a_departed_peers_cached_keys_are_dropped_after_the_grace_period`.
+4. **Medium, fixed:** a started unit whose last fragment was lost stayed in the egress queue forever. The next first fragment on the track now closes it. Test: `a_unit_whose_last_fragment_was_lost_does_not_stay_queued`.
+5. **Medium, fixed:** queued audio per receiver has a hard cap of 2000 datagrams, counted separately from the drop policy.
+6. **Medium, documented:** media is **group-authenticated only**. Every member holds every sender's secret, so a member who colludes with the server can forge another member's media; the server's ownership check is the only barrier. HPKE auth mode authenticates the wrapped key, not the media. Per-sender signatures would cost a signature per datagram or a second key scheme; deferred, as for text chat and MLS.
+7. **Low, fixed:** an old-epoch `SenderKey` is accepted only inside the grace window after the epoch moved on, and expires with it. Test: `a_replayed_old_sender_key_is_refused_after_the_grace_period`.
+8. **Low, fixed:** replay windows survive unsubscribing and resubscribing, until the room changes.
+9. **Low, fixed:** pending ciphertext is retried only on the 20 ms tick and only when the key generation changed; track owners are a map, not a scan.
+10. **Low, fixed:** a `Placed` older than the current epoch is ignored, and a `RoomState` that arrives before its `Placed` is kept and applied after it. Test: `room_state_before_placed_is_kept_and_a_stale_placed_is_ignored`.
+11. **Low, fixed:** keyframe aggregator entries are forgotten when their track's owner leaves the room.
+12. **Low, fixed:** the early sender-key buffer holds at most 64 entries, one per sender and epoch.
+13. **Nit, fixed:** a new contact is pinned only after their encryption key verifies.
+14. **Nit, fixed (format change):** safety numbers hash `version || key || key`, the key as its own stable identifier, as Signal does with a stable id. New vector from Python's `hashlib`.
+15. **Nit, fixed (format change):** the HPKE info includes the server's SPKI hash.
+
+## 2026-10-29 Wire format and crypto frozen
+
+The media header (§5.5), media AEAD and track-key derivation, HPKE sender-key wrapping and its info, the signed encryption key, and the safety-number construction are **frozen** as of this entry. Changing any of them needs a human decision.

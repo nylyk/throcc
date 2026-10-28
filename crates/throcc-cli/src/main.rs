@@ -57,6 +57,9 @@ enum Command {
         rate: u32,
         #[arg(long, default_value_t = 10_000)]
         count: u32,
+        /// Also sends 50 mic frames per second.
+        #[arg(long)]
+        with_audio: bool,
     },
     /// Joins a room and receives another member's units, checking each one.
     Recv {
@@ -69,6 +72,12 @@ enum Command {
         track: synthetic::Track,
         #[arg(long, default_value_t = 10_000)]
         count: u32,
+        /// Also receives the sender's mic.
+        #[arg(long)]
+        with_audio: bool,
+        /// Seconds without a unit before giving up.
+        #[arg(long, default_value_t = 10)]
+        idle: u64,
     },
 }
 
@@ -129,11 +138,19 @@ async fn main() -> Result<()> {
             size,
             rate,
             count,
+            with_audio,
         } => {
             let link = sign_in(&keystore, &address).await?;
             let room = find_room(&link.welcome.rooms, &room)?;
-            let call = Call::start(link, &keystore)?;
-            synthetic::send(&call, room, track, size, rate, count).await?;
+            let mut call = Call::start(link, &keystore)?;
+            let options = synthetic::SendOptions {
+                track,
+                size,
+                rate,
+                count,
+                with_audio,
+            };
+            synthetic::send(&mut call, room, options).await?;
         }
         Command::Recv {
             address,
@@ -141,11 +158,21 @@ async fn main() -> Result<()> {
             from,
             track,
             count,
+            with_audio,
+            idle,
         } => {
             let link = sign_in(&keystore, &address).await?;
             let room = find_room(&link.welcome.rooms, &room)?;
             let mut call = Call::start(link, &keystore)?;
-            synthetic::recv(&mut call, room, &from, track, count).await?;
+            let idle = std::time::Duration::from_secs(idle);
+            let options = synthetic::RecvOptions {
+                from: &from,
+                track,
+                count,
+                with_audio,
+                idle,
+            };
+            synthetic::recv(&mut call, room, options).await?;
         }
     }
     Ok(())

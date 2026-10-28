@@ -6,7 +6,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use throcc_crypto::hpke::EncKeyPair;
 use throcc_crypto::identity::{self, IdentityKey};
-use throcc_proto::messages::{PublicKey, Signature};
+use throcc_proto::Fingerprint;
+use throcc_proto::ids::UserId;
+use throcc_proto::messages::SignedEncKey;
 use tracing::warn;
 use zeroize::Zeroizing;
 
@@ -24,6 +26,7 @@ pub struct Keystore {
     dir: PathBuf,
     identity: IdentityKey,
     enc_key: EncKeyPair,
+    enc_key_created: u64,
     pub known_servers: KnownServers,
 }
 
@@ -54,11 +57,12 @@ impl Keystore {
 
     fn assemble(dir: PathBuf, identity: IdentityKey) -> Result<Self> {
         let known_servers = KnownServers::load(&dir.join(KNOWN_SERVERS_FILE))?;
-        let enc_key = load_enc_key(&dir.join(ENC_KEY_FILE))?;
+        let (enc_key, enc_key_created) = load_enc_key(&dir.join(ENC_KEY_FILE))?;
         Ok(Self {
             dir,
             identity,
             enc_key,
+            enc_key_created,
             known_servers,
         })
     }
@@ -71,13 +75,16 @@ impl Keystore {
         &self.enc_key
     }
 
-    /// The encryption key's public half and the identity key's signature over it.
-    pub fn signed_enc_key(&self) -> (PublicKey, Signature) {
-        let public = self.enc_key.public();
-        (
-            public,
-            self.identity.sign(&identity::enc_key_message(&public)),
-        )
+    /// The encryption key, signed for one server and user until it is due for rotation.
+    pub fn signed_enc_key(&self, server: &Fingerprint, user: UserId) -> SignedEncKey {
+        let key = self.enc_key.public();
+        let not_after = self.enc_key_created + ENC_KEY_LIFETIME.as_secs();
+        let message = identity::enc_key_message(&server.0, user, not_after, &key);
+        SignedEncKey {
+            key,
+            not_after,
+            sig: self.identity.sign(&message),
+        }
     }
 
     pub fn dir(&self) -> &Path {
@@ -86,20 +93,23 @@ impl Keystore {
 }
 
 /// Loads the encryption key, replacing it once it is older than 30 days.
-fn load_enc_key(path: &Path) -> Result<EncKeyPair> {
+fn load_enc_key(path: &Path) -> Result<(EncKeyPair, u64)> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     if let Ok(bytes) = fs::read(path).map(Zeroizing::new)
         && let Some((secret, created)) = bytes.split_first_chunk::<32>()
         && let Ok(created) = <[u8; 8]>::try_from(created)
         && now.saturating_sub(u64::from_be_bytes(created)) < ENC_KEY_LIFETIME.as_secs()
     {
-        return Ok(EncKeyPair::from_secret(secret)?);
+        return Ok((
+            EncKeyPair::from_secret(secret)?,
+            u64::from_be_bytes(created),
+        ));
     }
     let key = EncKeyPair::generate();
     let mut bytes = Zeroizing::new(key.secret().to_vec());
     bytes.extend_from_slice(&now.to_be_bytes());
     write_private(path, &bytes)?;
-    Ok(key)
+    Ok((key, now))
 }
 
 fn keychain_identity() -> Result<IdentityKey> {
@@ -164,12 +174,14 @@ mod tests {
     fn enc_key_persists_and_is_signed() {
         let dir = tempfile::tempdir().unwrap();
         let store = Keystore::open_in(dir.path()).unwrap();
-        let (public, sig) = store.signed_enc_key();
+        let server = Fingerprint([3; 32]);
+        let signed = store.signed_enc_key(&server, UserId(9));
         assert_eq!(
             Keystore::open_in(dir.path()).unwrap().enc_key().public(),
-            public
+            signed.key
         );
-        let message = identity::enc_key_message(&public);
-        assert!(identity::verify(&store.identity().public(), &message, &sig).is_ok());
+        let message =
+            identity::enc_key_message(&server.0, UserId(9), signed.not_after, &signed.key);
+        assert!(identity::verify(&store.identity().public(), &message, &signed.sig).is_ok());
     }
 }
