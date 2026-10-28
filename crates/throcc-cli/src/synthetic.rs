@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -86,8 +85,8 @@ pub async fn send(call: &mut Call, room: RoomId, options: SendOptions) -> Result
     let mut next_unit = tokio::time::Instant::now();
     let mut next_audio = tokio::time::Instant::now();
     let (mut sent, mut audio_sent) = (0u32, 0u32);
-    let mut keyframes: VecDeque<Instant> = VecDeque::new();
-    let mut max_keyframes_per_second = 0;
+    let mut last_keyframe: Option<Instant> = None;
+    let mut min_keyframe_gap_ms = u128::MAX;
     let finish = tokio::time::Instant::now() + unit_interval * count + Duration::from_millis(500);
     while tokio::time::Instant::now() < finish {
         tokio::select! {
@@ -104,11 +103,10 @@ pub async fn send(call: &mut Call, room: RoomId, options: SendOptions) -> Result
             event = call.events.recv() => match event {
                 Some(CallEvent::Server(Event::KeyframeWanted { media_id: wanted, .. })) if wanted == media_id => {
                     let now = Instant::now();
-                    keyframes.push_back(now);
-                    while keyframes.front().is_some_and(|t| now.duration_since(*t) >= Duration::from_secs(1)) {
-                        keyframes.pop_front();
+                    if let Some(last) = last_keyframe {
+                        min_keyframe_gap_ms = min_keyframe_gap_ms.min(now.duration_since(last).as_millis());
                     }
-                    max_keyframes_per_second = max_keyframes_per_second.max(keyframes.len());
+                    last_keyframe = Some(now);
                 }
                 Some(_) => {}
                 None => bail!("disconnected"),
@@ -118,11 +116,16 @@ pub async fn send(call: &mut Call, room: RoomId, options: SendOptions) -> Result
     }
     let stats = &call.engine.stats;
     println!(
-        "RESULT role=sender units={sent} audio_frames={audio_sent} seconds={:.1} datagrams={} local_drops={} queue_full={} max_keyframe_requests_per_second={max_keyframes_per_second}",
+        "RESULT role=sender units={sent} audio_frames={audio_sent} seconds={:.1} datagrams={} local_drops={} queue_full={} min_keyframe_gap_ms={}",
         started.elapsed().as_secs_f64(),
         stats.sent_datagrams.load(Ordering::Relaxed),
         stats.send_dropped_units.load(Ordering::Relaxed),
         stats.send_queue_full.load(Ordering::Relaxed),
+        if min_keyframe_gap_ms == u128::MAX {
+            "none".to_owned()
+        } else {
+            min_keyframe_gap_ms.to_string()
+        },
     );
     Ok(())
 }
@@ -156,17 +159,15 @@ pub async fn recv(call: &mut Call, room: RoomId, options: RecvOptions<'_>) -> Re
             None => bail!("disconnected"),
         }
     };
-    let (mic, video) = wait_for_tracks(call, sender).await?;
-    let (media_id, kind) = match track {
+    let (mut mic, video) = wait_for_tracks(call, sender).await?;
+    let pick = |mic: MediaId, video: MediaId| match track {
         Track::Mic => (mic, Kind::Audio),
         Track::Video => (video, Kind::Video),
     };
-    let mut units = call.engine.subscribe(media_id, kind, 4096);
+    let (mut media_id, kind) = pick(mic, video);
+    let mut units = subscribe(call, media_id, kind, track).await?;
     let mut audio =
         (with_audio && media_id != mic).then(|| call.engine.subscribe(mic, Kind::Audio, 4096));
-    if let Track::Video = track {
-        expect_ok(call.request(Request::SetWatching(vec![media_id])).await?)?;
-    }
     println!("receiving track {} from user {}", media_id.0, sender.0);
 
     let (mut intact, mut corrupt, mut bytes, mut audio_frames) = (0u32, 0u32, 0usize, 0u32);
@@ -193,6 +194,21 @@ pub async fn recv(call: &mut Call, room: RoomId, options: RecvOptions<'_>) -> Re
                 }
             }
             event = call.events.recv() => match event {
+                Some(CallEvent::Server(Event::RoomState { .. })) => {
+                    let current = call.engine.keys().keys.peer_tracks(sender).map(|t| (t.mic, t.shares[0].video));
+                    if let Some((new_mic, new_video)) = current
+                        && pick(new_mic, new_video).0 != media_id
+                    {
+                        call.engine.unsubscribe(media_id);
+                        mic = new_mic;
+                        media_id = pick(new_mic, new_video).0;
+                        units = subscribe(call, media_id, kind, track).await?;
+                        if with_audio && media_id != mic {
+                            audio = Some(call.engine.subscribe(mic, Kind::Audio, 4096));
+                        }
+                        println!("the sender rejoined; now receiving track {}", media_id.0);
+                    }
+                }
                 Some(CallEvent::Server(Event::LinkStats { tracks })) => {
                     for t in tracks {
                         if t.media_id == media_id {
@@ -225,6 +241,19 @@ pub async fn recv(call: &mut Call, room: RoomId, options: RecvOptions<'_>) -> Re
         call.engine.lost(mic),
     );
     Ok(())
+}
+
+async fn subscribe(
+    call: &Call,
+    media_id: MediaId,
+    kind: Kind,
+    track: Track,
+) -> Result<tokio::sync::mpsc::Receiver<throcc_client_core::media::engine::Received>> {
+    let units = call.engine.subscribe(media_id, kind, 4096);
+    if let Track::Video = track {
+        expect_ok(call.request(Request::SetWatching(vec![media_id])).await?)?;
+    }
+    Ok(units)
 }
 
 fn find_user(presence: &[Presence], query: &str) -> Option<UserId> {

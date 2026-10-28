@@ -53,6 +53,10 @@ async fn room_with_two(server: &TestServer) -> (Call, Call, RoomId) {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "a debug build can't encrypt 20 Mbps on CI runners"
+)]
 async fn ten_thousand_units_at_20_mbps_arrive_intact() {
     const UNITS: u32 = 10_000;
     const LEN: usize = 2500;
@@ -136,7 +140,18 @@ async fn ten_thousand_units_at_20_mbps_arrive_intact() {
             .unwrap();
         let index = u32::from_be_bytes(unit.data[..4].try_into().unwrap());
         assert_eq!(unit.data, synthetic(index, LEN), "unit {index} corrupted");
-        assert_eq!(index, intact, "units out of order");
+        assert_eq!(
+            index,
+            intact,
+            "a unit went missing; sender dropped {} and queue-full {}, receiver overflowed {}",
+            alice
+                .engine
+                .stats
+                .send_dropped_units
+                .load(Ordering::Relaxed),
+            alice.engine.stats.send_queue_full.load(Ordering::Relaxed),
+            bob.engine.stats.track_overflow.load(Ordering::Relaxed),
+        );
         intact += 1;
     }
     let elapsed = started.elapsed();

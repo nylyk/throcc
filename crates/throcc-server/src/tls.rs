@@ -38,7 +38,9 @@ pub fn transport_config(congestion: Congestion) -> Result<TransportConfig> {
     config
         .keep_alive_interval(Some(transport::KEEP_ALIVE))
         .max_idle_timeout(Some(IdleTimeout::try_from(transport::IDLE_TIMEOUT)?))
-        .datagram_send_buffer_size(transport::SERVER_DATAGRAM_SEND_BUFFER);
+        .datagram_send_buffer_size(transport::SERVER_DATAGRAM_SEND_BUFFER)
+        .packet_threshold(transport::REORDER_PACKETS)
+        .time_threshold(transport::REORDER_RTT_FACTOR);
     match congestion {
         Congestion::Cubic => config.congestion_controller_factory(Arc::new(CubicConfig::default())),
         Congestion::Bbr => config.congestion_controller_factory(Arc::new(BbrConfig::default())),

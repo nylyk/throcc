@@ -110,3 +110,19 @@ A fresh subagent reviewed the wire format, media AEAD, HPKE wrapping, safety num
 ## 2026-10-29 Wire format and crypto frozen
 
 The media header (§5.5), media AEAD and track-key derivation, HPKE sender-key wrapping and its info, the signed encryption key, and the safety-number construction are **frozen** as of this entry. Changing any of them needs a human decision.
+
+## 2026-10-29 M6 egress and network tests
+
+- **The egress budget is queueing delay:** video is dropped when the oldest unit not yet sending has waited more than 150 ms. An earlier version also estimated the drain rate as congestion window over RTT; its drops kept the connection app-limited, so the window never grew and a jittery link starved. Quinn's 64 KiB buffer now stays full and the controller keeps probing.
+- **Loss detection tolerates reordering:** `packet_threshold` 64 and `time_threshold` 2.0 × RTT on both ends. Datagrams are never retransmitted, so a spurious loss only shrinks the window.
+- **`tests/netem/`** runs four scenarios in a privileged container with network namespaces, `tbf` and `netem`: `tests/netem/run.sh`, or `tests/netem/run.sh receiver_limited`. CI runs it on ubuntu. Measured on colima (aarch64, kernel 6.8), 10 Mbps share plus 50 frames/s mic, 600 units:
+
+| Scenario | Result |
+| --- | --- |
+| Receiver B limited to 3 Mbps | A and C 600/600 intact, 0 server drops. B: 425 whole units dropped by the server and reported in `LinkStats`, 0 corrupt, mic 490/500 with 0 server drops. Sender: keyframe requests ≥ 1000 ms apart. |
+| 2% random loss | about 575/600 intact per receiver, 0 corrupt, keyframe requests ≥ 1000 ms apart. |
+| 40 ± 30 ms jitter (normal), reordering | **Cubic collapses:** about 75/600 intact per receiver, about 520 units dropped by the server. **BBR (`--congestion bbr`):** two receivers 580/600, the third 125/600. Mic unaffected either way. |
+| Sender uplink limited to 5 Mbps | sender drops 315 units locally before they get a `seq`; receivers see 0 server drops. |
+
+- **Open:** under heavy reordering Cubic's window collapses. BBR does better but not reliably. Cubic stays the default as §5.1 says; the choice of default is a human decision once there is real-network data.
+- **Open:** a receiver behind a 3 Mbps `tbf` still loses many datagrams on the path, because the server sends faster than the bottleneck until loss pushes the window down. Only about 1.7 Mbps of intact video arrives. Pacing to an estimated bottleneck rate would help; §5.5 leaves pacing to quinn unless measurement asks, and this is that measurement.

@@ -103,26 +103,21 @@ async fn main() -> Result<()> {
                 link.welcome.me.0, link.welcome.role
             );
             println!("server fingerprint {}", link.connected.fingerprint);
+            link.connected.close().await;
         }
         Command::Connect { address } => {
             let link = sign_in(&keystore, &address).await?;
             print_rooms(&link.welcome.rooms, &link.welcome.presence);
             interactive(link).await?;
         }
-        Command::Rooms { address } => {
-            let link = sign_in(&keystore, &address).await?;
-            print_rooms(&link.welcome.rooms, &link.welcome.presence);
-        }
+        Command::Rooms { address } => one_shot(&keystore, &address, "rooms").await?,
         Command::Join { address, room } => {
             let link = sign_in(&keystore, &address).await?;
             let room = find_room(&link.welcome.rooms, &room)?;
             run_command(&link.requester, &link.welcome, &format!("join {}", room.0)).await?;
             interactive(link).await?;
         }
-        Command::Leave { address } => {
-            let link = sign_in(&keystore, &address).await?;
-            run_command(&link.requester, &link.welcome, "leave").await?;
-        }
+        Command::Leave { address } => one_shot(&keystore, &address, "leave").await?,
         Command::Invite { address } => one_shot(&keystore, &address, "invite").await?,
         Command::Users { address } => one_shot(&keystore, &address, "users").await?,
         Command::CreateRoom { address, name } => {
@@ -151,6 +146,7 @@ async fn main() -> Result<()> {
                 with_audio,
             };
             synthetic::send(&mut call, room, options).await?;
+            call.close().await;
         }
         Command::Recv {
             address,
@@ -173,6 +169,7 @@ async fn main() -> Result<()> {
                 idle,
             };
             synthetic::recv(&mut call, room, options).await?;
+            call.close().await;
         }
     }
     Ok(())
@@ -195,10 +192,18 @@ async fn sign_in(keystore: &Keystore, address: &str) -> Result<Link> {
 
 async fn one_shot(keystore: &Keystore, address: &str, command: &str) -> Result<()> {
     let link = sign_in(keystore, address).await?;
-    run_command(&link.requester, &link.welcome, command).await
+    let result = run_command(&link.requester, &link.welcome, command).await;
+    link.connected.close().await;
+    result
 }
 
 async fn interactive(mut link: Link) -> Result<()> {
+    let result = read_commands(&mut link).await;
+    link.connected.close().await;
+    result
+}
+
+async fn read_commands(link: &mut Link) -> Result<()> {
     println!(
         "commands: rooms, join <room>, leave, invite, users, create-room <name>, name <name>, quit"
     );

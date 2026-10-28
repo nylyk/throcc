@@ -5,6 +5,11 @@ use crate::frame::DATAGRAM_PAYLOAD_FLOOR;
 pub const KEEP_ALIVE: Duration = Duration::from_secs(5);
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const SERVER_DATAGRAM_SEND_BUFFER: usize = 64 * 1024;
+/// Reordering tolerated before a packet counts as lost. Media datagrams are never
+/// retransmitted, so a spurious loss only shrinks the congestion window.
+pub const REORDER_PACKETS: u32 = 64;
+/// The same in time, as a factor of the round-trip time.
+pub const REORDER_RTT_FACTOR: f32 = 2.0;
 
 /// About 100 ms of datagrams at `kbps`, clamped to 64–512 KiB.
 pub fn client_datagram_send_buffer(kbps: u32) -> usize {

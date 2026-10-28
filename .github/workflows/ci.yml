@@ -36,3 +36,17 @@ jobs:
             grep -E "^test .* FAILED|panicked at|^thread .* panicked" -A2 test.log | head -40 | sed 's/^/::error::/'
             exit 1
           }
+      - name: cargo test --release (throughput)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --release -p throcc-cli --test media 2>&1 | tee release.log || {
+            grep -E "^test .* FAILED|panicked at|^thread .* panicked" -A2 release.log | head -20 | sed 's/^/::error::/'
+            exit 1
+          }
+
+  netem:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: tests/netem/run.sh

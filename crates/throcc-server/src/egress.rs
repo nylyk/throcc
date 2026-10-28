@@ -140,10 +140,10 @@ impl Queues {
         }
     }
 
-    /// Drops video until the queue fits the budget at `bytes_per_sec`: first discardable
-    /// units that haven't started, then the oldest that haven't started.
-    pub fn enforce_budget(&mut self, bytes_per_sec: f64, now: Instant) {
-        while self.over_budget(bytes_per_sec, now) {
+    /// Drops video until the queue fits the budget: first discardable units that haven't
+    /// started, then the oldest that haven't started.
+    pub fn enforce_budget(&mut self, now: Instant) {
+        while self.over_budget(now) {
             let victim = self
                 .video
                 .iter()
@@ -160,12 +160,15 @@ impl Queues {
         }
     }
 
-    fn over_budget(&self, bytes_per_sec: f64, now: Instant) -> bool {
-        let waiting = self.video.iter().filter(|u| !u.started);
-        let bytes: usize = waiting.clone().map(|u| u.bytes).sum();
-        let oldest = waiting.map(|u| u.arrived).min();
-        let drain_time = Duration::from_secs_f64(bytes as f64 / bytes_per_sec.max(1.0));
-        drain_time > VIDEO_BUDGET || oldest.is_some_and(|t| now.duration_since(t) > VIDEO_BUDGET)
+    /// Queued video is measured as the wait of the oldest unit not yet sending. Quinn's
+    /// buffer stays full, so the congestion controller keeps probing for more rate.
+    fn over_budget(&self, now: Instant) -> bool {
+        self.video
+            .iter()
+            .filter(|u| !u.started)
+            .map(|u| u.arrived)
+            .min()
+            .is_some_and(|t| now.duration_since(t) > VIDEO_BUDGET)
     }
 
     pub fn pop(&mut self) -> Option<Bytes> {
@@ -213,7 +216,7 @@ pub fn spawn(connection: quinn::Connection, control: mpsc::Sender<Outgoing>) -> 
                 queues.push(packet, Instant::now());
             }
             let now = Instant::now();
-            queues.enforce_budget(send_rate(&connection), now);
+            queues.enforce_budget(now);
             if now >= next_stats {
                 next_stats = now + LINK_STATS_INTERVAL;
                 let tracks = queues.take_stats();
@@ -241,12 +244,6 @@ pub fn spawn(connection: quinn::Connection, control: mpsc::Sender<Outgoing>) -> 
         }
     });
     handle
-}
-
-/// The path's sending rate as quinn sees it: congestion window over round-trip time.
-fn send_rate(connection: &quinn::Connection) -> f64 {
-    let path = connection.stats().path;
-    path.cwnd as f64 / path.rtt.as_secs_f64().max(0.001)
 }
 
 #[cfg(test)]
@@ -314,10 +311,16 @@ mod tests {
         unit(&mut queues, 1, 0, 3, false, now);
         unit(&mut queues, 1, 3, 3, true, now);
         unit(&mut queues, 1, 6, 3, false, now);
-        unit(&mut queues, 1, 9, 3, false, now);
+        unit(
+            &mut queues,
+            1,
+            9,
+            3,
+            false,
+            now + Duration::from_millis(100),
+        );
         queues.pop();
-        // 9 KB waiting at 30 KB/s is 300 ms: two units must go.
-        queues.enforce_budget(30_000.0, now);
+        queues.enforce_budget(now + Duration::from_millis(200));
         let left: Vec<u8> = std::iter::from_fn(|| queues.pop()).map(|b| b[0]).collect();
         assert_eq!(left, vec![1, 2, 9, 10, 11]);
         assert_eq!(queues.stats[&MediaId(1)].dropped_units, 2);
@@ -329,7 +332,7 @@ mod tests {
         let mut queues = Queues::default();
         queues.push(packet(TrackKind::Video, 1, 0, Flags::FIRST, 1000), start);
         let later = start + VIDEO_BUDGET + Duration::from_millis(1);
-        queues.enforce_budget(1e9, later);
+        queues.enforce_budget(later);
         queues.push(packet(TrackKind::Video, 1, 1, Flags::LAST, 1000), later);
         assert!(queues.pop().is_none());
         unit(&mut queues, 1, 2, 1, false, later);
@@ -386,7 +389,7 @@ mod tests {
                 now,
             );
         }
-        queues.enforce_budget(1.0, now + Duration::from_secs(5));
+        queues.enforce_budget(now + Duration::from_secs(5));
         assert_eq!(std::iter::from_fn(|| queues.pop()).count(), 500);
     }
 }

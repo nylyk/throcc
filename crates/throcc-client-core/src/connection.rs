@@ -17,7 +17,19 @@ pub struct Connected {
     pub fingerprint: Fingerprint,
     /// TLS exporter value for label `throcc/exporter/1`, used for channel binding.
     pub exporter: [u8; 32],
-    _endpoint: quinn::Endpoint,
+    endpoint: quinn::Endpoint,
+}
+
+impl Connected {
+    /// Closes the connection and waits until the server has been told, so it retracts
+    /// presence at once instead of after the idle timeout.
+    pub async fn close(&self) {
+        self.connection
+            .close(transport::close::NORMAL.into(), b"bye");
+        tokio::time::timeout(std::time::Duration::from_secs(1), self.endpoint.wait_idle())
+            .await
+            .ok();
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -86,7 +98,7 @@ pub async fn connect_with(
         connection,
         fingerprint,
         exporter,
-        _endpoint: endpoint,
+        endpoint,
     })
 }
 
@@ -114,7 +126,9 @@ pub fn transport_config(send_kbps: u32) -> TransportConfig {
     let mut config = TransportConfig::default();
     config
         .keep_alive_interval(Some(transport::KEEP_ALIVE))
-        .datagram_send_buffer_size(transport::client_datagram_send_buffer(send_kbps));
+        .datagram_send_buffer_size(transport::client_datagram_send_buffer(send_kbps))
+        .packet_threshold(transport::REORDER_PACKETS)
+        .time_threshold(transport::REORDER_RTT_FACTOR);
     if let Ok(idle) = IdleTimeout::try_from(transport::IDLE_TIMEOUT) {
         config.max_idle_timeout(Some(idle));
     }

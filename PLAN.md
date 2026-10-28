@@ -675,10 +675,10 @@ Then mark the wire format **frozen** in `DECISIONS.md`.
 
 ### M6 SFU egress and network tests
 
-- [ ] Per-receiver egress tasks with audio priority, whole-unit queueing, 150 ms budget, drop order.
-- [ ] `SetWatching`, the `Idr` on start, keyframe aggregation.
-- [ ] `LinkStats`.
-- [ ] `tests/netem/`: Linux network namespaces with `tc netem` and `tbf`. Scenarios: one receiver limited to 3 Mbps; 2% random loss; 30 ms jitter with reordering; sender uplink limited.
+- [x] Per-receiver egress tasks with audio priority, whole-unit queueing, 150 ms budget, drop order.
+- [x] `SetWatching`, the `Idr` on start, keyframe aggregation.
+- [x] `LinkStats`.
+- [x] `tests/netem/`: Linux network namespaces with `tc netem` and `tbf`. Scenarios: one receiver limited to 3 Mbps; 2% random loss; 30 ms jitter with reordering; sender uplink limited.
 - [ ] **Review subagent** on `sfu.rs` and `egress.rs`.
 
 **Done when:**

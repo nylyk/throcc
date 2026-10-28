@@ -7,6 +7,7 @@ use throcc_proto::messages::{Event, Placed, Request, Response, Welcome};
 use tokio::sync::mpsc;
 use tracing::warn;
 
+use crate::connection::Connected;
 use crate::contacts::Contacts;
 use crate::control::{Link, Requester};
 use crate::keys::KeyNotice;
@@ -30,6 +31,7 @@ pub struct Call {
     /// Our tracks whose encoder must recover after a local drop.
     pub recovery: mpsc::Receiver<MediaId>,
     pub connection: quinn::Connection,
+    connected: Connected,
 }
 
 impl Call {
@@ -85,7 +87,13 @@ impl Call {
             events,
             recovery,
             connection,
+            connected,
         })
+    }
+
+    /// Leaves the server cleanly.
+    pub async fn close(&self) {
+        self.connected.close().await;
     }
 
     pub fn me(&self) -> UserId {
