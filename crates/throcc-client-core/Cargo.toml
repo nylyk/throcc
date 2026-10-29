@@ -41,6 +41,7 @@ screencapturekit.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
+windows-core.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd.workspace = true

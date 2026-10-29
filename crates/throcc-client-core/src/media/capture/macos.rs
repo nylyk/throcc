@@ -169,7 +169,9 @@ impl Capture for MacCapture {
         let Ok((buffer, at)) = self.frames.pop() else {
             return false;
         };
-        let timestamp = self.since_zero(at, VIDEO_CLOCK_HZ) as u32;
+        let Ok(timestamp) = u32::try_from(self.since_zero(at, VIDEO_CLOCK_HZ)) else {
+            return false;
+        };
         let Ok(guard) = buffer.lock_read_only() else {
             return false;
         };
