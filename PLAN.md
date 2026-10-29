@@ -144,7 +144,7 @@ throcc/
 Each spike ends with a short entry in `docs/DECISIONS.md`.
 
 - [x] **S1 PAKE crate.** Is there a maintained CPace (Ristretto255) crate? If not, confirm RustCrypto `spake2` supports what §5.3 needs: key confirmation, associated data, symmetric roles. Recommend one.
-- [ ] **S2 Audio crates.** Confirm `sonora`, `ropus` and `neteq` build on all three targets. Confirm `neteq` can report the timestamp it is currently playing, which §5.10 needs. If it can't, propose the smallest patch.
+- [x] **S2 Audio crates.** Confirm `sonora`, `ropus` and `neteq` build on all three targets. Confirm `neteq` can report the timestamp it is currently playing, which §5.10 needs. If it can't, propose the smallest patch.
 - [x] **S3 gpui video surface.** On macOS `paint_surface` takes a `CVPixelBuffer`. Find the current state of surface or YUV rendering on Linux (wgpu) and Windows (D3D11) upstream, including zed discussion #45866. Recommend: carry a small patch on a pinned tag, or use what upstream has.
 - [x] **S4 Encoder recovery.** Which hardware encoders expose intra refresh through ffmpeg: NVENC, AMF, QSV, VA-API per vendor, VideoToolbox? Assume VideoToolbox does not until shown otherwise.
 
@@ -639,7 +639,7 @@ WantedBy=multi-user.target
 
 - [x] `SetRoom` transaction, media id allocation, epoch bump, `Placed`, `RoomState`, presence events.
 - [x] Room create, rename and delete with permissions. Deleting an occupied room moves people to `None`.
-- [ ] `SetProfile` rate limit, avatars with lazy fetch.
+- [x] `SetProfile` rate limit, avatars with lazy fetch.
 - [x] Reconnect with `want_room`.
 
 **Done when:**

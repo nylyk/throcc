@@ -6,6 +6,9 @@ use throcc_client_core::state::{ConnectionStatus, State};
 use throcc_proto::invite::InviteCode;
 use throcc_server::{Config, Congestion, Server};
 
+/// The server takes one profile change per 10 s.
+const PROFILE_INTERVAL: Duration = Duration::from_millis(10_500);
+
 /// Runs a server on its own runtime thread, as the blocking client API expects.
 fn server() -> (String, InviteCode) {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -109,4 +112,38 @@ fn two_clients_see_each_other_join_and_unmute() {
 
     bob.command(Command::Disconnect);
     wait_for(&alice, "bob gone", |s| s.person(bob_id).is_none());
+}
+
+#[test]
+fn a_profile_picture_reaches_others_and_survives_a_rename() {
+    let (address, bootstrap) = server();
+    let (alice, _a) = client(&address, &bootstrap);
+    wait_for(&alice, "connected", |s| {
+        s.connection == ConnectionStatus::Connected
+    });
+    alice.command(Command::CreateRoom("General".into()));
+    wait_for(&alice, "the room", |s| !s.rooms.is_empty());
+    let room = alice.state().rooms[0].id;
+    let code = invite(&alice);
+    let (bob, _b) = client(&address, &code);
+    alice.command(Command::Join(Some(room)));
+    bob.command(Command::Join(Some(room)));
+    let alice_id = alice.state().me.unwrap();
+    wait_for(&bob, "alice in the room", |s| s.person(alice_id).is_some());
+
+    let picture: Vec<u8> = (0..2000u32).map(|i| (i * 7) as u8).collect();
+    alice.command(Command::SetAvatar(Some(picture.clone())));
+    wait_for(&bob, "alice's avatar hash", |s| {
+        s.person(alice_id).is_some_and(|p| p.avatar.is_some())
+    });
+    let hash = bob.state().person(alice_id).unwrap().avatar.unwrap();
+    wait_for(&bob, "alice's picture", |_| bob.avatar(hash).is_some());
+    assert_eq!(&*bob.avatar(hash).unwrap(), picture.as_slice());
+
+    std::thread::sleep(PROFILE_INTERVAL);
+    alice.command(Command::SetName("Alice".into()));
+    wait_for(&bob, "alice's new name", |s| {
+        s.person(alice_id).is_some_and(|p| p.name == "Alice")
+    });
+    assert_eq!(bob.state().person(alice_id).unwrap().avatar, Some(hash));
 }

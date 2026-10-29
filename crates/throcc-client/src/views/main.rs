@@ -39,6 +39,7 @@ fn people_in(state: &State, room: RoomId) -> Vec<(UserId, Person)> {
 }
 
 fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
+    let pictures = app.pictures_of_people();
     let state = app.state.clone();
     let server = state
         .server
@@ -82,7 +83,7 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
             .children(
                 people
                     .into_iter()
-                    .map(|(user, person)| occupant(user, &person)),
+                    .map(|(user, person)| occupant(user, &person, pictures.get(&user).cloned())),
             )
     });
 
@@ -113,7 +114,7 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                 .flex_none()
                 .border_b_1()
                 .border_color(theme::control())
-                .child(avatar(&server, 0, px(28.), false))
+                .child(avatar(&server, 0, None, px(28.), false))
                 .child(
                     div()
                         .flex_1()
@@ -157,6 +158,7 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                 .child(avatar(
                     &my_name,
                     me.map_or(0, |m| m.0),
+                    me.and_then(|m| pictures.get(&m).cloned()),
                     px(28.),
                     me.is_some_and(|m| state.person(m).is_some_and(|p| p.speaking)),
                 ))
@@ -225,7 +227,11 @@ impl<T: Styled> Selected for T {
     }
 }
 
-fn occupant(user: UserId, person: &Person) -> Div {
+fn occupant(
+    user: UserId,
+    person: &Person,
+    picture: Option<std::sync::Arc<gpui::RenderImage>>,
+) -> Div {
     div()
         .flex()
         .items_center()
@@ -233,7 +239,13 @@ fn occupant(user: UserId, person: &Person) -> Div {
         .pl(px(28.))
         .pr_2()
         .min_h(px(30.))
-        .child(avatar(&person.name, user.0, px(20.), person.speaking))
+        .child(avatar(
+            &person.name,
+            user.0,
+            picture,
+            px(20.),
+            person.speaking,
+        ))
         .child(
             div()
                 .flex_1()
@@ -252,6 +264,7 @@ fn occupant(user: UserId, person: &Person) -> Div {
 }
 
 fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
+    let pictures = app.pictures_of_people();
     let state = app.state.clone();
     let cards = state.rooms.iter().map(|room| {
         let people = people_in(&state, room.id);
@@ -282,12 +295,9 @@ fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
                     .items_center()
                     .gap_1()
                     .min_h(px(32.))
-                    .children(
-                        people
-                            .iter()
-                            .take(6)
-                            .map(|(u, p)| avatar(&p.name, u.0, px(24.), p.speaking)),
-                    )
+                    .children(people.iter().take(6).map(|(u, p)| {
+                        avatar(&p.name, u.0, pictures.get(u).cloned(), px(24.), p.speaking)
+                    }))
                     .children(people.is_empty().then(|| caption("Empty")))
                     .children((sharing > 0).then(|| {
                         chip(
@@ -331,6 +341,7 @@ fn room(
     window: &mut Window,
     cx: &mut Context<ThroccApp>,
 ) -> impl IntoElement {
+    let pictures = app.pictures_of_people();
     let state = app.state.clone();
     let name = state.room(room).map_or("Room".into(), |r| r.name.clone());
     let people = people_in(&state, room);
@@ -417,7 +428,13 @@ fn room(
                         .py_1()
                         .rounded(theme::RADIUS_ROW)
                         .bg(theme::surface().opacity(0.85))
-                        .child(avatar(&person.name, user.0, px(18.), person.speaking))
+                        .child(avatar(
+                            &person.name,
+                            user.0,
+                            pictures.get(&user).cloned(),
+                            px(18.),
+                            person.speaking,
+                        ))
                         .child(
                             div()
                                 .text_size(px(13.))
@@ -495,7 +512,13 @@ fn room(
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(avatar(&person.name, user.0, px(22.), person.speaking))
+                            .child(avatar(
+                                &person.name,
+                                user.0,
+                                pictures.get(&user).cloned(),
+                                px(22.),
+                                person.speaking,
+                            ))
                             .child(
                                 div()
                                     .flex_1()
@@ -538,7 +561,13 @@ fn room(
                 .items_center()
                 .justify_center()
                 .gap_2()
-                .child(avatar(&person.name, user.0, px(40.), person.speaking))
+                .child(avatar(
+                    &person.name,
+                    user.0,
+                    pictures.get(user).cloned(),
+                    px(40.),
+                    person.speaking,
+                ))
                 .child(
                     div()
                         .flex()

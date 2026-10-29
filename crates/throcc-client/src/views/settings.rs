@@ -2,6 +2,7 @@ use gpui::{
     AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
+use gpui_component::input::Input;
 use gpui_component::switch::Switch;
 use throcc_client_core::client::Command;
 use throcc_client_core::media::audio::{
@@ -37,10 +38,12 @@ pub fn render(
             .when_page(page == target)
             .hover(|s| s.bg(theme::raised()))
             .child(label)
-            .on_click(cx.listener(move |app, _, _, cx| {
+            .on_click(cx.listener(move |app, _, window, cx| {
                 app.screen = Screen::Settings(target);
-                if target == SettingsPage::Members {
-                    app.command(Command::ListUsers);
+                match target {
+                    SettingsPage::Members => app.command(Command::ListUsers),
+                    SettingsPage::Profile => app.fill_profile(window, cx),
+                    _ => {}
                 }
                 cx.notify();
             }))
@@ -65,6 +68,12 @@ pub fn render(
                 })),
         )
         .child(div().h_2())
+        .child(nav_item(
+            "nav-profile",
+            "Profile",
+            SettingsPage::Profile,
+            cx,
+        ))
         .child(nav_item("nav-audio", "Audio", SettingsPage::Audio, cx))
         .child(nav_item(
             "nav-keys",
@@ -86,6 +95,7 @@ pub fn render(
         ));
 
     let content = match page {
+        SettingsPage::Profile => profile(app, cx),
         SettingsPage::Audio => audio(app, cx),
         SettingsPage::Keys => keys(app, cx),
         SettingsPage::Members => members(app, cx),
@@ -363,7 +373,78 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .into_any_element()
 }
 
+fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
+    let me = app
+        .state
+        .me
+        .and_then(|me| Some((me, app.state.person(me)?.clone())));
+    let (seed, name, avatar_hash) = me.map_or((0, String::new(), None), |(me, person)| {
+        (me.0, person.name, person.avatar)
+    });
+    let picture = app.picture(avatar_hash);
+    let picture_buttons = div()
+        .flex()
+        .gap_2()
+        .child(
+            secondary("choose-picture", "Choose picture…").on_click(cx.listener(
+                |app, _, _, cx| {
+                    app.profile_error = None;
+                    app.choose_picture(cx);
+                },
+            )),
+        )
+        .children(avatar_hash.map(|_| {
+            secondary("remove-picture", "Remove").on_click(cx.listener(|app, _, _, cx| {
+                app.command(Command::SetAvatar(None));
+                cx.notify();
+            }))
+        }));
+    let name_field = div()
+        .flex()
+        .gap_2()
+        .child(div().flex_1().child(Input::new(&app.name)))
+        .child(
+            primary("save-name", "Save").on_click(cx.listener(|app, _, _, cx| {
+                let name = app.name.read(cx).value().trim().to_owned();
+                if !name.is_empty() {
+                    app.command(Command::SetName(name));
+                }
+                cx.notify();
+            })),
+        );
+    div()
+        .flex()
+        .flex_col()
+        .gap_6()
+        .child(title("Profile"))
+        .child(
+            card()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_4()
+                        .child(avatar(&name, seed, picture, px(64.), false))
+                        .child(picture_buttons),
+                )
+                .child(row("Name", name_field))
+                .children(
+                    app.profile_error
+                        .clone()
+                        .map(|error| caption(error).text_color(theme::danger_text())),
+                )
+                .child(caption(
+                    "Everyone on this server sees your name and picture. You can change them once every 10 seconds.",
+                )),
+        )
+        .into_any_element()
+}
+
 fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
+    let pictures = app.pictures_of_people();
     let state = app.state.clone();
     let server = state
         .server
@@ -400,7 +481,7 @@ fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                         .rounded(theme::RADIUS_ROW)
                         .cursor_pointer()
                         .hover(|s| s.bg(theme::raised()))
-                        .child(avatar(&person.name, user.0, px(28.), false))
+                        .child(avatar(&person.name, user.0, pictures.get(&user).cloned(), px(28.), false))
                         .child(div().flex_1().child(person.name.clone()))
                         .child(if changed {
                             chip("Key changed", theme::warn_bg(), theme::warn_text())
@@ -420,6 +501,7 @@ fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
 }
 
 fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
+    let pictures = app.pictures_of_people();
     let is_admin = app.state.role == Some(Role::Admin);
     let invite = app.invite.clone();
     let users = app.users.clone();
@@ -486,7 +568,13 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                         .items_center()
                         .gap_3()
                         .min_h(theme::TOUCH)
-                        .child(avatar(&user.name, id.0, px(28.), false))
+                        .child(avatar(
+                            &user.name,
+                            id.0,
+                            pictures.get(&id).cloned(),
+                            px(28.),
+                            false,
+                        ))
                         .child(
                             div()
                                 .flex_1()
@@ -561,7 +649,7 @@ fn servers(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                             .items_center()
                             .gap_3()
                             .min_h(theme::TOUCH)
-                            .child(avatar(address, i as u64, px(28.), false))
+                            .child(avatar(address, i as u64, None, px(28.), false))
                             .child(
                                 div()
                                     .flex_1()

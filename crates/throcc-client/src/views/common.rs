@@ -1,5 +1,8 @@
+use std::sync::Arc;
+
 use gpui::{
-    Div, ElementId, FontWeight, Hsla, ParentElement, Pixels, SharedString, Styled, div, px,
+    Div, ElementId, FontWeight, Hsla, IntoElement, ObjectFit, ParentElement, Pixels, RenderImage,
+    SharedString, Styled, StyledImage, div, img, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Icon, Sizable, Size};
@@ -16,8 +19,15 @@ pub fn initials(name: &str) -> String {
         .map_or("?".into(), |c| c.to_uppercase().to_string())
 }
 
-/// Initials on a muted hue, with the speaking ring when they talk.
-pub fn avatar(name: &str, seed: u64, size: Pixels, speaking: bool) -> Div {
+/// The person's picture, or their initials on a muted hue, with the speaking ring when
+/// they talk.
+pub fn avatar(
+    name: &str,
+    seed: u64,
+    picture: Option<Arc<RenderImage>>,
+    size: Pixels,
+    speaking: bool,
+) -> Div {
     let ring = if speaking {
         theme::speaking()
     } else {
@@ -43,7 +53,15 @@ pub fn avatar(name: &str, seed: u64, size: Pixels, speaking: bool) -> Div {
                 .text_color(theme::text())
                 .text_size(size * 0.42)
                 .font_weight(FontWeight::MEDIUM)
-                .child(initials(name)),
+                .overflow_hidden()
+                .child(match picture {
+                    Some(picture) => img(picture)
+                        .size(size)
+                        .rounded_full()
+                        .object_fit(ObjectFit::Cover)
+                        .into_any_element(),
+                    None => initials(name).into_any_element(),
+                }),
         )
 }
 

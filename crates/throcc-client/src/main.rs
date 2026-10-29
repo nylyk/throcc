@@ -1,4 +1,5 @@
 mod app;
+mod avatar;
 mod hotkey;
 mod theme;
 mod video;

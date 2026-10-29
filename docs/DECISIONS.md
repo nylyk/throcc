@@ -243,3 +243,10 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 - **The process callback copies into two `rtrb` rings**: interleaved samples (one second) and one entry per buffer with its time and frame count (64). Either ring full drops the buffer and counts it on the capture's drop counter.
 - **Audio failing to start leaves a silent share**, with a warning; `captures_audio` is then false, so `ShareConfig.audio` is too.
 - **Tested in a Linux container** (`desktop_audio_has_other_apps_but_not_ours`): `pipewire`, `wireplumber` and a null sink; `pw-play` plays a 1 kHz tone from another process while a stream in the test process plays 300 Hz. The capture has the 1 kHz tone at full level and the 300 Hz one 35 dB down (onset splatter, the stream is not linked), in steady 960-tick steps, within 40 ms of the video's timestamps. A real desktop is in `MANUAL_TESTS.md`.
+
+## 2026-10-29 Profile pictures
+
+- **Pictures are fetched lazily by hash and checked against it.** The first `ClientApi::avatar(hash)` queues one `GetAvatar`; the bytes are kept only if their SHA-256 is the hash, then `Event::AvatarReady` redraws. A missing or mismatched picture is not asked for again in that session.
+- **The client shrinks any PNG or JPEG to a centred 128 px square** before upload, as PNG, or as JPEG at quality 85 when the PNG would pass the server's 64 KiB cap. Decoding and encoding use the `image` crate's `png` and `jpeg` features.
+- **A rename resends the current picture's hash**, since `SetProfile` sets both fields at once.
+- **Settings has a Profile page** (name, picture, remove). The server takes one profile change per 10 s and the page says so.

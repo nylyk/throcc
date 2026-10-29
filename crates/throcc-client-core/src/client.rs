@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use std::path::PathBuf;
 use throcc_proto::Fingerprint;
-use throcc_proto::ids::{Role, RoomId, UserId};
+use throcc_proto::ids::{Hash, Role, RoomId, UserId};
 use throcc_proto::messages::{Codec, ShareConfig, User};
 
 use throcc_crypto::safety;
@@ -39,6 +40,9 @@ pub enum Command {
     Unwatch(UserId),
     SetVolume(UserId, f32),
     SetName(String),
+    /// Sets our profile picture, at most 64 KiB, or clears it.
+    SetAvatar(Option<Vec<u8>>),
+    FetchAvatar(Hash),
     CreateRoom(String),
     RenameRoom(RoomId, String),
     DeleteRoom(RoomId),
@@ -66,10 +70,15 @@ pub enum Command {
 #[derive(Clone, Debug)]
 pub enum Event {
     State(Arc<State>),
-    Invite { code: String, expires: u64 },
+    Invite {
+        code: String,
+        expires: u64,
+    },
     Users(Vec<User>),
     Notice(String),
     Kicked(String),
+    /// A profile picture asked for with [`ClientApi::avatar`] has arrived.
+    AvatarReady(Hash),
 }
 
 /// The UI's view of a client. Implemented by the real client and by [`MockClient`].
@@ -81,6 +90,8 @@ pub trait ClientApi: Send + Sync {
     fn safety_number(&self, user: UserId) -> Option<String>;
     /// The newest picture of `user`'s share while watched, or of ours while sharing.
     fn picture(&self, user: UserId) -> Option<Picture>;
+    /// The profile picture behind `hash`, fetched in the background on first ask.
+    fn avatar(&self, hash: Hash) -> Option<Arc<[u8]>>;
 }
 
 const COMMANDS: usize = 64;
@@ -124,6 +135,7 @@ impl Client {
             state: Mutex::new(Arc::new(State::default())),
             events,
             pictures: Mutex::default(),
+            avatars: Mutex::default(),
         });
         let (commands, commands_rx) = mpsc::channel(COMMANDS);
         let call = {
@@ -184,12 +196,21 @@ impl ClientApi for Client {
     fn picture(&self, user: UserId) -> Option<Picture> {
         self.shared.picture(user)
     }
+
+    fn avatar(&self, hash: Hash) -> Option<Arc<[u8]>> {
+        let (bytes, fetch) = self.shared.avatar(hash);
+        if fetch {
+            self.command(Command::FetchAvatar(hash));
+        }
+        bytes
+    }
 }
 
 /// A client with canned people and rooms that reacts to commands locally.
 pub struct MockClient {
     state: Mutex<Arc<State>>,
     events: broadcast::Sender<Event>,
+    avatars: Mutex<HashMap<Hash, Arc<[u8]>>>,
 }
 
 impl Default for MockClient {
@@ -204,6 +225,7 @@ impl MockClient {
         Self {
             state: Mutex::new(Arc::new(sample_state())),
             events,
+            avatars: Mutex::default(),
         }
     }
 
@@ -284,6 +306,22 @@ impl ClientApi for MockClient {
                     p.name = name;
                 }
             }),
+            Command::SetAvatar(picture) => {
+                let hash = picture.map(|bytes| {
+                    let hash = Hash(<sha2::Sha256 as sha2::Digest>::digest(&bytes).into());
+                    self.avatars
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert(hash, bytes.into());
+                    hash
+                });
+                self.update(|s| {
+                    if let Some(p) = s.people.get_mut(&me) {
+                        p.avatar = hash;
+                    }
+                });
+            }
+            Command::FetchAvatar(_) => {}
             Command::CreateRoom(name) => self.update(|s| {
                 let id = RoomId(s.rooms.iter().map(|r| r.id.0).max().unwrap_or(0) + 1);
                 s.rooms.push(RoomView { id, name });
@@ -348,6 +386,14 @@ impl ClientApi for MockClient {
     fn picture(&self, _user: UserId) -> Option<Picture> {
         let frame = VideoFrame::test_pattern(1280, 720, 1, 0);
         Some(tokio::sync::watch::channel(Some(Arc::new(frame))).1)
+    }
+
+    fn avatar(&self, hash: Hash) -> Option<Arc<[u8]>> {
+        self.avatars
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&hash)
+            .cloned()
     }
 }
 

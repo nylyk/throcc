@@ -3,8 +3,9 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
 use throcc_proto::Fingerprint;
-use throcc_proto::ids::{MediaId, RoomId, UserId};
+use throcc_proto::ids::{Hash, MediaId, RoomId, UserId};
 use throcc_proto::messages::{
     Event as ServerEvent, MediaState, Placed, Presence, Recovery, Request, Response, RoomPeer,
     Share, ShareConfig, Welcome,
@@ -47,9 +48,43 @@ pub(crate) struct Shared {
     pub state: Mutex<Arc<State>>,
     pub events: broadcast::Sender<Event>,
     pub pictures: Mutex<HashMap<UserId, Picture>>,
+    pub avatars: Mutex<HashMap<Hash, AvatarSlot>>,
+}
+
+/// A profile picture fetched once per hash and kept for the session.
+#[derive(Clone)]
+pub(crate) enum AvatarSlot {
+    Fetching,
+    Ready(Arc<[u8]>),
+    Missing,
 }
 
 impl Shared {
+    /// The picture behind `hash` once fetched. True in the second place when nobody has
+    /// asked for it yet, so the caller should fetch it.
+    pub fn avatar(&self, hash: Hash) -> (Option<Arc<[u8]>>, bool) {
+        let mut avatars = self.avatars.lock().unwrap_or_else(PoisonError::into_inner);
+        match avatars.get(&hash) {
+            Some(AvatarSlot::Ready(bytes)) => (Some(bytes.clone()), false),
+            Some(_) => (None, false),
+            None => {
+                avatars.insert(hash, AvatarSlot::Fetching);
+                (None, true)
+            }
+        }
+    }
+
+    fn set_avatar(&self, hash: Hash, slot: AvatarSlot) {
+        let ready = matches!(slot, AvatarSlot::Ready(_));
+        self.avatars
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(hash, slot);
+        if ready {
+            self.emit(Event::AvatarReady(hash));
+        }
+    }
+
     pub fn picture(&self, user: UserId) -> Option<Picture> {
         self.pictures
             .lock()
@@ -450,9 +485,11 @@ impl Session {
                 });
             }
             Command::SetName(name) => {
-                self.simple(Request::SetProfile { name, avatar: None })
-                    .await
+                let avatar = self.my_person().and_then(|p| p.avatar);
+                self.simple(Request::SetProfile { name, avatar }).await
             }
+            Command::SetAvatar(picture) => self.set_avatar(picture).await,
+            Command::FetchAvatar(hash) => self.fetch_avatar(hash).await,
             Command::CreateRoom(name) => self.simple(Request::CreateRoom { name }).await,
             Command::RenameRoom(room, name) => {
                 self.simple(Request::RenameRoom { room, name }).await
@@ -521,6 +558,44 @@ impl Session {
         if let Ok(Response::Users(users)) = self.call.request(Request::ListUsers).await {
             self.shared.emit(Event::Users(users));
         }
+    }
+
+    fn my_person(&self) -> Option<Person> {
+        let state = self.shared.state();
+        state.person(state.me?).cloned()
+    }
+
+    async fn set_avatar(&mut self, picture: Option<Vec<u8>>) {
+        let Some(me) = self.my_person() else { return };
+        let avatar = match picture {
+            Some(bytes) => {
+                let shared: Arc<[u8]> = bytes.clone().into();
+                match self.call.request(Request::SetAvatar(bytes)).await {
+                    Ok(Response::AvatarHash(hash)) => {
+                        self.shared.set_avatar(hash, AvatarSlot::Ready(shared));
+                        Some(hash)
+                    }
+                    other => return self.refused(other),
+                }
+            }
+            None => None,
+        };
+        self.simple(Request::SetProfile {
+            name: me.name,
+            avatar,
+        })
+        .await;
+    }
+
+    /// Fetches a picture by its hash, keeping it only if the bytes match the hash.
+    async fn fetch_avatar(&mut self, hash: Hash) {
+        let slot = match self.call.request(Request::GetAvatar(hash)).await {
+            Ok(Response::Avatar(bytes)) if Sha256::digest(&bytes).as_slice() == hash.0 => {
+                AvatarSlot::Ready(bytes.into())
+            }
+            _ => AvatarSlot::Missing,
+        };
+        self.shared.set_avatar(hash, slot);
     }
 
     async fn simple(&mut self, request: Request) {

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use gpui::{
     App, AppContext, Context, Entity, InteractiveElement, IntoElement, KeyBinding, ParentElement,
-    Render, Styled, Subscription, Task, Window, actions, div,
+    PathPromptOptions, Render, RenderImage, Styled, Subscription, Task, Window, actions, div,
 };
 use gpui_component::WindowExt;
 use gpui_component::input::{InputEvent, InputState};
@@ -14,7 +14,7 @@ use throcc_client_core::media::audio::VoiceSettings;
 use throcc_client_core::media::devices;
 use throcc_client_core::state::{Preset, State};
 use throcc_proto::Fingerprint;
-use throcc_proto::ids::UserId;
+use throcc_proto::ids::{Hash, UserId};
 use throcc_proto::invite::{self, InviteCode};
 use throcc_proto::messages::User;
 
@@ -35,6 +35,7 @@ pub fn bind_keys(cx: &mut App) {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsPage {
+    Profile,
     Audio,
     Keys,
     Members,
@@ -81,8 +82,11 @@ pub struct ThroccApp {
     pub dialog: Option<Dialog>,
     pub address: Entity<InputState>,
     pub code: Entity<InputState>,
+    pub name: Entity<InputState>,
+    pub pictures: std::collections::HashMap<Hash, Arc<RenderImage>>,
     pub joining: bool,
     pub join_error: Option<String>,
+    pub profile_error: Option<String>,
     pub known_servers: Vec<(String, Fingerprint)>,
     pub users: Vec<User>,
     pub invite: Option<(String, u64)>,
@@ -102,6 +106,7 @@ impl ThroccApp {
     pub fn new(mock: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let address = cx.new(|cx| InputState::new(window, cx).placeholder("voice.example.net"));
         let code = cx.new(|cx| InputState::new(window, cx).placeholder("K7Q-M2XPD"));
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder("Your name"));
         let subscriptions = vec![cx.subscribe_in(&code, window, Self::on_code_input)];
         let known_servers = if mock { Vec::new() } else { known_servers() };
         let (inputs, outputs) = devices::list();
@@ -112,8 +117,11 @@ impl ThroccApp {
             dialog: None,
             address,
             code,
+            name,
+            pictures: std::collections::HashMap::new(),
             joining: false,
             join_error: None,
+            profile_error: None,
             known_servers,
             users: Vec::new(),
             invite: None,
@@ -195,8 +203,79 @@ impl ThroccApp {
                 self.screen = Screen::Join;
                 self.join_error = Some(reason);
             }
+            Event::AvatarReady(_) => {}
         }
         cx.notify();
+    }
+
+    /// The decoded pictures of everyone in the state who has one and has arrived.
+    pub fn pictures_of_people(&mut self) -> std::collections::HashMap<UserId, Arc<RenderImage>> {
+        let wanted: Vec<(UserId, Option<Hash>)> = self
+            .state
+            .people
+            .iter()
+            .map(|(user, p)| (*user, p.avatar))
+            .collect();
+        wanted
+            .into_iter()
+            .filter_map(|(user, avatar)| Some((user, self.picture(avatar)?)))
+            .collect()
+    }
+
+    /// The decoded profile picture behind `avatar`, once the client has it.
+    pub fn picture(&mut self, avatar: Option<Hash>) -> Option<Arc<RenderImage>> {
+        let hash = avatar?;
+        if let Some(picture) = self.pictures.get(&hash) {
+            return Some(picture.clone());
+        }
+        let picture = crate::avatar::decode(&self.client.as_ref()?.avatar(hash)?)?;
+        self.pictures.insert(hash, picture.clone());
+        Some(picture)
+    }
+
+    /// Puts our current name in the profile page's name field.
+    pub fn fill_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self
+            .state
+            .me
+            .and_then(|me| self.state.person(me))
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        self.name.update(cx, |s, cx| s.set_value(name, window, cx));
+    }
+
+    /// Asks for a picture file, shrinks it and sets it as our profile picture.
+    pub fn choose_picture(&mut self, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Use as picture".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let prepared = cx
+                .background_executor()
+                .spawn(async move {
+                    let file = std::fs::read(&path).map_err(|e| e.to_string())?;
+                    crate::avatar::prepare(&file)
+                })
+                .await;
+            this.update(cx, |app, cx| {
+                match prepared {
+                    Ok(bytes) => app.command(Command::SetAvatar(Some(bytes))),
+                    Err(message) => app.profile_error = Some(message),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn join(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -317,6 +396,11 @@ impl ThroccApp {
             "verify" => self.dialog = Some(Dialog::Verify(UserId(2))),
             "keychange" => self.dialog = Some(Dialog::Verify(UserId(3))),
             "settings" => self.screen = Screen::Settings(SettingsPage::Audio),
+            "profile" => {
+                self.screen = Screen::Settings(SettingsPage::Profile);
+                joined(self);
+                self.command(Command::SetAvatar(Some(crate::avatar::sample())));
+            }
             "members" => {
                 self.screen = Screen::Settings(SettingsPage::Members);
                 self.command(Command::ListUsers);

@@ -110,7 +110,7 @@ pub fn render(
                         .rounded(theme::RADIUS_ROW)
                         .cursor_pointer()
                         .hover(|s| s.bg(theme::raised()))
-                        .child(avatar(&address, i as u64, px(28.), false))
+                        .child(avatar(&address, i as u64, None, px(28.), false))
                         .child(
                             div()
                                 .flex()

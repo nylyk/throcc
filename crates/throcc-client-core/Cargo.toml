@@ -22,6 +22,7 @@ directories.workspace = true
 keyring.workspace = true
 serde.workspace = true
 postcard.workspace = true
+sha2.workspace = true
 quinn.workspace = true
 ropus.workspace = true
 rsmpeg = { workspace = true, optional = true }

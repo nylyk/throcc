@@ -28,7 +28,7 @@ cpal = "0.18.2"
 ed25519-dalek = { version = "3.0.0", features = ["zeroize"] }
 directories = "6.0.0"
 getrandom = "0.4.3"
-image = { version = "0.25.10", default-features = false }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 keyring = "4.2.0"
 libc = "0.2.191"
 hex = "0.4.3"
