@@ -41,3 +41,22 @@ Pass: over 50 fps and under one core.
 ## M9: share between two desktop clients
 
 Needs two machines with the client built with `--features ffmpeg` and a running server. Join one room on both, press Share on one and pick a window in the system picker. Pass: the other side sees the window within a second of pressing Watch, and the sharer sees their own self-view.
+
+## M9: Windows screen capture and sender load
+
+Needs a Windows 10 2004 or newer machine with a GPU. First, the capture alone, with something moving on the primary monitor:
+
+```sh
+cargo test -p throcc-client-core --lib primary_monitor -- --ignored
+```
+
+Pass: at least 10 frames in 3 s, timestamps rising, picture not uniform.
+
+Then the client, built with `--features ffmpeg`, in a room with a second client. Press Share.
+
+- The system picker opens over the throcc window. Pick a window. Pressing Cancel in the picker leaves the call as it was, with a notice that nothing was picked.
+- On Windows 11 no yellow border appears around the shared window or screen. On Windows 10 a border is expected.
+- The cursor shows in the shared picture.
+- Resize the shared window: the viewer's picture follows, letterboxed, without stretching.
+- Share the High preset (2560×1440 at 60 fps) of a screen playing moving video full screen. In Task Manager's Details tab, add the CPU time column or use `Get-Process throcc-client | Select CPU` twice 10 s apart. Pass: the sender uses under one core, and the viewer sees about 60 fps.
+- On a 120 Hz or faster display, the viewer still gets about 60 fps, not the display rate.
