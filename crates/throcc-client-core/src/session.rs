@@ -457,6 +457,26 @@ impl Session {
                     }
                 });
             }
+            Command::Voice(settings) => {
+                self.options.voice = settings;
+                self.voice(VoiceCommand::Settings(settings));
+            }
+            Command::Devices { input, output } => {
+                self.options.input_device = input;
+                self.options.output_device = output;
+                self.start_voice();
+                let placed = self.call.engine.keys().keys.room().map(|_| ());
+                if placed.is_some() {
+                    self.voice(VoiceCommand::SendOn(self.my_tracks.as_ref().map(|t| t.mic)));
+                    self.voice(VoiceCommand::Muted(!self.media.mic));
+                    self.voice(VoiceCommand::Deafened(self.media.deafened));
+                    let peers: Vec<RoomPeer> =
+                        std::mem::take(&mut self.peers).into_values().collect();
+                    self.sync_peers(&peers);
+                }
+            }
+            Command::MicTest(on) => self.voice(VoiceCommand::Loopback(on)),
+            Command::PushToTalk(down) => self.voice(VoiceCommand::PushToTalk(down)),
             Command::Disconnect => {}
         }
     }

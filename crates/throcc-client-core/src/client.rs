@@ -14,6 +14,7 @@ use crate::account::{self, SignInError};
 use crate::call::Call;
 use crate::contacts::Contacts;
 use crate::keystore::Keystore;
+use crate::media::audio::VoiceSettings;
 pub use crate::session::ClientOptions;
 use crate::session::{Session, Shared};
 
@@ -42,9 +43,20 @@ pub enum Command {
     CreateInvite,
     ListUsers,
     SetRole(UserId, Role),
-    RemoveUser { user: UserId, cascade: bool },
+    RemoveUser {
+        user: UserId,
+        cascade: bool,
+    },
     AcceptKey(UserId),
     SetVerified(UserId, bool),
+    Voice(VoiceSettings),
+    Devices {
+        input: Option<String>,
+        output: Option<String>,
+    },
+    /// Plays your processed mic back to you.
+    MicTest(bool),
+    PushToTalk(bool),
     Disconnect,
 }
 
@@ -301,6 +313,10 @@ impl ClientApi for MockClient {
                     p.verified = verified;
                 }
             }),
+            Command::Voice(_)
+            | Command::Devices { .. }
+            | Command::MicTest(_)
+            | Command::PushToTalk(_) => {}
             Command::Disconnect => self.update(|s| s.connection = ConnectionStatus::Disconnected),
         }
     }

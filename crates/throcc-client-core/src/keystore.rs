@@ -31,12 +31,15 @@ pub struct Keystore {
 }
 
 impl Keystore {
+    /// The pinned servers in the platform data directory, without touching the keychain.
+    pub fn default_known_servers() -> Result<KnownServers> {
+        KnownServers::load(&default_dir()?.join(KNOWN_SERVERS_FILE))
+    }
+
     /// Opens the platform data directory, keeping the identity key in the OS keychain.
     /// Falls back to a 0600 file when no keychain is available.
     pub fn open_default() -> Result<Self> {
-        let dirs = directories::ProjectDirs::from("", "", "throcc")
-            .context("no home directory to keep throcc's data in")?;
-        let dir = dirs.data_dir().to_owned();
+        let dir = default_dir()?;
         fs::create_dir_all(&dir)?;
         let identity = match keychain_identity() {
             Ok(identity) => identity,
@@ -90,6 +93,12 @@ impl Keystore {
     pub fn dir(&self) -> &Path {
         &self.dir
     }
+}
+
+fn default_dir() -> Result<PathBuf> {
+    let dirs = directories::ProjectDirs::from("", "", "throcc")
+        .context("no home directory to keep throcc's data in")?;
+    Ok(dirs.data_dir().to_owned())
 }
 
 /// Loads the encryption key, replacing it once it is older than 30 days.

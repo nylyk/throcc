@@ -7,6 +7,11 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zvariant was folded into zbus; keyring's Secret Service store has no release on the merged crate yet" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names was folded into zbus; same as above" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive was folded into zbus; same as above" },
+    { id = "RUSTSEC-2024-0384", reason = "instant is unmaintained, not vulnerable; pulled by gpui-base, client only" },
+    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained, not vulnerable; pulled by gpui-component, client only" },
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is unmaintained, not vulnerable; pulled by gpui's reqwest fork, client only" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is unmaintained, not vulnerable; gpui's text stack, client only" },
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz is unmaintained, not vulnerable; gpui-component's text shaping, client only" },
 ]
 
 [licenses]

@@ -1,0 +1,440 @@
+use std::sync::Arc;
+
+use gpui::{
+    App, AppContext, Context, Entity, InteractiveElement, IntoElement, KeyBinding, ParentElement,
+    Render, Styled, Subscription, Task, Window, actions, div,
+};
+use gpui_component::WindowExt;
+use gpui_component::input::{InputEvent, InputState};
+use gpui_component::notification::Notification;
+use throcc_client_core::account::SignInError;
+use throcc_client_core::client::{Client, ClientApi, ClientOptions, Command, Event, MockClient};
+use throcc_client_core::keystore::Keystore;
+use throcc_client_core::media::audio::VoiceSettings;
+use throcc_client_core::media::devices;
+use throcc_client_core::state::{Preset, State};
+use throcc_proto::Fingerprint;
+use throcc_proto::ids::UserId;
+use throcc_proto::invite::{self, InviteCode};
+use throcc_proto::messages::User;
+
+use crate::theme;
+use crate::views;
+
+actions!(throcc, [ToggleMic, ToggleDeafen, CloseDialog]);
+
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("cmd-shift-m", ToggleMic, None),
+        KeyBinding::new("ctrl-shift-m", ToggleMic, None),
+        KeyBinding::new("cmd-shift-d", ToggleDeafen, None),
+        KeyBinding::new("ctrl-shift-d", ToggleDeafen, None),
+        KeyBinding::new("escape", CloseDialog, None),
+    ]);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsPage {
+    Audio,
+    Keys,
+    Members,
+    Servers,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Screen {
+    Join,
+    Main,
+    Settings(SettingsPage),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Dialog {
+    Share {
+        preset: Preset,
+        audio: bool,
+    },
+    Connection,
+    Verify(UserId),
+    Remove {
+        user: UserId,
+        name: String,
+        cascade: bool,
+    },
+    PinMismatch {
+        address: String,
+        expected: Fingerprint,
+        actual: Fingerprint,
+    },
+}
+
+fn known_servers() -> Vec<(String, Fingerprint)> {
+    Keystore::default_known_servers()
+        .map(|k| k.iter().map(|(a, f)| (a.to_owned(), f)).collect())
+        .unwrap_or_default()
+}
+
+pub struct ThroccApp {
+    pub client: Option<Arc<dyn ClientApi>>,
+    pub state: Arc<State>,
+    pub screen: Screen,
+    pub dialog: Option<Dialog>,
+    pub address: Entity<InputState>,
+    pub code: Entity<InputState>,
+    pub joining: bool,
+    pub join_error: Option<String>,
+    pub known_servers: Vec<(String, Fingerprint)>,
+    pub users: Vec<User>,
+    pub invite: Option<(String, u64)>,
+    pub voice: VoiceSettings,
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
+    pub input_device: Option<String>,
+    pub output_device: Option<String>,
+    pub mic_test: bool,
+    push_to_talk: Option<(crate::hotkey::PushToTalkKey, Task<()>)>,
+    events: Option<Task<()>>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl ThroccApp {
+    pub fn new(mock: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let address = cx.new(|cx| InputState::new(window, cx).placeholder("voice.example.net"));
+        let code = cx.new(|cx| InputState::new(window, cx).placeholder("K7Q-M2XPD"));
+        let subscriptions = vec![cx.subscribe_in(&code, window, Self::on_code_input)];
+        let known_servers = if mock { Vec::new() } else { known_servers() };
+        let (inputs, outputs) = devices::list();
+        let mut app = Self {
+            client: None,
+            state: Arc::new(State::default()),
+            screen: Screen::Join,
+            dialog: None,
+            address,
+            code,
+            joining: false,
+            join_error: None,
+            known_servers,
+            users: Vec::new(),
+            invite: None,
+            voice: VoiceSettings::default(),
+            inputs,
+            outputs,
+            input_device: None,
+            output_device: None,
+            mic_test: false,
+            push_to_talk: None,
+            events: None,
+            _subscriptions: subscriptions,
+        };
+        if mock {
+            app.attach(Arc::new(MockClient::new()), window, cx);
+        }
+        app
+    }
+
+    /// Keeps the invite field upper-case, Crockford-normalized and dashed as you type.
+    fn on_code_input(
+        &mut self,
+        state: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(event, InputEvent::Change) {
+            return;
+        }
+        let typed = state.read(cx).value().to_string();
+        let formatted = invite::format_partial(&typed);
+        if formatted != typed {
+            state.update(cx, |s, cx| s.set_value(formatted, window, cx));
+        }
+    }
+
+    pub fn command(&self, command: Command) {
+        if let Some(client) = &self.client {
+            client.command(command);
+        }
+    }
+
+    fn attach(&mut self, client: Arc<dyn ClientApi>, window: &mut Window, cx: &mut Context<Self>) {
+        self.state = client.state();
+        let mut events = client.events();
+        self.client = Some(client);
+        self.screen = Screen::Main;
+        self.joining = false;
+        self.join_error = None;
+        let window_handle = window.window_handle();
+        self.events = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let event = match events.recv().await {
+                    Ok(event) => event,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => return,
+                };
+                let updated = cx.update_window(window_handle, |_, window, cx| {
+                    this.update(cx, |app, cx| app.on_event(event, window, cx))
+                        .ok();
+                });
+                if updated.is_err() {
+                    return;
+                }
+            }
+        }));
+    }
+
+    fn on_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            Event::State(state) => self.state = state,
+            Event::Invite { code, expires } => self.invite = Some((code, expires)),
+            Event::Users(users) => self.users = users,
+            Event::Notice(text) => window.push_notification(Notification::new().message(text), cx),
+            Event::Kicked(reason) => {
+                self.client = None;
+                self.screen = Screen::Join;
+                self.join_error = Some(reason);
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn join(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let address = self.address.read(cx).value().trim().to_owned();
+        let code_text = self.code.read(cx).value().to_string();
+        if address.is_empty() {
+            self.join_error = Some("Enter the server's address.".into());
+            return;
+        }
+        let invite = if code_text.trim().is_empty() {
+            None
+        } else {
+            match code_text.parse::<InviteCode>() {
+                Ok(code) => Some(code),
+                Err(e) => {
+                    self.join_error = Some(e.to_string());
+                    return;
+                }
+            }
+        };
+        self.joining = true;
+        self.join_error = None;
+        let options = ClientOptions {
+            voice: self.voice,
+            input_device: self.input_device.clone(),
+            output_device: self.output_device.clone(),
+            audio: true,
+        };
+        let window_handle = window.window_handle();
+        let connecting = cx.background_executor().spawn({
+            let address = address.clone();
+            async move {
+                let keystore = Keystore::open_default().map_err(SignInError::Store)?;
+                Client::connect(&address, keystore, invite.as_ref(), options)
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = connecting.await;
+            cx.update_window(window_handle, |_, window, cx| {
+                this.update(cx, |app, cx| {
+                    match result {
+                        Ok(client) => app.attach(Arc::new(client), window, cx),
+                        Err(e) => {
+                            app.joining = false;
+                            match e.pin_mismatch() {
+                                Some((expected, actual)) => {
+                                    app.dialog = Some(Dialog::PinMismatch {
+                                        address: address.clone(),
+                                        expected,
+                                        actual,
+                                    });
+                                }
+                                None => app.join_error = Some(views::join::explain(&e)),
+                            }
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Trusts a server's new key after a pin mismatch, as the human chose to.
+    pub fn trust_new_key(
+        &mut self,
+        address: &str,
+        actual: Fingerprint,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Ok(mut known) = Keystore::default_known_servers()
+            && known.trust(address, actual).is_ok()
+        {
+            self.dialog = None;
+            self.join(window, cx);
+        }
+    }
+
+    pub fn leave_server(&mut self, cx: &mut Context<Self>) {
+        self.command(Command::Disconnect);
+        self.client = None;
+        self.events = None;
+        self.screen = Screen::Join;
+        self.known_servers = known_servers();
+        cx.notify();
+    }
+
+    /// Opens a screen of the mock client by name, for screenshots: join, lobby, room,
+    /// share, settings, connection, verify, members or keychange.
+    pub fn show_sample(&mut self, screen: &str) {
+        let room = throcc_proto::ids::RoomId(1);
+        let joined = |app: &mut Self| {
+            app.command(Command::Join(Some(room)));
+            app.command(Command::SetMic(true));
+            app.command(Command::Watch(UserId(4)));
+        };
+        match screen {
+            "join" => {
+                self.client = None;
+                self.screen = Screen::Join;
+                self.known_servers = vec![("voice.example.net".into(), Fingerprint([0x2c; 32]))];
+            }
+            "room" => joined(self),
+            "share" => {
+                joined(self);
+                self.dialog = Some(Dialog::Share {
+                    preset: Preset::Default,
+                    audio: true,
+                });
+            }
+            "connection" => {
+                joined(self);
+                self.dialog = Some(Dialog::Connection);
+            }
+            "verify" => self.dialog = Some(Dialog::Verify(UserId(2))),
+            "keychange" => self.dialog = Some(Dialog::Verify(UserId(3))),
+            "settings" => self.screen = Screen::Settings(SettingsPage::Audio),
+            "members" => {
+                self.screen = Screen::Settings(SettingsPage::Members);
+                self.command(Command::ListUsers);
+                self.command(Command::CreateInvite);
+            }
+            _ => {}
+        }
+        if let Some(client) = &self.client {
+            self.state = client.state();
+        }
+    }
+
+    /// Registers or drops the global push-to-talk key to match the transmit mode.
+    pub fn sync_push_to_talk(&mut self, cx: &mut Context<Self>) {
+        let wanted = matches!(
+            self.voice.transmit,
+            throcc_client_core::media::audio::Transmit::PushToTalk
+        );
+        if !wanted {
+            self.push_to_talk = None;
+            return;
+        }
+        if self.push_to_talk.is_some() {
+            return;
+        }
+        match crate::hotkey::PushToTalkKey::register(crate::hotkey::DEFAULT_KEY) {
+            Ok(key) => {
+                let poller = cx.spawn(async move |this, cx| {
+                    loop {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(10))
+                            .await;
+                        let alive = this.update(cx, |app, _| {
+                            if let Some(down) =
+                                app.push_to_talk.as_ref().and_then(|(key, _)| key.poll())
+                            {
+                                app.command(Command::PushToTalk(down));
+                            }
+                        });
+                        if alive.is_err() {
+                            return;
+                        }
+                    }
+                });
+                self.push_to_talk = Some((key, poller));
+            }
+            Err(e) => tracing::warn!(
+                "no global push-to-talk key ({e:#}); hold Space in the window instead"
+            ),
+        }
+    }
+
+    fn push_to_talk_ready(&self) -> bool {
+        self.screen == Screen::Main
+            && self.dialog.is_none()
+            && matches!(
+                self.voice.transmit,
+                throcc_client_core::media::audio::Transmit::PushToTalk
+            )
+    }
+
+    pub fn safety_number(&self, user: UserId) -> Option<String> {
+        self.client.as_ref()?.safety_number(user)
+    }
+
+    fn toggle_mic(&mut self, _: &ToggleMic, _: &mut Window, _: &mut Context<Self>) {
+        if let Some(current) = &self.state.current {
+            self.command(Command::SetMic(!current.mic));
+        }
+    }
+
+    fn toggle_deafen(&mut self, _: &ToggleDeafen, _: &mut Window, _: &mut Context<Self>) {
+        if let Some(current) = &self.state.current {
+            self.command(Command::SetDeafened(!current.deafened));
+        }
+    }
+
+    fn close_dialog(&mut self, _: &CloseDialog, _: &mut Window, cx: &mut Context<Self>) {
+        self.dialog = None;
+        cx.notify();
+    }
+}
+
+impl Render for ThroccApp {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let screen = match self.screen {
+            Screen::Join => views::join::render(self, window, cx).into_any_element(),
+            Screen::Main => views::main::render(self, window, cx).into_any_element(),
+            Screen::Settings(page) => {
+                views::settings::render(self, page, window, cx).into_any_element()
+            }
+        };
+        div()
+            .id("throcc")
+            .key_context("Throcc")
+            .on_action(cx.listener(Self::toggle_mic))
+            .on_action(cx.listener(Self::toggle_deafen))
+            .on_action(cx.listener(Self::close_dialog))
+            .on_key_down(cx.listener(|app, event: &gpui::KeyDownEvent, _, _| {
+                if event.keystroke.key == "space" && !event.is_held && app.push_to_talk_ready() {
+                    app.command(Command::PushToTalk(true));
+                }
+            }))
+            .on_key_up(cx.listener(|app, event: &gpui::KeyUpEvent, _, _| {
+                if event.keystroke.key == "space" && app.push_to_talk_ready() {
+                    app.command(Command::PushToTalk(false));
+                }
+            }))
+            .size_full()
+            .relative()
+            .bg(theme::bg())
+            .text_color(theme::text())
+            .font_family(theme::font())
+            .text_size(gpui::px(14.))
+            .child(screen)
+            .children(views::banner::render(self))
+            .children(
+                self.dialog
+                    .clone()
+                    .map(|dialog| views::dialogs::render(self, dialog, window, cx)),
+            )
+    }
+}

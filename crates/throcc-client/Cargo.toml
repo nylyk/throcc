@@ -10,3 +10,13 @@ workspace = true
 
 [dependencies]
 throcc-client-core.workspace = true
+throcc-proto.workspace = true
+anyhow.workspace = true
+global-hotkey.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+gpui-kit-assets.workspace = true
+gpui-platform.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

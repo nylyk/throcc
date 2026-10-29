@@ -609,7 +609,7 @@ WantedBy=multi-user.target
 - [x] Request ids, pending map, `ServerMessage` tagging, protocol-error handling.
 - [x] `throcc-cli` with subcommands: `enroll`, `connect`, `rooms`, `join`, `leave`, `invite`, `users`.
 - [x] Fuzz target for framing (cargo-fuzz), run 10 minutes in CI nightly.
-- [ ] **Parallel (M8a):** a subagent builds the gpui shell and the Join, Lobby and Room screens against `MockClient`.
+- [x] **Parallel (M8a):** a subagent builds the gpui shell and the Join, Lobby and Room screens against `MockClient`.
 
 **Done when:**
 
@@ -703,8 +703,8 @@ Then mark the wire format **frozen** in `DECISIONS.md`.
 
 ### M8 gpui client
 
-- [ ] Shell and theme from M8a, wired to the real `Client`.
-- [ ] Every screen in §5.13 matching its mockup, plus the unmocked states.
+- [x] Shell and theme from M8a, wired to the real `Client`.
+- [x] Every screen in §5.13 matching its mockup, plus the unmocked states.
 - [ ] Video surface per S3 (macOS first, then Linux, then Windows).
 - [ ] Screen subagents work from `design/mockups/<Screen>.dc.html` and `theme.rs` only.
 

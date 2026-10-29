@@ -28,6 +28,11 @@ directories = "6.0.0"
 getrandom = "0.4.3"
 keyring = "4.2.0"
 hex = "0.4.3"
+global-hotkey = "0.8.0"
+gpui = { package = "gpui-pre", version = "=0.3.10" }
+gpui-component = "=0.8.1"
+gpui-kit-assets = "=0.8.1"
+gpui-platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["font-kit", "runtime_shaders"] }
 hkdf = "0.13.0"
 hpke = { version = "0.15.1", default-features = false, features = ["alloc", "x25519", "aes", "getrandom"] }
 hmac = "0.13.0"

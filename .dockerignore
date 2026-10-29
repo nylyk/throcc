@@ -4,3 +4,4 @@ fuzz/corpus
 fuzz/artifacts
 .git
 *.html
+target-screens

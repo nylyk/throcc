@@ -160,3 +160,14 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 - **Deafen also mutes the mic, and unmuting undeafens**, as in TeamSpeak and Discord.
 - **The real `Client`** owns a 2-thread tokio runtime. Its session task keeps `State` current, hears every peer's mic, reconnects with backoff (1 s doubling to 15 s) back into the same room, and refreshes the connection panel every 2 s with a one-sentence verdict per §5.11.
 - **Push-to-talk keys** will use the `global-hotkey` crate (Carbon hotkeys on macOS, `RegisterHotKey` on Windows, `XGrabKey` on X11) and the GlobalShortcuts portal on Wayland, instead of a raw `CGEventTap` and low-level Windows hook. Carbon hotkeys don't need the Input Monitoring permission. Wayland without the portal gets voice activation only (§7 default).
+
+## 2026-10-29 M8 desktop client
+
+- **Built in the main session, not by per-screen subagents.** The screens share one state model and widget set, and splitting them would have meant re-explaining both nine times.
+- **Buttons use gpui-component's built-in variants, with its theme set from our tokens through `Theme::update`.** Its custom variant paints any colour at about 20 % strength, which can't produce a solid accent. Inputs, switches and focus rings come from the same theme. Every colour still lives only in `theme.rs`.
+- **Fonts:** the mockup export embeds Geist only as woff2 subsets, which gpui can't load. The theme picks the first installed family from Geist, then the platform UI font; the Geist TTFs get bundled in M11.
+- **Icons:** Lucide SVGs from `gpui-kit-assets` (ISC), which has every icon the mockups use.
+- **Screens beyond the mockups:** pin mismatch (with "use a fresh invite" or "trust the new key"), join errors in plain language, a reconnecting banner, empty states, and the remove-with-cascade confirm. The mockups' Appearance theme switcher and popped-out share window are left out: §5.13 asks for one dark look, and the stage has a fullscreen button.
+- **Push-to-talk:** a global Alt+Space via `global-hotkey`, plus Space while the window has focus. Wayland gets the in-window key only.
+- **Screenshots:** `scripts/screens.sh` opens each screen of the mock client (`--mock --screen <name>`) and captures its window into `docs/screens/`. `tests/screens/` is a Linux variant under Xvfb for machines without a display.
+- **Listing known servers no longer opens the keychain**; only joining does, so the app doesn't ask for the keychain password at startup.
