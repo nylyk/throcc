@@ -183,5 +183,5 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 
 ## 2026-10-29 macOS build requirements
 
-- **Building the client on macOS needs the macOS 15 SDK (Xcode 16 or its Command Line Tools).** `screencapturekit` pulls in `apple-metal`, whose Swift bridge uses Metal APIs that the macOS 14 SDK lacks. CI runs on `macos-15`. The app's deployment target is unaffected.
+- **Building the client on macOS needs the macOS 26 SDK (Xcode 26 or its Command Line Tools).** `screencapturekit` pulls in `apple-metal`, whose Swift bridge uses Metal tensor APIs that older SDKs lack. CI runs on `macos-26`. The app's deployment target is unaffected. If that becomes a burden for contributors, `objc2-screen-capture-kit` binds ScreenCaptureKit without Swift.
 - **CI installs `ffmpeg@8` after `brew update`**: Homebrew's `ffmpeg` is 9, and `rsmpeg` 0.18 targets 8.

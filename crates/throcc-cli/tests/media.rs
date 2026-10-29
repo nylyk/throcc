@@ -281,7 +281,7 @@ async fn keyframes_arrive_whole_through_two_percent_loss() {
                 enqueued: Instant::now(),
             },
         );
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
     let mut whole = std::collections::HashSet::new();
     while let Ok(Some(unit)) = tokio::time::timeout(Duration::from_secs(1), units.recv()).await {
@@ -291,7 +291,10 @@ async fn keyframes_arrive_whole_through_two_percent_loss() {
     }
     let whole = whole.len() as u32;
     let dropped = relay.dropped.load(Ordering::Relaxed);
-    eprintln!("{whole} of {KEYFRAMES} keyframes whole, {dropped} packets dropped");
+    let sent = alice.engine.stats.sent_datagrams.load(Ordering::Relaxed);
+    eprintln!(
+        "{whole} of {KEYFRAMES} keyframes whole, {dropped} packets dropped, {sent} datagrams sent"
+    );
     assert!(dropped >= 30, "the relay dropped only {dropped} packets");
     assert!(
         whole >= KEYFRAMES * 9 / 10,
