@@ -730,9 +730,9 @@ Then mark the wire format **frozen** in `DECISIONS.md`.
 
 ### M10 Share audio and sync
 
-- [ ] Own-process-excluding capture per platform (subagent per platform).
-- [ ] Music-mode Opus track, its own `neteq`, AEC reference mixing.
-- [ ] Audio-led sync hold, clock mapping per platform.
+- [x] Own-process-excluding capture per platform (subagent per platform).
+- [x] Music-mode Opus track, its own `neteq`, AEC reference mixing.
+- [x] Audio-led sync hold, clock mapping per platform.
 
 **Done when:**
 
