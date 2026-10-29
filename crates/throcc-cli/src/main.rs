@@ -43,6 +43,25 @@ enum Command {
     CreateRoom { address: String, name: String },
     /// Sets your display name.
     Name { address: String, name: String },
+    /// Holds a voice call in a room until Ctrl-C, printing who speaks.
+    Call {
+        address: String,
+        room: String,
+        /// Starts muted.
+        #[arg(long)]
+        muted: bool,
+        /// Opens no audio devices.
+        #[arg(long)]
+        no_audio: bool,
+        /// Input device name, from `devices`.
+        #[arg(long)]
+        input: Option<String>,
+        /// Output device name, from `devices`.
+        #[arg(long)]
+        output: Option<String>,
+    },
+    /// Lists audio devices.
+    Devices,
     /// Joins a room and sends fake access units through the encrypted media path.
     SendSynthetic {
         address: String,
@@ -126,6 +145,24 @@ async fn main() -> Result<()> {
         Command::Name { address, name } => {
             one_shot(&keystore, &address, &format!("name {name}")).await?
         }
+        Command::Call {
+            address,
+            room,
+            muted,
+            no_audio,
+            input,
+            output,
+        } => {
+            tokio::task::spawn_blocking(move || {
+                voice_call(&address, &room, keystore, muted, !no_audio, input, output)
+            })
+            .await??;
+        }
+        Command::Devices => {
+            let (inputs, outputs) = throcc_client_core::media::devices::list();
+            println!("inputs:\n  {}", inputs.join("\n  "));
+            println!("outputs:\n  {}", outputs.join("\n  "));
+        }
         Command::SendSynthetic {
             address,
             room,
@@ -173,6 +210,69 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Runs a call with the real client until stdin closes or Ctrl-C.
+fn voice_call(
+    address: &str,
+    room: &str,
+    keystore: Keystore,
+    muted: bool,
+    audio: bool,
+    input: Option<String>,
+    output: Option<String>,
+) -> Result<()> {
+    use throcc_client_core::client::{
+        Client, ClientApi, ClientOptions, Command as ClientCommand, Event as ClientEvent,
+    };
+    let options = ClientOptions {
+        audio,
+        input_device: input,
+        output_device: output,
+        ..Default::default()
+    };
+    let client = Client::connect(address, keystore, None, options)?;
+    let state = client.state();
+    let room = find_room(
+        &state
+            .rooms
+            .iter()
+            .map(|r| Room {
+                id: r.id,
+                name: r.name.clone(),
+            })
+            .collect::<Vec<_>>(),
+        room,
+    )?;
+    let mut events = client.events();
+    client.command(ClientCommand::Join(Some(room)));
+    client.command(ClientCommand::SetMic(!muted));
+    println!("in the call; press Ctrl-C to leave");
+    let mut speaking = std::collections::BTreeSet::new();
+    loop {
+        match events.blocking_recv() {
+            Ok(ClientEvent::State(state)) => {
+                let now: std::collections::BTreeSet<String> = state
+                    .people
+                    .values()
+                    .filter(|p| p.room == Some(room) && p.speaking)
+                    .map(|p| p.name.clone())
+                    .collect();
+                if now != speaking {
+                    println!(
+                        "speaking: {}",
+                        now.iter().cloned().collect::<Vec<_>>().join(", ")
+                    );
+                    speaking = now;
+                }
+            }
+            Ok(ClientEvent::Notice(notice)) => println!("* {notice}"),
+            Ok(ClientEvent::Kicked(reason)) => bail!("disconnected: {reason}"),
+            Ok(_) => {}
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+            Err(_) => return Ok(()),
+        }
+    }
 }
 
 async fn sign_in(keystore: &Keystore, address: &str) -> Result<Link> {

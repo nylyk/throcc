@@ -1,0 +1,112 @@
+use std::time::{Duration, Instant};
+
+use throcc_client_core::client::{Client, ClientApi, ClientOptions, Command};
+use throcc_client_core::keystore::Keystore;
+use throcc_client_core::state::{ConnectionStatus, State};
+use throcc_proto::invite::InviteCode;
+use throcc_server::{Config, Congestion, Server};
+
+/// Runs a server on its own runtime thread, as the blocking client API expects.
+fn server() -> (String, InviteCode) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let server = Server::bind(&Config {
+                data_dir: dir.path().to_owned(),
+                listen: "127.0.0.1:0".parse().unwrap(),
+                congestion: Congestion::Cubic,
+            })
+            .unwrap();
+            tx.send((
+                server.local_addr().unwrap().to_string(),
+                server.bootstrap_invite().unwrap().clone(),
+            ))
+            .unwrap();
+            server.run().await.unwrap();
+        });
+    });
+    rx.recv().unwrap()
+}
+
+fn client(address: &str, invite: &InviteCode) -> (Client, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let keystore = Keystore::open_in(dir.path()).unwrap();
+    let options = ClientOptions {
+        audio: false,
+        ..Default::default()
+    };
+    (
+        Client::connect(address, keystore, Some(invite), options).unwrap(),
+        dir,
+    )
+}
+
+fn wait_for(client: &Client, what: &str, mut ready: impl FnMut(&State) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready(&client.state()) {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {what}: {:?}",
+            client.state()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn invite(client: &Client) -> InviteCode {
+    let mut events = client.events();
+    client.command(Command::CreateInvite);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(throcc_client_core::client::Event::Invite { code, .. }) = events.try_recv() {
+            return code.parse().unwrap();
+        }
+        assert!(Instant::now() < deadline, "no invite");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn two_clients_see_each_other_join_and_unmute() {
+    let (address, bootstrap) = server();
+    let (alice, _a) = client(&address, &bootstrap);
+    wait_for(&alice, "connected", |s| {
+        s.connection == ConnectionStatus::Connected
+    });
+    alice.command(Command::CreateRoom("General".into()));
+    wait_for(&alice, "the room", |s| !s.rooms.is_empty());
+    let room = alice.state().rooms[0].id;
+
+    let code = invite(&alice);
+    let (bob, _b) = client(&address, &code);
+    alice.command(Command::Join(Some(room)));
+    bob.command(Command::Join(Some(room)));
+    let bob_id = bob.state().me.unwrap();
+    wait_for(&alice, "bob in the room", |s| {
+        s.person(bob_id).is_some_and(|p| p.room == Some(room))
+    });
+
+    bob.command(Command::SetMic(true));
+    wait_for(&alice, "bob's mic on", |s| {
+        s.person(bob_id).is_some_and(|p| p.mic)
+    });
+    wait_for(&bob, "bob's own state", |s| {
+        s.current.as_ref().is_some_and(|c| c.mic)
+    });
+
+    bob.command(Command::SetDeafened(true));
+    wait_for(&alice, "bob deafened and muted", |s| {
+        s.person(bob_id).is_some_and(|p| p.deafened && !p.mic)
+    });
+
+    let alice_id = alice.state().me.unwrap();
+    wait_for(&bob, "a pinned key for alice", |_| {
+        bob.safety_number(alice_id).is_some()
+    });
+    assert_eq!(bob.safety_number(alice_id), alice.safety_number(bob_id));
+
+    bob.command(Command::Disconnect);
+    wait_for(&alice, "bob gone", |s| s.person(bob_id).is_none());
+}

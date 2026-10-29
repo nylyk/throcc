@@ -82,6 +82,8 @@ pub struct CaptureChain {
     packet: [u8; MAX_PACKET],
     clock: u32,
     hangover: u32,
+    muted: bool,
+    transmitting: bool,
     /// Speech probability of the last 10 ms, 0 to 1.
     pub voice_probability: f32,
     /// Level of the last 10 ms after processing, in dBFS.
@@ -119,6 +121,8 @@ impl CaptureChain {
             packet: [0; MAX_PACKET],
             clock: 0,
             hangover: 0,
+            muted: false,
+            transmitting: false,
             voice_probability: 0.0,
             level_dbfs: f32::NEG_INFINITY,
         })
@@ -130,6 +134,23 @@ impl CaptureChain {
         self.encoder
             .set_bitrate(Bitrate::Bits(settings.kbps * 1000))
             .ok();
+    }
+
+    /// Closes the gate while keeping processing and the media clock running.
+    pub fn set_muted(&mut self, muted: bool) {
+        self.muted = muted;
+    }
+
+    /// Restarts the media clock, for a new track.
+    pub fn reset_clock(&mut self) {
+        self.clock = 0;
+        self.frame_len = 0;
+        self.frame_open = false;
+    }
+
+    /// Whether the last 20 ms went out.
+    pub fn transmitting(&self) -> bool {
+        self.transmitting
     }
 
     /// Tells the encoder how much loss to protect against, from measured loss.
@@ -171,7 +192,7 @@ impl CaptureChain {
                 self.hangover > 0
             }
         };
-        self.frame_open |= open;
+        self.frame_open |= open && !self.muted;
         self.frame[self.frame_len..self.frame_len + PULL].copy_from_slice(&self.processed);
         self.frame_len += PULL;
         if self.frame_len < FRAME {
@@ -180,7 +201,8 @@ impl CaptureChain {
         self.frame_len = 0;
         let timestamp = self.clock;
         self.clock = self.clock.wrapping_add(FRAME as u32);
-        if !std::mem::take(&mut self.frame_open) {
+        self.transmitting = std::mem::take(&mut self.frame_open);
+        if !self.transmitting {
             return Ok(None);
         }
         let len = self

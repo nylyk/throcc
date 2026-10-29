@@ -690,10 +690,10 @@ Then mark the wire format **frozen** in `DECISIONS.md`.
 
 ### M7 Voice
 
-- [ ] M7a (from M5): `cpal`, `sonora`, `ropus` and `neteq` pipeline against WAV input and output, with the three acceptance tests from §5.8.
+- [x] M7a (from M5): `cpal`, `sonora`, `ropus` and `neteq` pipeline against WAV input and output, with the three acceptance tests from §5.8.
 - [ ] Live pipeline over the network, mixing, per-user volume, deafen.
 - [ ] Voice activation and push-to-talk per platform (subagent per platform).
-- [ ] Mute or gate for 5 minutes then resume.
+- [x] Mute or gate for 5 minutes then resume.
 
 **Done when:**
 

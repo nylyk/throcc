@@ -106,6 +106,10 @@ impl ReplayWindow {
         Seen::New
     }
 
+    pub fn received(&self) -> u64 {
+        self.received
+    }
+
     /// Datagrams between the first and the highest `seq` that never arrived.
     pub fn lost(&self) -> u64 {
         self.highest.map_or(0, |h| {

@@ -1,9 +1,21 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
+use std::path::PathBuf;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Role, RoomId, UserId};
 use throcc_proto::messages::{Codec, ShareConfig, User};
-use tokio::sync::broadcast;
+
+use throcc_crypto::safety;
+use throcc_proto::invite::InviteCode;
+use throcc_proto::messages::PublicKey;
+use tokio::sync::{broadcast, mpsc};
+
+use crate::account::{self, SignInError};
+use crate::call::Call;
+use crate::contacts::Contacts;
+use crate::keystore::Keystore;
+pub use crate::session::ClientOptions;
+use crate::session::{Session, Shared};
 
 use crate::state::{
     ConnectionStatus, CurrentRoom, Health, KeyWarning, Person, RoomView, ServerView, State,
@@ -53,6 +65,104 @@ pub trait ClientApi: Send + Sync {
     fn state(&self) -> Arc<State>;
     /// The 60-digit safety number with `user`, if both identity keys are known.
     fn safety_number(&self, user: UserId) -> Option<String>;
+}
+
+const COMMANDS: usize = 64;
+
+/// A live client: tokio runs on its own threads, and a session task keeps [`State`]
+/// current, drives media and reconnects with the room it was in.
+pub struct Client {
+    commands: mpsc::Sender<Command>,
+    shared: Arc<Shared>,
+    identity: PublicKey,
+    dir: PathBuf,
+    server: Fingerprint,
+    runtime: Option<tokio::runtime::Runtime>,
+}
+
+impl Client {
+    /// Signs in, or enrolls with `invite`, and blocks until the server has answered.
+    pub fn connect(
+        address: &str,
+        mut keystore: Keystore,
+        invite: Option<&InviteCode>,
+        options: ClientOptions,
+    ) -> Result<Self, SignInError> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("throcc-core")
+            .enable_all()
+            .build()
+            .map_err(|e| SignInError::Store(e.into()))?;
+        let link = runtime.block_on(async {
+            match invite {
+                Some(code) => account::enroll(&mut keystore, address, code).await,
+                None => account::sign_in(&keystore, address, None).await,
+            }
+        })?;
+        let server = link.connected.fingerprint;
+        let identity = keystore.identity().public();
+        let dir = keystore.dir().to_owned();
+        let (events, _) = broadcast::channel(EVENTS);
+        let shared = Arc::new(Shared {
+            state: Mutex::new(Arc::new(State::default())),
+            events,
+        });
+        let (commands, commands_rx) = mpsc::channel(COMMANDS);
+        let call = {
+            let _guard = runtime.enter();
+            Call::start(link, &keystore).map_err(SignInError::Store)?
+        };
+        let session = {
+            let _guard = runtime.enter();
+            Session::new(shared.clone(), keystore, address.to_owned(), options, call)
+        };
+        runtime.spawn(session.run(commands_rx));
+        Ok(Self {
+            commands,
+            shared,
+            identity,
+            dir,
+            server,
+            runtime: Some(runtime),
+        })
+    }
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        self.commands.try_send(Command::Disconnect).ok();
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+        }
+    }
+}
+
+impl ClientApi for Client {
+    fn command(&self, command: Command) {
+        if self.commands.try_send(command).is_err() {
+            self.shared
+                .events
+                .send(Event::Notice("busy; try again".into()))
+                .ok();
+        }
+    }
+
+    fn events(&self) -> broadcast::Receiver<Event> {
+        self.shared.events.subscribe()
+    }
+
+    fn state(&self) -> Arc<State> {
+        self.shared.state()
+    }
+
+    fn safety_number(&self, user: UserId) -> Option<String> {
+        let contacts = Contacts::load(&self.dir, &self.server).ok()?;
+        Some(safety::safety_number(
+            &self.identity,
+            &contacts.get(user)?.key,
+        ))
+    }
 }
 
 /// A client with canned people and rooms that reacts to commands locally.

@@ -80,6 +80,7 @@ pub struct KeyState {
 struct Sink {
     window: ReplayWindow,
     inbox: Option<mpsc::Sender<Bytes>>,
+    bytes: u64,
 }
 
 /// Moves media between this client's tracks and the connection, end-to-end encrypted.
@@ -261,6 +262,18 @@ impl MediaEngine {
             .map_or(0, |s| s.window.lost())
     }
 
+    /// Datagrams received and lost on `media_id` so far.
+    pub fn datagrams(&self, media_id: MediaId) -> (u64, u64) {
+        lock(&self.sinks)
+            .get(&media_id)
+            .map_or((0, 0), |s| (s.window.received(), s.window.lost()))
+    }
+
+    /// Bytes received on `media_id` so far, counting each datagram once.
+    pub fn received_bytes(&self, media_id: MediaId) -> u64 {
+        lock(&self.sinks).get(&media_id).map_or(0, |s| s.bytes)
+    }
+
     /// Queues a unit for sending. Never waits; a full queue drops the unit and counts it.
     pub fn send(&self, kind: Kind, unit: Outgoing) {
         let queue = match kind {
@@ -298,6 +311,7 @@ async fn receive_loop(
         };
         match sink.window.check(header.seq) {
             Seen::New => {
+                sink.bytes += datagram.len() as u64;
                 if inbox.try_send(datagram).is_err() {
                     stats.track_overflow.fetch_add(1, Ordering::Relaxed);
                 }
