@@ -180,3 +180,8 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 - **The freeze after a loss is bounded by the server's one-request-per-second cap plus the 50 ms reorder window**, about 1.1 s at worst. `two_percent_loss_brings_a_refresh_within_a_second` checks every keyframe request is answered within 1 s and the longest freeze stays under that bound.
 - **Measured encode-to-decoded latency** through a local server at 1080p60: median 16 ms, p95 18 ms (`a_shared_picture_arrives_within_a_few_frames`). Capture and display add about one frame each.
 - **Linux and Windows capture are not built yet**; `capture::start` returns `Unsupported` there, so "macOS to Linux and back" is not shown.
+
+## 2026-10-29 macOS build requirements
+
+- **Building the client on macOS needs the macOS 15 SDK (Xcode 16 or its Command Line Tools).** `screencapturekit` pulls in `apple-metal`, whose Swift bridge uses Metal APIs that the macOS 14 SDK lacks. CI runs on `macos-15`. The app's deployment target is unaffected.
+- **CI installs `ffmpeg@8` after `brew update`**: Homebrew's `ffmpeg` is 9, and `rsmpeg` 0.18 targets 8.
