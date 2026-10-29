@@ -5,6 +5,7 @@ use rsmpeg::avcodec::{AVCodec, AVCodecContext};
 use rsmpeg::avutil::{AVDictionary, AVFrame, ra};
 use rsmpeg::error::RsmpegError;
 use rsmpeg::ffi;
+use rsmpeg::swscale::SwsContext;
 use throcc_proto::frame::VIDEO_CLOCK_HZ;
 use throcc_proto::messages::{Codec, Recovery};
 use tracing::{debug, info};
@@ -20,6 +21,8 @@ pub enum EncodeError {
     NoEncoder,
     #[error("ffmpeg: {0}")]
     Ffmpeg(#[from] RsmpegError),
+    #[error("can't scale the picture to the encoder's size")]
+    Scaler,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -188,6 +191,8 @@ pub struct Encoder {
     width: usize,
     height: usize,
     idr_next: bool,
+    /// Fits pictures of another size into the encoder's, keyed by their size.
+    scaler: Option<((usize, usize), SwsContext)>,
 }
 
 impl Encoder {
@@ -217,6 +222,7 @@ impl Encoder {
                         width: config.width,
                         height: config.height,
                         idr_next: true,
+                        scaler: None,
                     });
                 }
                 Err(e) => debug!(encoder = ?candidate.name, "unusable: {e}"),
@@ -242,16 +248,13 @@ impl Encoder {
     }
 
     pub fn encode(&mut self, picture: &VideoFrame) -> Result<Vec<EncodedUnit>, EncodeError> {
-        let mut frame = AVFrame::new();
-        frame.set_width(self.width as i32);
-        frame.set_height(self.height as i32);
-        frame.set_format(match self.input {
-            Input::Nv12 => ffi::AV_PIX_FMT_NV12,
-            Input::Yuv420p => ffi::AV_PIX_FMT_YUV420P,
-        });
+        let mut frame = new_frame(self.width, self.height, self.input)?;
+        if (picture.width, picture.height) == (self.width, self.height) {
+            copy_into(&mut frame, picture, self.input);
+        } else {
+            self.fit(picture, &mut frame)?;
+        }
         frame.set_pts(i64::from(picture.timestamp));
-        frame.alloc_buffer()?;
-        copy_into(&mut frame, picture, self.input);
         if std::mem::take(&mut self.idr_next) {
             frame.set_pict_type(ffi::AV_PICTURE_TYPE_I);
         }
@@ -279,6 +282,124 @@ impl Encoder {
     }
 }
 
+impl Encoder {
+    /// Scales `picture` into `frame` keeping its aspect ratio, with black bars around it.
+    fn fit(&mut self, picture: &VideoFrame, frame: &mut AVFrame) -> Result<(), EncodeError> {
+        let source_size = (picture.width, picture.height);
+        let (x, y, width, height) = fitted(source_size, (self.width, self.height));
+        if self
+            .scaler
+            .as_ref()
+            .is_none_or(|(size, _)| *size != source_size)
+        {
+            let context = SwsContext::get_context(
+                picture.width as i32,
+                picture.height as i32,
+                ffi::AV_PIX_FMT_NV12,
+                width as i32,
+                height as i32,
+                pixel_format(self.input),
+                ffi::SWS_BILINEAR,
+                None,
+                None,
+                None,
+            )
+            .ok_or(EncodeError::Scaler)?;
+            self.scaler = Some((source_size, context));
+        }
+        let Some((_, scaler)) = self.scaler.as_mut() else {
+            return Err(EncodeError::Scaler);
+        };
+        let mut source = new_frame(picture.width, picture.height, Input::Nv12)?;
+        copy_into(&mut source, picture, Input::Nv12);
+        fill_black(frame, self.input, self.height);
+        let chroma_x = match self.input {
+            Input::Nv12 => x,
+            Input::Yuv420p => x / 2,
+        };
+        // SAFETY: `fitted` keeps the rectangle inside the frame with even offsets, so every
+        // plane pointer stays within its plane and sws writes only `width`×`height` from it.
+        unsafe {
+            let destination = [
+                frame.data[0].add(y * frame.linesize[0] as usize + x),
+                frame.data[1].add(y / 2 * frame.linesize[1] as usize + chroma_x),
+                match self.input {
+                    Input::Nv12 => std::ptr::null_mut(),
+                    Input::Yuv420p => frame.data[2].add(y / 2 * frame.linesize[2] as usize + x / 2),
+                },
+                std::ptr::null_mut(),
+            ];
+            scaler.scale(
+                source.data.as_ptr() as _,
+                source.linesize.as_ptr(),
+                0,
+                picture.height as i32,
+                destination.as_ptr(),
+                frame.linesize.as_ptr(),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// The largest rectangle with the aspect ratio of `source`, centred in `target`, as
+/// (x, y, width, height), all even.
+fn fitted(source: (usize, usize), target: (usize, usize)) -> (usize, usize, usize, usize) {
+    let (sw, sh) = (source.0.max(1), source.1.max(1));
+    let (tw, th) = target;
+    let (width, height) = if sw * th > tw * sh {
+        (tw, sh * tw / sw)
+    } else {
+        (sw * th / sh, th)
+    };
+    let even = |v: usize| (v & !1).max(2);
+    let (width, height) = (even(width).min(tw & !1), even(height).min(th & !1));
+    (
+        ((tw - width) / 2) & !1,
+        ((th - height) / 2) & !1,
+        width,
+        height,
+    )
+}
+
+fn pixel_format(input: Input) -> i32 {
+    match input {
+        Input::Nv12 => ffi::AV_PIX_FMT_NV12,
+        Input::Yuv420p => ffi::AV_PIX_FMT_YUV420P,
+    }
+}
+
+fn new_frame(width: usize, height: usize, input: Input) -> Result<AVFrame, RsmpegError> {
+    let mut frame = AVFrame::new();
+    frame.set_width(width as i32);
+    frame.set_height(height as i32);
+    frame.set_format(pixel_format(input));
+    frame.alloc_buffer()?;
+    Ok(frame)
+}
+
+/// Paints the whole frame full-range black.
+fn fill_black(frame: &mut AVFrame, input: Input, height: usize) {
+    let planes: &[(usize, u8, usize)] = match input {
+        Input::Nv12 => &[(0, 0, height), (1, 128, height.div_ceil(2))],
+        Input::Yuv420p => &[
+            (0, 0, height),
+            (1, 128, height.div_ceil(2)),
+            (2, 128, height.div_ceil(2)),
+        ],
+    };
+    for &(plane, value, rows) in planes {
+        // SAFETY: `alloc_buffer` gave the plane `rows` rows of `linesize` bytes.
+        unsafe {
+            std::ptr::write_bytes(
+                frame.data[plane],
+                value,
+                rows * frame.linesize[plane] as usize,
+            );
+        }
+    }
+}
+
 fn open_candidate(
     codec: &AVCodec,
     candidate: &Candidate,
@@ -289,10 +410,7 @@ fn open_candidate(
     ctx.set_height(config.height as i32);
     ctx.set_time_base(ra(1, VIDEO_CLOCK_HZ as i32));
     ctx.set_framerate(ra(config.fps as i32, 1));
-    ctx.set_pix_fmt(match candidate.input {
-        Input::Nv12 => ffi::AV_PIX_FMT_NV12,
-        Input::Yuv420p => ffi::AV_PIX_FMT_YUV420P,
-    });
+    ctx.set_pix_fmt(pixel_format(candidate.input));
     let bitrate = i64::from(config.kbps) * 1000;
     ctx.set_bit_rate(bitrate);
     ctx.set_max_b_frames(0);
@@ -315,6 +433,7 @@ fn cstring(text: &str) -> CString {
 }
 
 /// Copies an NV12 picture into a freshly allocated frame of the encoder's input format.
+/// The frame must have been allocated at the picture's size.
 fn copy_into(frame: &mut AVFrame, picture: &VideoFrame, input: Input) {
     let (width, height) = (picture.width, picture.height);
     let chroma_rows = height.div_ceil(2);
@@ -344,6 +463,29 @@ fn copy_into(frame: &mut AVFrame, picture: &VideoFrame, input: Input) {
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fitted;
+
+    #[test]
+    fn fitted_rectangles_are_even_centred_and_inside() {
+        assert_eq!(fitted((2560, 1440), (1920, 1080)), (0, 0, 1920, 1080));
+        assert_eq!(fitted((1000, 1000), (1280, 720)), (280, 0, 720, 720));
+        assert_eq!(fitted((3840, 1080), (1280, 720)), (0, 180, 1280, 360));
+        for source in [(1, 1), (1, 5000), (5000, 1), (641, 359), (1279, 721)] {
+            let (x, y, width, height) = fitted(source, (1280, 720));
+            assert!(
+                [x, y, width, height].iter().all(|v| v % 2 == 0),
+                "{source:?}"
+            );
+            assert!(
+                width >= 2 && height >= 2 && x + width <= 1280 && y + height <= 720,
+                "{source:?}"
+            );
         }
     }
 }

@@ -716,7 +716,7 @@ Then mark the wire format **frozen** in `DECISIONS.md`.
 
 ### M9 Screen share video
 
-- [ ] Capture backends, one subagent per platform, each delivering a GPU `AVFrame` and a `MANUAL_TESTS.md` entry.
+- [x] Capture backends, one subagent per platform, each delivering a GPU `AVFrame` and a `MANUAL_TESTS.md` entry.
 - [x] Encoder ladder, presets, recovery per S4, self-view.
 - [ ] Reorder window, decoder fallback ladder, presentation.
 - [x] Glass-to-glass latency test: render a frame counter, share it, and read it back on the receiver.

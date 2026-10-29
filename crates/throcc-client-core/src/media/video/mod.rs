@@ -69,4 +69,58 @@ mod tests {
             "keyframes at {keyframes:?}"
         );
     }
+
+    #[test]
+    fn pictures_of_another_size_are_fitted_with_black_bars() {
+        let config = EncoderConfig {
+            width: 1280,
+            height: 720,
+            fps: 30,
+            kbps: 4000,
+        };
+        let Ok(mut encoder) = Encoder::open(config) else {
+            eprintln!("no hardware video encoder here; skipping");
+            return;
+        };
+        let mut decoder = Decoder::new(encoder.codec()).unwrap();
+        let mut last = None;
+        for (n, (width, height)) in [
+            (2560, 1440),
+            (2560, 1440),
+            (1000, 1000),
+            (1000, 1000),
+            (641, 359),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut input = VideoFrame::blank(width, height);
+            input.y.fill(200);
+            input.timestamp = n as u32 * 3000;
+            for unit in encoder.encode(&input).unwrap() {
+                if let Some(output) = decoder.decode(&unit.data, unit.timestamp).unwrap() {
+                    last = Some(output);
+                }
+            }
+        }
+        for _ in 0..4 {
+            let mut input = VideoFrame::blank(1000, 1000);
+            input.y.fill(200);
+            for unit in encoder.encode(&input).unwrap() {
+                if let Some(output) = decoder.decode(&unit.data, unit.timestamp).unwrap() {
+                    last = Some(output);
+                }
+            }
+        }
+        let output = last.expect("a decoded picture");
+        assert_eq!((output.width, output.height), (1280, 720));
+        let luma = |x: usize, y: usize| output.y[y * output.width + x];
+        assert!(luma(20, 360) < 30, "left bar is {}", luma(20, 360));
+        assert!(luma(1260, 360) < 30, "right bar is {}", luma(1260, 360));
+        assert!(
+            luma(640, 360).abs_diff(200) < 20,
+            "picture is {}",
+            luma(640, 360)
+        );
+    }
 }
