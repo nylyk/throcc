@@ -59,4 +59,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: tests/netem/run.sh
+      - run: ./scripts/ci-run.sh tests/netem/run.sh
+        shell: bash

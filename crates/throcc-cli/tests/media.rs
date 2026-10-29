@@ -292,8 +292,15 @@ async fn keyframes_arrive_whole_through_two_percent_loss() {
     let whole = whole.len() as u32;
     let dropped = relay.dropped.load(Ordering::Relaxed);
     let sent = alice.engine.stats.sent_datagrams.load(Ordering::Relaxed);
+    let stats = &bob.engine.stats;
     eprintln!(
-        "{whole} of {KEYFRAMES} keyframes whole, {dropped} packets dropped, {sent} datagrams sent"
+        "{whole} of {KEYFRAMES} keyframes whole, {dropped} packets dropped, {sent} datagrams sent; \
+         bob: {} duplicates, {} abandoned, {} overflowed, {} too old, {} lost",
+        stats.duplicates.load(Ordering::Relaxed),
+        stats.abandoned_units.load(Ordering::Relaxed),
+        stats.track_overflow.load(Ordering::Relaxed),
+        stats.too_old.load(Ordering::Relaxed),
+        bob.engine.lost(video_id),
     );
     assert!(dropped >= 30, "the relay dropped only {dropped} packets");
     assert!(
