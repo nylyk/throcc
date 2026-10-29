@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 FROM rust:1.98.1-bookworm AS build
-RUN apt-get update && apt-get install -y --no-install-recommends libasound2-dev && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends libasound2-dev libpipewire-0.3-dev libclang-dev libdbus-1-dev pkg-config && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
@@ -10,7 +10,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends iproute2 procps libasound2 \
+    && apt-get install -y --no-install-recommends iproute2 procps libasound2 libpipewire-0.3-0 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /usr/local/bin/throcc-server /usr/local/bin/throcc-cli /usr/local/bin/
 COPY tests/netem/scenarios.sh /netem/scenarios.sh
