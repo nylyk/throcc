@@ -679,7 +679,7 @@ Then mark the wire format **frozen** in `DECISIONS.md`.
 - [x] `SetWatching`, the `Idr` on start, keyframe aggregation.
 - [x] `LinkStats`.
 - [x] `tests/netem/`: Linux network namespaces with `tc netem` and `tbf`. Scenarios: one receiver limited to 3 Mbps; 2% random loss; 30 ms jitter with reordering; sender uplink limited.
-- [ ] **Review subagent** on `sfu.rs` and `egress.rs`.
+- [x] **Review subagent** on `sfu.rs` and `egress.rs`.
 
 **Done when:**
 

@@ -126,3 +126,29 @@ The media header (§5.5), media AEAD and track-key derivation, HPKE sender-key w
 
 - **Open:** under heavy reordering Cubic's window collapses. BBR does better but not reliably. Cubic stays the default as §5.1 says; the choice of default is a human decision once there is real-network data.
 - **Open:** a receiver behind a 3 Mbps `tbf` still loses many datagrams on the path, because the server sends faster than the bottleneck until loss pushes the window down. Only about 1.7 Mbps of intact video arrives. Pacing to an estimated bottleneck rate would help; §5.5 leaves pacing to quinn unless measurement asks, and this is that measurement.
+
+## 2026-10-29 Working without the human
+
+The human said they won't be available and asked for every open question to be decided in the project's interest. Decisions from here on are made by the agent and recorded here as usual.
+
+## 2026-10-29 M6 review
+
+A fresh subagent reviewed `sfu.rs`, `egress.rs`, the routing code in `rooms.rs` and the netem harness. It found routing, rebuilds, ownership, task lifetimes, locking, drop order and keyframe aggregation sound. Findings and what was done:
+
+1. **Medium, fixed:** a fragment joined the newest open unit of its track, so reordering on the sender's uplink merged and truncated units. Egress now keeps each track's last 32 unit starts and places a fragment by `seq`; a late fragment of a unit already sent is forwarded on its own and never counted as a drop. Tests: `fragments_reordered_upstream_join_their_own_unit`, `a_late_fragment_of_a_sent_unit_is_still_forwarded`; netem scenario `uplink_jitter`.
+2. **Medium, fixed:** a started unit could grow without bound. Units are capped at 4096 fragments, and a started unit that gets nothing for 1 s is given up.
+3. **Medium, fixed:** the netem check "audio to B is never dropped" could not fail. Audio dropped by the safety cap or a full inbox is now counted in `LinkStats.dropped_units` for its track, which the check reads.
+4. **Low, fixed:** a replaced connection could still send requests for the user's new session. `Hub::handle` takes the connection id and refuses a stale one.
+5. **Low, fixed:** stalled units after a track vanished; covered by the 1 s idle expiry.
+6. **Low, accepted:** audio waits behind video already in quinn's 64 KiB buffer, about 300 ms at 1.7 Mbps. A separate audio path would need a second connection or stream priorities quinn's datagrams don't have.
+7. **Low, fixed:** `place` bumps both epochs before changing any membership.
+8. **Nit, fixed:** the audio cap comment.
+9. **Nit, fixed:** `LinkStats` counters are taken only once a control-queue slot is reserved.
+
+Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the sender's uplink, the sender's own window collapses (492 of 600 units dropped locally, the same Cubic behaviour as on downlinks), and what does arrive is intact with no server drops.
+
+## 2026-10-29 M7a voice pipeline
+
+- **Jitter buffer:** our own (`media/jitter.rs`), chosen by the human over patching `neteq`. It decodes 20 ms Opus frames in timestamp order, recovers one lost packet from the next packet's in-band FEC, conceals up to 3 frames, then goes quiet and rebuffers. Target delay is 20 ms plus 3 × the RFC 3550 jitter estimate, capped at 200 ms. When the buffer runs more than 2 frames over target it skips a frame, at most every 200 ms. It exposes the playout timestamp for §5.10. Arrival times are parameters, so tests run on a simulated clock: the 5-minute-mute test reaches 60 ms one second after resuming.
+- **Acceptance tests** (`media/audio.rs`) use a synthetic speech-like signal: a gliding harmonic series shaped into syllables. Echo path: four reflections through a `tanh`-overdriven loudspeaker. Measured: ERLE 64 dB once converged (floor 20 dB). Double talk: near-end speech kept at −6.0 dB with correlation 0.64 against the same speech processed alone (floors −8 dB and 0.6, set after measuring). FEC: a lost frame comes back at 9.2 dB SNR against the lossless decode, concealment at 0 dB.
+- **Double talk is compared with the talker processed alone**, not the raw talker. AEC3's filterbank shifts phase by about 650 samples and the raw correlation drops to 0.5 even with the far end silent.

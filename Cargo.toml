@@ -22,6 +22,7 @@ anyhow = "1.0.104"
 arc-swap = "1.9.3"
 bytes = "1.12.1"
 clap = { version = "4.6.7", features = ["derive"] }
+cpal = "0.18.2"
 ed25519-dalek = { version = "3.0.0", features = ["zeroize"] }
 directories = "6.0.0"
 getrandom = "0.4.3"
@@ -36,9 +37,15 @@ quinn = { version = "0.11.12", default-features = false, features = ["log", "run
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 ring = "0.17.14"
+ropus = "0.12.18"
+rtrb = "0.3.5"
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 rustls-webpki = { version = "0.103.16", default-features = false, features = ["ring", "std"] }
+sonora = "0.2.0"
+sonora-common-audio = "0.2.0"
+sonora-agc2 = "0.2.0"
+sonora-simd = "0.2.0"
 spake2 = "0.4.0"
 subtle = "2.6.1"
 sha2 = "0.11.1"

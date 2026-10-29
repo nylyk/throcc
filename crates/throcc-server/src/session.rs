@@ -144,7 +144,7 @@ async fn serve(shared: &Shared, connection: &quinn::Connection) -> Result<(), Re
     let sent = write_frame(&mut send, &AuthResult::Ok(Box::new(welcome))).await;
     let writer = tokio::spawn(write_loop(send, outgoing_rx, connection.clone()));
     let result = match sent {
-        Ok(()) => read_loop(shared, user, &mut recv, &outgoing).await,
+        Ok(()) => read_loop(shared, user, conn_id, &mut recv, &outgoing).await,
         Err(_) => Err(ReadError::Closed),
     };
     shared.hub().disconnect(user, conn_id);
@@ -156,13 +156,14 @@ async fn serve(shared: &Shared, connection: &quinn::Connection) -> Result<(), Re
 async fn read_loop(
     shared: &Shared,
     user: throcc_proto::ids::UserId,
+    conn_id: u64,
     recv: &mut quinn::RecvStream,
     outgoing: &mpsc::Sender<Outgoing>,
 ) -> Result<(), ReadError> {
     loop {
         let ClientMessage::Request { id, req } = read_frame(recv).await?;
         debug!(user = user.0, id, ?req, "request");
-        let res = shared.hub().handle(user, req);
+        let res = shared.hub().handle(user, conn_id, req);
         let response = Outgoing::Message(ServerMessage::Response { id, res });
         if outgoing.send(response).await.is_err() {
             return Err(ReadError::Closed);

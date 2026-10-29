@@ -192,7 +192,19 @@ impl Hub {
         }
     }
 
-    pub fn handle(&mut self, user: UserId, request: Request) -> Response {
+    /// Handles a request from connection `conn_id`. A connection that has been replaced
+    /// by a newer one of the same user is refused.
+    pub fn handle(&mut self, user: UserId, conn_id: u64, request: Request) -> Response {
+        if self
+            .sessions
+            .get(&user)
+            .is_none_or(|s| s.conn_id != conn_id)
+        {
+            return Response::Err {
+                code: ErrorCode::Forbidden,
+                message: "this connection was replaced".into(),
+            };
+        }
         let outcome = match request {
             Request::SetRoom(room) => self.place(user, room).map(Response::Placed),
             Request::SetProfile { name, avatar } => self.set_profile(user, name, avatar),
@@ -335,17 +347,14 @@ impl Hub {
             Some(_) => Some(self.allocate_tracks()?),
             None => None,
         };
-        if let Some(old) = current {
-            self.bump_epoch(old)?;
-            if let Some(entry) = self.rooms.get_mut(&old) {
-                entry.members.remove(&user);
-            }
+        for room in current.iter().chain(&target) {
+            self.bump_epoch(*room)?;
         }
-        if let Some(new) = target {
-            self.bump_epoch(new)?;
-            if let Some(entry) = self.rooms.get_mut(&new) {
-                entry.members.insert(user);
-            }
+        if let Some(entry) = current.and_then(|old| self.rooms.get_mut(&old)) {
+            entry.members.remove(&user);
+        }
+        if let Some(entry) = target.and_then(|new| self.rooms.get_mut(&new)) {
+            entry.members.insert(user);
         }
         let session = self.session_mut(user)?;
         session.room = target;

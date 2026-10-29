@@ -139,6 +139,14 @@ scenario_jitter() {
     done
 }
 
+scenario_uplink_jitter() {
+    uplink s netem delay 40ms 30ms distribution normal
+    run_share uplink_jitter
+    for ns in a b c; do
+        check "$ns gets only intact units" eq "$(field "uplink_jitter-$ns" corrupt)" 0
+    done
+}
+
 scenario_sender_uplink() {
     uplink s tbf rate 5mbit burst 32kbit latency 100ms
     run_share sender_uplink
@@ -152,7 +160,7 @@ trap teardown EXIT
 setup
 start_server
 scenarios=("$@")
-[ ${#scenarios[@]} -eq 0 ] && scenarios=(receiver_limited random_loss jitter sender_uplink)
+[ ${#scenarios[@]} -eq 0 ] && scenarios=(receiver_limited random_loss jitter uplink_jitter sender_uplink)
 for scenario in "${scenarios[@]}"; do
     clear_shaping
     echo "== $scenario"

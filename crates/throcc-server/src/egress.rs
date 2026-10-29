@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -15,8 +14,15 @@ use crate::rooms::Outgoing;
 pub const VIDEO_BUDGET: Duration = Duration::from_millis(150);
 const LINK_STATS_INTERVAL: Duration = Duration::from_secs(2);
 const INBOX: usize = 8192;
-/// About 5 s of 20 mic tracks: a cap against a receiver that stops reading, not a policy.
+/// Two seconds of 20 mic tracks at 50 frames/s: a cap against a receiver that stops
+/// reading, not a drop policy.
 const MAX_QUEUED_AUDIO: usize = 2000;
+/// A unit's fragment limit: a 1440p keyframe at 18 Mbps is well under 1000.
+const MAX_UNIT_FRAGMENTS: usize = 4096;
+/// A started unit that gets no fragment for this long is given up on.
+const UNIT_IDLE: Duration = Duration::from_secs(1);
+/// Unit starts remembered per track, to place late fragments.
+const HISTORY: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrackKind {
@@ -34,25 +40,44 @@ pub struct Packet {
 #[derive(Clone)]
 pub struct EgressHandle {
     inbox: mpsc::Sender<Packet>,
-    pub inbox_drops: Arc<AtomicU64>,
+    /// Packets that found the inbox full, by track. Locked only when that happens.
+    inbox_drops: Arc<Mutex<BTreeMap<MediaId, u32>>>,
 }
 
 impl EgressHandle {
     pub fn offer(&self, packet: Packet) {
+        let media_id = packet.header.media_id;
         if self.inbox.try_send(packet).is_err() {
-            self.inbox_drops.fetch_add(1, Ordering::Relaxed);
+            let mut drops = self
+                .inbox_drops
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            *drops.entry(media_id).or_default() += 1;
         }
     }
 }
 
+/// What became of a unit, by its first `seq`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fate {
+    Queued(u64),
+    Sent,
+    Dropped,
+}
+
 struct VideoUnit {
+    id: u64,
     media_id: MediaId,
     packets: VecDeque<Bytes>,
-    bytes: usize,
+    received: usize,
     arrived: Instant,
+    last_fragment: Instant,
     started: bool,
+    /// The last fragment has arrived.
     complete: bool,
     discardable: bool,
+    /// A fragment of a unit already sent, forwarded on its own and never counted as a drop.
+    stray: bool,
 }
 
 #[derive(Default)]
@@ -66,11 +91,9 @@ struct Counters {
 pub struct Queues {
     audio: VecDeque<(MediaId, Bytes)>,
     video: VecDeque<VideoUnit>,
-    /// Tracks whose current unit was dropped; their fragments are discarded until the next first.
-    dropping: HashMap<MediaId, ()>,
+    history: HashMap<MediaId, BTreeMap<u32, Fate>>,
+    next_id: u64,
     stats: BTreeMap<MediaId, Counters>,
-    /// Audio dropped by the safety cap, which only a receiver that stops reading reaches.
-    pub audio_overflow: u64,
 }
 
 impl Queues {
@@ -78,9 +101,10 @@ impl Queues {
         let media_id = packet.header.media_id;
         match packet.kind {
             TrackKind::Audio => {
-                if self.audio.len() >= MAX_QUEUED_AUDIO {
-                    self.audio.pop_front();
-                    self.audio_overflow += 1;
+                if self.audio.len() >= MAX_QUEUED_AUDIO
+                    && let Some((dropped, _)) = self.audio.pop_front()
+                {
+                    self.stats.entry(dropped).or_default().dropped_units += 1;
                 }
                 self.audio.push_back((media_id, packet.bytes));
             }
@@ -88,75 +112,100 @@ impl Queues {
         }
     }
 
+    /// Places a fragment in the unit whose first `seq` is the closest at or below its own,
+    /// so fragments reordered on the way in still join the right unit.
     fn push_video(&mut self, packet: Packet, now: Instant) {
-        let flags = packet.header.flags.defined();
-        let media_id = packet.header.media_id;
+        let Header {
+            media_id,
+            seq,
+            flags,
+            ..
+        } = packet.header;
+        let flags = flags.defined();
         if flags.contains(Flags::FIRST) {
-            self.dropping.remove(&media_id);
-            self.close_open_unit(media_id);
-            self.video.push_back(VideoUnit {
+            let id = self.next_id;
+            self.next_id += 1;
+            let unit = VideoUnit {
+                id,
                 media_id,
-                packets: VecDeque::new(),
-                bytes: 0,
+                packets: VecDeque::from([packet.bytes]),
+                received: 1,
                 arrived: now,
+                last_fragment: now,
                 started: false,
-                complete: false,
+                complete: flags.contains(Flags::LAST),
                 discardable: flags.contains(Flags::DISCARDABLE),
-            });
-        } else if self.dropping.contains_key(&media_id) {
+                stray: false,
+            };
+            self.video.push_back(unit);
+            let history = self.history.entry(media_id).or_default();
+            history.insert(seq, Fate::Queued(id));
+            while history.len() > HISTORY {
+                history.pop_first();
+            }
             return;
         }
-        let Some(unit) = self
-            .video
-            .iter_mut()
-            .rev()
-            .find(|u| u.media_id == media_id && !u.complete)
-        else {
-            return;
-        };
-        unit.bytes += packet.bytes.len();
-        unit.packets.push_back(packet.bytes);
-        unit.complete = flags.contains(Flags::LAST);
-    }
-
-    /// Ends the track's unfinished unit, whose last fragment was lost upstream: a started
-    /// unit sends what it has, one not yet started is dropped.
-    fn close_open_unit(&mut self, media_id: MediaId) {
-        let Some(index) = self
-            .video
-            .iter()
-            .position(|u| u.media_id == media_id && !u.complete)
-        else {
-            return;
-        };
-        if self.video[index].started {
-            self.video[index].complete = true;
-            if self.video[index].packets.is_empty() {
-                self.video.remove(index);
+        let fate = self
+            .history
+            .get(&media_id)
+            .and_then(|h| h.range(..=seq).next_back())
+            .map(|(_, fate)| *fate);
+        match fate {
+            Some(Fate::Queued(id)) => {
+                if let Some(unit) = self.video.iter_mut().find(|u| u.id == id)
+                    && unit.received < MAX_UNIT_FRAGMENTS
+                {
+                    unit.packets.push_back(packet.bytes);
+                    unit.received += 1;
+                    unit.last_fragment = now;
+                    unit.complete |= flags.contains(Flags::LAST);
+                }
             }
-        } else {
-            self.video.remove(index);
-            self.stats.entry(media_id).or_default().dropped_units += 1;
+            Some(Fate::Sent) => self.video.push_back(VideoUnit {
+                id: u64::MAX,
+                media_id,
+                packets: VecDeque::from([packet.bytes]),
+                received: 1,
+                arrived: now,
+                last_fragment: now,
+                started: false,
+                complete: true,
+                discardable: true,
+                stray: true,
+            }),
+            Some(Fate::Dropped) | None => {}
         }
     }
 
     /// Drops video until the queue fits the budget: first discardable units that haven't
-    /// started, then the oldest that haven't started.
+    /// started, then the oldest that haven't started. Also gives up on started units
+    /// whose remaining fragments stopped arriving.
     pub fn enforce_budget(&mut self, now: Instant) {
+        let idle: Vec<u64> = self
+            .video
+            .iter()
+            .filter(|u| {
+                u.started && u.packets.is_empty() && now.duration_since(u.last_fragment) > UNIT_IDLE
+            })
+            .map(|u| u.id)
+            .collect();
+        for id in idle {
+            self.finish(id, Fate::Sent);
+        }
         while self.over_budget(now) {
             let victim = self
                 .video
                 .iter()
-                .position(|u| !u.started && u.discardable)
-                .or_else(|| self.video.iter().position(|u| !u.started));
-            let Some(index) = victim else { return };
-            let Some(unit) = self.video.remove(index) else {
+                .find(|u| !u.started && u.discardable)
+                .or_else(|| self.video.iter().find(|u| !u.started))
+                .map(|u| (u.id, u.media_id, u.stray));
+            let Some((id, media_id, stray)) = victim else {
                 return;
             };
-            if !unit.complete {
-                self.dropping.insert(unit.media_id, ());
+            self.finish(id, Fate::Dropped);
+            if !stray {
+                self.stats.entry(media_id).or_default().dropped_units += 1;
             }
-            self.stats.entry(unit.media_id).or_default().dropped_units += 1;
         }
     }
 
@@ -171,25 +220,46 @@ impl Queues {
             .is_some_and(|t| now.duration_since(t) > VIDEO_BUDGET)
     }
 
+    fn finish(&mut self, id: u64, fate: Fate) {
+        let Some(index) = self.video.iter().position(|u| u.id == id) else {
+            return;
+        };
+        let Some(unit) = self.video.remove(index) else {
+            return;
+        };
+        if let Some(history) = self.history.get_mut(&unit.media_id) {
+            for f in history.values_mut().filter(|f| **f == Fate::Queued(id)) {
+                *f = fate;
+            }
+        }
+    }
+
     pub fn pop(&mut self) -> Option<Bytes> {
         if let Some((media_id, bytes)) = self.audio.pop_front() {
             self.stats.entry(media_id).or_default().forwarded += 1;
             return Some(bytes);
         }
-        let index = self.video.iter().position(|u| !u.packets.is_empty())?;
-        let unit = self.video.get_mut(index)?;
+        let unit = self.video.iter_mut().find(|u| !u.packets.is_empty())?;
         let bytes = unit.packets.pop_front()?;
         if !unit.started {
             unit.started = true;
-            self.stats.entry(unit.media_id).or_default().forwarded += 1;
+            if !unit.stray {
+                self.stats.entry(unit.media_id).or_default().forwarded += 1;
+            }
         }
         if unit.complete && unit.packets.is_empty() {
-            self.video.remove(index);
+            let id = unit.id;
+            self.finish(id, Fate::Sent);
         }
         Some(bytes)
     }
 
-    fn take_stats(&mut self) -> Vec<TrackStats> {
+    fn take_stats(&mut self, inbox_drops: &Mutex<BTreeMap<MediaId, u32>>) -> Vec<TrackStats> {
+        let dropped =
+            std::mem::take(&mut *inbox_drops.lock().unwrap_or_else(PoisonError::into_inner));
+        for (media_id, count) in dropped {
+            self.stats.entry(media_id).or_default().dropped_units += count;
+        }
         std::mem::take(&mut self.stats)
             .into_iter()
             .map(|(media_id, c)| TrackStats {
@@ -208,6 +278,7 @@ pub fn spawn(connection: quinn::Connection, control: mpsc::Sender<Outgoing>) -> 
         inbox,
         inbox_drops: Arc::default(),
     };
+    let inbox_drops = handle.inbox_drops.clone();
     tokio::spawn(async move {
         let mut queues = Queues::default();
         let mut next_stats = Instant::now() + LINK_STATS_INTERVAL;
@@ -219,11 +290,13 @@ pub fn spawn(connection: quinn::Connection, control: mpsc::Sender<Outgoing>) -> 
             queues.enforce_budget(now);
             if now >= next_stats {
                 next_stats = now + LINK_STATS_INTERVAL;
-                let tracks = queues.take_stats();
-                if !tracks.is_empty() {
-                    let stats =
-                        Outgoing::Message(ServerMessage::Event(Event::LinkStats { tracks }));
-                    control.try_send(stats).ok();
+                if let Ok(permit) = control.try_reserve() {
+                    let tracks = queues.take_stats(&inbox_drops);
+                    if !tracks.is_empty() {
+                        permit.send(Outgoing::Message(ServerMessage::Event(Event::LinkStats {
+                            tracks,
+                        })));
+                    }
                 }
             }
             match queues.pop() {
@@ -265,6 +338,13 @@ mod tests {
         }
     }
 
+    fn fragment_flags(i: u32, count: u32, discardable: bool) -> Flags {
+        Flags::default()
+            .with(Flags::FIRST, i == 0)
+            .with(Flags::LAST, i == count - 1)
+            .with(Flags::DISCARDABLE, discardable)
+    }
+
     fn unit(
         queues: &mut Queues,
         media: u32,
@@ -274,15 +354,16 @@ mod tests {
         now: Instant,
     ) {
         for i in 0..fragments {
-            let flags = Flags::default()
-                .with(Flags::FIRST, i == 0)
-                .with(Flags::LAST, i == fragments - 1)
-                .with(Flags::DISCARDABLE, discardable);
+            let flags = fragment_flags(i, fragments, discardable);
             queues.push(
                 packet(TrackKind::Video, media, first_seq + i, flags, 1000),
                 now,
             );
         }
+    }
+
+    fn drain(queues: &mut Queues) -> Vec<u8> {
+        std::iter::from_fn(|| queues.pop()).map(|b| b[0]).collect()
     }
 
     #[test]
@@ -321,13 +402,12 @@ mod tests {
         );
         queues.pop();
         queues.enforce_budget(now + Duration::from_millis(200));
-        let left: Vec<u8> = std::iter::from_fn(|| queues.pop()).map(|b| b[0]).collect();
-        assert_eq!(left, vec![1, 2, 9, 10, 11]);
+        assert_eq!(drain(&mut queues), vec![1, 2, 9, 10, 11]);
         assert_eq!(queues.stats[&MediaId(1)].dropped_units, 2);
     }
 
     #[test]
-    fn stale_units_are_dropped_and_their_tail_discarded() {
+    fn fragments_of_a_dropped_unit_are_discarded() {
         let start = Instant::now();
         let mut queues = Queues::default();
         queues.push(packet(TrackKind::Video, 1, 0, Flags::FIRST, 1000), start);
@@ -340,21 +420,52 @@ mod tests {
     }
 
     #[test]
-    fn a_unit_whose_last_fragment_was_lost_does_not_stay_queued() {
+    fn fragments_reordered_upstream_join_their_own_unit() {
+        let now = Instant::now();
+        let mut queues = Queues::default();
+        for seq in [0, 1, 3, 2, 4, 5] {
+            let flags = fragment_flags(seq % 3, 3, false);
+            queues.push(packet(TrackKind::Video, 1, seq, flags, 1000), now);
+        }
+        assert_eq!(drain(&mut queues), vec![0, 1, 2, 3, 4, 5]);
+        assert!(queues.video.is_empty());
+        assert_eq!(queues.stats[&MediaId(1)].dropped_units, 0);
+    }
+
+    #[test]
+    fn a_late_fragment_of_a_sent_unit_is_still_forwarded() {
+        let now = Instant::now();
+        let mut queues = Queues::default();
+        queues.push(packet(TrackKind::Video, 1, 0, Flags::FIRST, 1000), now);
+        queues.push(packet(TrackKind::Video, 1, 2, Flags::LAST, 1000), now);
+        assert_eq!(drain(&mut queues), vec![0, 2]);
+        queues.push(packet(TrackKind::Video, 1, 1, Flags::default(), 1000), now);
+        assert_eq!(drain(&mut queues), vec![1]);
+    }
+
+    #[test]
+    fn a_unit_whose_tail_never_arrives_is_given_up_after_a_second() {
         let now = Instant::now();
         let mut queues = Queues::default();
         queues.push(packet(TrackKind::Video, 1, 0, Flags::FIRST, 1000), now);
         queues.pop();
-        queues.push(packet(TrackKind::Video, 1, 2, Flags::FIRST, 1000), now);
-        unit(&mut queues, 1, 3, 1, false, now);
-        let sent: Vec<u8> = std::iter::from_fn(|| queues.pop()).map(|b| b[0]).collect();
-        assert_eq!(sent, vec![3]);
+        queues.enforce_budget(now + UNIT_IDLE + Duration::from_millis(1));
         assert!(queues.video.is_empty());
-        assert_eq!(queues.stats[&MediaId(1)].dropped_units, 1);
     }
 
     #[test]
-    fn queued_audio_has_a_hard_cap() {
+    fn a_unit_cannot_grow_without_bound() {
+        let now = Instant::now();
+        let mut queues = Queues::default();
+        queues.push(packet(TrackKind::Video, 1, 0, Flags::FIRST, 10), now);
+        for seq in 1..MAX_UNIT_FRAGMENTS as u32 * 2 {
+            queues.push(packet(TrackKind::Video, 1, seq, Flags::default(), 10), now);
+        }
+        assert_eq!(queues.video[0].packets.len(), MAX_UNIT_FRAGMENTS);
+    }
+
+    #[test]
+    fn queued_audio_has_a_hard_cap_that_is_reported() {
         let now = Instant::now();
         let mut queues = Queues::default();
         for seq in 0..MAX_QUEUED_AUDIO as u32 + 10 {
@@ -370,7 +481,8 @@ mod tests {
             );
         }
         assert_eq!(queues.audio.len(), MAX_QUEUED_AUDIO);
-        assert_eq!(queues.audio_overflow, 10);
+        let stats = queues.take_stats(&Mutex::default());
+        assert_eq!(stats[0].dropped_units, 10);
     }
 
     #[test]
