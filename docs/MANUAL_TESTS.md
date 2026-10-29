@@ -60,3 +60,13 @@ Then the client, built with `--features ffmpeg`, in a room with a second client.
 - Resize the shared window: the viewer's picture follows, letterboxed, without stretching.
 - Share the High preset (2560×1440 at 60 fps) of a screen playing moving video full screen. In Task Manager's Details tab, add the CPU time column or use `Get-Process throcc-client | Select CPU` twice 10 s apart. Pass: the sender uses under one core, and the viewer sees about 60 fps.
 - On a 120 Hz or faster display, the viewer still gets about 60 fps, not the display rate.
+
+## M9: Linux screen share through the portal
+
+Needs a Wayland or X11 desktop with `xdg-desktop-portal` and its desktop backend (GNOME, KDE or wlr), PipeWire, and `libpipewire-0.3-dev`. Keep something moving on screen, such as a video, since compositors send frames only on change.
+
+```sh
+cargo test -p throcc-client-core --lib portal_share -- --ignored --nocapture
+```
+
+Pass: the portal's dialog appears once; pick a monitor or a window. Both shares print a size and get at least 10 frames, and the second share starts without a dialog. To ask again, delete `~/.local/share/throcc/screencast-restore-token`.

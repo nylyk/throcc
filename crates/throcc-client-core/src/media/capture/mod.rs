@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+pub(crate) mod linux;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
 #[cfg(windows)]
@@ -60,7 +62,11 @@ pub fn start(config: CaptureConfig) -> Result<Box<dyn Capture>, CaptureError> {
     {
         windows::start(config).map(|c| Box::new(c) as Box<dyn Capture>)
     }
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::start(config).map(|c| Box::new(c) as Box<dyn Capture>)
+    }
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
         let _ = config;
         Err(CaptureError::Unsupported)

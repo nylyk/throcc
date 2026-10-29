@@ -42,6 +42,11 @@ screencapturekit.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd.workspace = true
+async-io.workspace = true
+pipewire.workspace = true
+
 [dev-dependencies]
 libc.workspace = true
 proptest.workspace = true

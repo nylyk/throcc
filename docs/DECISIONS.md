@@ -179,7 +179,7 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 - **Keyframes are sent twice** (`KEYFRAME_COPIES`), whole unit after whole unit, with identical sealed bytes. VideoToolbox has no intra refresh (S4), and its keyframes ignore the VBV: about 60 datagrams at 1080p, so at 2 % loss only about 30 % arrived whole and the picture stayed frozen. With two copies the receiver's replay window fills each lost fragment from its copy, and the server queues the copy as its own unit. Cost: one extra keyframe per GOP or recovery, about 130 kbps at 6 Mbps and a 4 s GOP. The wire format is unchanged. Voice is sent between the keyframe's datagrams, and the copy stops early once a newer frame waits and half the send budget is gone, so a repair never makes the sender drop the next frame. Forced recoveries on the sender are at least 1 s apart. The server counts a dropped copy as lost only when no other copy reaches the viewer.
 - **The freeze after a loss is bounded by the server's one-request-per-second cap plus the 50 ms reorder window**, about 1.1 s at worst. `two_percent_loss_brings_a_refresh_within_a_second` checks every keyframe request is answered within 1 s and the longest freeze stays under that bound.
 - **Measured encode-to-decoded latency** through a local server at 1080p60: median 16 ms, p95 18 ms (`a_shared_picture_arrives_within_a_few_frames`). Capture and display add about one frame each.
-- **Linux capture is not built yet**; `capture::start` returns `Unsupported` there, so "macOS to Linux and back" is not shown.
+- **All three platforms capture** (Linux and Windows below); the "macOS to Linux and back" check needs two machines (`MANUAL_TESTS.md`).
 
 ## 2026-10-29 macOS build requirements
 
@@ -195,3 +195,14 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 - **The D3D11 device is multithread-protected.** The frame pool uses the device from system threads while the share thread uses its immediate context.
 - **The picker is parented to the foreground window**, checked to belong to this process, because `start` runs on a blocking pool thread with no window of its own. Borderless capture is requested and `IsBorderRequired` set to false; both are ignored where the OS refuses.
 - **Not run on Windows.** `cargo clippy -p throcc-client-core --target x86_64-pc-windows-msvc --all-targets` is clean on macOS, with stub C headers and a stub archiver so `ring`'s build script runs. The picker, the blit and the readback need a Windows machine (`MANUAL_TESTS.md`).
+
+## 2026-10-29 M9 screen share (Linux)
+
+- **The portal is driven with `ashpd`'s `async-io` runtime and `async_io::block_on`.** gpui already pulls `ashpd` with `async-io`, and `ashpd` refuses both runtime features at once. `start` blocks on the portal like the macOS picker.
+- **The portal session is closed explicitly when the capture drops.** `ashpd` keeps one shared D-Bus connection for the process, so the compositor would otherwise keep casting until the app exits.
+- **The restore token lives in `<data dir>/screencast-restore-token`**, with `PersistMode::ExplicitlyRevoked`. Each share returns a fresh single-use token that replaces the file. A stale token makes the portal ask again.
+- **Shared memory only (`MemPtr`/`MemFd`, mapped by PipeWire).** The format offers no DRM modifiers, so compositors fall back from dmabuf. dmabuf import with negotiated modifiers is left for when a GPU path needs it.
+- **The PipeWire process callback only copies.** It moves the planes into one of four preallocated slots, recycled free → filled → free through two `rtrb` rings; the share thread converts to NV12. Slots start at the configured size × 4 bytes. A larger stream drops the first frames (counted) until the share thread has grown each slot once.
+- **The requested size is a preference.** Mutter offers a fixed monitor size, so `next_frame` reports what the stream delivers, as on macOS. The max frame rate is capped at the configured fps.
+- **Stream errors carry no message.** Copying PipeWire's error text would allocate in a callback; a stream that fails or a session the compositor ends just stops delivering frames. `PIPEWIRE_DEBUG=3` shows the cause.
+- **The PipeWire path is tested without the portal** (`pipewire_source_delivers_converted_frames`): an in-test BGRx source node, a `pipewire` daemon and `wireplumber`, inside a Linux container.
