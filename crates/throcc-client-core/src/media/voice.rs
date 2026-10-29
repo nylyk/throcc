@@ -13,7 +13,8 @@ use tracing::warn;
 use super::audio::{CaptureChain, Mixer, SAMPLE_RATE, VoiceSettings};
 use super::devices::{self, Devices};
 use super::engine::{Kind, MediaEngine, Outgoing, Received};
-use super::jitter::PULL;
+use super::jitter::{JitterBuffer, PULL};
+use super::share_audio::Playout;
 
 /// Playback kept queued in the device ring, in 10 ms pulls: enough to ride out
 /// scheduling hiccups, little enough to keep mouth-to-ear delay low.
@@ -34,6 +35,13 @@ pub enum VoiceCommand {
         units: mpsc::Receiver<Received>,
     },
     Forget(UserId),
+    /// Plays a share's stereo audio and reports where its playback is in `playout`.
+    ListenShare {
+        user: UserId,
+        units: mpsc::Receiver<Received>,
+        playout: Arc<Playout>,
+    },
+    ForgetShare(UserId),
     ForgetAll,
     /// Plays the processed mic back locally, for the settings screen's mic test.
     Loopback(bool),
@@ -106,17 +114,27 @@ struct Remote {
     units: mpsc::Receiver<Received>,
 }
 
+struct ShareAudio {
+    units: mpsc::Receiver<Received>,
+    jitter: JitterBuffer,
+    playout: Arc<Playout>,
+}
+
 struct Worker {
     devices: Devices,
     chain: CaptureChain,
     mixer: Mixer,
     remotes: HashMap<UserId, Remote>,
+    shares: HashMap<UserId, ShareAudio>,
     engine: Arc<MediaEngine>,
     levels: Arc<Mutex<Levels>>,
-    to_device: Option<PushSincResampler>,
+    /// Left and right resamplers to the output device's rate.
+    to_device: Option<[PushSincResampler; 2]>,
     from_device: Option<PushSincResampler>,
     device_in: Vec<f32>,
+    /// One pull at the output device's rate, left and right interleaved.
     device_out: Vec<f32>,
+    device_channel: [Vec<f32>; 2],
     mic_track: Option<MediaId>,
     muted: bool,
     push_to_talk: bool,
@@ -137,15 +155,19 @@ impl Worker {
         let resampler = |from: u32, to: u32| {
             (from != to).then(|| PushSincResampler::new(per_pull(from), per_pull(to)))
         };
+        let out_pull = per_pull(devices.output_rate);
         Self {
-            to_device: resampler(SAMPLE_RATE, devices.output_rate),
+            to_device: (devices.output_rate != SAMPLE_RATE)
+                .then(|| std::array::from_fn(|_| PushSincResampler::new(PULL, out_pull))),
             from_device: resampler(devices.input_rate, SAMPLE_RATE),
             device_in: vec![0.0; per_pull(devices.input_rate)],
-            device_out: vec![0.0; per_pull(devices.output_rate)],
+            device_out: vec![0.0; out_pull * 2],
+            device_channel: [vec![0.0; out_pull], vec![0.0; out_pull]],
             devices,
             chain,
             mixer: Mixer::default(),
             remotes: HashMap::new(),
+            shares: HashMap::new(),
             engine,
             levels,
             mic_track: None,
@@ -216,9 +238,35 @@ impl Worker {
                 self.remotes.remove(&user);
                 self.mixer.remove(user);
             }
+            VoiceCommand::ListenShare {
+                user,
+                units,
+                playout,
+            } => match JitterBuffer::new(ropus::Channels::Stereo) {
+                Ok(jitter) => {
+                    self.shares.insert(
+                        user,
+                        ShareAudio {
+                            units,
+                            jitter,
+                            playout,
+                        },
+                    );
+                }
+                Err(e) => warn!("share audio decoder: {e}"),
+            },
+            VoiceCommand::ForgetShare(user) => {
+                if let Some(share) = self.shares.remove(&user) {
+                    share.playout.set(None);
+                }
+            }
             VoiceCommand::ForgetAll => {
                 self.remotes.clear();
                 self.mixer.clear();
+                for share in self.shares.values() {
+                    share.playout.set(None);
+                }
+                self.shares.clear();
             }
             VoiceCommand::Loopback(on) => self.loopback = on,
         }
@@ -235,34 +283,90 @@ impl Worker {
                 }
             }
         }
+        for share in self.shares.values_mut() {
+            while let Ok(unit) = share.units.try_recv() {
+                share.jitter.insert(unit.timestamp, &unit.data, self.played);
+            }
+        }
     }
 
-    /// Mixes 10 ms, feeds it to the echo canceller and queues it for the speakers.
+    /// Mixes 10 ms of voices and shares, feeds it to the echo canceller and queues it for
+    /// the speakers.
     fn play(&mut self, loopback: &[f32; PULL]) {
-        let mut mixed = [0.0f32; PULL];
-        if !self.deafened {
-            self.mixer.mix(&mut mixed);
+        let mut voices = [0.0f32; PULL];
+        let mut stereo = [0.0f32; PULL * 2];
+        self.mix_shares(&mut stereo);
+        if self.deafened {
+            stereo.fill(0.0);
+        } else {
+            self.mixer.mix(&mut voices);
         }
         if self.loopback {
-            for (m, l) in mixed.iter_mut().zip(loopback) {
+            for (m, l) in voices.iter_mut().zip(loopback) {
                 *m = (*m + l).clamp(-1.0, 1.0);
             }
         }
-        if let Err(e) = self.chain.render(&mixed) {
+        for (pair, voice) in stereo.as_chunks_mut::<2>().0.iter_mut().zip(voices) {
+            for sample in pair {
+                *sample = (*sample + voice).clamp(-1.0, 1.0);
+            }
+        }
+        let mut reference = [0.0f32; PULL];
+        for (r, [left, right]) in reference.iter_mut().zip(stereo.as_chunks::<2>().0) {
+            *r = (left + right) * 0.5;
+        }
+        if let Err(e) = self.chain.render(&reference) {
             warn!("echo canceller reference: {e}");
         }
         self.played += PULL as u64;
         let out: &[f32] = match &mut self.to_device {
-            Some(resampler) => {
-                resampler.resample(&mixed, &mut self.device_out);
+            Some(resamplers) => {
+                for (channel, (resampler, out)) in resamplers
+                    .iter_mut()
+                    .zip(&mut self.device_channel)
+                    .enumerate()
+                {
+                    let input: [f32; PULL] = std::array::from_fn(|i| stereo[i * 2 + channel]);
+                    resampler.resample(&input, out);
+                }
+                let [left, right] = &self.device_channel;
+                for ((pair, l), r) in self
+                    .device_out
+                    .as_chunks_mut::<2>()
+                    .0
+                    .iter_mut()
+                    .zip(left)
+                    .zip(right)
+                {
+                    *pair = [*l, *r];
+                }
                 &self.device_out
             }
-            None => &mixed,
+            None => &stereo,
         };
+        if self.devices.playback.slots() < out.len() {
+            return;
+        }
         for sample in out {
-            if self.devices.playback.push(*sample).is_err() {
-                break;
+            self.devices.playback.push(*sample).ok();
+        }
+    }
+
+    /// Adds every share's next 10 ms into `out`, and publishes the audio each share has
+    /// reaching the speakers once what is queued ahead of it has played.
+    fn mix_shares(&mut self, out: &mut [f32; PULL * 2]) {
+        let queued = (self.queued_playback() * PULL) as u32;
+        let mut pull = [0.0f32; PULL * 2];
+        for share in self.shares.values_mut() {
+            share.jitter.pull(&mut pull);
+            for (o, s) in out.iter_mut().zip(&pull) {
+                *o += s;
             }
+            let heard = share
+                .jitter
+                .playout_timestamp()
+                .map(|ts| ts.wrapping_sub(queued));
+            share.playout.set(heard);
         }
     }
 

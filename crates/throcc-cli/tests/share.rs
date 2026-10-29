@@ -11,10 +11,11 @@ use throcc_client_core::media::capture::{CaptureConfig, TestPattern};
 use throcc_client_core::media::engine::Kind;
 use throcc_client_core::media::reorder::REORDER_WINDOW;
 use throcc_client_core::media::share::{self, ShareSender};
+use throcc_client_core::media::share_audio::audio_to_video;
 use throcc_client_core::media::video::decode::Decoder;
 use throcc_proto::frame::Flags;
 use throcc_proto::ids::MediaId;
-use throcc_proto::messages::{Codec, Event, MediaState, Request, Response, ShareConfig};
+use throcc_proto::messages::{Codec, Event, MediaState, Request, Response, Share, ShareConfig};
 use tokio::sync::{Mutex, mpsc};
 
 use common::*;
@@ -33,22 +34,22 @@ const WANTED: ShareConfig = ShareConfig {
 async fn share_pattern(
     alice: &mut Call,
     bob: &Call,
+    wanted: ShareConfig,
     epoch: Instant,
-) -> Option<(Arc<ShareSender>, MediaId, Arc<Mutex<Vec<Instant>>>)> {
+) -> Option<(Arc<ShareSender>, Share, Arc<Mutex<Vec<Instant>>>)> {
     wait_for("bob to learn alice's tracks", || {
         bob.engine.keys().keys.peer_tracks(alice.me()).is_some()
     })
     .await;
-    let track = bob
+    let tracks = bob
         .engine
         .keys()
         .keys
         .peer_tracks(alice.me())
         .unwrap()
-        .shares[0]
-        .video;
-    let capture = Box::new(TestPattern::new(CaptureConfig::for_share(&WANTED), epoch));
-    let sender = match ShareSender::start(alice.engine.clone(), track, WANTED, capture) {
+        .shares[0];
+    let capture = Box::new(TestPattern::new(CaptureConfig::for_share(&wanted), epoch));
+    let sender = match ShareSender::start(alice.engine.clone(), tracks, wanted, capture) {
         Ok(sender) => Arc::new(sender),
         Err(e) => {
             eprintln!("skipped: {e}");
@@ -66,10 +67,10 @@ async fn share_pattern(
         Response::Ok
     );
 
-    let wanted = Arc::new(Mutex::new(Vec::new()));
+    let requests = Arc::new(Mutex::new(Vec::new()));
     let (_, closed) = mpsc::channel(1);
     let mut events = std::mem::replace(&mut alice.events, closed);
-    let (forward, log) = (sender.clone(), wanted.clone());
+    let (forward, log) = (sender.clone(), requests.clone());
     tokio::spawn(async move {
         while let Some(event) = events.recv().await {
             if let CallEvent::Server(Event::KeyframeWanted { kind, .. }) = event {
@@ -78,7 +79,7 @@ async fn share_pattern(
             }
         }
     });
-    Some((sender, track, wanted))
+    Some((sender, tracks, requests))
 }
 
 async fn watch(
@@ -105,11 +106,11 @@ async fn a_shared_picture_arrives_within_a_few_frames() {
     let server = start_server();
     let (mut alice, bob, _) = room_with_two(&server).await;
     let epoch = Instant::now();
-    let Some((sender, video, _)) = share_pattern(&mut alice, &bob, epoch).await else {
+    let Some((sender, tracks, _)) = share_pattern(&mut alice, &bob, WANTED, epoch).await else {
         return;
     };
-    let units = watch(&bob, video).await;
-    let mut picture = share::receive(units, sender.config.codec).unwrap();
+    let units = watch(&bob, tracks.video).await;
+    let mut picture = share::receive(units, sender.config.codec, None).unwrap();
 
     let mut latencies = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -139,10 +140,11 @@ async fn two_percent_loss_brings_a_refresh_within_a_second() {
     let relay = lossy_relay(&server.addr, 50).await;
     let (mut alice, bob, _) = room_with_two_at(&server, &relay.addr).await;
     let epoch = Instant::now();
-    let Some((sender, video, wanted)) = share_pattern(&mut alice, &bob, epoch).await else {
+    let Some((sender, tracks, wanted)) = share_pattern(&mut alice, &bob, WANTED, epoch).await
+    else {
         return;
     };
-    let mut units = watch(&bob, video).await;
+    let mut units = watch(&bob, tracks.video).await;
     let mut decoder = Decoder::new(sender.config.codec).unwrap();
 
     let mut keyframes = Vec::new();
@@ -194,4 +196,53 @@ async fn two_percent_loss_brings_a_refresh_within_a_second() {
     let aggregation = Duration::from_secs(1);
     let allowed = aggregation + REORDER_WINDOW + Duration::from_millis(200);
     assert!(longest_freeze < allowed, "frozen for {longest_freeze:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a hardware video encoder; virtual machines queue frames for seconds"]
+async fn share_audio_and_video_arrive_on_one_clock() {
+    let server = start_server();
+    let (mut alice, bob, _) = room_with_two(&server).await;
+    let epoch = Instant::now();
+    let wanted = ShareConfig {
+        audio: true,
+        ..WANTED
+    };
+    let Some((sender, tracks, _)) = share_pattern(&mut alice, &bob, wanted, epoch).await else {
+        return;
+    };
+    assert!(sender.config.audio, "the test pattern captures audio");
+    let mut audio = bob.engine.subscribe(tracks.audio, Kind::Audio, 512);
+    let mut video = bob.engine.subscribe(tracks.video, Kind::Video, 512);
+    let watching = Request::SetWatching(vec![tracks.video, tracks.audio]);
+    assert_eq!(bob.request(watching).await.unwrap(), Response::Ok);
+
+    let now_on_video_clock = || (epoch.elapsed().as_micros() * 90_000 / 1_000_000) as u32;
+    let (mut audio_lags, mut video_lags) = (Vec::new(), Vec::new());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        tokio::select! {
+            Some(unit) = audio.recv() => {
+                let captured = audio_to_video(unit.timestamp) + 1800;
+                audio_lags.push(now_on_video_clock().wrapping_sub(captured) as i32 / 90);
+            }
+            Some(unit) = video.recv() => {
+                video_lags.push(now_on_video_clock().wrapping_sub(unit.timestamp) as i32 / 90);
+            }
+            _ = tokio::time::sleep_until(deadline) => {}
+        }
+    }
+    let median = |lags: &mut Vec<i32>| {
+        lags.sort_unstable();
+        lags[lags.len() / 2]
+    };
+    assert!(audio_lags.len() > 100 && video_lags.len() > 100);
+    let (audio_ms, video_ms) = (median(&mut audio_lags), median(&mut video_lags));
+    eprintln!("capture to arrival: audio {audio_ms} ms, video {video_ms} ms");
+    assert!((0..100).contains(&audio_ms), "audio lag {audio_ms} ms");
+    assert!((0..100).contains(&video_ms), "video lag {video_ms} ms");
+    assert!(
+        (audio_ms - video_ms).abs() < 40,
+        "audio {audio_ms} ms, video {video_ms} ms"
+    );
 }

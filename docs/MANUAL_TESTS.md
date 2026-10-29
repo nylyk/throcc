@@ -80,3 +80,13 @@ cargo test -p throcc-client-core --lib portal_share -- --ignored --nocapture
 ```
 
 Pass: the portal's dialog appears once; pick a monitor or a window. Both shares print a size and get at least 10 frames, and the second share starts without a dialog. To ask again, delete `~/.local/share/throcc/screencast-restore-token`.
+
+## M10: macOS share audio
+
+Needs a Mac with the screen recording permission and speakers.
+
+```sh
+cargo test -p throcc-client-core --lib share_audio_arrives -- --ignored
+```
+
+Pass: it plays a system sound and captures it. Then, in a call between two machines, share a screen with audio while the other side talks. Pass: the other side never hears their own voice come back, and a clap video shared with audio looks and sounds in sync (offset under 40 ms, judged by eye or with a phone's slow-motion camera).

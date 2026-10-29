@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use ropus::{Channels, DecodeMode, Decoder};
 
-/// Samples in one Opus frame: 20 ms at 48 kHz.
+/// Samples per channel in one Opus frame: 20 ms at 48 kHz.
 pub const FRAME: usize = 960;
-/// Samples in one pull: 10 ms at 48 kHz.
+/// Samples per channel in one pull: 10 ms at 48 kHz.
 pub const PULL: usize = 480;
 const MIN_TARGET: u32 = FRAME as u32;
 const MAX_TARGET: u32 = 10 * FRAME as u32;
@@ -44,7 +44,9 @@ pub struct JitterBuffer {
     /// Media timestamp of the next frame to decode.
     next_ts: Option<u32>,
     playing: bool,
-    frame: [f32; FRAME],
+    channels: usize,
+    /// One decoded frame, channels interleaved.
+    frame: Vec<f32>,
     frame_ts: u32,
     frame_pos: usize,
     concealed_in_a_row: u32,
@@ -57,12 +59,17 @@ pub struct JitterBuffer {
 
 impl JitterBuffer {
     pub fn new(channels: Channels) -> Result<Self, ropus::DecoderInitError> {
+        let count = match channels {
+            Channels::Mono => 1,
+            Channels::Stereo => 2,
+        };
         Ok(Self {
             decoder: Decoder::new(48_000, channels)?,
             packets: BTreeMap::new(),
             next_ts: None,
             playing: false,
-            frame: [0.0; FRAME],
+            channels: count,
+            frame: vec![0.0; FRAME * count],
             frame_ts: 0,
             frame_pos: FRAME,
             concealed_in_a_row: 0,
@@ -139,8 +146,9 @@ impl JitterBuffer {
         self.played
     }
 
-    /// Fills 10 ms of output.
-    pub fn pull(&mut self, out: &mut [f32; PULL]) -> Played {
+    /// Fills 10 ms of output, channels interleaved: `out` holds `PULL` samples per channel.
+    pub fn pull(&mut self, out: &mut [f32]) -> Played {
+        let channels = self.channels;
         if !self.playing {
             if self.buffered() >= self.target() && self.next_ts.is_some() {
                 self.playing = true;
@@ -162,15 +170,16 @@ impl JitterBuffer {
                         }
                     }
                     None => {
-                        out[filled..].fill(0.0);
+                        out[filled * channels..].fill(0.0);
                         self.played = Played::Silence;
                         return Played::Silence;
                     }
                 }
             }
             let take = (PULL - filled).min(FRAME - self.frame_pos);
-            out[filled..filled + take]
-                .copy_from_slice(&self.frame[self.frame_pos..self.frame_pos + take]);
+            out[filled * channels..(filled + take) * channels].copy_from_slice(
+                &self.frame[self.frame_pos * channels..(self.frame_pos + take) * channels],
+            );
             self.frame_pos += take;
             filled += take;
         }
@@ -332,6 +341,33 @@ mod tests {
         jb.pull(&mut out);
         jb.pull(&mut out);
         assert_eq!(jb.playout_timestamp(), Some(5000 + 3 * PULL as u32));
+    }
+
+    #[test]
+    fn stereo_keeps_its_channels_apart() {
+        let mut enc = Encoder::builder(48_000, Channels::Stereo, Application::Audio)
+            .frame_duration(FrameDuration::Ms20)
+            .bitrate(Bitrate::Bits(128_000))
+            .build()
+            .unwrap();
+        let mut jb = JitterBuffer::new(Channels::Stereo).unwrap();
+        for f in 0..6 {
+            let left_only: Vec<f32> = tone(f).iter().flat_map(|s| [*s, 0.0]).collect();
+            let mut packet = vec![0u8; 4000];
+            let n = enc.encode_float(&left_only, &mut packet).unwrap();
+            jb.insert((f * FRAME) as u32, &packet[..n], (f * FRAME) as u64);
+        }
+        let mut out = [0.0f32; PULL * 2];
+        let mut energy = [0.0f32; 2];
+        for _ in 0..7 {
+            jb.pull(&mut out);
+            for [left, right] in out.as_chunks::<2>().0 {
+                energy[0] += left * left;
+                energy[1] += right * right;
+            }
+        }
+        assert!(energy[0] > 100.0 * energy[1].max(1e-6), "{energy:?}");
+        assert_eq!(jb.playout_timestamp(), Some(7 * PULL as u32));
     }
 
     #[test]

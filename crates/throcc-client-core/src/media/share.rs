@@ -1,16 +1,18 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use throcc_proto::ids::MediaId;
-use throcc_proto::messages::{Codec, Recovery, ShareConfig};
+use bytes::Bytes;
+use throcc_proto::messages::{Codec, Recovery, Share, ShareConfig};
 use tokio::sync::{mpsc, watch};
 use tracing::warn;
 
 use super::capture::{Capture, CaptureConfig, CaptureError};
 use super::engine::{Kind, MediaEngine, Outgoing, Received};
+use super::share_audio::{Playout, STEREO_FRAME, ShareAudioEncoder, due_frames};
 use super::video::Picture;
 use super::video::decode::Decoder;
 use super::video::encode::{Encoder, EncoderConfig};
@@ -64,7 +66,7 @@ impl ShareSender {
     /// Encodes and sends what `capture` delivers, opened with [`CaptureConfig::for_share`].
     pub fn start(
         engine: Arc<MediaEngine>,
-        track: MediaId,
+        tracks: Share,
         wanted: ShareConfig,
         mut capture: Box<dyn Capture>,
     ) -> Result<Self, ShareError> {
@@ -76,8 +78,14 @@ impl ShareSender {
             kbps: wanted.kbps,
         })
         .map_err(|e| ShareError::Encoder(e.to_string()))?;
+        let mut audio_encoder = if wanted.audio && capture.captures_audio() {
+            Some(ShareAudioEncoder::new().map_err(|e| ShareError::Encoder(e.to_string()))?)
+        } else {
+            None
+        };
         let config = ShareConfig {
             codec: encoder.codec(),
+            audio: audio_encoder.is_some(),
             ..wanted
         };
         let name = encoder.name();
@@ -89,6 +97,7 @@ impl ShareSender {
             .name("throcc-share".into())
             .spawn(move || {
                 let mut frame = VideoFrame::blank(capture_config.width, capture_config.height);
+                let mut sound = [0.0f32; STEREO_FRAME];
                 let mut count = 0u32;
                 let mut pacer = RecoveryPacer::default();
                 while !thread_stop.load(Ordering::Relaxed) {
@@ -97,6 +106,22 @@ impl ShareSender {
                     }
                     if let Some(kind) = pacer.due(Instant::now()) {
                         encoder.recover(kind);
+                    }
+                    if let Some(audio_encoder) = &mut audio_encoder {
+                        while let Some(timestamp) = capture.next_audio(&mut sound) {
+                            let Some(packet) = audio_encoder.encode(&sound) else {
+                                continue;
+                            };
+                            let unit = Outgoing {
+                                media_id: tracks.audio,
+                                data: Bytes::copy_from_slice(packet),
+                                timestamp,
+                                keyframe: false,
+                                discardable: false,
+                                enqueued: Instant::now(),
+                            };
+                            engine.send(Kind::Audio, unit);
+                        }
                     }
                     if !capture.next_frame(&mut frame) {
                         std::thread::sleep(IDLE);
@@ -112,7 +137,7 @@ impl ShareSender {
                                 engine.send(
                                     Kind::Video,
                                     Outgoing {
-                                        media_id: track,
+                                        media_id: tracks.video,
                                         data: unit.data,
                                         timestamp: unit.timestamp,
                                         keyframe: unit.keyframe,
@@ -159,23 +184,56 @@ pub enum ShareError {
     Encoder(String),
 }
 
-/// Decodes one remote share and keeps its newest picture.
-pub fn receive(units: mpsc::Receiver<Received>, codec: Codec) -> Result<Picture, String> {
+/// Decoded frames held back for the share audio, at most.
+const MAX_HELD: usize = 32;
+
+/// Decodes one remote share and keeps its newest due picture. With `playout`, a frame is
+/// due once the share audio reaching the speakers has caught up with it.
+pub fn receive(
+    units: mpsc::Receiver<Received>,
+    codec: Codec,
+    playout: Option<Arc<Playout>>,
+) -> Result<Picture, String> {
     let mut decoder = Decoder::new(codec).map_err(|e| e.to_string())?;
     let (tx, picture) = watch::channel(None);
     std::thread::Builder::new()
         .name("throcc-decode".into())
         .spawn(move || {
             let mut units = units;
-            while let Some(unit) = units.blocking_recv() {
-                match decoder.decode(&unit.data, unit.timestamp) {
-                    Ok(Some(frame)) => {
-                        if tx.send(Some(Arc::new(frame))).is_err() {
-                            return;
+            let mut held: VecDeque<Arc<VideoFrame>> = VecDeque::new();
+            loop {
+                let unit = if held.is_empty() {
+                    units.blocking_recv()
+                } else {
+                    match units.try_recv() {
+                        Ok(unit) => Some(unit),
+                        Err(mpsc::error::TryRecvError::Empty) => {
+                            std::thread::sleep(IDLE);
+                            None
                         }
+                        Err(mpsc::error::TryRecvError::Disconnected) => return,
                     }
-                    Ok(None) => {}
-                    Err(e) => warn!("decoding failed: {e}"),
+                };
+                if let Some(unit) = &unit {
+                    match decoder.decode(&unit.data, unit.timestamp) {
+                        Ok(Some(frame)) => {
+                            if held.len() == MAX_HELD {
+                                held.pop_front();
+                            }
+                            held.push_back(Arc::new(frame));
+                        }
+                        Ok(None) => {}
+                        Err(e) => warn!("decoding failed: {e}"),
+                    }
+                } else if held.is_empty() {
+                    return;
+                }
+                let heard = playout.as_ref().and_then(|p| p.heard());
+                let due = due_frames(held.iter().map(|f| f.timestamp), heard);
+                if let Some(newest) = held.drain(..due).next_back()
+                    && tx.send(Some(newest)).is_err()
+                {
+                    return;
                 }
             }
         })

@@ -46,6 +46,7 @@ pub struct Devices {
     pub input_rate: u32,
     pub output_rate: u32,
     pub capture: rtrb::Consumer<f32>,
+    /// Left and right samples, interleaved.
     pub playback: rtrb::Producer<f32>,
     pub counters: Arc<DeviceCounters>,
 }
@@ -96,7 +97,7 @@ pub fn open(input: Option<&str>, output: Option<&str>) -> Result<Devices, Device
 
     let counters = Arc::new(DeviceCounters::default());
     let (capture_tx, capture) = rtrb::RingBuffer::new((input_rate * RING_SECONDS) as usize);
-    let (playback, playback_rx) = rtrb::RingBuffer::new((output_rate * RING_SECONDS) as usize);
+    let (playback, playback_rx) = rtrb::RingBuffer::new((output_rate * RING_SECONDS) as usize * 2);
 
     let in_config = StreamConfig {
         channels: input_config.channels(),
@@ -218,11 +219,18 @@ fn build_output<T: ToF32>(
             *config,
             move |data: &mut [T], _| {
                 for frame in data.chunks_mut(channels) {
-                    let sample = ring.pop().unwrap_or_else(|_| {
+                    let (left, right) = if ring.slots() >= 2 {
+                        (ring.pop().unwrap_or(0.0), ring.pop().unwrap_or(0.0))
+                    } else {
                         counters.underruns.fetch_add(1, Ordering::Relaxed);
-                        0.0
-                    });
-                    frame.fill(T::from_f32(sample));
+                        (0.0, 0.0)
+                    };
+                    let both = T::from_f32((left + right) * 0.5);
+                    frame.fill(both);
+                    if let [first, second, ..] = frame {
+                        *first = T::from_f32(left);
+                        *second = T::from_f32(right);
+                    }
                 }
             },
             |e| tracing::warn!("output stream: {e}"),

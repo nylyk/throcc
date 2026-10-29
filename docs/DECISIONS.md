@@ -207,3 +207,13 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 - **The requested size is a preference.** Mutter offers a fixed monitor size, so `next_frame` reports what the stream delivers, as on macOS. The max frame rate is capped at the configured fps.
 - **Stream errors carry no message.** Copying PipeWire's error text would allocate in a callback; a stream that fails or a session the compositor ends just stops delivering frames. `PIPEWIRE_DEBUG=3` shows the cause.
 - **The PipeWire path is tested without the portal** (`pipewire_source_delivers_converted_frames`): an in-test BGRx source node, a `pipewire` daemon and `wireplumber`, inside a Linux container.
+
+## 2026-10-29 M10 share audio and sync
+
+- **Playback is stereo end to end.** The playback ring carries interleaved left and right; the device callback puts them on the first two channels and their mean on the rest (or on the only one). Voices are mono, added to both sides. The echo canceller gets the mono mean of the whole mix, so share audio is cancelled from the mic like voices are.
+- **The jitter buffer takes any channel count**; share audio uses one per watched share, stereo, outside the voice mixer, with no volume control yet.
+- **Share audio keeps being pulled while deafened**, only silenced, so its playout position and the video held to it keep moving.
+- **The playout position published to the video decoder is what reaches the speakers**: the jitter buffer's playout timestamp minus the playback queued ahead of it. The device's own buffer is not counted; it is a few milliseconds.
+- **Video is held while it is ahead of the share audio being heard**, at most 32 frames and never more than 0.5 s ahead: past that the audio has stalled, and a frozen picture is worse than unsynced sound. Without share audio playing, nothing is held.
+- **Capture backends report both media from one zero**: `Capture::next_audio` returns 20 ms of 48 kHz stereo with a 48 kHz timestamp counted from the same instant as the video's 90 kHz timestamps. On macOS both callbacks only queue the sample buffers with their host time; the share thread picks the zero, unpacks audio (planar or interleaved float) and re-chunks it to 20 ms, restarting the chunking when a buffer lands more than 10 ms away from where the previous one ended.
+- **`ShareConfig.audio` is true only when the capture delivers audio**, so receivers never wait for audio that will not come.

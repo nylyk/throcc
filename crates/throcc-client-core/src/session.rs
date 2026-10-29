@@ -7,7 +7,7 @@ use throcc_proto::Fingerprint;
 use throcc_proto::ids::{MediaId, RoomId, UserId};
 use throcc_proto::messages::{
     Event as ServerEvent, MediaState, Placed, Presence, Recovery, Request, Response, RoomPeer,
-    ShareConfig, Welcome,
+    Share, ShareConfig, Welcome,
 };
 use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn};
@@ -19,6 +19,7 @@ use crate::keys::KeyNotice;
 use crate::keystore::Keystore;
 use crate::media::audio::VoiceSettings;
 use crate::media::engine::Kind;
+use crate::media::share_audio::Playout;
 use crate::media::video::Picture;
 use crate::media::voice::{VoiceCommand, VoiceEngine};
 use crate::state::{
@@ -113,6 +114,7 @@ pub(crate) struct Session {
     watching: Vec<UserId>,
     /// The video track each watched share is decoded from.
     watched_video: HashMap<UserId, MediaId>,
+    watched_audio: HashMap<UserId, MediaId>,
     #[cfg(feature = "ffmpeg")]
     sharing: Option<crate::media::share::ShareSender>,
     tracks: HashMap<MediaId, Watched>,
@@ -143,6 +145,7 @@ impl Session {
             last_room_state: None,
             watching: Vec::new(),
             watched_video: HashMap::new(),
+            watched_audio: HashMap::new(),
             #[cfg(feature = "ffmpeg")]
             sharing: None,
             tracks: HashMap::new(),
@@ -274,6 +277,10 @@ impl Session {
         for (user, video) in std::mem::take(&mut self.watched_video) {
             self.call.engine.unsubscribe(video);
             self.shared.set_picture(user, None);
+        }
+        for (user, audio) in std::mem::take(&mut self.watched_audio) {
+            self.call.engine.unsubscribe(audio);
+            self.voice(VoiceCommand::ForgetShare(user));
         }
         self.room = None;
         self.my_tracks = None;
@@ -569,18 +576,18 @@ impl Session {
 
     /// Keeps one decoder per watched share, following track and codec changes.
     fn sync_watching(&mut self) {
-        let wanted: HashMap<UserId, (MediaId, ShareConfig)> = self
+        let wanted: HashMap<UserId, (Share, ShareConfig)> = self
             .watching
             .iter()
             .filter_map(|user| {
                 let peer = self.peers.get(user)?;
-                Some((*user, (peer.tracks.shares.first()?.video, peer.share?)))
+                Some((*user, (*peer.tracks.shares.first()?, peer.share?)))
             })
             .collect();
         let stale: Vec<UserId> = self
             .watched_video
             .iter()
-            .filter(|(user, video)| wanted.get(user).is_none_or(|(v, _)| v != *video))
+            .filter(|(user, video)| wanted.get(user).is_none_or(|(s, _)| s.video != **video))
             .map(|(user, _)| *user)
             .collect();
         for user in stale {
@@ -588,16 +595,35 @@ impl Session {
                 self.call.engine.unsubscribe(video);
                 self.tracks.remove(&video);
             }
+            if let Some(audio) = self.watched_audio.remove(&user) {
+                self.call.engine.unsubscribe(audio);
+                self.tracks.remove(&audio);
+                self.voice(VoiceCommand::ForgetShare(user));
+            }
             self.shared.set_picture(user, None);
         }
-        for (user, (video, config)) in wanted {
+        for (user, (share, config)) in wanted {
             if self.watched_video.contains_key(&user) {
                 continue;
             }
+            let playout = config.audio.then(|| {
+                let playout = Playout::new();
+                let units = self.call.engine.subscribe(share.audio, Kind::Audio, 64);
+                self.voice(VoiceCommand::ListenShare {
+                    user,
+                    units,
+                    playout: playout.clone(),
+                });
+                self.tracks
+                    .insert(share.audio, watched(user, "screen audio", SHARE_AUDIO_KBPS));
+                self.watched_audio.insert(user, share.audio);
+                playout
+            });
+            let video = share.video;
             #[cfg(feature = "ffmpeg")]
             {
                 let units = self.call.engine.subscribe(video, Kind::Video, 64);
-                match crate::media::share::receive(units, config.codec) {
+                match crate::media::share::receive(units, config.codec, playout) {
                     Ok(picture) => self.shared.set_picture(user, Some(picture)),
                     Err(e) => self
                         .shared
@@ -605,9 +631,12 @@ impl Session {
                 }
             }
             #[cfg(not(feature = "ffmpeg"))]
-            self.shared.emit(Event::Notice(
-                "This build can't show video; it was built without ffmpeg.".into(),
-            ));
+            {
+                drop(playout);
+                self.shared.emit(Event::Notice(
+                    "This build can't show video; it was built without ffmpeg.".into(),
+                ));
+            }
             self.tracks
                 .insert(video, watched(user, "screen", config.kbps));
             self.watched_video.insert(user, video);
@@ -616,11 +645,11 @@ impl Session {
 
     #[cfg(feature = "ffmpeg")]
     async fn start_share(&mut self, wanted: ShareConfig) {
-        let Some(track) = self
+        let Some(tracks) = self
             .my_tracks
             .as_ref()
             .and_then(|t| t.shares.first())
-            .map(|s| s.video)
+            .copied()
         else {
             self.shared
                 .emit(Event::Notice("Join a room before sharing.".into()));
@@ -630,7 +659,7 @@ impl Session {
         let started = tokio::task::spawn_blocking(move || {
             let config = crate::media::capture::CaptureConfig::for_share(&wanted);
             let capture = crate::media::capture::start(config)?;
-            crate::media::share::ShareSender::start(engine, track, wanted, capture)
+            crate::media::share::ShareSender::start(engine, tracks, wanted, capture)
         })
         .await;
         match started {
