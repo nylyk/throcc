@@ -7350,6 +7350,7 @@ dependencies = [
  "throcc-proto",
  "tokio",
  "tracing",
+ "windows 0.62.2",
  "zeroize",
 ]
 

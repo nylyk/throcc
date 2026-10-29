@@ -1,5 +1,7 @@
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
+#[cfg(windows)]
+pub(crate) mod windows;
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -54,7 +56,11 @@ pub fn start(config: CaptureConfig) -> Result<Box<dyn Capture>, CaptureError> {
     {
         macos::start(config).map(|c| Box::new(c) as Box<dyn Capture>)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        windows::start(config).map(|c| Box::new(c) as Box<dyn Capture>)
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = config;
         Err(CaptureError::Unsupported)
