@@ -25,7 +25,7 @@ done
 
 fail=0
 check() { if eval "$2"; then echo "  ok    $1"; else echo "  FAIL  $1"; fail=1; fi; }
-check "the binary is static" "docker exec throcc-deploy sh -c 'ldd /usr/local/bin/throcc-server 2>&1 | grep -q \"not a dynamic\"'"
+check "the binary is static" "docker exec throcc-deploy sh -c 'ldd /usr/local/bin/throcc-server 2>&1 | grep -Eq \"not a dynamic|statically linked\"'"
 check "the unit is active" "[ \"\$(docker exec throcc-deploy systemctl is-active throcc-server)\" = active ]"
 check "it runs as a dynamic user, not root" "docker exec throcc-deploy sh -c 'pid=\$(systemctl show -p MainPID --value throcc-server); [ \$(stat -c %u /proc/\$pid) -ne 0 ]'"
 check "it listens on UDP 8476" "docker exec throcc-deploy sh -c 'grep -qi \":211C \" /proc/net/udp6'"
