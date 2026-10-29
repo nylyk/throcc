@@ -95,7 +95,7 @@ impl Keystore {
     }
 }
 
-fn default_dir() -> Result<PathBuf> {
+pub(crate) fn default_dir() -> Result<PathBuf> {
     let dirs = directories::ProjectDirs::from("", "", "throcc")
         .context("no home directory to keep throcc's data in")?;
     Ok(dirs.data_dir().to_owned())

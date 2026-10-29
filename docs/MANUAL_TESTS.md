@@ -41,3 +41,13 @@ Pass: over 50 fps and under one core.
 ## M9: share between two desktop clients
 
 Needs two machines with the client built with `--features ffmpeg` and a running server. Join one room on both, press Share on one and pick a window in the system picker. Pass: the other side sees the window within a second of pressing Watch, and the sharer sees their own self-view.
+
+## M9: Linux screen share through the portal
+
+Needs a Wayland or X11 desktop with `xdg-desktop-portal` and its desktop backend (GNOME, KDE or wlr), PipeWire, and `libpipewire-0.3-dev`. Keep something moving on screen, such as a video, since compositors send frames only on change.
+
+```sh
+cargo test -p throcc-client-core --lib portal_share -- --ignored --nocapture
+```
+
+Pass: the portal's dialog appears once; pick a monitor or a window. Both shares print a size and get at least 10 frames, and the second share starts without a dialog. To ask again, delete `~/.local/share/throcc/screencast-restore-token`.

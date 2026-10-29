@@ -39,6 +39,11 @@ zeroize.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 screencapturekit.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd.workspace = true
+async-io.workspace = true
+pipewire.workspace = true
+
 [dev-dependencies]
 libc.workspace = true
 proptest.workspace = true
