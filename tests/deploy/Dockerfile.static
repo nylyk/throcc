@@ -1,0 +1,11 @@
+# syntax=docker/dockerfile:1
+FROM rust:1.98.1-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends musl-tools && rm -rf /var/lib/apt/lists/*
+ARG TARGET
+RUN rustup target add "$TARGET"
+WORKDIR /src
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    CC="musl-gcc" cargo build --release -p throcc-server --target "$TARGET" \
+    && cp "target/$TARGET/release/throcc-server" /throcc-server

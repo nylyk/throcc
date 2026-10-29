@@ -217,3 +217,10 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 - **Video is held while it is ahead of the share audio being heard**, at most 32 frames and never more than 0.5 s ahead: past that the audio has stalled, and a frozen picture is worse than unsynced sound. Without share audio playing, nothing is held.
 - **Capture backends report both media from one zero**: `Capture::next_audio` returns 20 ms of 48 kHz stereo with a 48 kHz timestamp counted from the same instant as the video's 90 kHz timestamps. On macOS both callbacks only queue the sample buffers with their host time; the share thread picks the zero, unpacks audio (planar or interleaved float) and re-chunks it to 20 ms, restarting the chunking when a buffer lands more than 10 ms away from where the previous one ended.
 - **`ShareConfig.audio` is true only when the capture delivers audio**, so receivers never wait for audio that will not come.
+
+## 2026-10-29 M11 server packaging
+
+- **Static server binaries are built with musl in a container** (`tests/deploy/Dockerfile.static`), so the same command works on any Docker host. CI builds x86_64 on `ubuntu-latest` and aarch64 natively on `ubuntu-24.04-arm` and keeps them as workflow artifacts for a week; publishing a release is left to the human.
+- **`tests/deploy/run.sh` stands in for a clean Debian VM**: a `debian:12` container with systemd as init installs the static binary and `packaging/throcc-server.service`, then checks the unit is active under a dynamic user, listens on UDP 8476, logs the first invite, keeps its key in the state directory and keeps its identity over a restart.
+- **The container image's runtime stage is `distroless/cc-debian12:nonroot`** with `/data` owned by its user, so a fresh named volume is writable. The `dev` stage builds into its own `/target` volume, so a bind-mounted checkout is never written to.
+- **cargo-chef 0.1.78 and watchexec-cli 2.8.0** are pinned in the Dockerfile.

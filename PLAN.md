@@ -741,9 +741,9 @@ Then mark the wire format **frozen** in `DECISIONS.md`.
 
 ### M11 Packaging and release
 
-- [ ] Static server binary for Linux x86_64 and aarch64, the systemd unit, the container image.
+- [x] Static server binary for Linux x86_64 and aarch64, the systemd unit, the container image.
 - [ ] Client builds with an LGPL ffmpeg for macOS (signed and notarised, needs the human's certificate), Windows and Arch (PKGBUILD).
-- [ ] `README.md`: run a server, back up the data directory, open UDP/8476, join.
+- [x] `README.md`: run a server, back up the data directory, open UDP/8476, join.
 
 **Done when** a clean Debian VM runs the server from the unit file, and fresh clients on macOS and Arch enroll and talk.
 

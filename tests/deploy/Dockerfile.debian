@@ -1,0 +1,7 @@
+FROM debian:12
+RUN apt-get update && apt-get install -y --no-install-recommends systemd systemd-sysv && rm -rf /var/lib/apt/lists/*
+COPY throcc-server /usr/local/bin/throcc-server
+COPY throcc-server.service /etc/systemd/system/throcc-server.service
+RUN systemctl enable throcc-server
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

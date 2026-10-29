@@ -1,0 +1,18 @@
+[Unit]
+Description=throcc server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/throcc-server --data /var/lib/throcc --listen [::]:8476
+DynamicUser=yes
+StateDirectory=throcc
+StateDirectoryMode=0700
+Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
