@@ -90,3 +90,15 @@ cargo test -p throcc-client-core --lib share_audio_arrives -- --ignored
 ```
 
 Pass: it plays a system sound and captures it. Then, in a call between two machines, share a screen with audio while the other side talks. Pass: the other side never hears their own voice come back, and a clap video shared with audio looks and sounds in sync (offset under 40 ms, judged by eye or with a phone's slow-motion camera).
+
+## M10: Windows share audio
+
+Needs a Windows 10 2004 or newer machine with a GPU and speakers. First, the capture alone:
+
+```sh
+cargo test -p throcc-client-core --lib share_audio_arrives -- --ignored
+```
+
+Pass: it plays `C:\Windows\Media\Alarm01.wav` from PowerShell and captures it. Over 100 audio frames arrive in 4 s, timestamps rise, at least 90 % of steps are exactly 960, and the loudest sample is above 0.01.
+
+Then, in a call between two machines, share the screen with audio from Windows while the other side talks. Pass: the other side never hears their own voice come back. Play a video with sound on the Windows machine: the other side hears it. Share a clap video with audio: it looks and sounds in sync (offset under 40 ms). Share a single window: other apps' sound is shared too (expected until include mode is possible).
