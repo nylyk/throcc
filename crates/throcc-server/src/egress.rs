@@ -78,6 +78,9 @@ struct VideoUnit {
     discardable: bool,
     /// A fragment of a unit already sent, forwarded on its own and never counted as a drop.
     stray: bool,
+    first_seq: u32,
+    /// A resent copy of a unit seen before. Counted only once no other copy is queued.
+    copy: bool,
 }
 
 #[derive(Default)]
@@ -125,6 +128,15 @@ impl Queues {
         if flags.contains(Flags::FIRST) {
             let id = self.next_id;
             self.next_id += 1;
+            let history = self.history.entry(media_id).or_default();
+            let copy = match history.get(&seq) {
+                Some(Fate::Dropped) => {
+                    let counters = self.stats.entry(media_id).or_default();
+                    counters.dropped_units = counters.dropped_units.saturating_sub(1);
+                    false
+                }
+                seen => seen.is_some(),
+            };
             let unit = VideoUnit {
                 id,
                 media_id,
@@ -136,9 +148,10 @@ impl Queues {
                 complete: flags.contains(Flags::LAST),
                 discardable: flags.contains(Flags::DISCARDABLE),
                 stray: false,
+                first_seq: seq,
+                copy,
             };
             self.video.push_back(unit);
-            let history = self.history.entry(media_id).or_default();
             history.insert(seq, Fate::Queued(id));
             while history.len() > HISTORY {
                 history.pop_first();
@@ -172,6 +185,8 @@ impl Queues {
                 complete: true,
                 discardable: true,
                 stray: true,
+                first_seq: seq,
+                copy: false,
             }),
             Some(Fate::Dropped) | None => {}
         }
@@ -198,12 +213,18 @@ impl Queues {
                 .iter()
                 .find(|u| !u.started && u.discardable)
                 .or_else(|| self.video.iter().find(|u| !u.started))
-                .map(|u| (u.id, u.media_id, u.stray));
-            let Some((id, media_id, stray)) = victim else {
+                .map(|u| (u.id, u.media_id, u.first_seq, u.stray || u.copy));
+            let Some((id, media_id, first_seq, uncounted)) = victim else {
                 return;
             };
             self.finish(id, Fate::Dropped);
-            if !stray {
+            let twin = self
+                .video
+                .iter_mut()
+                .find(|u| u.media_id == media_id && u.first_seq == first_seq && !u.stray);
+            if let Some(twin) = twin {
+                twin.copy = false;
+            } else if !uncounted {
                 self.stats.entry(media_id).or_default().dropped_units += 1;
             }
         }
@@ -243,7 +264,7 @@ impl Queues {
         let bytes = unit.packets.pop_front()?;
         if !unit.started {
             unit.started = true;
-            if !unit.stray {
+            if !unit.stray && !unit.copy {
                 self.stats.entry(unit.media_id).or_default().forwarded += 1;
             }
         }
@@ -404,6 +425,54 @@ mod tests {
         queues.enforce_budget(now + Duration::from_millis(200));
         assert_eq!(drain(&mut queues), vec![1, 2, 9, 10, 11]);
         assert_eq!(queues.stats[&MediaId(1)].dropped_units, 2);
+    }
+
+    #[test]
+    fn a_dropped_copy_counts_only_when_no_copy_is_left() {
+        let now = Instant::now();
+        let mut queues = Queues::default();
+        unit(&mut queues, 1, 0, 3, false, now);
+        unit(&mut queues, 1, 0, 3, false, now + Duration::from_millis(60));
+        unit(
+            &mut queues,
+            1,
+            3,
+            2,
+            false,
+            now + Duration::from_millis(100),
+        );
+        let late = now + VIDEO_BUDGET + Duration::from_millis(1);
+        queues.enforce_budget(late);
+        assert_eq!(queues.stats.get(&MediaId(1)).map(|s| s.dropped_units), None);
+        queues.enforce_budget(late + Duration::from_millis(100));
+        assert_eq!(drain(&mut queues), Vec::<u8>::new());
+        assert_eq!(queues.stats[&MediaId(1)].dropped_units, 2);
+    }
+
+    #[test]
+    fn a_copy_of_a_sent_unit_is_neither_forwarded_nor_dropped_in_the_stats() {
+        let now = Instant::now();
+        let mut queues = Queues::default();
+        unit(&mut queues, 1, 0, 2, false, now);
+        assert_eq!(drain(&mut queues), vec![0, 1]);
+        unit(&mut queues, 1, 0, 2, false, now);
+        queues.enforce_budget(now + VIDEO_BUDGET + Duration::from_millis(1));
+        assert_eq!(drain(&mut queues), Vec::<u8>::new());
+        let counters = &queues.stats[&MediaId(1)];
+        assert_eq!((counters.forwarded, counters.dropped_units), (1, 0));
+    }
+
+    #[test]
+    fn a_copy_arriving_after_its_original_was_dropped_undoes_the_drop() {
+        let now = Instant::now();
+        let mut queues = Queues::default();
+        unit(&mut queues, 1, 0, 2, false, now);
+        let late = now + VIDEO_BUDGET + Duration::from_millis(1);
+        queues.enforce_budget(late);
+        unit(&mut queues, 1, 0, 2, false, late);
+        assert_eq!(drain(&mut queues), vec![0, 1]);
+        let counters = &queues.stats[&MediaId(1)];
+        assert_eq!((counters.forwarded, counters.dropped_units), (1, 0));
     }
 
     #[test]

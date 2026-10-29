@@ -215,3 +215,86 @@ async fn mic_audio_reaches_peers_but_not_the_deafened() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn keyframes_arrive_whole_through_two_percent_loss() {
+    const KEYFRAMES: u32 = 50;
+    const LEN: usize = 60 * 1100;
+    let server = start_server();
+    let relay = lossy_relay(&server.addr, 50).await;
+    let (alice, bob, _) = room_with_two_at(&server, &relay.addr).await;
+    let config = ShareConfig {
+        audio: false,
+        kbps: 10_000,
+        codec: Codec::H264,
+        width: 1920,
+        height: 1080,
+        fps: 60,
+    };
+    let share = MediaState {
+        mic: false,
+        deafened: false,
+        share: Some(config),
+    };
+    assert_eq!(
+        alice.request(Request::SetMedia(share)).await.unwrap(),
+        Response::Ok
+    );
+    wait_for("bob to learn alice's tracks", || {
+        bob.engine.keys().keys.peer_tracks(alice.me()).is_some()
+    })
+    .await;
+    let video_id = bob
+        .engine
+        .keys()
+        .keys
+        .peer_tracks(alice.me())
+        .unwrap()
+        .shares[0]
+        .video;
+    let mut units = bob
+        .engine
+        .subscribe(video_id, Kind::Video, KEYFRAMES as usize);
+    assert_eq!(
+        bob.request(Request::SetWatching(vec![video_id]))
+            .await
+            .unwrap(),
+        Response::Ok
+    );
+    wait_for("both at one epoch with keys", || {
+        let epoch = alice.engine.keys().keys.epoch();
+        epoch == bob.engine.keys().keys.epoch()
+            && bob.engine.keys().keys.recv_key(video_id, epoch).is_some()
+    })
+    .await;
+
+    relay.lossy.store(true, Ordering::Relaxed);
+    for index in 0..KEYFRAMES {
+        alice.engine.send(
+            Kind::Video,
+            Outgoing {
+                media_id: video_id,
+                data: synthetic(index, LEN),
+                timestamp: index * 3000,
+                keyframe: true,
+                discardable: false,
+                enqueued: Instant::now(),
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(60)).await;
+    }
+    let mut whole = std::collections::HashSet::new();
+    while let Ok(Some(unit)) = tokio::time::timeout(Duration::from_secs(1), units.recv()).await {
+        let index = u32::from_be_bytes(unit.data[..4].try_into().unwrap());
+        assert_eq!(unit.data, synthetic(index, LEN));
+        whole.insert(index);
+    }
+    let whole = whole.len() as u32;
+    let dropped = relay.dropped.load(Ordering::Relaxed);
+    eprintln!("{whole} of {KEYFRAMES} keyframes whole, {dropped} packets dropped");
+    assert!(dropped >= 30, "the relay dropped only {dropped} packets");
+    assert!(
+        whole >= KEYFRAMES * 9 / 10,
+        "only {whole} of {KEYFRAMES} keyframes whole"
+    );
+}

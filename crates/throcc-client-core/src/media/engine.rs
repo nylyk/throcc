@@ -539,34 +539,90 @@ async fn send_loop(
             Some(unit) = video.recv() => (Kind::Video, unit),
             else => return,
         };
-        if kind == Kind::Video && unit.enqueued.elapsed() > SEND_BUDGET {
+        if kind == Kind::Audio {
+            if !send_unit(&connection, &keys, &mut sealer, &unit, &stats).await {
+                return;
+            }
+            continue;
+        }
+        if unit.enqueued.elapsed() > SEND_BUDGET {
             stats.send_dropped_units.fetch_add(1, Ordering::Relaxed);
             if !unit.discardable {
                 recovery.try_send(unit.media_id).ok();
             }
             continue;
         }
-        let Some((epoch, key)) = lock(&keys).keys.send_key(unit.media_id) else {
-            stats.send_no_key.fetch_add(1, Ordering::Relaxed);
+        let Some(datagrams) = seal(&keys, &mut sealer, &unit, &stats) else {
             continue;
         };
-        let datagrams = sealer.seal(&unit, epoch, &key);
-        let copies = if kind == Kind::Video && unit.keyframe {
-            KEYFRAME_COPIES
-        } else {
-            1
-        };
-        for datagram in datagrams.iter().cycle().take(datagrams.len() * copies) {
-            if connection
-                .send_datagram_wait(datagram.clone())
-                .await
-                .is_err()
-            {
+        let copies = if unit.keyframe { KEYFRAME_COPIES } else { 1 };
+        let originals = datagrams.len();
+        for (sent, datagram) in datagrams
+            .iter()
+            .cycle()
+            .take(originals * copies)
+            .enumerate()
+        {
+            if sent >= originals && copy_would_delay(&unit, &video) {
+                break;
+            }
+            while let Ok(voice) = audio.try_recv() {
+                if !send_unit(&connection, &keys, &mut sealer, &voice, &stats).await {
+                    return;
+                }
+            }
+            if !send_datagram(&connection, datagram, &stats).await {
                 return;
             }
-            stats.sent_datagrams.fetch_add(1, Ordering::Relaxed);
         }
     }
+}
+
+/// A keyframe's copy stops once a newer frame is waiting and the copy would eat into its
+/// send budget, so repairing one frame never makes the sender drop the next.
+fn copy_would_delay(unit: &Outgoing, video: &mpsc::Receiver<Outgoing>) -> bool {
+    !video.is_empty() && unit.enqueued.elapsed() > SEND_BUDGET / 2
+}
+
+fn seal(
+    keys: &Mutex<KeyState>,
+    sealer: &mut Sealer,
+    unit: &Outgoing,
+    stats: &Stats,
+) -> Option<Vec<Bytes>> {
+    let Some((epoch, key)) = lock(keys).keys.send_key(unit.media_id) else {
+        stats.send_no_key.fetch_add(1, Ordering::Relaxed);
+        return None;
+    };
+    Some(sealer.seal(unit, epoch, &key))
+}
+
+/// Seals and sends one unit. False once the connection is gone.
+async fn send_unit(
+    connection: &quinn::Connection,
+    keys: &Mutex<KeyState>,
+    sealer: &mut Sealer,
+    unit: &Outgoing,
+    stats: &Stats,
+) -> bool {
+    for datagram in seal(keys, sealer, unit, stats).unwrap_or_default() {
+        if !send_datagram(connection, &datagram, stats).await {
+            return false;
+        }
+    }
+    true
+}
+
+async fn send_datagram(connection: &quinn::Connection, datagram: &Bytes, stats: &Stats) -> bool {
+    if connection
+        .send_datagram_wait(datagram.clone())
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    stats.sent_datagrams.fetch_add(1, Ordering::Relaxed);
+    true
 }
 
 #[cfg(test)]

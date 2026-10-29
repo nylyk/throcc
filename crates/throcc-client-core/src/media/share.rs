@@ -20,6 +20,36 @@ const IDLE: Duration = Duration::from_millis(2);
 /// Self-view gets every Nth frame; it is only a thumbnail of what is sent.
 const SELF_VIEW_EVERY: u32 = 4;
 
+/// Forced recoveries are at least this far apart, so a link too slow for whole keyframes
+/// gets one a second rather than one every frame.
+const RECOVERY_SPACING: Duration = Duration::from_secs(1);
+
+/// Merges recovery requests into one per [`RECOVERY_SPACING`]; `Idr` wins over `Refresh`.
+#[derive(Default)]
+struct RecoveryPacer {
+    wanted: Option<Recovery>,
+    last: Option<Instant>,
+}
+
+impl RecoveryPacer {
+    fn ask(&mut self, kind: Recovery) {
+        let idr = kind == Recovery::Idr || self.wanted == Some(Recovery::Idr);
+        self.wanted = Some(if idr { Recovery::Idr } else { kind });
+    }
+
+    fn due(&mut self, now: Instant) -> Option<Recovery> {
+        if self
+            .last
+            .is_some_and(|last| now.duration_since(last) < RECOVERY_SPACING)
+        {
+            return None;
+        }
+        let kind = self.wanted.take()?;
+        self.last = Some(now);
+        Some(kind)
+    }
+}
+
 /// Our running share: capture, encode, send.
 pub struct ShareSender {
     stop: Arc<AtomicBool>,
@@ -60,8 +90,12 @@ impl ShareSender {
             .spawn(move || {
                 let mut frame = VideoFrame::blank(capture_config.width, capture_config.height);
                 let mut count = 0u32;
+                let mut pacer = RecoveryPacer::default();
                 while !thread_stop.load(Ordering::Relaxed) {
                     while let Ok(kind) = recover_rx.try_recv() {
+                        pacer.ask(kind);
+                    }
+                    if let Some(kind) = pacer.due(Instant::now()) {
                         encoder.recover(kind);
                     }
                     if !capture.next_frame(&mut frame) {
@@ -147,6 +181,25 @@ pub fn receive(units: mpsc::Receiver<Received>, codec: Codec) -> Result<Picture,
         })
         .map_err(|e| e.to_string())?;
     Ok(picture)
+}
+
+#[cfg(test)]
+mod pacer_tests {
+    use super::*;
+
+    #[test]
+    fn recoveries_merge_until_a_second_has_passed() {
+        let start = Instant::now();
+        let mut pacer = RecoveryPacer::default();
+        assert_eq!(pacer.due(start), None);
+        pacer.ask(Recovery::Refresh);
+        assert_eq!(pacer.due(start), Some(Recovery::Refresh));
+        pacer.ask(Recovery::Idr);
+        pacer.ask(Recovery::Refresh);
+        assert_eq!(pacer.due(start + Duration::from_millis(500)), None);
+        assert_eq!(pacer.due(start + RECOVERY_SPACING), Some(Recovery::Idr));
+        assert_eq!(pacer.due(start + RECOVERY_SPACING * 3), None);
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
