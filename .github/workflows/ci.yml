@@ -34,23 +34,26 @@ jobs:
             libegl-dev libssl-dev libzstd-dev pkg-config
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: cargo test
+      - run: ./scripts/ci-run.sh cargo clippy --workspace --all-targets -- -D warnings
         shell: bash
-        run: |
-          set -o pipefail
-          cargo test --workspace --no-fail-fast 2>&1 | tee test.log || {
-            grep -E "^test .* FAILED|panicked at|^thread .* panicked" -A2 test.log | head -40 | sed 's/^/::error::/'
-            exit 1
-          }
-      - name: cargo test --release (throughput)
+      - run: ./scripts/ci-run.sh cargo test --workspace --no-fail-fast
         shell: bash
-        run: |
-          set -o pipefail
-          cargo test --release -p throcc-cli --test media 2>&1 | tee release.log || {
-            grep -E "^test .* FAILED|panicked at|^thread .* panicked" -A2 release.log | head -20 | sed 's/^/::error::/'
-            exit 1
-          }
+      - run: ./scripts/ci-run.sh cargo test --release -p throcc-cli --test media
+        shell: bash
+
+  video:
+    runs-on: macos-14
+    env:
+      FFMPEG_PKG_CONFIG_PATH: /opt/homebrew/opt/ffmpeg@8/lib/pkgconfig
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install ffmpeg@8
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/ci-run.sh cargo clippy -p throcc-client -p throcc-client-core -p throcc-cli --features ffmpeg --all-targets -- -D warnings
+        shell: bash
+      - run: ./scripts/ci-run.sh cargo test -p throcc-client-core -p throcc-cli --features ffmpeg
+        shell: bash
 
   netem:
     runs-on: ubuntu-latest
