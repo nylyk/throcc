@@ -90,3 +90,13 @@ cargo test -p throcc-client-core --lib share_audio_arrives -- --ignored
 ```
 
 Pass: it plays a system sound and captures it. Then, in a call between two machines, share a screen with audio while the other side talks. Pass: the other side never hears their own voice come back, and a clap video shared with audio looks and sounds in sync (offset under 40 ms, judged by eye or with a phone's slow-motion camera).
+
+## M10: Linux share audio
+
+Needs a Linux desktop with PipeWire, a session manager, the portal (as for M9), speakers, and a second machine in the call.
+
+```sh
+cargo test -p throcc-client-core --lib desktop_audio_has_other_apps -- --ignored --nocapture
+```
+
+Pass: it prints the other app's tone near 0.3 and ours near 0. Then, in a call between two machines, share a screen with audio on the Linux machine while a video plays in a browser and the other side talks. Pass: the other side hears the video, and never hears their own voice come back. Check both with throcc playing through `pipewire-pulse` and through the PipeWire ALSA plugin if the desktop has both. While sharing, `pw-link -l` shows `throcc-share-audio-<pid>` fed by the browser's stream and not by throcc's own playback stream. A clap video shared with audio looks and sounds in sync (offset under 40 ms).
