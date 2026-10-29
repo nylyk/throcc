@@ -38,6 +38,16 @@ cargo test --release -p throcc-client-core --features ffmpeg --lib sending_1440p
 
 Pass: over 50 fps and under one core.
 
+## M9: share latency and loss recovery
+
+Needs a machine with a hardware video encoder (any Apple silicon Mac; CI's virtual machines queue frames for seconds).
+
+```sh
+cargo test -p throcc-cli --features ffmpeg --test share -- --ignored --nocapture
+```
+
+Pass: both tests pass. The first prints the encode-to-decoded latency (16 ms median at 1080p60 on an M-series MacBook); the second shows every keyframe request answered within a second at 2 % loss.
+
 ## M9: share between two desktop clients
 
 Needs two machines with the client built with `--features ffmpeg` and a running server. Join one room on both, press Share on one and pick a window in the system picker. Pass: the other side sees the window within a second of pressing Watch, and the sharer sees their own self-view.
