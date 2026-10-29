@@ -658,7 +658,7 @@ WantedBy=multi-user.target
 - [x] Contact pinning, key-change detection, safety-number derivation with test vectors.
 - [x] CLI `send-synthetic` and `recv` that move fake access units of configurable size and rate through the real path.
 - [x] Fuzz targets for header parsing and reassembly.
-- [ ] **Parallel:** M7a (audio pipeline against WAV files) and M9a (encode/decode against recorded frames) start now in worktrees.
+- [x] **Parallel:** M7a (audio pipeline against WAV files) and M9a (encode/decode against recorded frames) start now in worktrees.
 - [x] **Review subagent** on everything in this milestone.
 
 **Done when** these property and integration tests pass:
@@ -691,7 +691,7 @@ Then mark the wire format **frozen** in `DECISIONS.md`.
 ### M7 Voice
 
 - [x] M7a (from M5): `cpal`, `sonora`, `ropus` and `neteq` pipeline against WAV input and output, with the three acceptance tests from §5.8.
-- [ ] Live pipeline over the network, mixing, per-user volume, deafen.
+- [x] Live pipeline over the network, mixing, per-user volume, deafen.
 - [ ] Voice activation and push-to-talk per platform (subagent per platform).
 - [x] Mute or gate for 5 minutes then resume.
 
@@ -705,8 +705,8 @@ Then mark the wire format **frozen** in `DECISIONS.md`.
 
 - [x] Shell and theme from M8a, wired to the real `Client`.
 - [x] Every screen in §5.13 matching its mockup, plus the unmocked states.
-- [ ] Video surface per S3 (macOS first, then Linux, then Windows).
-- [ ] Screen subagents work from `design/mockups/<Screen>.dc.html` and `theme.rs` only.
+- [x] Video surface per S3 (macOS first, then Linux, then Windows).
+- [x] Screen subagents work from `design/mockups/<Screen>.dc.html` and `theme.rs` only.
 
 **Done when:**
 
@@ -718,7 +718,7 @@ Then mark the wire format **frozen** in `DECISIONS.md`.
 
 - [x] Capture backends, one subagent per platform, each delivering a GPU `AVFrame` and a `MANUAL_TESTS.md` entry.
 - [x] Encoder ladder, presets, recovery per S4, self-view.
-- [ ] Reorder window, decoder fallback ladder, presentation.
+- [x] Reorder window, decoder fallback ladder, presentation.
 - [x] Glass-to-glass latency test: render a frame counter, share it, and read it back on the receiver.
 
 **Done when:**
