@@ -5,6 +5,9 @@
     clippy::panic
 )]
 
+mod desktop_audio;
+
+use std::collections::VecDeque;
 use std::io::Cursor;
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
@@ -12,7 +15,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
-use std::time::Instant;
 
 use ashpd::desktop::screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType};
 use ashpd::desktop::{PersistMode, ResponseError, Session};
@@ -31,11 +33,18 @@ use throcc_proto::frame::VIDEO_CLOCK_HZ;
 use tracing::warn;
 
 use super::{Capture, CaptureConfig, CaptureError};
+use crate::media::audio::SAMPLE_RATE;
+use crate::media::jitter::FRAME;
+use crate::media::share_audio::STEREO_FRAME;
 use crate::media::video::frame::VideoFrame;
+use desktop_audio::DesktopAudio;
 
 /// Frame buffers shared by the PipeWire thread and the share thread.
 const POOL: usize = 4;
 const MAX_SIDE: u32 = 8192;
+/// An audio buffer further than this from where the previous one ended starts afresh.
+const AUDIO_SLIP: i64 = FRAME as i64 / 2;
+const NANOS: i128 = 1_000_000_000;
 
 /// A portal screen cast: the session the person picked and the PipeWire stream reading it.
 pub struct LinuxCapture {
@@ -71,6 +80,14 @@ impl Capture for LinuxCapture {
 
     fn dropped(&self) -> Arc<AtomicU64> {
         self.stream.dropped()
+    }
+
+    fn captures_audio(&self) -> bool {
+        self.stream.captures_audio()
+    }
+
+    fn next_audio(&mut self, into: &mut [f32; STEREO_FRAME]) -> Option<u32> {
+        self.stream.next_audio(into)
     }
 }
 
@@ -180,13 +197,21 @@ fn failed(e: impl std::fmt::Display) -> CaptureError {
     CaptureError::Failed(e.to_string())
 }
 
-/// A PipeWire video stream read on its own thread and main loop.
+/// A PipeWire video stream read on its own thread and main loop, with the desktop's audio
+/// when the config asks for it.
 pub(crate) struct PipeWireCapture {
     filled: rtrb::Consumer<Slot>,
     free: rtrb::Producer<Slot>,
     dropped: Arc<AtomicU64>,
     quit: pw::channel::Sender<()>,
     thread: Option<JoinHandle<()>>,
+    audio: Option<DesktopAudio>,
+    /// PipeWire time, in nanoseconds, that both media clocks count from.
+    zero: Option<i64>,
+    /// Captured audio not yet taken, left and right interleaved.
+    pending: VecDeque<f32>,
+    /// Timestamp of the first pending sample, in 48 kHz ticks from `zero`.
+    pending_at: i64,
 }
 
 impl PipeWireCapture {
@@ -208,7 +233,6 @@ impl PipeWireCapture {
             filled: filled_tx,
             spare: None,
             dropped: dropped.clone(),
-            epoch: None,
         };
         let (quit, quit_rx) = pw::channel::channel();
         let (ready_tx, ready) = mpsc::sync_channel(1);
@@ -220,6 +244,14 @@ impl PipeWireCapture {
                 }
             })
             .map_err(failed)?;
+        let audio = config
+            .audio
+            .then(|| DesktopAudio::start(dropped.clone()))
+            .and_then(|audio| {
+                audio
+                    .inspect_err(|e| warn!("sharing without sound: {e}"))
+                    .ok()
+            });
         match ready.recv() {
             Ok(Ok(())) => Ok(Self {
                 filled,
@@ -227,6 +259,10 @@ impl PipeWireCapture {
                 dropped,
                 quit,
                 thread: Some(thread),
+                audio,
+                zero: None,
+                pending: VecDeque::new(),
+                pending_at: 0,
             }),
             Ok(Err(e)) => {
                 thread.join().ok();
@@ -244,14 +280,19 @@ impl Capture for PipeWireCapture {
     fn next_frame(&mut self, into: &mut VideoFrame) -> bool {
         while let Ok(mut slot) = self.filled.pop() {
             let picture = slot.picture.take();
-            if let Some(picture) = &picture {
+            let stamped = picture.as_ref().and_then(|picture| {
+                let ticks = since_zero(&mut self.zero, picture.at, VIDEO_CLOCK_HZ);
+                Some((picture, u32::try_from(ticks).ok()?))
+            });
+            if let Some((picture, timestamp)) = stamped {
                 convert(&slot.bytes, picture, into);
+                into.timestamp = timestamp;
             }
             if slot.bytes.len() < slot.needed {
                 slot.bytes.resize(slot.needed, 0);
             }
             self.free.push(slot).ok();
-            if picture.is_some() {
+            if stamped.is_some() {
                 return true;
             }
         }
@@ -261,6 +302,41 @@ impl Capture for PipeWireCapture {
     fn dropped(&self) -> Arc<AtomicU64> {
         self.dropped.clone()
     }
+
+    fn captures_audio(&self) -> bool {
+        self.audio.is_some()
+    }
+
+    fn next_audio(&mut self, into: &mut [f32; STEREO_FRAME]) -> Option<u32> {
+        while self.pending.len() < STEREO_FRAME {
+            let (at, samples) = self.audio.as_mut()?.pop()?;
+            let ticks = since_zero(&mut self.zero, at, SAMPLE_RATE);
+            let expected = self.pending_at + (self.pending.len() / 2) as i64;
+            if self.pending.is_empty() || (ticks - expected).abs() > AUDIO_SLIP {
+                self.pending.clear();
+                self.pending_at = ticks;
+            }
+            self.pending.extend(samples);
+        }
+        if self.pending_at < 0 {
+            self.pending.drain(..STEREO_FRAME);
+            self.pending_at += FRAME as i64;
+            return None;
+        }
+        for (slot, sample) in into.iter_mut().zip(self.pending.drain(..STEREO_FRAME)) {
+            *slot = sample;
+        }
+        let timestamp = self.pending_at as u32;
+        self.pending_at += FRAME as i64;
+        Some(timestamp)
+    }
+}
+
+/// Ticks of a `rate` Hz clock from `zero`, which the first frame or audio buffer taken sets,
+/// to `at`, both in nanoseconds of PipeWire time.
+fn since_zero(zero: &mut Option<i64>, at: i64, rate: u32) -> i64 {
+    let zero = *zero.get_or_insert(at);
+    (i128::from(at - zero) * i128::from(rate) / NANOS) as i64
 }
 
 impl Drop for PipeWireCapture {
@@ -426,7 +502,6 @@ struct StreamState {
     filled: rtrb::Producer<Slot>,
     spare: Option<Slot>,
     dropped: Arc<AtomicU64>,
-    epoch: Option<Instant>,
 }
 
 fn on_param_changed(
@@ -457,6 +532,9 @@ fn on_process(stream: &Stream, state: &mut StreamState) {
     let Some(layout) = state.layout else {
         return;
     };
+    let Ok(time) = stream.time() else {
+        return;
+    };
     let Some(mut slot) = state.spare.take().or_else(|| state.free.pop().ok()) else {
         state.dropped.fetch_add(1, Ordering::Relaxed);
         return;
@@ -466,7 +544,7 @@ fn on_process(stream: &Stream, state: &mut StreamState) {
             slot.picture = Some(Picture {
                 layout,
                 planes,
-                timestamp: ticks(&mut state.epoch),
+                at: time.now(),
             });
         }
         Copied::TooSmall => {
@@ -481,13 +559,6 @@ fn on_process(stream: &Stream, state: &mut StreamState) {
     if let Err(rtrb::PushError::Full(slot)) = state.filled.push(slot) {
         state.spare = Some(slot);
     }
-}
-
-/// Time since the first frame, 90 kHz.
-fn ticks(epoch: &mut Option<Instant>) -> u32 {
-    let now = Instant::now();
-    let elapsed = now.saturating_duration_since(*epoch.get_or_insert(now));
-    (elapsed.as_micros() * u128::from(VIDEO_CLOCK_HZ) / 1_000_000) as u32
 }
 
 enum Copied {
@@ -577,7 +648,8 @@ impl Slot {
 struct Picture {
     layout: Layout,
     planes: [Plane; 2],
-    timestamp: u32,
+    /// PipeWire time of the graph cycle that delivered the picture, in nanoseconds.
+    at: i64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -635,7 +707,6 @@ fn convert(bytes: &[u8], picture: &Picture, into: &mut VideoFrame) {
     if into.width != width || into.height != height {
         *into = VideoFrame::blank(width, height);
     }
-    into.timestamp = picture.timestamp;
     let [y, uv] = picture
         .planes
         .map(|plane| Some((bytes.get(plane.offset..)?, plane.stride)));
@@ -736,7 +807,7 @@ fn chroma_row(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use super::*;
 
@@ -758,7 +829,7 @@ mod tests {
                 height,
             },
             planes,
-            timestamp: 7,
+            at: 7,
         }
     }
 
@@ -827,7 +898,7 @@ mod tests {
             &picture(Format::Nv12, width, height, planes),
             &mut frame,
         );
-        assert_eq!((frame.width, frame.height, frame.timestamp), (4, 3, 7));
+        assert_eq!((frame.width, frame.height), (4, 3));
         assert_eq!(frame.y, [0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23]);
         assert_eq!(frame.uv, [100, 101, 102, 103, 110, 111, 112, 113]);
     }
@@ -1017,6 +1088,207 @@ mod tests {
         assert!(capture.dropped().load(Ordering::Relaxed) > resized);
         assert!(frames_within(&mut capture, &mut frame, 10).len() >= 10);
         drop(capture);
+    }
+
+    const OTHER_HZ: f32 = 1000.0;
+    const OURS_HZ: f32 = 300.0;
+
+    fn tone(hz: f32, n: u32) -> f32 {
+        let t = (n % SAMPLE_RATE) as f32 / SAMPLE_RATE as f32;
+        0.3 * (std::f32::consts::TAU * hz * t).sin()
+    }
+
+    /// A playback stream in this process, so its pid is ours, playing a sine tone.
+    struct TestTone {
+        cycles: Arc<AtomicU64>,
+        quit: pw::channel::Sender<()>,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl TestTone {
+        fn start(hz: f32) -> Self {
+            let (quit, quit_rx) = pw::channel::channel::<()>();
+            let cycles = Arc::new(AtomicU64::new(0));
+            let counted = cycles.clone();
+            let thread = std::thread::spawn(move || {
+                pw::init();
+                let mainloop = pw::main_loop::MainLoopRc::new(None).unwrap();
+                let context = pw::context::ContextRc::new(&mainloop, None).unwrap();
+                let core = context.connect_rc(None).unwrap();
+                let stream = StreamBox::new(
+                    &core,
+                    "throcc-test-tone",
+                    properties! {
+                        *pw::keys::MEDIA_TYPE => "Audio",
+                        *pw::keys::MEDIA_CATEGORY => "Playback",
+                        *pw::keys::MEDIA_ROLE => "Music",
+                    },
+                )
+                .unwrap();
+                let _listener = stream
+                    .add_local_listener_with_user_data(0u32)
+                    .process(move |stream, played| {
+                        let Some(mut buffer) = stream.dequeue_buffer() else {
+                            return;
+                        };
+                        let Some(data) = buffer.datas_mut().first_mut() else {
+                            return;
+                        };
+                        let Some(bytes) = data.data() else {
+                            return;
+                        };
+                        let frames = bytes.as_chunks_mut::<8>().0;
+                        let count = frames.len().min(1024);
+                        for frame in &mut frames[..count] {
+                            let sample = tone(hz, *played).to_le_bytes();
+                            frame[..4].copy_from_slice(&sample);
+                            frame[4..].copy_from_slice(&sample);
+                            *played = played.wrapping_add(1);
+                        }
+                        let chunk = data.chunk_mut();
+                        *chunk.offset_mut() = 0;
+                        *chunk.stride_mut() = 8;
+                        *chunk.size_mut() = (count * 8) as u32;
+                        counted.fetch_add(1, Ordering::Relaxed);
+                    })
+                    .register()
+                    .unwrap();
+                let format = serialize(desktop_audio::format_param()).unwrap();
+                stream
+                    .connect(
+                        Direction::Output,
+                        None,
+                        StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
+                        &mut [Pod::from_bytes(&format).unwrap()],
+                    )
+                    .unwrap();
+                let _quit = quit_rx.attach(mainloop.loop_(), {
+                    let mainloop = mainloop.clone();
+                    move |()| mainloop.quit()
+                });
+                mainloop.run();
+            });
+            Self {
+                cycles,
+                quit,
+                thread: Some(thread),
+            }
+        }
+    }
+
+    impl Drop for TestTone {
+        fn drop(&mut self) {
+            self.quit.send(()).ok();
+            if let Some(thread) = self.thread.take() {
+                thread.join().ok();
+            }
+        }
+    }
+
+    /// Writes `seconds` of a stereo 16-bit 48 kHz tone as a WAV file.
+    fn write_tone_wav(path: &std::path::Path, hz: f32, seconds: u32) {
+        let frames = SAMPLE_RATE * seconds;
+        let data_len = frames * 4;
+        let mut bytes = Vec::with_capacity(44 + data_len as usize);
+        bytes.extend(b"RIFF");
+        bytes.extend((36 + data_len).to_le_bytes());
+        bytes.extend(b"WAVEfmt ");
+        bytes.extend(16u32.to_le_bytes());
+        bytes.extend(1u16.to_le_bytes());
+        bytes.extend(2u16.to_le_bytes());
+        bytes.extend(SAMPLE_RATE.to_le_bytes());
+        bytes.extend((SAMPLE_RATE * 4).to_le_bytes());
+        bytes.extend(4u16.to_le_bytes());
+        bytes.extend(16u16.to_le_bytes());
+        bytes.extend(b"data");
+        bytes.extend(data_len.to_le_bytes());
+        for n in 0..frames {
+            let sample = ((tone(hz, n) * 32767.0) as i16).to_le_bytes();
+            bytes.extend(sample);
+            bytes.extend(sample);
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// The amplitude of the `hz` component of mono samples spanning whole cycles of it.
+    fn level(samples: impl Iterator<Item = f32>, hz: f32) -> f32 {
+        let (mut sin, mut cos, mut count) = (0.0f32, 0.0f32, 0usize);
+        for (n, sample) in samples.enumerate() {
+            let phase = std::f32::consts::TAU * hz * n as f32 / SAMPLE_RATE as f32;
+            sin += sample * phase.sin();
+            cos += sample * phase.cos();
+            count += 1;
+        }
+        2.0 * sin.hypot(cos) / count.max(1) as f32
+    }
+
+    #[test]
+    #[ignore = "needs a PipeWire daemon, a session manager, an audio sink and pw-play"]
+    fn desktop_audio_has_other_apps_but_not_ours() {
+        let source = TestSource::start(64, 48, [0, 0, 255, 0]);
+        let ours = TestTone::start(OURS_HZ);
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("other.wav");
+        write_tone_wav(&wav, OTHER_HZ, 10);
+        let config = CaptureConfig {
+            width: 64,
+            height: 48,
+            fps: 30,
+            audio: true,
+        };
+        let mut capture = PipeWireCapture::start(source.node, None, config).unwrap();
+        assert!(capture.captures_audio());
+        let mut frame = VideoFrame::blank(64, 48);
+        let mut sound = [0.0f32; STEREO_FRAME];
+
+        let mut other = std::process::Command::new("pw-play")
+            .arg(&wav)
+            .spawn()
+            .unwrap();
+        let (mut timestamps, mut other_level, mut our_level) = (Vec::new(), 0.0f32, 0.0f32);
+        let mut worst_skew = 0.0f64;
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while Instant::now() < deadline {
+            if capture.next_frame(&mut frame) {
+                while let Some(timestamp) = capture.next_audio(&mut sound) {
+                    timestamps.push(timestamp);
+                    let left = || sound.iter().step_by(2).copied();
+                    other_level = other_level.max(level(left(), OTHER_HZ));
+                    our_level = our_level.max(level(left(), OURS_HZ));
+                    let skew = f64::from(frame.timestamp) / f64::from(VIDEO_CLOCK_HZ)
+                        - f64::from(timestamp) / f64::from(SAMPLE_RATE);
+                    worst_skew = worst_skew.max(skew.abs());
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        other.kill().ok();
+        other.wait().ok();
+        let tone_cycles = ours.cycles.load(Ordering::Relaxed);
+        drop(capture);
+
+        println!(
+            "{} audio frames, other app {other_level:.3}, ours {our_level:.4}, \
+             worst skew {:.0} ms, our tone ran {tone_cycles} cycles",
+            timestamps.len(),
+            worst_skew * 1000.0
+        );
+        assert!(tone_cycles > 50, "our own tone didn't play");
+        assert!(
+            timestamps.len() > 100,
+            "{} audio frames in 4 s",
+            timestamps.len()
+        );
+        assert!(timestamps.windows(2).all(|w| w[1] > w[0]), "{timestamps:?}");
+        let steady = timestamps.windows(2).filter(|w| w[1] - w[0] == 960).count();
+        assert!(
+            steady * 10 >= (timestamps.len() - 1) * 9,
+            "only {steady} of {} steps are 960 ticks",
+            timestamps.len() - 1
+        );
+        assert!(other_level > 0.1, "the other app's tone: {other_level}");
+        assert!(our_level < 0.03, "our own tone leaked in: {our_level}");
+        assert!(worst_skew < 0.2, "audio and video {worst_skew} s apart");
     }
 
     #[test]
