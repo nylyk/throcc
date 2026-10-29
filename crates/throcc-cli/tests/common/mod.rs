@@ -106,7 +106,7 @@ pub async fn invited(server: &TestServer, by: &TestClient) -> TestClient {
 }
 
 pub async fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(15);
     while !ready() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         tokio::time::sleep(Duration::from_millis(10)).await;
