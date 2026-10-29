@@ -3,3 +3,4 @@
 /fuzz/corpus
 /fuzz/artifacts
 ci-run.log
+/.claude/worktrees/
