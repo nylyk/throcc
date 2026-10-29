@@ -1,7 +1,11 @@
 pub mod audio;
+pub mod capture;
 pub mod devices;
 pub mod engine;
 pub mod fragment;
 pub mod jitter;
 pub mod reorder;
+#[cfg(feature = "ffmpeg")]
+pub mod share;
+pub mod video;
 pub mod voice;

@@ -93,6 +93,7 @@ pub struct ThroccApp {
     pub output_device: Option<String>,
     pub mic_test: bool,
     push_to_talk: Option<(crate::hotkey::PushToTalkKey, Task<()>)>,
+    pub shown: std::collections::HashMap<UserId, crate::video::Shown>,
     events: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -123,6 +124,7 @@ impl ThroccApp {
             output_device: None,
             mic_test: false,
             push_to_talk: None,
+            shown: std::collections::HashMap::new(),
             events: None,
             _subscriptions: subscriptions,
         };

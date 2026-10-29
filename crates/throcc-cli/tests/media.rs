@@ -4,9 +4,8 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use throcc_client_core::call::{Call, CallEvent};
+use throcc_client_core::call::CallEvent;
 use throcc_client_core::media::engine::{Kind, Outgoing};
-use throcc_proto::ids::RoomId;
 use throcc_proto::messages::{Codec, Event, MediaState, Request, Response, ShareConfig};
 
 use common::*;
@@ -18,38 +17,6 @@ fn synthetic(index: u32, len: usize) -> Bytes {
         *b = (index as usize).wrapping_mul(31).wrapping_add(i) as u8;
     }
     Bytes::from(data)
-}
-
-async fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !ready() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
-async fn room_with_two(server: &TestServer) -> (Call, Call, RoomId) {
-    let mut alice = admin(server).await;
-    assert_eq!(
-        alice
-            .request(Request::CreateRoom {
-                name: "General".into()
-            })
-            .await,
-        Response::Ok
-    );
-    let room = alice
-        .event(|e| match e {
-            Event::RoomCreated(r) => Some(r.id),
-            _ => None,
-        })
-        .await;
-    let bob = invited(server, &alice).await;
-    let alice = Call::start(alice.link, &alice.keystore).unwrap();
-    let bob = Call::start(bob.link, &bob.keystore).unwrap();
-    alice.join(Some(room)).await.unwrap();
-    bob.join(Some(room)).await.unwrap();
-    (alice, bob, room)
 }
 
 #[tokio::test]

@@ -26,7 +26,9 @@ cpal = "0.18.2"
 ed25519-dalek = { version = "3.0.0", features = ["zeroize"] }
 directories = "6.0.0"
 getrandom = "0.4.3"
+image = { version = "0.25.10", default-features = false }
 keyring = "4.2.0"
+libc = "0.2.191"
 hex = "0.4.3"
 global-hotkey = "0.8.0"
 gpui = { package = "gpui-pre", version = "=0.3.10" }
@@ -43,6 +45,7 @@ rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 ring = "0.17.14"
 ropus = "0.12.18"
+rsmpeg = { version = "0.18.0", default-features = false, features = ["ffmpeg8", "link_system_ffmpeg"] }
 rtrb = "0.3.5"
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -53,6 +56,8 @@ sonora-agc2 = "0.2.0"
 sonora-simd = "0.2.0"
 spake2 = "0.4.0"
 subtle = "2.6.1"
+screencapturekit = { version = "=11.0.0", features = ["macos_14_0"] }
+smallvec = "1.16.4"
 sha2 = "0.11.1"
 tempfile = "3.27.0"
 thiserror = "2.0.21"

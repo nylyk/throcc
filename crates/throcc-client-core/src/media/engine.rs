@@ -519,6 +519,10 @@ impl Sealer {
     }
 }
 
+/// Keyframes are sent this many times over, whole unit after whole unit. The receiver's
+/// replay window keeps the first copy of each fragment, so a lost fragment is filled by a copy.
+const KEYFRAME_COPIES: usize = 2;
+
 async fn send_loop(
     connection: quinn::Connection,
     keys: Arc<Mutex<KeyState>>,
@@ -546,8 +550,18 @@ async fn send_loop(
             stats.send_no_key.fetch_add(1, Ordering::Relaxed);
             continue;
         };
-        for datagram in sealer.seal(&unit, epoch, &key) {
-            if connection.send_datagram_wait(datagram).await.is_err() {
+        let datagrams = sealer.seal(&unit, epoch, &key);
+        let copies = if kind == Kind::Video && unit.keyframe {
+            KEYFRAME_COPIES
+        } else {
+            1
+        };
+        for datagram in datagrams.iter().cycle().take(datagrams.len() * copies) {
+            if connection
+                .send_datagram_wait(datagram.clone())
+                .await
+                .is_err()
+            {
                 return;
             }
             stats.sent_datagrams.fetch_add(1, Ordering::Relaxed);

@@ -171,3 +171,12 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 - **Push-to-talk:** a global Alt+Space via `global-hotkey`, plus Space while the window has focus. Wayland gets the in-window key only.
 - **Screenshots:** `scripts/screens.sh` opens each screen of the mock client (`--mock --screen <name>`) and captures its window into `docs/screens/`. `tests/screens/` is a Linux variant under Xvfb for machines without a display.
 - **Listing known servers no longer opens the keychain**; only joining does, so the app doesn't ask for the keychain password at startup.
+
+## 2026-10-29 M9 screen share (macOS)
+
+- **Captured frames are copied to CPU NV12, not mapped as GPU `AVFrame`s.** Measured on an M-series MacBook: capture plus `hevc_videotoolbox` at 2560×1440, 57.6 fps and 10.4 Mbps takes 0.08 cores (`sending_1440p60_takes_under_one_core`). The `av_hwframe_map` path stays open if another platform needs it.
+- **ScreenCaptureKit via the `screencapturekit` crate's Swift bridge.** Its build script only searches Xcode's toolchain for the Swift compatibility libraries, so `throcc-client-core/build.rs` adds the active toolchain's path from `xcrun`, and `.cargo/config.toml` adds the `/usr/lib/swift` rpath for its runtime dylibs.
+- **Keyframes are sent twice** (`KEYFRAME_COPIES`), whole unit after whole unit, with identical sealed bytes. VideoToolbox has no intra refresh (S4), and its keyframes ignore the VBV: about 60 datagrams at 1080p, so at 2 % loss only about 30 % arrived whole and the picture stayed frozen. With two copies the receiver's replay window fills each lost fragment from its copy, and the server queues the copy as its own unit. Cost: one extra keyframe per GOP or recovery, about 130 kbps at 6 Mbps and a 4 s GOP. The wire format is unchanged.
+- **The freeze after a loss is bounded by the server's one-request-per-second cap plus the 50 ms reorder window**, about 1.1 s at worst. `two_percent_loss_brings_a_refresh_within_a_second` checks every keyframe request is answered within 1 s and the longest freeze stays under that bound.
+- **Measured encode-to-decoded latency** through a local server at 1080p60: median 16 ms, p95 18 ms (`a_shared_picture_arrives_within_a_few_frames`). Capture and display add about one frame each.
+- **Linux and Windows capture are not built yet**; `capture::start` returns `Unsupported` there, so "macOS to Linux and back" is not shown.

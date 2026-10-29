@@ -272,10 +272,7 @@ fn verify(
                 })))),
         );
     }
-    let groups: Vec<String> = number
-        .as_deref()
-        .map(safety_groups)
-        .unwrap_or_default();
+    let groups: Vec<String> = number.as_deref().map(safety_groups).unwrap_or_default();
     content
         .child(section("Safety number"))
         .child(if groups.is_empty() {

@@ -6,8 +6,8 @@ use std::time::Duration;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{MediaId, RoomId, UserId};
 use throcc_proto::messages::{
-    Event as ServerEvent, MediaState, Placed, Presence, Request, Response, RoomPeer, ShareConfig,
-    Welcome,
+    Event as ServerEvent, MediaState, Placed, Presence, Recovery, Request, Response, RoomPeer,
+    ShareConfig, Welcome,
 };
 use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn};
@@ -19,6 +19,7 @@ use crate::keys::KeyNotice;
 use crate::keystore::Keystore;
 use crate::media::audio::VoiceSettings;
 use crate::media::engine::Kind;
+use crate::media::video::Picture;
 use crate::media::voice::{VoiceCommand, VoiceEngine};
 use crate::state::{
     ConnectionStatus, CurrentRoom, Health, KeyWarning, Person, RoomView, ServerView, State,
@@ -44,9 +45,27 @@ pub struct ClientOptions {
 pub(crate) struct Shared {
     pub state: Mutex<Arc<State>>,
     pub events: broadcast::Sender<Event>,
+    pub pictures: Mutex<HashMap<UserId, Picture>>,
 }
 
 impl Shared {
+    pub fn picture(&self, user: UserId) -> Option<Picture> {
+        self.pictures
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&user)
+            .cloned()
+    }
+
+    #[cfg_attr(not(feature = "ffmpeg"), allow(dead_code))]
+    fn set_picture(&self, user: UserId, picture: Option<Picture>) {
+        let mut pictures = self.pictures.lock().unwrap_or_else(PoisonError::into_inner);
+        match picture {
+            Some(picture) => pictures.insert(user, picture),
+            None => pictures.remove(&user),
+        };
+    }
+
     pub fn state(&self) -> Arc<State> {
         self.state
             .lock()
@@ -92,6 +111,10 @@ pub(crate) struct Session {
     peers: BTreeMap<UserId, RoomPeer>,
     last_room_state: Option<(RoomId, throcc_proto::ids::Epoch, Vec<RoomPeer>)>,
     watching: Vec<UserId>,
+    /// The video track each watched share is decoded from.
+    watched_video: HashMap<UserId, MediaId>,
+    #[cfg(feature = "ffmpeg")]
+    sharing: Option<crate::media::share::ShareSender>,
     tracks: HashMap<MediaId, Watched>,
     dropped_for_you: u32,
     last_sent: u64,
@@ -119,6 +142,9 @@ impl Session {
             peers: BTreeMap::new(),
             last_room_state: None,
             watching: Vec::new(),
+            watched_video: HashMap::new(),
+            #[cfg(feature = "ffmpeg")]
+            sharing: None,
             tracks: HashMap::new(),
             dropped_for_you: 0,
             last_sent: 0,
@@ -181,7 +207,7 @@ impl Session {
                 },
                 _ = levels.tick() => self.refresh_levels(),
                 _ = health.tick() => self.refresh_health(),
-                Some(_) = self.call.recovery.recv() => {}
+                Some(_) = self.call.recovery.recv() => self.recover_share(Recovery::Idr),
             }
         }
     }
@@ -244,6 +270,11 @@ impl Session {
     }
 
     fn reset_room(&mut self) {
+        self.stop_share();
+        for (user, video) in std::mem::take(&mut self.watched_video) {
+            self.call.engine.unsubscribe(video);
+            self.shared.set_picture(user, None);
+        }
         self.room = None;
         self.my_tracks = None;
         self.peers.clear();
@@ -387,11 +418,9 @@ impl Session {
                 }
                 self.push_media().await;
             }
-            Command::StartShare(config) => {
-                self.media.share = Some(config);
-                self.push_media().await;
-            }
+            Command::StartShare(config) => self.start_share(config).await,
             Command::StopShare => {
+                self.stop_share();
                 self.media.share = None;
                 self.push_media().await;
             }
@@ -535,6 +564,114 @@ impl Session {
             }
         });
         self.simple(Request::SetWatching(ids)).await;
+        self.sync_watching();
+    }
+
+    /// Keeps one decoder per watched share, following track and codec changes.
+    fn sync_watching(&mut self) {
+        let wanted: HashMap<UserId, (MediaId, ShareConfig)> = self
+            .watching
+            .iter()
+            .filter_map(|user| {
+                let peer = self.peers.get(user)?;
+                Some((*user, (peer.tracks.shares.first()?.video, peer.share?)))
+            })
+            .collect();
+        let stale: Vec<UserId> = self
+            .watched_video
+            .iter()
+            .filter(|(user, video)| wanted.get(user).is_none_or(|(v, _)| v != *video))
+            .map(|(user, _)| *user)
+            .collect();
+        for user in stale {
+            if let Some(video) = self.watched_video.remove(&user) {
+                self.call.engine.unsubscribe(video);
+                self.tracks.remove(&video);
+            }
+            self.shared.set_picture(user, None);
+        }
+        for (user, (video, config)) in wanted {
+            if self.watched_video.contains_key(&user) {
+                continue;
+            }
+            #[cfg(feature = "ffmpeg")]
+            {
+                let units = self.call.engine.subscribe(video, Kind::Video, 64);
+                match crate::media::share::receive(units, config.codec) {
+                    Ok(picture) => self.shared.set_picture(user, Some(picture)),
+                    Err(e) => self
+                        .shared
+                        .emit(Event::Notice(format!("Can't show this share: {e}"))),
+                }
+            }
+            #[cfg(not(feature = "ffmpeg"))]
+            self.shared.emit(Event::Notice(
+                "This build can't show video; it was built without ffmpeg.".into(),
+            ));
+            self.tracks
+                .insert(video, watched(user, "screen", config.kbps));
+            self.watched_video.insert(user, video);
+        }
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    async fn start_share(&mut self, wanted: ShareConfig) {
+        let Some(track) = self
+            .my_tracks
+            .as_ref()
+            .and_then(|t| t.shares.first())
+            .map(|s| s.video)
+        else {
+            self.shared
+                .emit(Event::Notice("Join a room before sharing.".into()));
+            return;
+        };
+        let engine = self.call.engine.clone();
+        let started = tokio::task::spawn_blocking(move || {
+            let config = crate::media::capture::CaptureConfig::for_share(&wanted);
+            let capture = crate::media::capture::start(config)?;
+            crate::media::share::ShareSender::start(engine, track, wanted, capture)
+        })
+        .await;
+        match started {
+            Ok(Ok(sender)) => {
+                self.media.share = Some(sender.config);
+                self.shared
+                    .set_picture(self.call.me(), Some(sender.self_view.clone()));
+                info!(encoder = sender.encoder, "sharing");
+                self.sharing = Some(sender);
+                self.push_media().await;
+            }
+            Ok(Err(e)) => self
+                .shared
+                .emit(Event::Notice(format!("Couldn't start sharing: {e}"))),
+            Err(_) => self
+                .shared
+                .emit(Event::Notice("Couldn't start sharing.".into())),
+        }
+    }
+
+    #[cfg(not(feature = "ffmpeg"))]
+    async fn start_share(&mut self, _wanted: ShareConfig) {
+        self.shared.emit(Event::Notice(
+            "This build can't share video; it was built without ffmpeg.".into(),
+        ));
+    }
+
+    fn stop_share(&mut self) {
+        #[cfg(feature = "ffmpeg")]
+        if self.sharing.take().is_some() {
+            self.shared.set_picture(self.call.me(), None);
+        }
+    }
+
+    fn recover_share(&self, kind: Recovery) {
+        #[cfg(feature = "ffmpeg")]
+        if let Some(sender) = &self.sharing {
+            sender.recover(kind);
+        }
+        #[cfg(not(feature = "ffmpeg"))]
+        let _ = kind;
     }
 
     fn accept_key(&mut self, user: UserId) {
@@ -655,7 +792,17 @@ impl Session {
             ))),
             ServerEvent::Kicked { reason } => self.shared.emit(Event::Kicked(reason)),
             ServerEvent::UserAdded(_) | ServerEvent::UserRemoved(_) => self.list_users().await,
-            ServerEvent::SenderKey { .. } | ServerEvent::KeyframeWanted { .. } => {}
+            ServerEvent::KeyframeWanted { media_id, kind } => {
+                if self
+                    .my_tracks
+                    .as_ref()
+                    .and_then(|t| t.shares.first())
+                    .is_some_and(|s| s.video == media_id)
+                {
+                    self.recover_share(kind);
+                }
+            }
+            ServerEvent::SenderKey { .. } => {}
         }
     }
 

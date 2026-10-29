@@ -8,12 +8,17 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+ffmpeg = ["throcc-client-core/ffmpeg"]
+
 [dependencies]
 throcc-client-core.workspace = true
 throcc-proto.workspace = true
 anyhow.workspace = true
 global-hotkey.workspace = true
 gpui.workspace = true
+image.workspace = true
+smallvec.workspace = true
 gpui-component.workspace = true
 gpui-kit-assets.workspace = true
 gpui-platform.workspace = true

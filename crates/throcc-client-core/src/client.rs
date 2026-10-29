@@ -15,6 +15,8 @@ use crate::call::Call;
 use crate::contacts::Contacts;
 use crate::keystore::Keystore;
 use crate::media::audio::VoiceSettings;
+use crate::media::video::Picture;
+use crate::media::video::frame::VideoFrame;
 pub use crate::session::ClientOptions;
 use crate::session::{Session, Shared};
 
@@ -77,6 +79,8 @@ pub trait ClientApi: Send + Sync {
     fn state(&self) -> Arc<State>;
     /// The 60-digit safety number with `user`, if both identity keys are known.
     fn safety_number(&self, user: UserId) -> Option<String>;
+    /// The newest picture of `user`'s share while watched, or of ours while sharing.
+    fn picture(&self, user: UserId) -> Option<Picture>;
 }
 
 const COMMANDS: usize = 64;
@@ -119,6 +123,7 @@ impl Client {
         let shared = Arc::new(Shared {
             state: Mutex::new(Arc::new(State::default())),
             events,
+            pictures: Mutex::default(),
         });
         let (commands, commands_rx) = mpsc::channel(COMMANDS);
         let call = {
@@ -174,6 +179,10 @@ impl ClientApi for Client {
             &self.identity,
             &contacts.get(user)?.key,
         ))
+    }
+
+    fn picture(&self, user: UserId) -> Option<Picture> {
+        self.shared.picture(user)
     }
 }
 
@@ -334,6 +343,11 @@ impl ClientApi for MockClient {
 
     fn safety_number(&self, _user: UserId) -> Option<String> {
         Some("482139057716024733195580241196087436295031487266089415270031".into())
+    }
+
+    fn picture(&self, _user: UserId) -> Option<Picture> {
+        let frame = VideoFrame::test_pattern(1280, 720, 1, 0);
+        Some(tokio::sync::watch::channel(Some(Arc::new(frame))).1)
     }
 }
 
