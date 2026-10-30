@@ -22,7 +22,7 @@ build() {
     packaging/ffmpeg/bindings.sh "$srcdir/ffmpeg" "$srcdir/ffmpeg/binding.rs"
     export FFMPEG_DLL_PATH="$srcdir/ffmpeg/lib"
     export FFMPEG_BINDING_PATH="$srcdir/ffmpeg/binding.rs"
-    export RUSTFLAGS="-C link-arg=-Wl,-rpath,/usr/lib/throcc"
+    export RUSTFLAGS="-C link-arg=-Wl,--disable-new-dtags,-rpath,/usr/lib/throcc"
     cargo build --release --locked -p throcc-client --features ffmpeg
     cargo build --release --locked -p throcc-cli
 }
