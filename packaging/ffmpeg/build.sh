@@ -15,6 +15,9 @@ fi
 actual=$( (sha256sum 2>/dev/null || shasum -a 256) <"$work/ffmpeg.tar.xz" | cut -d' ' -f1)
 [ "$actual" = "$sha256" ] || { echo "ffmpeg-$version.tar.xz has checksum $actual" >&2; exit 1; }
 tar -xf "$work/ffmpeg.tar.xz" -C "$work"
+for fix in "$(dirname "$0")"/patches/*.patch; do
+    patch -s -p1 -d "$work/ffmpeg-$version" <"$fix"
+done
 
 flags=(
     --prefix="$prefix"

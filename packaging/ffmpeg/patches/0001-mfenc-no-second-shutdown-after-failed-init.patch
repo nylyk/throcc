@@ -1,0 +1,20 @@
+--- a/libavcodec/mfenc.c	2026-10-30 21:04:06
++++ b/libavcodec/mfenc.c	2026-10-30 21:04:06
+@@ -1373,14 +1373,15 @@
+         IMFDXGIDeviceManager_Release(c->dxgiManager);
+ 
+ #if !HAVE_UWP
+-    if (c->library)
++    if (c->library && c->mft)
+         ff_free_mf(&c->functions, &c->mft);
+ 
+     dlclose(c->library);
+     dlclose(c->d3d_dll);
+     c->library = NULL;
+ #else
+-    ff_free_mf(&c->functions, &c->mft);
++    if (c->mft)
++        ff_free_mf(&c->functions, &c->mft);
+ #endif
+ 
+     av_frame_free(&c->frame);

@@ -63,7 +63,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: deps/ffmpeg-lgpl
-          key: macos-ffmpeg-${{ steps.dav1d.outputs.version }}-${{ hashFiles('packaging/ffmpeg/build.sh') }}
+          key: macos-ffmpeg-${{ steps.dav1d.outputs.version }}-${{ hashFiles('packaging/ffmpeg/build.sh', 'packaging/ffmpeg/patches/*') }}
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/ci-run.sh packaging/macos/bundle.sh
@@ -92,7 +92,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: deps
-          key: windows-deps-nv13.0.19.0-${{ hashFiles('packaging/ffmpeg/build.sh', 'packaging/ffmpeg/bindings.sh', 'packaging/windows/build-deps.sh') }}
+          key: windows-deps-nv13.0.19.0-${{ hashFiles('packaging/ffmpeg/build.sh', 'packaging/ffmpeg/patches/*', 'packaging/ffmpeg/bindings.sh', 'packaging/windows/build-deps.sh') }}
       - if: steps.deps.outputs.cache-hit != 'true'
         run: choco install nasm --no-progress -y
       - if: steps.deps.outputs.cache-hit != 'true'
@@ -106,7 +106,7 @@ jobs:
         with:
           msystem: MSYS
           path-type: inherit
-          install: make diffutils nasm pkgconf git
+          install: make diffutils nasm patch pkgconf git
       - if: steps.deps.outputs.cache-hit != 'true'
         name: ffmpeg
         shell: msys2 {0}
