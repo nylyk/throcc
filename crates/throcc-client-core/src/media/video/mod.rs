@@ -3,8 +3,6 @@ pub mod decode;
 #[cfg(feature = "ffmpeg")]
 pub mod encode;
 pub mod frame;
-#[cfg(windows)]
-pub mod media_foundation;
 
 use std::sync::Arc;
 

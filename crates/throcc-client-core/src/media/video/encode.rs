@@ -2,7 +2,7 @@ use std::ffi::{CStr, CString};
 
 use bytes::Bytes;
 use rsmpeg::avcodec::{AVCodec, AVCodecContext};
-use rsmpeg::avutil::{AVDictionary, AVFrame, ra};
+use rsmpeg::avutil::{AVFrame, opt_set, ra};
 use rsmpeg::error::RsmpegError;
 use rsmpeg::ffi;
 use rsmpeg::swscale::SwsContext;
@@ -230,10 +230,6 @@ impl Encoder {
             let Some(codec) = AVCodec::find_encoder_by_name(candidate.name) else {
                 continue;
             };
-            #[cfg(windows)]
-            if !media_foundation_ready(candidate) {
-                continue;
-            }
             match open_candidate(&codec, candidate, config) {
                 Ok(ctx) => {
                     let name = candidate.name.to_str().unwrap_or("encoder");
@@ -436,18 +432,6 @@ fn fill_black(frame: &mut AVFrame, input: Input, height: usize) {
     }
 }
 
-/// ffmpeg 8.1.3's Media Foundation encoders crash the process when no hardware encoder
-/// exists, so they are tried only once Media Foundation lists one.
-#[cfg(windows)]
-fn media_foundation_ready(candidate: &Candidate) -> bool {
-    use super::media_foundation::{MfCodec, has_hardware_encoder};
-    match candidate.name.to_bytes() {
-        b"hevc_mf" => has_hardware_encoder(MfCodec::Hevc),
-        b"h264_mf" => has_hardware_encoder(MfCodec::H264),
-        _ => true,
-    }
-}
-
 fn open_candidate(
     codec: &AVCodec,
     candidate: &Candidate,
@@ -464,16 +448,35 @@ fn open_candidate(
     ctx.set_max_b_frames(0);
     ctx.set_gop_size(config.fps as i32 * GOP_SECONDS);
     ctx.set_flags(ctx.flags | ffi::AV_CODEC_FLAG_LOW_DELAY as i32);
-    let vbv = (bitrate * 2 / i64::from(config.fps.max(1))).to_string();
-    let mut dict = AVDictionary::new(c"maxrate", &cstring(&bitrate.to_string()), 0)
-        .set(c"bufsize", &cstring(&vbv), 0)
-        .set(c"color_range", c"pc", 0)
-        .set(c"colorspace", c"bt709", 0);
-    for (key, value) in candidate.options {
-        dict = dict.set(key, value, 0);
+    let maxrate = cstring(&bitrate.to_string());
+    let bufsize = cstring(&(bitrate * 2 / i64::from(config.fps.max(1))).to_string());
+    let common = [
+        (c"maxrate", maxrate.as_c_str()),
+        (c"bufsize", bufsize.as_c_str()),
+        (c"color_range", c"pc"),
+        (c"colorspace", c"bt709"),
+    ];
+    for (key, value) in common.into_iter().chain(candidate.options.iter().copied()) {
+        set_option(&mut ctx, key, value)?;
     }
-    ctx.open(Some(dict))?;
+    // rsmpeg 0.18 frees an options dictionary twice when opening fails after ffmpeg has
+    // replaced it, which crashes the process; the options go straight onto the context.
+    ctx.open(None)?;
     Ok(ctx)
+}
+
+/// ffmpeg's `AVERROR_OPTION_NOT_FOUND`, `-MKTAG(0xF8, 'O', 'P', 'T')`.
+const OPTION_NOT_FOUND: i32 = -0x5450_4FF8;
+
+/// Sets an encoder option as an options dictionary would: one the encoder doesn't have
+/// is skipped, a value it rejects is an error.
+fn set_option(ctx: &mut AVCodecContext, key: &CStr, value: &CStr) -> Result<(), RsmpegError> {
+    let search_children = ffi::AV_OPT_SEARCH_CHILDREN as i32;
+    // SAFETY: an AVCodecContext begins with its AVClass pointer, as `opt_set` requires.
+    match unsafe { opt_set(ctx.as_mut_ptr().cast(), key, value, search_children) } {
+        Err(RsmpegError::AVError(OPTION_NOT_FOUND)) => Ok(()),
+        set => set,
+    }
 }
 
 fn cstring(text: &str) -> CString {
@@ -534,6 +537,30 @@ mod tests {
                 width >= 2 && height >= 2 && x + width <= 1280 && y + height <= 720,
                 "{source:?}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod failed_open {
+    use super::*;
+
+    #[test]
+    fn an_encoder_that_fails_to_open_is_cleaned_up_safely() {
+        let Some(codec) = AVCodec::find_encoder_by_name(c"hevc_videotoolbox") else {
+            return;
+        };
+        let Some(candidate) = LADDER.iter().find(|c| c.name == c"hevc_videotoolbox") else {
+            return;
+        };
+        for _ in 0..20 {
+            let config = EncoderConfig {
+                width: 0,
+                height: 0,
+                fps: 30,
+                kbps: 500,
+            };
+            assert!(open_candidate(&codec, candidate, config).is_err());
         }
     }
 }
