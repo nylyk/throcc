@@ -112,3 +112,9 @@ cargo test -p throcc-client-core --lib desktop_audio_has_other_apps -- --ignored
 ```
 
 Pass: it prints the other app's tone near 0.3 and ours near 0. Then, in a call between two machines, share a screen with audio on the Linux machine while a video plays in a browser and the other side talks. Pass: the other side hears the video, and never hears their own voice come back. Check both with throcc playing through `pipewire-pulse` and through the PipeWire ALSA plugin if the desktop has both. While sharing, `pw-link -l` shows `throcc-share-audio-<pid>` fed by the browser's stream and not by throcc's own playback stream. A clap video shared with audio looks and sounds in sync (offset under 40 ms).
+
+## M11: packaged clients enroll and talk
+
+Needs a server installed from `packaging/throcc-server.service` (or the container image), a Mac and an Arch machine. Download `throcc-macos` (the `.dmg`) and `throcc-windows` from the latest `packaging` workflow run, and build the Arch package with `makepkg -si` in `packaging/arch`.
+
+Pass: on each machine the packaged client opens (on macOS with right-click, Open the first time), joins with an invite code, shows the server fingerprint from the server's log, and holds a call with the others; sharing a screen shows the picture on the other side.
