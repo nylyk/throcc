@@ -140,6 +140,11 @@ jobs:
           ./scripts/ci-run.sh packaging/ffmpeg/build.sh target/ffmpeg-lgpl
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+      - name: bindings
+        shell: bash
+        run: |
+          cargo install bindgen-cli --version 0.72.1 --locked
+          ./scripts/ci-run.sh packaging/ffmpeg/bindings.sh target/ffmpeg-lgpl target/ffmpeg-lgpl/binding.rs
       - name: package
         shell: pwsh
         run: packaging\windows\package.ps1
@@ -147,7 +152,7 @@ jobs:
         shell: pwsh
         run: |
           $env:FFMPEG_DLL_PATH = "$PWD\target\ffmpeg-lgpl\lib"
-          $env:FFMPEG_INCLUDE_DIR = "$PWD\target\ffmpeg-lgpl\include"
+          $env:FFMPEG_BINDING_PATH = "$PWD\target\ffmpeg-lgpl\binding.rs"
           $env:PATH = "$PWD\target\ffmpeg-lgpl\bin;$PWD\deps\bin;$env:PATH"
           cargo test --release -p throcc-client-core --features ffmpeg --lib video::
       - uses: actions/upload-artifact@v4

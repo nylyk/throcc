@@ -8,7 +8,7 @@ license=('AGPL-3.0-or-later' 'LGPL-2.1-or-later')
 depends=('alsa-lib' 'dav1d' 'dbus' 'fontconfig' 'freetype2' 'gcc-libs' 'glibc' 'libpipewire'
          'libx11' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11' 'vulkan-icd-loader' 'wayland'
          'xdg-desktop-portal')
-makedepends=('clang' 'git' 'nasm' 'pkgconf' 'rustup')
+makedepends=('clang' 'git' 'nasm' 'pkgconf' 'rust-bindgen' 'rustup')
 options=('!lto')
 _ffmpeg=8.1.3
 source=("throcc::git+${THROCC_GIT:-https://github.com/nylyk/throcc.git}"
@@ -19,7 +19,9 @@ sha256sums=('SKIP'
 build() {
     cd throcc
     FFMPEG_TARBALL="$srcdir/ffmpeg-$_ffmpeg.tar.xz" packaging/ffmpeg/build.sh "$srcdir/ffmpeg"
-    export FFMPEG_PKG_CONFIG_PATH="$srcdir/ffmpeg/lib/pkgconfig"
+    packaging/ffmpeg/bindings.sh "$srcdir/ffmpeg" "$srcdir/ffmpeg/binding.rs"
+    export FFMPEG_DLL_PATH="$srcdir/ffmpeg/lib"
+    export FFMPEG_BINDING_PATH="$srcdir/ffmpeg/binding.rs"
     export RUSTFLAGS="-C link-arg=-Wl,-rpath,/usr/lib/throcc"
     cargo build --release --locked -p throcc-client --features ffmpeg
     cargo build --release --locked -p throcc-cli

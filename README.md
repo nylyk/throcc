@@ -62,7 +62,7 @@ cargo build --release -p throcc-client --features ffmpeg
 Screen sharing needs ffmpeg 8 (`--features ffmpeg`); without it the client still does voice.
 
 - macOS: Xcode 26 or its Command Line Tools, and `brew install ffmpeg@8` with `FFMPEG_PKG_CONFIG_PATH=/opt/homebrew/opt/ffmpeg@8/lib/pkgconfig`.
-- Linux: the packages in `.github/workflows/ci.yml`, plus ffmpeg 8 development files.
+- Linux: the packages in `.github/workflows/ci.yml`, plus ffmpeg 8 development files. With clang 21 or newer, generate the ffmpeg bindings with `packaging/ffmpeg/bindings.sh <ffmpeg prefix> binding.rs` (needs `bindgen` 0.72) and build with `FFMPEG_DLL_PATH=<prefix>/lib FFMPEG_BINDING_PATH=binding.rs`.
 - Windows: ffmpeg 8 development files found through `FFMPEG_PKG_CONFIG_PATH` or vcpkg.
 
 `throcc-cli` is a headless client for scripts and testing (`throcc-cli --help`).
