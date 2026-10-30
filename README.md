@@ -67,6 +67,13 @@ Screen sharing needs ffmpeg 8 (`--features ffmpeg`); without it the client still
 
 `throcc-cli` is a headless client for scripts and testing (`throcc-cli --help`).
 
+### Packages
+
+`packaging/ffmpeg/build.sh <prefix>` builds the LGPL ffmpeg the packages ship with.
+
+- macOS: `packaging/macos/bundle.sh` makes `target/macos/throcc.dmg` (needs `brew install dav1d pkgconf`). It isn't signed with a Developer ID yet, so open it the first time with right-click, Open.
+- CI builds the `.dmg` in the `macos-app` job and keeps it for a week.
+
 ## Screenshots
 
 The desktop client, shown with sample data (`throcc-client --mock`). Regenerate them with `scripts/screens.sh`.

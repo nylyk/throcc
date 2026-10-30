@@ -89,3 +89,18 @@ jobs:
           name: throcc-server-${{ matrix.target }}
           path: throcc-server-${{ matrix.target }}
           retention-days: 7
+
+  macos-app:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install dav1d pkgconf
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/ci-run.sh packaging/macos/bundle.sh
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: throcc-macos
+          path: target/macos/throcc.dmg
+          retention-days: 7

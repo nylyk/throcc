@@ -250,3 +250,9 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 - **The client shrinks any PNG or JPEG to a centred 128 px square** before upload, as PNG, or as JPEG at quality 85 when the PNG would pass the server's 64 KiB cap. Decoding and encoding use the `image` crate's `png` and `jpeg` features.
 - **A rename resends the current picture's hash**, since `SetProfile` sets both fields at once.
 - **Settings has a Profile page** (name, picture, remove). The server takes one profile change per 10 s and the page says so.
+
+## 2026-10-30 M11 client packaging
+
+- **ffmpeg is built from source as LGPL shared libraries** by `packaging/ffmpeg/build.sh`: release 8.1.3, checksum pinned (it matches Homebrew's), autodetection off so nothing unexpected links in, and only dav1d, OpenH264 (if present), VideoToolbox on macOS, and NVENC, QSV and AMF where their headers exist. The script fails if the configured build is GPL.
+- **macOS ships unsigned for now**, as the human chose: `packaging/macos/bundle.sh` builds `throcc.app` with the ffmpeg and dav1d dylibs in `Contents/Frameworks`, rewritten to `@rpath`, ad hoc signed, and packed into `throcc.dmg`. Gatekeeper asks on first open (right-click, Open). A Developer ID and notarisation slot in later at the `codesign` lines.
+- **The minimum macOS is 14**, which the system share picker needs.
