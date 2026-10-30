@@ -10,7 +10,7 @@ trap 'rm -rf "$work"' EXIT
 if [ -n "${FFMPEG_TARBALL:-}" ]; then
     cp "$FFMPEG_TARBALL" "$work/ffmpeg.tar.xz"
 else
-    curl -fsSL -o "$work/ffmpeg.tar.xz" "https://ffmpeg.org/releases/ffmpeg-$version.tar.xz"
+    curl -fsSL --retry 5 --retry-all-errors -o "$work/ffmpeg.tar.xz" "https://ffmpeg.org/releases/ffmpeg-$version.tar.xz"
 fi
 actual=$( (sha256sum 2>/dev/null || shasum -a 256) <"$work/ffmpeg.tar.xz" | cut -d' ' -f1)
 [ "$actual" = "$sha256" ] || { echo "ffmpeg-$version.tar.xz has checksum $actual" >&2; exit 1; }
