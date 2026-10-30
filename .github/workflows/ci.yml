@@ -121,10 +121,10 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
       - run: choco install nasm --no-progress -y
       - name: dav1d
-        shell: cmd
+        shell: bash
         run: |
-          set PATH=C:\Program Files\NASM;%PATH%
-          packaging\windows\build-deps.cmd
+          export PATH="/c/Program Files/NASM:$PATH"
+          ./scripts/ci-run.sh packaging/windows/build-deps.sh
       - uses: msys2/setup-msys2@v2
         with:
           msystem: MSYS
