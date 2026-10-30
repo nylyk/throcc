@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=throcc
+Comment=Voice and screen share
+Exec=throcc
+Icon=audio-headset
+Terminal=false
+Categories=Network;AudioVideo;Chat;

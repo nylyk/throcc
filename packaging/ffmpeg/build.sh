@@ -8,7 +8,11 @@ prefix=$(cd "$1" && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-curl -fsSL -o "$work/ffmpeg.tar.xz" "https://ffmpeg.org/releases/ffmpeg-$version.tar.xz"
+if [ -n "${FFMPEG_TARBALL:-}" ]; then
+    cp "$FFMPEG_TARBALL" "$work/ffmpeg.tar.xz"
+else
+    curl -fsSL -o "$work/ffmpeg.tar.xz" "https://ffmpeg.org/releases/ffmpeg-$version.tar.xz"
+fi
 actual=$( (sha256sum 2>/dev/null || shasum -a 256) <"$work/ffmpeg.tar.xz" | cut -d' ' -f1)
 [ "$actual" = "$sha256" ] || { echo "ffmpeg-$version.tar.xz has checksum $actual" >&2; exit 1; }
 tar -xf "$work/ffmpeg.tar.xz" -C "$work"

@@ -72,6 +72,7 @@ Screen sharing needs ffmpeg 8 (`--features ffmpeg`); without it the client still
 `packaging/ffmpeg/build.sh <prefix>` builds the LGPL ffmpeg the packages ship with.
 
 - macOS: `packaging/macos/bundle.sh` makes `target/macos/throcc.dmg` (needs `brew install dav1d pkgconf`). It isn't signed with a Developer ID yet, so open it the first time with right-click, Open.
+- Arch: `packaging/arch/PKGBUILD` builds from git with a private LGPL ffmpeg in `/usr/lib/throcc` (`makepkg -si` in that directory). `tests/arch/run.sh` builds and installs it in a clean Arch container.
 - CI builds the `.dmg` in the `macos-app` job and keeps it for a week.
 
 ## Screenshots
