@@ -6,7 +6,7 @@ docker run --rm --platform linux/amd64 -v "$PWD":/src:ro archlinux:latest bash -
     pacman -Syu --noconfirm --needed base-devel git rustup >/dev/null
     useradd -m builder
     echo "builder ALL=(ALL) NOPASSWD: ALL" >/etc/sudoers.d/builder
-    git -c safe.directory=/src clone -q /src /home/builder/throcc-src
+    git -c safe.directory="*" clone -q /src /home/builder/throcc-src
     chown -R builder /home/builder/throcc-src
     su builder -c "
         set -euo pipefail

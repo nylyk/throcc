@@ -143,7 +143,7 @@ jobs:
       - name: bindings
         shell: bash
         run: |
-          cargo install bindgen-cli --version 0.72.1 --locked
+          ./scripts/ci-run.sh cargo install bindgen-cli --version 0.72.1 --locked
           ./scripts/ci-run.sh packaging/ffmpeg/bindings.sh target/ffmpeg-lgpl target/ffmpeg-lgpl/binding.rs
       - name: package
         shell: pwsh

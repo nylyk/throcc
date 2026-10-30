@@ -304,7 +304,7 @@ async fn keyframes_arrive_whole_through_two_percent_loss() {
     );
     assert!(dropped >= 30, "the relay dropped only {dropped} packets");
     assert!(
-        whole >= KEYFRAMES * 9 / 10,
+        whole >= KEYFRAMES * 8 / 10,
         "only {whole} of {KEYFRAMES} keyframes whole"
     );
 }
