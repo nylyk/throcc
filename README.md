@@ -30,11 +30,9 @@ The unit runs the server as a throwaway system user with its data in `/var/lib/p
 
 ```sh
 docker build -f crates/throcc-server/Dockerfile -t throcc-server .
-docker run -d --name throcc --restart unless-stopped --network host -v throcc-data:/data throcc-server
+docker run -d --name throcc --restart unless-stopped -p 8476:8476/udp -v throcc-data:/data throcc-server
 docker logs throcc | grep 'becomes admin'
 ```
-
-Use host networking: Docker's published UDP ports (`-p 8476:8476/udp`) show every client as the bridge's gateway address, and the server limits invite guessing per source address.
 
 For development, the `dev` stage rebuilds and restarts the server on every change to the source mounted at `/src`:
 
