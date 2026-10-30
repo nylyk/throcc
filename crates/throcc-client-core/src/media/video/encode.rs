@@ -2,7 +2,7 @@ use std::ffi::{CStr, CString};
 
 use bytes::Bytes;
 use rsmpeg::avcodec::{AVCodec, AVCodecContext};
-use rsmpeg::avutil::{AVFrame, opt_set, ra};
+use rsmpeg::avutil::{AVFrame, AVHWDeviceContext, opt_set, ra};
 use rsmpeg::error::RsmpegError;
 use rsmpeg::ffi;
 use rsmpeg::swscale::SwsContext;
@@ -23,6 +23,8 @@ pub enum EncodeError {
     Ffmpeg(#[from] RsmpegError),
     #[error("can't scale the picture to the encoder's size")]
     Scaler,
+    #[error("the VA-API encoder has no surface pool")]
+    NoSurfaces,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +50,8 @@ struct Candidate {
     /// Largest picture the encoder is used for, as (pixels, fps).
     limit: Option<(usize, u32)>,
     options: &'static [(&'static CStr, &'static CStr)],
+    /// Takes frames in VA-API surfaces, uploaded from the NV12 picture.
+    vaapi: bool,
 }
 
 const LADDER: &[Candidate] = &[
@@ -58,22 +62,16 @@ const LADDER: &[Candidate] = &[
         intra_refresh: true,
         limit: None,
         options: NVENC,
+        vaapi: false,
     },
     Candidate {
-        name: c"av1_qsv",
+        name: c"av1_vaapi",
         codec: Codec::Av1,
         input: Input::Nv12,
         intra_refresh: false,
         limit: None,
-        options: QSV,
-    },
-    Candidate {
-        name: c"av1_amf",
-        codec: Codec::Av1,
-        input: Input::Nv12,
-        intra_refresh: false,
-        limit: None,
-        options: AMF,
+        options: VAAPI,
+        vaapi: true,
     },
     Candidate {
         name: c"hevc_nvenc",
@@ -82,22 +80,7 @@ const LADDER: &[Candidate] = &[
         intra_refresh: true,
         limit: None,
         options: NVENC,
-    },
-    Candidate {
-        name: c"hevc_qsv",
-        codec: Codec::Hevc,
-        input: Input::Nv12,
-        intra_refresh: true,
-        limit: None,
-        options: QSV_REFRESH,
-    },
-    Candidate {
-        name: c"hevc_amf",
-        codec: Codec::Hevc,
-        input: Input::Nv12,
-        intra_refresh: false,
-        limit: None,
-        options: AMF,
+        vaapi: false,
     },
     Candidate {
         name: c"hevc_mf",
@@ -106,6 +89,16 @@ const LADDER: &[Candidate] = &[
         intra_refresh: false,
         limit: None,
         options: MEDIA_FOUNDATION,
+        vaapi: false,
+    },
+    Candidate {
+        name: c"hevc_vaapi",
+        codec: Codec::Hevc,
+        input: Input::Nv12,
+        intra_refresh: false,
+        limit: None,
+        options: VAAPI,
+        vaapi: true,
     },
     Candidate {
         name: c"hevc_videotoolbox",
@@ -114,6 +107,7 @@ const LADDER: &[Candidate] = &[
         intra_refresh: false,
         limit: None,
         options: VIDEOTOOLBOX,
+        vaapi: false,
     },
     Candidate {
         name: c"h264_nvenc",
@@ -122,22 +116,7 @@ const LADDER: &[Candidate] = &[
         intra_refresh: true,
         limit: None,
         options: NVENC,
-    },
-    Candidate {
-        name: c"h264_qsv",
-        codec: Codec::H264,
-        input: Input::Nv12,
-        intra_refresh: true,
-        limit: None,
-        options: QSV_REFRESH,
-    },
-    Candidate {
-        name: c"h264_amf",
-        codec: Codec::H264,
-        input: Input::Nv12,
-        intra_refresh: false,
-        limit: None,
-        options: AMF,
+        vaapi: false,
     },
     Candidate {
         name: c"h264_mf",
@@ -146,6 +125,16 @@ const LADDER: &[Candidate] = &[
         intra_refresh: false,
         limit: None,
         options: MEDIA_FOUNDATION,
+        vaapi: false,
+    },
+    Candidate {
+        name: c"h264_vaapi",
+        codec: Codec::H264,
+        input: Input::Nv12,
+        intra_refresh: false,
+        limit: None,
+        options: VAAPI,
+        vaapi: true,
     },
     Candidate {
         name: c"h264_videotoolbox",
@@ -154,6 +143,7 @@ const LADDER: &[Candidate] = &[
         intra_refresh: false,
         limit: None,
         options: VIDEOTOOLBOX,
+        vaapi: false,
     },
     Candidate {
         name: c"libopenh264",
@@ -162,6 +152,7 @@ const LADDER: &[Candidate] = &[
         intra_refresh: false,
         limit: Some((1920 * 1080, 30)),
         options: &[(c"allow_skip_frames", c"1")],
+        vaapi: false,
     },
 ];
 
@@ -174,23 +165,14 @@ const NVENC: &[(&CStr, &CStr)] = &[
     (c"intra-refresh", c"1"),
     (c"forced-idr", c"1"),
 ];
-const QSV: &[(&CStr, &CStr)] = &[
-    (c"async_depth", c"1"),
-    (c"low_power", c"1"),
-    (c"forced_idr", c"1"),
-];
-const QSV_REFRESH: &[(&CStr, &CStr)] = &[
-    (c"async_depth", c"1"),
-    (c"low_power", c"1"),
-    (c"forced_idr", c"1"),
-    (c"int_ref_type", c"vertical"),
-];
-const AMF: &[(&CStr, &CStr)] = &[(c"usage", c"ultralowlatency"), (c"forced_idr", c"1")];
 const MEDIA_FOUNDATION: &[(&CStr, &CStr)] = &[
     (c"hw_encoding", c"1"),
     (c"scenario", c"display_remoting"),
     (c"rate_control", c"cbr"),
 ];
+/// Surfaces in a VA-API encoder's pool: enough for the frames it holds plus one uploading.
+const VAAPI_SURFACES: i32 = 8;
+const VAAPI: &[(&CStr, &CStr)] = &[(c"rc_mode", c"CBR"), (c"async_depth", c"1")];
 const VIDEOTOOLBOX: &[(&CStr, &CStr)] = &[(c"realtime", c"1"), (c"allow_sw", c"0")];
 
 /// An encoded access unit.
@@ -209,6 +191,7 @@ pub struct Encoder {
     name: &'static str,
     input: Input,
     intra_refresh: bool,
+    vaapi: bool,
     width: usize,
     height: usize,
     idr_next: bool,
@@ -240,6 +223,7 @@ impl Encoder {
                         name,
                         input: candidate.input,
                         intra_refresh: candidate.intra_refresh,
+                        vaapi: candidate.vaapi,
                         width: config.width,
                         height: config.height,
                         idr_next: true,
@@ -275,6 +259,9 @@ impl Encoder {
         } else {
             self.fit(picture, &mut frame)?;
         }
+        if self.vaapi {
+            frame = self.upload(&frame)?;
+        }
         frame.set_pts(i64::from(picture.timestamp));
         if std::mem::take(&mut self.idr_next) {
             frame.set_pict_type(ffi::AV_PICTURE_TYPE_I);
@@ -289,6 +276,17 @@ impl Encoder {
         }
         self.drain(&mut units)?;
         Ok(units)
+    }
+
+    /// Copies an NV12 frame into a VA-API surface from the encoder's pool.
+    fn upload(&mut self, frame: &AVFrame) -> Result<AVFrame, EncodeError> {
+        let mut surface = AVFrame::new();
+        let Some(mut pool) = self.ctx.hw_frames_ctx_mut() else {
+            return Err(EncodeError::NoSurfaces);
+        };
+        pool.get_buffer(&mut surface)?;
+        surface.hwframe_transfer_data(frame)?;
+        Ok(surface)
     }
 
     /// Takes every packet the encoder has ready.
@@ -443,6 +441,19 @@ fn open_candidate(
     ctx.set_time_base(ra(1, VIDEO_CLOCK_HZ as i32));
     ctx.set_framerate(ra(config.fps as i32, 1));
     ctx.set_pix_fmt(pixel_format(candidate.input));
+    if candidate.vaapi {
+        let device = AVHWDeviceContext::create(ffi::AV_HWDEVICE_TYPE_VAAPI, None, None, 0)?;
+        let mut pool = device.hwframe_ctx_alloc();
+        let surfaces = pool.data();
+        surfaces.format = ffi::AV_PIX_FMT_VAAPI;
+        surfaces.sw_format = pixel_format(candidate.input);
+        surfaces.width = config.width as i32;
+        surfaces.height = config.height as i32;
+        surfaces.initial_pool_size = VAAPI_SURFACES;
+        pool.init()?;
+        ctx.set_pix_fmt(ffi::AV_PIX_FMT_VAAPI);
+        ctx.set_hw_frames_ctx(pool);
+    }
     let bitrate = i64::from(config.kbps) * 1000;
     ctx.set_bit_rate(bitrate);
     ctx.set_max_b_frames(0);

@@ -32,6 +32,8 @@ docker run --rm --platform linux/amd64 -v "$PWD":/src:ro archlinux:latest bash -
     echo "  ok    the private ffmpeg is used"
     if grep -aq -- "--enable-gpl" /usr/lib/throcc/libavcodec.so.*; then echo "FAIL  ffmpeg is GPL"; exit 1; fi
     echo "  ok    ffmpeg is LGPL"
+    grep -aq -- "--enable-vaapi" /usr/lib/throcc/libavcodec.so.* || { echo "FAIL  ffmpeg has no VA-API"; exit 1; }
+    echo "  ok    ffmpeg encodes through VA-API"
     throcc-cli --help >/dev/null
     echo "  ok    throcc-cli runs"
     pacman -S --noconfirm --needed sway vulkan-swrast >/dev/null

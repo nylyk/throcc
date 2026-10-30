@@ -36,14 +36,11 @@ case "$(uname -s)" in
         ;;
     Linux)
         have ffnvcodec && flags+=(--enable-ffnvcodec --enable-nvenc)
-        have vpl && flags+=(--enable-libvpl)
-        [ -f /usr/include/AMF/core/Version.h ] && flags+=(--enable-amf)
+        have libva && flags+=(--enable-vaapi)
         ;;
     MINGW* | MSYS*)
         flags+=(--toolchain=msvc --enable-d3d11va --enable-mediafoundation)
         have ffnvcodec && flags+=(--enable-ffnvcodec --enable-nvenc)
-        have vpl && flags+=(--enable-libvpl)
-        [ -n "${AMF_INCLUDE:-}" ] && flags+=(--enable-amf --extra-cflags="-I$AMF_INCLUDE")
         ;;
 esac
 

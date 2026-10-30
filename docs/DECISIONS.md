@@ -272,3 +272,9 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 ## 2026-10-31 Linux window backend
 
 - **The client enables gpui's `wayland` backend only.** gpui's Linux windowing backends are opt-in features; without one it starts headless and shows no window, which the first Arch install did. X11 is left out by the human's choice. `tests/arch/run.sh` starts the installed app under a headless Weston with `WAYLAND_DEBUG=1` and checks it creates a toplevel titled "throcc".
+
+## 2026-10-31 VA-API in place of QSV and AMF
+
+- **The encoder ladder is NVENC, then VA-API on Linux, Media Foundation on Windows or VideoToolbox on macOS, then OpenH264 when it is built in.** QSV and AMF are gone: AMF on Linux needs AMD's proprietary runtime, which Mesa systems lack, and VA-API reaches both AMD (Mesa) and Intel GPUs on Linux. On Windows, Media Foundation covers Intel and AMD. This revises S4.
+- **VA-API encoders take frames in GPU surfaces**: each encoder opens the default render node, keeps a pool of 8 NV12 surfaces, and every picture is uploaded into one before encoding. Rate control is CBR with `async_depth=1`; recovery is an IDR, since VA-API has no intra refresh in ffmpeg.
+- **No software encoder ships yet.** The LGPL build has none for H.264, HEVC or AV1; SVT-AV1 is the preferred addition, since AV1 is already in the protocol, and VP9 would need a new codec value on the wire.

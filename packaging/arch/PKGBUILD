@@ -5,10 +5,13 @@ pkgdesc='Self-hosted voice and screen share, end-to-end encrypted'
 arch=('x86_64' 'aarch64')
 url='https://github.com/nylyk/throcc'
 license=('AGPL-3.0-or-later' 'LGPL-2.1-or-later')
-depends=('alsa-lib' 'dav1d' 'dbus' 'fontconfig' 'freetype2' 'gcc-libs' 'glibc' 'libpipewire'
+depends=('alsa-lib' 'dav1d' 'dbus' 'fontconfig' 'freetype2' 'gcc-libs' 'glibc' 'libpipewire' 'libva'
          'libx11' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11' 'vulkan-icd-loader' 'wayland'
          'xdg-desktop-portal')
-makedepends=('clang' 'git' 'nasm' 'pkgconf' 'rust-bindgen' 'rustup')
+makedepends=('clang' 'ffnvcodec-headers' 'git' 'nasm' 'pkgconf' 'rust-bindgen' 'rustup')
+optdepends=('mesa: VA-API video encoding on AMD GPUs'
+            'intel-media-driver: VA-API video encoding on Intel GPUs'
+            'nvidia-utils: NVENC video encoding on NVIDIA GPUs')
 options=('!lto')
 _ffmpeg=8.1.3
 source=("throcc::git+${THROCC_GIT:-https://github.com/nylyk/throcc.git}"
