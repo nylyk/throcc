@@ -154,7 +154,7 @@ jobs:
       - name: video tests
         shell: pwsh
         run: |
-          $env:FFMPEG_DLL_PATH = "$PWD\target\ffmpeg-lgpl\lib"
+          $env:FFMPEG_DLL_PATH = "$PWD\target\ffmpeg-lgpl\bin"
           $env:FFMPEG_BINDING_PATH = "$PWD\target\ffmpeg-lgpl\binding.rs"
           $env:PATH = "$PWD\target\ffmpeg-lgpl\bin;$PWD\deps\bin;$env:PATH"
           cargo test --release -p throcc-client-core --features ffmpeg --lib video::
