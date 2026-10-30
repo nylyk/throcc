@@ -2,10 +2,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 docker run --rm --platform linux/amd64 -v "$PWD":/src:ro archlinux:latest bash -euo pipefail -c '
+    sed -i "s/^\[options\]/[options]\nDisableSandbox/" /etc/pacman.conf
     pacman -Syu --noconfirm --needed base-devel git rustup >/dev/null
     useradd -m builder
     echo "builder ALL=(ALL) NOPASSWD: ALL" >/etc/sudoers.d/builder
-    cp -r /src /home/builder/throcc-src
+    git -c safe.directory=/src clone -q /src /home/builder/throcc-src
     chown -R builder /home/builder/throcc-src
     su builder -c "
         set -euo pipefail
