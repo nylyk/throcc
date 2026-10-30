@@ -14,7 +14,13 @@ docker run --rm -v "$PWD":/src:ro archlinux:latest bash -euo pipefail -c '
         rustup default 1.98.1 >/dev/null
         mkdir -p ../pkg && cp packaging/arch/PKGBUILD ../pkg/
         cd ../pkg
-        THROCC_GIT=\"file:///home/builder/throcc-src#commit=\$(git -C ../throcc-src rev-parse HEAD)\" makepkg -s --noconfirm
+        THROCC_GIT=\"file:///home/builder/throcc-src#commit=\$(git -C ../throcc-src rev-parse HEAD)\" makepkg -s --noconfirm || {
+            echo \"FAIL  makepkg; the bindings build script said:\"
+            cat src/throcc/target/release/build/rusty_ffmpeg-*/stderr | head -40
+            echo \"FAIL  pkg-config said: \$(PKG_CONFIG_PATH=src/ffmpeg/lib/pkgconfig pkg-config --cflags libavformat)\"
+            ls src/ffmpeg/include/libavformat
+            exit 1
+        }
     "
     pacman -U --noconfirm /home/builder/pkg/throcc-*.pkg.tar.zst >/dev/null
     missing=$(ldd /usr/bin/throcc /usr/bin/throcc-cli | grep "not found" || true)
