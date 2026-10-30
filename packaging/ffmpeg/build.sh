@@ -21,6 +21,8 @@ flags=(
     --enable-shared --disable-static --enable-pic
     --disable-programs --disable-doc --disable-debug
     --disable-autodetect --disable-network
+    --disable-filters --disable-indevs --disable-outdevs
+    --disable-muxers --disable-demuxers --disable-protocols
 )
 have() { pkg-config --exists "$1" 2>/dev/null; }
 have dav1d && flags+=(--enable-libdav1d)
