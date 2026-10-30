@@ -100,6 +100,14 @@ const LADDER: &[Candidate] = &[
         options: AMF,
     },
     Candidate {
+        name: c"hevc_mf",
+        codec: Codec::Hevc,
+        input: Input::Nv12,
+        intra_refresh: false,
+        limit: None,
+        options: MEDIA_FOUNDATION,
+    },
+    Candidate {
         name: c"hevc_videotoolbox",
         codec: Codec::Hevc,
         input: Input::Nv12,
@@ -130,6 +138,14 @@ const LADDER: &[Candidate] = &[
         intra_refresh: false,
         limit: None,
         options: AMF,
+    },
+    Candidate {
+        name: c"h264_mf",
+        codec: Codec::H264,
+        input: Input::Nv12,
+        intra_refresh: false,
+        limit: None,
+        options: MEDIA_FOUNDATION,
     },
     Candidate {
         name: c"h264_videotoolbox",
@@ -170,6 +186,11 @@ const QSV_REFRESH: &[(&CStr, &CStr)] = &[
     (c"int_ref_type", c"vertical"),
 ];
 const AMF: &[(&CStr, &CStr)] = &[(c"usage", c"ultralowlatency"), (c"forced_idr", c"1")];
+const MEDIA_FOUNDATION: &[(&CStr, &CStr)] = &[
+    (c"hw_encoding", c"1"),
+    (c"scenario", c"display_remoting"),
+    (c"rate_control", c"cbr"),
+];
 const VIDEOTOOLBOX: &[(&CStr, &CStr)] = &[(c"realtime", c"1"), (c"allow_sw", c"0")];
 
 /// An encoded access unit.
@@ -258,8 +279,20 @@ impl Encoder {
         if std::mem::take(&mut self.idr_next) {
             frame.set_pict_type(ffi::AV_PICTURE_TYPE_I);
         }
-        self.ctx.send_frame(Some(&frame))?;
         let mut units = Vec::new();
+        match self.ctx.send_frame(Some(&frame)) {
+            Err(RsmpegError::SendFrameAgainError) => {
+                self.drain(&mut units)?;
+                self.ctx.send_frame(Some(&frame))?;
+            }
+            sent => sent?,
+        }
+        self.drain(&mut units)?;
+        Ok(units)
+    }
+
+    /// Takes every packet the encoder has ready.
+    fn drain(&mut self, units: &mut Vec<EncodedUnit>) -> Result<(), EncodeError> {
         loop {
             match self.ctx.receive_packet() {
                 Ok(packet) => {
@@ -273,12 +306,11 @@ impl Encoder {
                     });
                 }
                 Err(RsmpegError::EncoderDrainError) | Err(RsmpegError::EncoderFlushedError) => {
-                    break;
+                    return Ok(());
                 }
                 Err(e) => return Err(e.into()),
             }
         }
-        Ok(units)
     }
 }
 

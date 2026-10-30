@@ -1,4 +1,3 @@
-# Builds throcc from git with a private LGPL ffmpeg in /usr/lib/throcc.
 pkgname=throcc
 pkgver=0.1.0
 pkgrel=1

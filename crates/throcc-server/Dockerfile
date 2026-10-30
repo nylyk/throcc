@@ -1,5 +1,4 @@
 # syntax=docker/dockerfile:1
-# Build from the repository root: docker build -f crates/throcc-server/Dockerfile .
 FROM rust:1.98.1-bookworm AS chef
 RUN cargo install cargo-chef --locked --version 0.1.78
 WORKDIR /src

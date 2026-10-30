@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Builds target/macos/throcc.app and throcc.dmg, unsigned (ad hoc), with an LGPL ffmpeg inside.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ffmpeg=${FFMPEG_PREFIX:-target/ffmpeg-lgpl}

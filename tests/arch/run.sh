@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Builds the Arch package from this checkout in a clean Arch container and checks the result.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 docker run --rm -v "$PWD":/src:ro archlinux:latest bash -euo pipefail -c '

@@ -113,3 +113,45 @@ jobs:
           fetch-depth: 0
       - run: ./scripts/ci-run.sh tests/arch/run.sh
         shell: bash
+
+  windows-app:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - run: choco install nasm --no-progress -y
+      - name: dav1d
+        shell: cmd
+        run: |
+          set PATH=C:\Program Files\NASM;%PATH%
+          packaging\windows\build-deps.cmd
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          path-type: inherit
+          install: make diffutils nasm pkgconf git
+      - name: ffmpeg
+        shell: msys2 {0}
+        run: |
+          rm -f /usr/bin/link.exe
+          git clone --depth 1 --branch n13.0.19.0 https://github.com/FFmpeg/nv-codec-headers target/nv-codec-headers
+          make -C target/nv-codec-headers install PREFIX="$(cygpath -m "$PWD/deps")"
+          export PKG_CONFIG_PATH="$(cygpath -m "$PWD/deps/lib/pkgconfig")"
+          ./scripts/ci-run.sh packaging/ffmpeg/build.sh target/ffmpeg-lgpl
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: package
+        shell: pwsh
+        run: packaging\windows\package.ps1
+      - name: video tests
+        shell: pwsh
+        run: |
+          $env:FFMPEG_DLL_PATH = "$PWD\target\ffmpeg-lgpl\lib"
+          $env:FFMPEG_INCLUDE_DIR = "$PWD\target\ffmpeg-lgpl\include"
+          $env:PATH = "$PWD\target\ffmpeg-lgpl\bin;$PWD\deps\bin;$env:PATH"
+          cargo test --release -p throcc-client-core --features ffmpeg --lib video::
+      - uses: actions/upload-artifact@v4
+        with:
+          name: throcc-windows
+          path: target/windows/throcc-windows.zip
+          retention-days: 7

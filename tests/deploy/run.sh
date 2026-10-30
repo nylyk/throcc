@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Builds a static server, installs it with the systemd unit on a clean Debian 12 and checks it runs.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 case "$(docker info --format '{{.Architecture}}')" in

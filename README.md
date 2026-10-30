@@ -73,7 +73,8 @@ Screen sharing needs ffmpeg 8 (`--features ffmpeg`); without it the client still
 
 - macOS: `packaging/macos/bundle.sh` makes `target/macos/throcc.dmg` (needs `brew install dav1d pkgconf`). It isn't signed with a Developer ID yet, so open it the first time with right-click, Open.
 - Arch: `packaging/arch/PKGBUILD` builds from git with a private LGPL ffmpeg in `/usr/lib/throcc` (`makepkg -si` in that directory). `tests/arch/run.sh` builds and installs it in a clean Arch container.
-- CI builds the `.dmg` in the `macos-app` job and keeps it for a week.
+- Windows: from a Visual Studio developer prompt with nasm on `PATH`, `packaging\windows\build-deps.cmd` builds dav1d; then, in an MSYS2 shell that inherits that environment, `packaging/ffmpeg/build.sh target/ffmpeg-lgpl`; then `packaging\windows\package.ps1` makes `target\windows\throcc-windows.zip`. The `windows-app` CI job shows the exact steps.
+- CI builds the `.dmg` (`macos-app`) and the Windows zip (`windows-app`) and keeps them for a week.
 
 ## Screenshots
 

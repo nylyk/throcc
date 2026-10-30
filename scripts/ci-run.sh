@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Runs a command and, if it fails, posts its error lines as one annotation, since job logs need a login.
 set -o pipefail
 "$@" 2>&1 | tee ci-run.log && exit 0
 errors=$(grep -vE "^ *(Compiling|Checking|Downloaded|Downloading|Fresh|Running|Finished) " ci-run.log |
