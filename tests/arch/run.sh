@@ -38,11 +38,12 @@ docker run --rm --platform linux/amd64 -v "$PWD":/src:ro archlinux:latest bash -
     echo "  ok    ffmpeg has the VP9 software fallback"
     throcc-cli --help >/dev/null
     echo "  ok    throcc-cli runs"
-    pacman -S --noconfirm --needed sway vulkan-swrast >/dev/null
+    pacman -S --noconfirm --needed sway vulkan-swrast ttf-dejavu >/dev/null
+    cp /usr/bin/sway /usr/local/bin/sway-nocaps
     su builder -c "
         export XDG_RUNTIME_DIR=/tmp/xdg-builder WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman
         mkdir -p -m 700 \$XDG_RUNTIME_DIR
-        sway -c /dev/null >/tmp/sway.log 2>&1 &
+        sway-nocaps -c /dev/null >/tmp/sway.log 2>&1 &
         sleep 3
         export WAYLAND_DISPLAY=\$(ls \$XDG_RUNTIME_DIR | grep -E \"^wayland-[0-9]+\$\" | head -1)
         WAYLAND_DEBUG=1 timeout 15 throcc --mock >/tmp/throcc.log 2>&1 || true
