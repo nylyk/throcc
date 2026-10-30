@@ -14,7 +14,7 @@ use throcc_client_core::media::audio::VoiceSettings;
 use throcc_client_core::media::devices;
 use throcc_client_core::state::{Preset, State};
 use throcc_proto::Fingerprint;
-use throcc_proto::ids::{Hash, Role, UserId};
+use throcc_proto::ids::{Hash, Role, RoomId, UserId};
 use throcc_proto::invite::{self, InviteCode};
 use throcc_proto::messages::User;
 
@@ -68,6 +68,10 @@ pub enum Dialog {
         actual: Fingerprint,
     },
     NewRoom,
+    EditRoom {
+        room: RoomId,
+        confirm_delete: bool,
+    },
 }
 
 fn known_servers() -> Vec<(String, Fingerprint)> {
@@ -114,7 +118,11 @@ impl ThroccApp {
             cx.subscribe_in(&code, window, Self::on_code_input),
             cx.subscribe_in(&room_name, window, |app, _, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
-                    app.create_room(cx);
+                    match app.dialog {
+                        Some(Dialog::NewRoom) => app.create_room(cx),
+                        Some(Dialog::EditRoom { .. }) => app.rename_room(cx),
+                        _ => {}
+                    }
                 }
             }),
         ];
@@ -264,6 +272,36 @@ impl ThroccApp {
             return;
         }
         self.command(Command::CreateRoom(name));
+        self.dialog = None;
+        cx.notify();
+    }
+
+    pub fn open_edit_room(&mut self, room: RoomId, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self
+            .state
+            .room(room)
+            .map(|r| r.name.clone())
+            .unwrap_or_default();
+        self.room_name.update(cx, |s, cx| {
+            s.set_value(name, window, cx);
+            s.focus(window, cx);
+        });
+        self.dialog = Some(Dialog::EditRoom {
+            room,
+            confirm_delete: false,
+        });
+        cx.notify();
+    }
+
+    pub fn rename_room(&mut self, cx: &mut Context<Self>) {
+        let Some(Dialog::EditRoom { room, .. }) = self.dialog else {
+            return;
+        };
+        let name = self.room_name.read(cx).value().trim().to_owned();
+        let unchanged = self.state.room(room).is_some_and(|r| r.name == name);
+        if !name.is_empty() && !unchanged {
+            self.command(Command::RenameRoom(room, name));
+        }
         self.dialog = None;
         cx.notify();
     }
@@ -432,6 +470,18 @@ impl ThroccApp {
             "keychange" => self.dialog = Some(Dialog::Verify(UserId(3))),
             "settings" => self.screen = Screen::Settings(SettingsPage::Audio),
             "newroom" => self.dialog = Some(Dialog::NewRoom),
+            "editroom" => {
+                self.dialog = Some(Dialog::EditRoom {
+                    room: throcc_proto::ids::RoomId(1),
+                    confirm_delete: false,
+                })
+            }
+            "deleteroom" => {
+                self.dialog = Some(Dialog::EditRoom {
+                    room: throcc_proto::ids::RoomId(1),
+                    confirm_delete: true,
+                })
+            }
             "profile" => {
                 self.screen = Screen::Settings(SettingsPage::Profile);
                 joined(self);

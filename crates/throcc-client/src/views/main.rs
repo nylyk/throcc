@@ -2,8 +2,8 @@ use gpui::{
     AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
-use gpui_component::Disableable;
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
+use gpui_component::{Disableable, Sizable, Size};
 use throcc_client_core::client::Command;
 use throcc_client_core::state::{Person, Preset, State, share_label};
 use throcc_proto::ids::{RoomId, UserId};
@@ -46,6 +46,7 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
         .as_ref()
         .map_or("server".to_owned(), |s| s.address.clone());
     let current_room = state.current.as_ref().map(|c| c.room);
+    let manages = app.manages_rooms();
     let rooms = state.rooms.iter().map(|room| {
         let people = people_in(&state, room.id);
         let sharing = people.iter().any(|(_, p)| p.sharing.is_some());
@@ -76,6 +77,14 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                     )
                     .children(sharing.then(live_badge))
                     .children((!people.is_empty()).then(|| caption(people.len().to_string())))
+                    .children(manages.then(|| {
+                        ghost_icon(("edit-room", id.0 as usize), "pencil", "Edit room")
+                            .with_size(Size::Small)
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                cx.stop_propagation();
+                                app.open_edit_room(id, window, cx);
+                            }))
+                    }))
                     .on_click(
                         cx.listener(move |app, _, _, _| app.command(Command::Join(Some(id)))),
                     ),

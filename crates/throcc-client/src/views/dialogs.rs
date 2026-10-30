@@ -6,6 +6,7 @@ use gpui_component::input::Input;
 use gpui_component::switch::Switch;
 use throcc_client_core::client::Command;
 use throcc_client_core::state::Preset;
+use throcc_proto::ids::RoomId;
 use throcc_proto::messages::Codec;
 
 use super::common::{caption, card, danger, mono, primary, secondary, section, title};
@@ -34,6 +35,10 @@ pub fn render(
             actual,
         } => pin_mismatch(&address, expected, actual, cx),
         Dialog::NewRoom => new_room(app, cx),
+        Dialog::EditRoom {
+            room,
+            confirm_delete,
+        } => edit_room(app, room, confirm_delete, cx),
     };
     let _ = window;
     div()
@@ -73,6 +78,86 @@ fn new_room(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .child(
                     primary("create-room", "Create")
                         .on_click(cx.listener(|app, _, _, cx| app.create_room(cx))),
+                ),
+        )
+        .into_any_element()
+}
+
+fn edit_room(
+    app: &mut ThroccApp,
+    room: RoomId,
+    confirm_delete: bool,
+    cx: &mut Context<ThroccApp>,
+) -> AnyElement {
+    let name = app
+        .state
+        .room(room)
+        .map_or_else(|| "this room".to_owned(), |r| r.name.clone());
+    if confirm_delete {
+        let occupied = app.state.occupants(room).next().is_some();
+        return div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(title(format!("Delete {name}?")))
+            .child(caption(if occupied {
+                "Everyone in it goes back to the lobby. This can't be undone."
+            } else {
+                "This can't be undone."
+            }))
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(secondary("keep-room", "Cancel").on_click(cx.listener(
+                        move |app, _, _, cx| {
+                            app.dialog = Some(Dialog::EditRoom {
+                                room,
+                                confirm_delete: false,
+                            });
+                            cx.notify();
+                        },
+                    )))
+                    .child(
+                        danger("delete-room", format!("Delete {name}")).on_click(cx.listener(
+                            move |app, _, _, cx| {
+                                app.command(Command::DeleteRoom(room));
+                                app.dialog = None;
+                                cx.notify();
+                            },
+                        )),
+                    ),
+            )
+            .into_any_element();
+    }
+    div()
+        .flex()
+        .flex_col()
+        .gap_4()
+        .child(title("Edit room"))
+        .child(Input::new(&app.room_name))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    danger("ask-delete-room", "Delete room").on_click(cx.listener(
+                        move |app, _, _, cx| {
+                            app.dialog = Some(Dialog::EditRoom {
+                                room,
+                                confirm_delete: true,
+                            });
+                            cx.notify();
+                        },
+                    )),
+                )
+                .child(div().flex_1())
+                .child(close_button(cx))
+                .child(
+                    primary("rename-room", "Save")
+                        .on_click(cx.listener(|app, _, _, cx| app.rename_room(cx))),
                 ),
         )
         .into_any_element()
