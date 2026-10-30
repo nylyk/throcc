@@ -14,7 +14,7 @@ use throcc_client_core::media::audio::VoiceSettings;
 use throcc_client_core::media::devices;
 use throcc_client_core::state::{Preset, State};
 use throcc_proto::Fingerprint;
-use throcc_proto::ids::{Hash, UserId};
+use throcc_proto::ids::{Hash, Role, UserId};
 use throcc_proto::invite::{self, InviteCode};
 use throcc_proto::messages::User;
 
@@ -67,6 +67,7 @@ pub enum Dialog {
         expected: Fingerprint,
         actual: Fingerprint,
     },
+    NewRoom,
 }
 
 fn known_servers() -> Vec<(String, Fingerprint)> {
@@ -83,6 +84,7 @@ pub struct ThroccApp {
     pub address: Entity<InputState>,
     pub code: Entity<InputState>,
     pub name: Entity<InputState>,
+    pub room_name: Entity<InputState>,
     pub pictures: std::collections::HashMap<Hash, Arc<RenderImage>>,
     pub joining: bool,
     pub join_error: Option<String>,
@@ -107,7 +109,15 @@ impl ThroccApp {
         let address = cx.new(|cx| InputState::new(window, cx).placeholder("voice.example.net"));
         let code = cx.new(|cx| InputState::new(window, cx).placeholder("K7Q-M2XPD"));
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Your name"));
-        let subscriptions = vec![cx.subscribe_in(&code, window, Self::on_code_input)];
+        let room_name = cx.new(|cx| InputState::new(window, cx).placeholder("Room name"));
+        let subscriptions = vec![
+            cx.subscribe_in(&code, window, Self::on_code_input),
+            cx.subscribe_in(&room_name, window, |app, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    app.create_room(cx);
+                }
+            }),
+        ];
         let known_servers = if mock { Vec::new() } else { known_servers() };
         let (inputs, outputs) = devices::list();
         let mut app = Self {
@@ -118,6 +128,7 @@ impl ThroccApp {
             address,
             code,
             name,
+            room_name,
             pictures: std::collections::HashMap::new(),
             joining: false,
             join_error: None,
@@ -231,6 +242,30 @@ impl ThroccApp {
         let picture = crate::avatar::decode(&self.client.as_ref()?.avatar(hash)?)?;
         self.pictures.insert(hash, picture.clone());
         Some(picture)
+    }
+
+    /// Whether we may create, rename and delete rooms.
+    pub fn manages_rooms(&self) -> bool {
+        matches!(self.state.role, Some(Role::Admin | Role::Manager))
+    }
+
+    pub fn open_new_room(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.room_name.update(cx, |s, cx| {
+            s.set_value("", window, cx);
+            s.focus(window, cx);
+        });
+        self.dialog = Some(Dialog::NewRoom);
+        cx.notify();
+    }
+
+    pub fn create_room(&mut self, cx: &mut Context<Self>) {
+        let name = self.room_name.read(cx).value().trim().to_owned();
+        if name.is_empty() {
+            return;
+        }
+        self.command(Command::CreateRoom(name));
+        self.dialog = None;
+        cx.notify();
     }
 
     /// Puts our current name in the profile page's name field.
@@ -396,6 +431,7 @@ impl ThroccApp {
             "verify" => self.dialog = Some(Dialog::Verify(UserId(2))),
             "keychange" => self.dialog = Some(Dialog::Verify(UserId(3))),
             "settings" => self.screen = Screen::Settings(SettingsPage::Audio),
+            "newroom" => self.dialog = Some(Dialog::NewRoom),
             "profile" => {
                 self.screen = Screen::Settings(SettingsPage::Profile);
                 joined(self);

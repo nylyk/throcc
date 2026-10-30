@@ -136,7 +136,19 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(div().px_2().py_1().child(section("Rooms")))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .pl_2()
+                        .child(section("Rooms"))
+                        .children(app.manages_rooms().then(|| {
+                            ghost_icon("new-room", "plus", "New room").on_click(
+                                cx.listener(|app, _, window, cx| app.open_new_room(window, cx)),
+                            )
+                        })),
+                )
                 .children(rooms)
                 .children(
                     state
@@ -265,6 +277,7 @@ fn occupant(
 
 fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
     let pictures = app.pictures_of_people();
+    let manages = app.manages_rooms();
     let state = app.state.clone();
     let cards = state.rooms.iter().map(|room| {
         let people = people_in(&state, room.id);
@@ -329,9 +342,11 @@ fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
         ))
         .child(div().flex().flex_wrap().gap_4().children(cards))
         .children(state.rooms.is_empty().then(|| {
-            card().child(caption(
-                "There are no rooms yet. A manager or admin can create one in Settings, Members.",
-            ))
+            card().child(caption(if manages {
+                "There are no rooms yet. Create one with + next to Rooms."
+            } else {
+                "There are no rooms yet. A manager or admin can create one."
+            }))
         }))
 }
 

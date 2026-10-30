@@ -2,6 +2,7 @@ use gpui::{
     AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
+use gpui_component::input::Input;
 use gpui_component::switch::Switch;
 use throcc_client_core::client::Command;
 use throcc_client_core::state::Preset;
@@ -32,6 +33,7 @@ pub fn render(
             expected,
             actual,
         } => pin_mismatch(&address, expected, actual, cx),
+        Dialog::NewRoom => new_room(app, cx),
     };
     let _ = window;
     div()
@@ -51,6 +53,27 @@ pub fn render(
                 .border_color(theme::border_strong())
                 .p_6()
                 .child(body),
+        )
+        .into_any_element()
+}
+
+fn new_room(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_4()
+        .child(title("New room"))
+        .child(Input::new(&app.room_name))
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap_2()
+                .child(close_button(cx))
+                .child(
+                    primary("create-room", "Create")
+                        .on_click(cx.listener(|app, _, _, cx| app.create_room(cx))),
+                ),
         )
         .into_any_element()
 }
