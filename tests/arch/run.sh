@@ -34,5 +34,17 @@ docker run --rm --platform linux/amd64 -v "$PWD":/src:ro archlinux:latest bash -
     echo "  ok    ffmpeg is LGPL"
     throcc-cli --help >/dev/null
     echo "  ok    throcc-cli runs"
+    pacman -S --noconfirm --needed weston vulkan-swrast >/dev/null
+    export XDG_RUNTIME_DIR=/tmp/xdg
+    mkdir -p -m 700 "$XDG_RUNTIME_DIR"
+    weston --backend=headless --socket=wayland-test >/tmp/weston.log 2>&1 &
+    sleep 3
+    WAYLAND_DISPLAY=wayland-test WAYLAND_DEBUG=1 timeout 15 throcc --mock >/tmp/throcc.log 2>&1 || true
+    if ! grep -Eq "xdg_toplevel(#[0-9]+)?\.set_title\(\"throcc\"\)" /tmp/throcc.log; then
+        echo "FAIL  no Wayland window"
+        grep -v "^\[" /tmp/throcc.log | tail -20
+        exit 1
+    fi
+    echo "  ok    the app opens a Wayland window"
     echo "all checks passed"
 '

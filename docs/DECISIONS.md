@@ -268,3 +268,7 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 - **ffmpeg builds live in `deps/`, outside `target/`, and are cached**: on macOS keyed on the build script and Homebrew's dav1d version, on Windows (with dav1d, the NVIDIA headers and the generated bindings) keyed on the build scripts.
 - **ffmpeg is patched** (`packaging/ffmpeg/patches/`): in 8.1.3 a Media Foundation encoder that finds no hardware MFT shuts Media Foundation down and uninitialises COM on its error path, then `mf_close` does both again. The patch frees only when an MFT was created, and should go upstream.
 - **Media Foundation encoders are tried only when Media Foundation lists a hardware encoder** (`media/video/media_foundation.rs`, `MFTEnumEx` with the hardware flag). With none, ffmpeg's `hevc_mf` still crashed the process on the GPU-less Windows runner even with the patch, as an access violation or heap corruption, and the cause inside ffmpeg is not found.
+
+## 2026-10-31 Linux window backend
+
+- **The client enables gpui's `wayland` backend only.** gpui's Linux windowing backends are opt-in features; without one it starts headless and shows no window, which the first Arch install did. X11 is left out by the human's choice. `tests/arch/run.sh` starts the installed app under a headless Weston with `WAYLAND_DEBUG=1` and checks it creates a toplevel titled "throcc".
