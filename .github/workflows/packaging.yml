@@ -87,7 +87,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
       - id: deps
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: deps
           key: windows-deps-nv13.0.19.0-${{ hashFiles('packaging/ffmpeg/build.sh', 'packaging/ffmpeg/bindings.sh', 'packaging/windows/build-deps.sh') }}
@@ -123,20 +123,25 @@ jobs:
           export PATH="$(dirname "$(command -v cl)"):$PATH"
           ./scripts/ci-run.sh cargo install bindgen-cli --version 0.72.1 --locked
           ./scripts/ci-run.sh packaging/ffmpeg/bindings.sh deps/ffmpeg-lgpl deps/ffmpeg-lgpl/binding.rs
+      - if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: deps
+          key: ${{ steps.deps.outputs.cache-primary-key }}
       - name: package
         shell: bash
         run: |
           export PATH="$(dirname "$(command -v cl)"):$PATH"
           ./scripts/ci-run.sh pwsh -NoProfile -File packaging/windows/package.ps1
-      - name: video tests
-        shell: pwsh
-        run: |
-          $env:FFMPEG_DLL_PATH = "$PWD\deps\ffmpeg-lgpl\bin"
-          $env:FFMPEG_BINDING_PATH = "$PWD\deps\ffmpeg-lgpl\binding.rs"
-          $env:PATH = "$PWD\deps\ffmpeg-lgpl\bin;$PWD\deps\bin;$env:PATH"
-          cargo test --release -p throcc-client-core --features ffmpeg --lib video::
       - uses: actions/upload-artifact@v4
         with:
           name: throcc-windows
           path: target/windows/throcc-windows.zip
           retention-days: 7
+      - name: video tests
+        shell: bash
+        run: |
+          export PATH="$(dirname "$(command -v cl)"):$PWD/deps/ffmpeg-lgpl/bin:$PWD/deps/bin:$PATH"
+          export FFMPEG_DLL_PATH="$(cygpath -w "$PWD/deps/ffmpeg-lgpl/bin")"
+          export FFMPEG_BINDING_PATH="$(cygpath -w "$PWD/deps/ffmpeg-lgpl/binding.rs")"
+          ./scripts/ci-run.sh cargo test --release -p throcc-client-core --features ffmpeg --lib video::
