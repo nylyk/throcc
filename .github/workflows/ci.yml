@@ -147,8 +147,10 @@ jobs:
           ./scripts/ci-run.sh cargo install bindgen-cli --version 0.72.1 --locked
           ./scripts/ci-run.sh packaging/ffmpeg/bindings.sh target/ffmpeg-lgpl target/ffmpeg-lgpl/binding.rs
       - name: package
-        shell: pwsh
-        run: packaging\windows\package.ps1
+        shell: bash
+        run: |
+          export PATH="$(dirname "$(command -v cl)"):$PATH"
+          ./scripts/ci-run.sh pwsh -NoProfile -File packaging/windows/package.ps1
       - name: video tests
         shell: pwsh
         run: |
