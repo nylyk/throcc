@@ -25,10 +25,13 @@ mod tests {
             fps: 30,
             kbps: 4000,
         };
+        // SAFETY: setting ffmpeg's global log level has no other effect.
+        unsafe { rsmpeg::ffi::av_log_set_level(rsmpeg::ffi::AV_LOG_VERBOSE as i32) };
         let Ok(mut encoder) = Encoder::open(config) else {
             eprintln!("no hardware video encoder here; skipping");
             return;
         };
+        eprintln!("opened {}", encoder.name());
         let mut decoder = Decoder::new(encoder.codec()).unwrap();
         let mut shown = Vec::new();
         let mut keyframes = Vec::new();
@@ -78,10 +81,13 @@ mod tests {
             fps: 30,
             kbps: 4000,
         };
+        // SAFETY: setting ffmpeg's global log level has no other effect.
+        unsafe { rsmpeg::ffi::av_log_set_level(rsmpeg::ffi::AV_LOG_VERBOSE as i32) };
         let Ok(mut encoder) = Encoder::open(config) else {
             eprintln!("no hardware video encoder here; skipping");
             return;
         };
+        eprintln!("opened {}", encoder.name());
         let mut decoder = Decoder::new(encoder.codec()).unwrap();
         let mut last = None;
         for (n, (width, height)) in [
