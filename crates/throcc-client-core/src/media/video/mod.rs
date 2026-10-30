@@ -3,6 +3,8 @@ pub mod decode;
 #[cfg(feature = "ffmpeg")]
 pub mod encode;
 pub mod frame;
+#[cfg(windows)]
+pub mod media_foundation;
 
 use std::sync::Arc;
 
@@ -25,8 +27,6 @@ mod tests {
             fps: 30,
             kbps: 4000,
         };
-        // SAFETY: setting ffmpeg's global log level has no other effect.
-        unsafe { rsmpeg::ffi::av_log_set_level(rsmpeg::ffi::AV_LOG_VERBOSE as i32) };
         let Ok(mut encoder) = Encoder::open(config) else {
             eprintln!("no hardware video encoder here; skipping");
             return;
@@ -81,8 +81,6 @@ mod tests {
             fps: 30,
             kbps: 4000,
         };
-        // SAFETY: setting ffmpeg's global log level has no other effect.
-        unsafe { rsmpeg::ffi::av_log_set_level(rsmpeg::ffi::AV_LOG_VERBOSE as i32) };
         let Ok(mut encoder) = Encoder::open(config) else {
             eprintln!("no hardware video encoder here; skipping");
             return;

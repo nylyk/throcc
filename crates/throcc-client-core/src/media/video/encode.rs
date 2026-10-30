@@ -230,6 +230,10 @@ impl Encoder {
             let Some(codec) = AVCodec::find_encoder_by_name(candidate.name) else {
                 continue;
             };
+            #[cfg(windows)]
+            if !media_foundation_ready(candidate) {
+                continue;
+            }
             match open_candidate(&codec, candidate, config) {
                 Ok(ctx) => {
                     let name = candidate.name.to_str().unwrap_or("encoder");
@@ -429,6 +433,18 @@ fn fill_black(frame: &mut AVFrame, input: Input, height: usize) {
                 rows * frame.linesize[plane] as usize,
             );
         }
+    }
+}
+
+/// ffmpeg 8.1.3's Media Foundation encoders crash the process when no hardware encoder
+/// exists, so they are tried only once Media Foundation lists one.
+#[cfg(windows)]
+fn media_foundation_ready(candidate: &Candidate) -> bool {
+    use super::media_foundation::{MfCodec, has_hardware_encoder};
+    match candidate.name.to_bytes() {
+        b"hevc_mf" => has_hardware_encoder(MfCodec::Hevc),
+        b"h264_mf" => has_hardware_encoder(MfCodec::H264),
+        _ => true,
     }
 }
 
