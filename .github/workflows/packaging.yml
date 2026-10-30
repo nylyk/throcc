@@ -144,4 +144,4 @@ jobs:
           export PATH="$(dirname "$(command -v cl)"):$PWD/deps/ffmpeg-lgpl/bin:$PWD/deps/bin:$PATH"
           export FFMPEG_DLL_PATH="$(cygpath -w "$PWD/deps/ffmpeg-lgpl/bin")"
           export FFMPEG_BINDING_PATH="$(cygpath -w "$PWD/deps/ffmpeg-lgpl/binding.rs")"
-          ./scripts/ci-run.sh cargo test --release -p throcc-client-core --features ffmpeg --lib video::
+          ./scripts/ci-run.sh cargo test --release -p throcc-client-core --features ffmpeg --lib video:: -- --test-threads=1 --nocapture
