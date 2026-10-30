@@ -29,7 +29,7 @@ flags=(
 )
 have() { pkg-config --exists "$1" 2>/dev/null; }
 have dav1d && flags+=(--enable-libdav1d)
-have openh264 && flags+=(--enable-libopenh264)
+have vpx && flags+=(--enable-libvpx)
 case "$(uname -s)" in
     Darwin)
         flags+=(--enable-videotoolbox)

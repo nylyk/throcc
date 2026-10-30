@@ -57,9 +57,9 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
-      - run: brew install dav1d pkgconf
+      - run: brew install dav1d libvpx pkgconf
       - id: dav1d
-        run: echo "version=$(brew list --versions dav1d | tr ' ' '-')" >>"$GITHUB_OUTPUT"
+        run: echo "version=$(brew list --versions dav1d libvpx | tr ' \n' '--')" >>"$GITHUB_OUTPUT"
       - uses: actions/cache@v4
         with:
           path: deps/ffmpeg-lgpl

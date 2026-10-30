@@ -71,7 +71,7 @@ Screen sharing needs ffmpeg 8 (`--features ffmpeg`); without it the client still
 
 `packaging/ffmpeg/build.sh <prefix>` builds the LGPL ffmpeg the packages ship with.
 
-- macOS: `packaging/macos/bundle.sh` makes `target/macos/throcc.dmg` (needs `brew install dav1d pkgconf`). It isn't signed with a Developer ID yet, so open it the first time with right-click, Open.
+- macOS: `packaging/macos/bundle.sh` makes `target/macos/throcc.dmg` (needs `brew install dav1d libvpx pkgconf`). It isn't signed with a Developer ID yet, so open it the first time with right-click, Open.
 - Arch: `packaging/arch/PKGBUILD` builds from git with a private LGPL ffmpeg in `/usr/lib/throcc` (`makepkg -si` in that directory). `tests/arch/run.sh` builds and installs it in a clean Arch container.
 - Windows: from a Visual Studio developer prompt with nasm on `PATH`, `packaging/windows/build-deps.sh` (in Git Bash) builds dav1d; then, in an MSYS2 shell that inherits that environment, `packaging/ffmpeg/build.sh deps/ffmpeg-lgpl` and `packaging/ffmpeg/bindings.sh deps/ffmpeg-lgpl deps/ffmpeg-lgpl/binding.rs`; then `packaging\windows\package.ps1` makes `target\windows\throcc-windows.zip`. The `windows-app` job in `.github/workflows/packaging.yml` shows the exact steps.
 - The `packaging` workflow builds the `.dmg`, the Windows zip, the Arch package and the static servers on tags, when packaging files change, weekly, or by hand, and keeps the files for a week.

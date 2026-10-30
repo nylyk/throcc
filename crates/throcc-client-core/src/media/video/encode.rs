@@ -47,8 +47,6 @@ struct Candidate {
     codec: Codec,
     input: Input,
     intra_refresh: bool,
-    /// Largest picture the encoder is used for, as (pixels, fps).
-    limit: Option<(usize, u32)>,
     options: &'static [(&'static CStr, &'static CStr)],
     /// Takes frames in VA-API surfaces, uploaded from the NV12 picture.
     vaapi: bool,
@@ -60,7 +58,6 @@ const LADDER: &[Candidate] = &[
         codec: Codec::Av1,
         input: Input::Nv12,
         intra_refresh: true,
-        limit: None,
         options: NVENC,
         vaapi: false,
     },
@@ -69,7 +66,6 @@ const LADDER: &[Candidate] = &[
         codec: Codec::Av1,
         input: Input::Nv12,
         intra_refresh: false,
-        limit: None,
         options: VAAPI,
         vaapi: true,
     },
@@ -78,7 +74,6 @@ const LADDER: &[Candidate] = &[
         codec: Codec::Hevc,
         input: Input::Nv12,
         intra_refresh: true,
-        limit: None,
         options: NVENC,
         vaapi: false,
     },
@@ -87,7 +82,6 @@ const LADDER: &[Candidate] = &[
         codec: Codec::Hevc,
         input: Input::Nv12,
         intra_refresh: false,
-        limit: None,
         options: MEDIA_FOUNDATION,
         vaapi: false,
     },
@@ -96,7 +90,6 @@ const LADDER: &[Candidate] = &[
         codec: Codec::Hevc,
         input: Input::Nv12,
         intra_refresh: false,
-        limit: None,
         options: VAAPI,
         vaapi: true,
     },
@@ -105,7 +98,6 @@ const LADDER: &[Candidate] = &[
         codec: Codec::Hevc,
         input: Input::Nv12,
         intra_refresh: false,
-        limit: None,
         options: VIDEOTOOLBOX,
         vaapi: false,
     },
@@ -114,7 +106,6 @@ const LADDER: &[Candidate] = &[
         codec: Codec::H264,
         input: Input::Nv12,
         intra_refresh: true,
-        limit: None,
         options: NVENC,
         vaapi: false,
     },
@@ -123,7 +114,6 @@ const LADDER: &[Candidate] = &[
         codec: Codec::H264,
         input: Input::Nv12,
         intra_refresh: false,
-        limit: None,
         options: MEDIA_FOUNDATION,
         vaapi: false,
     },
@@ -132,7 +122,6 @@ const LADDER: &[Candidate] = &[
         codec: Codec::H264,
         input: Input::Nv12,
         intra_refresh: false,
-        limit: None,
         options: VAAPI,
         vaapi: true,
     },
@@ -141,17 +130,15 @@ const LADDER: &[Candidate] = &[
         codec: Codec::H264,
         input: Input::Nv12,
         intra_refresh: false,
-        limit: None,
         options: VIDEOTOOLBOX,
         vaapi: false,
     },
     Candidate {
-        name: c"libopenh264",
-        codec: Codec::H264,
+        name: c"libvpx-vp9",
+        codec: Codec::Vp9,
         input: Input::Yuv420p,
         intra_refresh: false,
-        limit: Some((1920 * 1080, 30)),
-        options: &[(c"allow_skip_frames", c"1")],
+        options: LIBVPX,
         vaapi: false,
     },
 ];
@@ -173,6 +160,14 @@ const MEDIA_FOUNDATION: &[(&CStr, &CStr)] = &[
 /// Surfaces in a VA-API encoder's pool: enough for the frames it holds plus one uploading.
 const VAAPI_SURFACES: i32 = 8;
 const VAAPI: &[(&CStr, &CStr)] = &[(c"rc_mode", c"CBR"), (c"async_depth", c"1")];
+const LIBVPX: &[(&CStr, &CStr)] = &[
+    (c"deadline", c"realtime"),
+    (c"cpu-used", c"8"),
+    (c"lag-in-frames", c"0"),
+    (c"row-mt", c"1"),
+    (c"tune-content", c"screen"),
+    (c"threads", c"auto"),
+];
 const VIDEOTOOLBOX: &[(&CStr, &CStr)] = &[(c"realtime", c"1"), (c"allow_sw", c"0")];
 
 /// An encoded access unit.
@@ -183,8 +178,9 @@ pub struct EncodedUnit {
     pub timestamp: u32,
 }
 
-/// A low-latency hardware video encoder: no B-frames, no lookahead, a VBV of about two
-/// frames, and recovery by intra refresh where the encoder has it, else by IDR.
+/// A low-latency video encoder, hardware where there is one: no B-frames, no lookahead,
+/// a VBV of about two frames, and recovery by intra refresh where the encoder has it,
+/// else by IDR.
 pub struct Encoder {
     ctx: AVCodecContext,
     codec: Codec,
@@ -200,40 +196,40 @@ pub struct Encoder {
 }
 
 impl Encoder {
-    /// Opens the best encoder that works here, in the order AV1, HEVC, H.264.
+    /// Opens the best encoder that works here: hardware AV1, HEVC, then H.264, then VP9 in
+    /// software.
     pub fn open(config: EncoderConfig) -> Result<Self, EncodeError> {
-        let pixels = config.width * config.height;
-        for candidate in LADDER {
-            if candidate
-                .limit
-                .is_some_and(|(max_pixels, max_fps)| pixels > max_pixels || config.fps > max_fps)
-            {
-                continue;
+        LADDER
+            .iter()
+            .find_map(|candidate| Self::open_with(candidate, config))
+            .ok_or(EncodeError::NoEncoder)
+    }
+
+    /// The encoder `candidate` names, if this ffmpeg has it and it opens here.
+    fn open_with(candidate: &Candidate, config: EncoderConfig) -> Option<Self> {
+        let codec = AVCodec::find_encoder_by_name(candidate.name)?;
+        match open_candidate(&codec, candidate, config) {
+            Ok(ctx) => {
+                let name = candidate.name.to_str().unwrap_or("encoder");
+                info!(encoder = name, "video encoder ready");
+                Some(Self {
+                    ctx,
+                    codec: candidate.codec,
+                    name,
+                    input: candidate.input,
+                    intra_refresh: candidate.intra_refresh,
+                    vaapi: candidate.vaapi,
+                    width: config.width,
+                    height: config.height,
+                    idr_next: true,
+                    scaler: None,
+                })
             }
-            let Some(codec) = AVCodec::find_encoder_by_name(candidate.name) else {
-                continue;
-            };
-            match open_candidate(&codec, candidate, config) {
-                Ok(ctx) => {
-                    let name = candidate.name.to_str().unwrap_or("encoder");
-                    info!(encoder = name, "video encoder ready");
-                    return Ok(Self {
-                        ctx,
-                        codec: candidate.codec,
-                        name,
-                        input: candidate.input,
-                        intra_refresh: candidate.intra_refresh,
-                        vaapi: candidate.vaapi,
-                        width: config.width,
-                        height: config.height,
-                        idr_next: true,
-                        scaler: None,
-                    });
-                }
-                Err(e) => debug!(encoder = ?candidate.name, "unusable: {e}"),
+            Err(e) => {
+                debug!(encoder = ?candidate.name, "unusable: {e}");
+                None
             }
         }
-        Err(EncodeError::NoEncoder)
     }
 
     pub fn codec(&self) -> Codec {
@@ -470,6 +466,10 @@ fn open_candidate(
     for (key, value) in common.into_iter().chain(candidate.options.iter().copied()) {
         set_option(&mut ctx, key, value)?;
     }
+    // libvpx runs constant bitrate only when the minimum rate equals the bitrate.
+    if candidate.codec == Codec::Vp9 {
+        set_option(&mut ctx, c"minrate", &maxrate)?;
+    }
     // rsmpeg 0.18 frees an options dictionary twice when opening fails after ffmpeg has
     // replaced it, which crashes the process; the options go straight onto the context.
     ctx.open(None)?;
@@ -573,5 +573,54 @@ mod failed_open {
             };
             assert!(open_candidate(&codec, candidate, config).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod vp9 {
+    use super::super::decode::Decoder;
+    use super::super::frame::{VideoFrame, luma_psnr};
+    use super::*;
+
+    #[test]
+    fn the_software_fallback_round_trips_through_vp9() {
+        let Some(candidate) = LADDER.iter().find(|c| c.name == c"libvpx-vp9") else {
+            return;
+        };
+        let config = EncoderConfig {
+            width: 1280,
+            height: 720,
+            fps: 30,
+            kbps: 3000,
+        };
+        let Some(mut encoder) = Encoder::open_with(candidate, config) else {
+            eprintln!("this ffmpeg has no libvpx; skipping");
+            return;
+        };
+        let mut decoder = Decoder::new(Codec::Vp9).unwrap();
+        let started = std::time::Instant::now();
+        let mut shown = Vec::new();
+        for n in 0..60u16 {
+            let input = VideoFrame::test_pattern(1280, 720, n, u32::from(n) * 3000);
+            for unit in encoder.encode(&input).unwrap() {
+                if let Some(output) = decoder.decode(&unit.data, unit.timestamp).unwrap() {
+                    let number = output.read_test_number();
+                    let psnr = luma_psnr(&output, &VideoFrame::test_pattern(1280, 720, number, 0));
+                    shown.push((number, psnr));
+                }
+            }
+        }
+        let per_frame = started.elapsed() / 60;
+        eprintln!(
+            "libvpx-vp9: {} frames shown, {per_frame:?} a frame",
+            shown.len()
+        );
+        assert!(
+            shown.len() >= 55,
+            "only {} of 60 frames came out",
+            shown.len()
+        );
+        let worst = shown.iter().map(|(_, p)| *p).fold(f64::INFINITY, f64::min);
+        assert!(worst > 25.0, "picture quality {worst:.1} dB");
     }
 }

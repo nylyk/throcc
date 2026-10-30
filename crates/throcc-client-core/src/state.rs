@@ -154,6 +154,7 @@ pub fn share_label(config: &ShareConfig) -> String {
         Codec::Av1 => "AV1",
         Codec::Hevc => "HEVC",
         Codec::H264 => "H.264",
+        Codec::Vp9 => "VP9",
     };
     format!("{}p{} · {codec}", config.height, config.fps)
 }

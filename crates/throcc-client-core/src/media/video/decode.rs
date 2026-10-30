@@ -24,6 +24,7 @@ fn decoders(codec: Codec) -> &'static [&'static CStr] {
         Codec::Av1 => &[c"libdav1d", c"av1"],
         Codec::Hevc => &[c"hevc"],
         Codec::H264 => &[c"h264"],
+        Codec::Vp9 => &[c"vp9"],
     }
 }
 

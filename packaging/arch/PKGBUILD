@@ -5,7 +5,7 @@ pkgdesc='Self-hosted voice and screen share, end-to-end encrypted'
 arch=('x86_64' 'aarch64')
 url='https://github.com/nylyk/throcc'
 license=('AGPL-3.0-or-later' 'LGPL-2.1-or-later')
-depends=('alsa-lib' 'dav1d' 'dbus' 'fontconfig' 'freetype2' 'gcc-libs' 'glibc' 'libpipewire' 'libva'
+depends=('alsa-lib' 'dav1d' 'dbus' 'fontconfig' 'freetype2' 'gcc-libs' 'glibc' 'libpipewire' 'libva' 'libvpx'
          'libx11' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11' 'vulkan-icd-loader' 'wayland'
          'xdg-desktop-portal')
 makedepends=('clang' 'ffnvcodec-headers' 'git' 'nasm' 'pkgconf' 'rust-bindgen' 'rustup')

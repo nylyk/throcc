@@ -34,6 +34,8 @@ docker run --rm --platform linux/amd64 -v "$PWD":/src:ro archlinux:latest bash -
     echo "  ok    ffmpeg is LGPL"
     grep -aq -- "--enable-vaapi" /usr/lib/throcc/libavcodec.so.* || { echo "FAIL  ffmpeg has no VA-API"; exit 1; }
     echo "  ok    ffmpeg encodes through VA-API"
+    grep -aq -- "--enable-libvpx" /usr/lib/throcc/libavcodec.so.* || { echo "FAIL  ffmpeg has no libvpx"; exit 1; }
+    echo "  ok    ffmpeg has the VP9 software fallback"
     throcc-cli --help >/dev/null
     echo "  ok    throcc-cli runs"
     pacman -S --noconfirm --needed sway vulkan-swrast >/dev/null
