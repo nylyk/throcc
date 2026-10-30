@@ -150,6 +150,8 @@ pub(crate) struct Session {
     /// The video track each watched share is decoded from.
     watched_video: HashMap<UserId, MediaId>,
     watched_audio: HashMap<UserId, MediaId>,
+    /// A picture chosen before our own profile was known.
+    pending_avatar: Option<Option<Hash>>,
     #[cfg(feature = "ffmpeg")]
     sharing: Option<crate::media::share::ShareSender>,
     tracks: HashMap<MediaId, Watched>,
@@ -181,6 +183,7 @@ impl Session {
             watching: Vec::new(),
             watched_video: HashMap::new(),
             watched_audio: HashMap::new(),
+            pending_avatar: None,
             #[cfg(feature = "ffmpeg")]
             sharing: None,
             tracks: HashMap::new(),
@@ -566,7 +569,6 @@ impl Session {
     }
 
     async fn set_avatar(&mut self, picture: Option<Vec<u8>>) {
-        let Some(me) = self.my_person() else { return };
         let avatar = match picture {
             Some(bytes) => {
                 let shared: Arc<[u8]> = bytes.clone().into();
@@ -580,11 +582,25 @@ impl Session {
             }
             None => None,
         };
-        self.simple(Request::SetProfile {
-            name: me.name,
-            avatar,
-        })
-        .await;
+        self.pending_avatar = Some(avatar);
+        self.apply_pending_avatar().await;
+    }
+
+    /// Sets the chosen picture on our profile once we know our own name, which arrives
+    /// with our presence when we join a room.
+    async fn apply_pending_avatar(&mut self) {
+        let Some(avatar) = self.pending_avatar else {
+            return;
+        };
+        let Some(me) = self.my_person() else { return };
+        self.pending_avatar = None;
+        if me.avatar != avatar {
+            self.simple(Request::SetProfile {
+                name: me.name,
+                avatar,
+            })
+            .await;
+        }
     }
 
     /// Fetches a picture by its hash, keeping it only if the bytes match the hash.
@@ -829,7 +845,10 @@ impl Session {
     async fn event(&mut self, event: CallEvent) {
         match event {
             CallEvent::Key(notice) => self.notices(vec![notice]),
-            CallEvent::Server(event) => self.server_event(event).await,
+            CallEvent::Server(event) => {
+                self.server_event(event).await;
+                self.apply_pending_avatar().await;
+            }
         }
     }
 

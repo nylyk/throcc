@@ -115,12 +115,14 @@ fn two_clients_see_each_other_join_and_unmute() {
 }
 
 #[test]
-fn a_profile_picture_reaches_others_and_survives_a_rename() {
+fn a_picture_chosen_in_the_lobby_reaches_others_and_survives_a_rename() {
     let (address, bootstrap) = server();
     let (alice, _a) = client(&address, &bootstrap);
     wait_for(&alice, "connected", |s| {
         s.connection == ConnectionStatus::Connected
     });
+    let picture: Vec<u8> = (0..2000u32).map(|i| (i * 7) as u8).collect();
+    alice.command(Command::SetAvatar(Some(picture.clone())));
     alice.command(Command::CreateRoom("General".into()));
     wait_for(&alice, "the room", |s| !s.rooms.is_empty());
     let room = alice.state().rooms[0].id;
@@ -131,8 +133,6 @@ fn a_profile_picture_reaches_others_and_survives_a_rename() {
     let alice_id = alice.state().me.unwrap();
     wait_for(&bob, "alice in the room", |s| s.person(alice_id).is_some());
 
-    let picture: Vec<u8> = (0..2000u32).map(|i| (i * 7) as u8).collect();
-    alice.command(Command::SetAvatar(Some(picture.clone())));
     wait_for(&bob, "alice's avatar hash", |s| {
         s.person(alice_id).is_some_and(|p| p.avatar.is_some())
     });
