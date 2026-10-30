@@ -3,6 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 docker run --rm --platform linux/amd64 -v "$PWD":/src:ro archlinux:latest bash -euo pipefail -c '
     sed -i "s/^\[options\]/[options]\nDisableSandbox/" /etc/pacman.conf
+    sed -i "s|--retry 3|--retry 5 --retry-all-errors|" /etc/makepkg.conf
     pacman -Syu --noconfirm --needed base-devel git rustup >/dev/null
     useradd -m builder
     echo "builder ALL=(ALL) NOPASSWD: ALL" >/etc/sudoers.d/builder
