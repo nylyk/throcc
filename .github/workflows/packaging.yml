@@ -6,6 +6,8 @@ on:
     tags: ['v*']
     paths:
       - 'packaging/**'
+      - 'crates/throcc-client-core/src/media/video/**'
+      - 'crates/throcc-client-core/src/media/capture/**'
       - 'tests/arch/**'
       - 'tests/deploy/**'
       - 'crates/throcc-server/Dockerfile'
