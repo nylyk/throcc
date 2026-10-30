@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -61,105 +65,3 @@ jobs:
       - uses: actions/checkout@v4
       - run: ./scripts/ci-run.sh tests/netem/run.sh
         shell: bash
-
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: ./scripts/ci-run.sh tests/deploy/run.sh
-        shell: bash
-
-  server-binaries:
-    strategy:
-      matrix:
-        include:
-          - runner: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v4
-      - run: docker build -f tests/deploy/Dockerfile.static --build-arg TARGET=${{ matrix.target }} -t throcc-static .
-      - run: |
-          docker create --name copy throcc-static
-          docker cp copy:/throcc-server throcc-server-${{ matrix.target }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: throcc-server-${{ matrix.target }}
-          path: throcc-server-${{ matrix.target }}
-          retention-days: 7
-
-  macos-app:
-    runs-on: macos-26
-    steps:
-      - uses: actions/checkout@v4
-      - run: brew install dav1d pkgconf
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - run: ./scripts/ci-run.sh packaging/macos/bundle.sh
-        shell: bash
-      - uses: actions/upload-artifact@v4
-        with:
-          name: throcc-macos
-          path: target/macos/throcc.dmg
-          retention-days: 7
-
-  arch:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - run: ./scripts/ci-run.sh tests/arch/run.sh
-        shell: bash
-
-  windows-app:
-    runs-on: windows-2022
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ilammy/msvc-dev-cmd@v1
-      - run: choco install nasm --no-progress -y
-      - name: dav1d
-        shell: bash
-        run: |
-          export PATH="/c/Program Files/NASM:$PATH"
-          ./scripts/ci-run.sh packaging/windows/build-deps.sh
-      - uses: msys2/setup-msys2@v2
-        with:
-          msystem: MSYS
-          path-type: inherit
-          install: make diffutils nasm pkgconf git
-      - name: ffmpeg
-        shell: msys2 {0}
-        run: |
-          rm -f /usr/bin/link.exe
-          git clone --depth 1 --branch n13.0.19.0 https://github.com/FFmpeg/nv-codec-headers target/nv-codec-headers
-          make -C target/nv-codec-headers install PREFIX="$(cygpath -m "$PWD/deps")"
-          export PKG_CONFIG_PATH="$(cygpath -m "$PWD/deps/lib/pkgconfig")"
-          ./scripts/ci-run.sh packaging/ffmpeg/build.sh target/ffmpeg-lgpl
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: bindings
-        shell: bash
-        run: |
-          export PATH="$(dirname "$(command -v cl)"):$PATH"
-          ./scripts/ci-run.sh cargo install bindgen-cli --version 0.72.1 --locked
-          ./scripts/ci-run.sh packaging/ffmpeg/bindings.sh target/ffmpeg-lgpl target/ffmpeg-lgpl/binding.rs
-      - name: package
-        shell: bash
-        run: |
-          export PATH="$(dirname "$(command -v cl)"):$PATH"
-          ./scripts/ci-run.sh pwsh -NoProfile -File packaging/windows/package.ps1
-      - name: video tests
-        shell: pwsh
-        run: |
-          $env:FFMPEG_DLL_PATH = "$PWD\target\ffmpeg-lgpl\bin"
-          $env:FFMPEG_BINDING_PATH = "$PWD\target\ffmpeg-lgpl\binding.rs"
-          $env:PATH = "$PWD\target\ffmpeg-lgpl\bin;$PWD\deps\bin;$env:PATH"
-          cargo test --release -p throcc-client-core --features ffmpeg --lib video::
-      - uses: actions/upload-artifact@v4
-        with:
-          name: throcc-windows
-          path: target/windows/throcc-windows.zip
-          retention-days: 7

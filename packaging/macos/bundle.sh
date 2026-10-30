@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-ffmpeg=${FFMPEG_PREFIX:-target/ffmpeg-lgpl}
+ffmpeg=${FFMPEG_PREFIX:-deps/ffmpeg-lgpl}
 [ -f "$ffmpeg/lib/pkgconfig/libavcodec.pc" ] || packaging/ffmpeg/build.sh "$ffmpeg"
 ffmpeg=$(cd "$ffmpeg" && pwd)
 FFMPEG_PKG_CONFIG_PATH="$ffmpeg/lib/pkgconfig" cargo build --release -p throcc-client --features ffmpeg

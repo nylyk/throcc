@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..\..')
-$ffmpeg = Resolve-Path 'target\ffmpeg-lgpl'
+$ffmpeg = Resolve-Path 'deps\ffmpeg-lgpl'
 $env:FFMPEG_DLL_PATH = Join-Path $ffmpeg 'bin'
 $env:FFMPEG_BINDING_PATH = Join-Path $ffmpeg 'binding.rs'
 cargo build --release -p throcc-client --features ffmpeg
