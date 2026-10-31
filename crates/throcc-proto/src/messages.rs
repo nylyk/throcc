@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
 
-pub const PROTOCOL: u16 = 1;
+pub const PROTOCOL: u16 = 2;
 pub const MAX_AVATAR_BYTES: usize = 64 * 1024;
 pub const MAX_NAME_CHARS: usize = 32;
 
@@ -61,6 +61,14 @@ pub struct Welcome {
     pub rooms: Vec<Room>,
     pub presence: Vec<Presence>,
     pub placed: Placed,
+    pub server: ServerProfile,
+}
+
+/// The server's own name and picture, which admins set.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerProfile {
+    pub name: Option<String>,
+    pub avatar: Option<Hash>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -128,6 +136,8 @@ pub enum Request {
         user: UserId,
         cascade: bool,
     },
+    SetServerName(Option<String>),
+    SetServerAvatar(Option<Hash>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,6 +201,7 @@ pub enum Event {
     Kicked {
         reason: String,
     },
+    ServerProfileChanged(ServerProfile),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

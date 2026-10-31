@@ -10,6 +10,10 @@ pub fn can_list_users(actor: Role) -> bool {
     actor == Role::Admin
 }
 
+pub fn can_edit_server(actor: Role) -> bool {
+    actor == Role::Admin
+}
+
 /// Admins mint without a cap; everyone else gets [`DAILY_INVITES`] per rolling day.
 pub fn invite_cap(actor: Role) -> Option<u32> {
     (actor != Role::Admin).then_some(DAILY_INVITES)

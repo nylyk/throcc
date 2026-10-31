@@ -127,7 +127,8 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
     let server = state
         .server
         .as_ref()
-        .map_or("server".to_owned(), |s| s.address.clone());
+        .map_or("server".to_owned(), |s| s.title().to_owned());
+    let server_picture = app.picture(state.server.as_ref().and_then(|s| s.avatar));
     let current_room = state.current.as_ref().map(|c| c.room);
     let manages = app.manages_rooms();
     let rooms = state.rooms.iter().map(|room| {
@@ -201,7 +202,7 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                 .flex_none()
                 .border_b_1()
                 .border_color(theme::control())
-                .child(avatar(&server, 0, None, px(28.), false))
+                .child(avatar(&server, 0, server_picture, px(28.), false))
                 .child(
                     div()
                         .flex_1()
@@ -211,8 +212,9 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                 )
                 .child(
                     ghost_icon("server-settings", "settings-2", "Server settings").on_click(
-                        cx.listener(|app, _, _, cx| {
-                            app.screen = Screen::Server(ServerPage::Keys);
+                        cx.listener(|app, _, window, cx| {
+                            app.fill_server(window, cx);
+                            app.screen = Screen::Server(ServerPage::Overview);
                             cx.notify();
                         }),
                     ),

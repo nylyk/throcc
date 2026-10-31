@@ -410,6 +410,8 @@ impl Session {
             s.server = Some(ServerView {
                 address,
                 fingerprint,
+                name: welcome_copy.server.name.clone(),
+                avatar: welcome_copy.server.avatar,
             });
             s.connection = ConnectionStatus::Connected;
             s.me = Some(welcome_copy.me);
@@ -575,6 +577,17 @@ impl Session {
                 self.push_profile().await;
             }
             Command::FetchAvatar(hash) => self.fetch_avatar(hash).await,
+            Command::SetServerName(name) => self.simple(Request::SetServerName(name)).await,
+            Command::SetServerPicture(picture) => {
+                let avatar = match picture {
+                    Some(bytes) => match self.call.request(Request::SetAvatar(bytes)).await {
+                        Ok(Response::AvatarHash(hash)) => Some(hash),
+                        other => return self.refused(other),
+                    },
+                    None => None,
+                };
+                self.simple(Request::SetServerAvatar(avatar)).await;
+            }
             Command::CreateRoom(name) => self.simple(Request::CreateRoom { name }).await,
             Command::RenameRoom(room, name) => {
                 self.simple(Request::RenameRoom { room, name }).await
@@ -923,6 +936,12 @@ impl Session {
 
     async fn server_event(&mut self, event: ServerEvent) {
         match event {
+            ServerEvent::ServerProfileChanged(profile) => self.shared.update(|s| {
+                if let Some(server) = s.server.as_mut() {
+                    server.name = profile.name;
+                    server.avatar = profile.avatar;
+                }
+            }),
             ServerEvent::PresenceChanged(p) => {
                 self.shared.update(|s| {
                     let updated = match s.people.get(&p.user) {

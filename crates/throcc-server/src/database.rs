@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use throcc_proto::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
-use throcc_proto::messages::{PublicKey, Room, SignedEncKey, User};
+use throcc_proto::messages::{PublicKey, Room, ServerProfile, SignedEncKey, User};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS users (
@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS invites (
 );
 CREATE TABLE IF NOT EXISTS blobs (hash BLOB PRIMARY KEY, bytes BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS server_profile (id INTEGER PRIMARY KEY CHECK (id = 0), name TEXT, avatar_hash BLOB);
 ";
 
 const NEXT_MEDIA_ID: &str = "next_media_id";
@@ -402,6 +403,46 @@ impl Database {
         Ok(())
     }
 
+    pub fn server_profile(&self) -> Result<ServerProfile> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT name, avatar_hash FROM server_profile WHERE id = 0",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, Option<Vec<u8>>>(1)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(
+            row.map_or_else(ServerProfile::default, |(name, avatar)| ServerProfile {
+                name,
+                avatar: avatar.and_then(|h| h.try_into().ok()).map(Hash),
+            }),
+        )
+    }
+
+    pub fn set_server_name(&self, name: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO server_profile (id, name) VALUES (0, ?1)
+             ON CONFLICT (id) DO UPDATE SET name = excluded.name",
+            params![name],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_server_avatar(&self, avatar: Option<Hash>) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO server_profile (id, avatar_hash) VALUES (0, ?1)
+             ON CONFLICT (id) DO UPDATE SET avatar_hash = excluded.avatar_hash",
+            params![avatar.map(|h| h.0.to_vec())],
+        )?;
+        Ok(())
+    }
+
     pub fn blob(&self, hash: &Hash) -> Result<Option<Vec<u8>>> {
         Ok(self
             .conn
@@ -475,6 +516,26 @@ mod tests {
         })
         .unwrap();
         db.enroll(&[key; 32], &code, 100).unwrap().unwrap().id
+    }
+
+    #[test]
+    fn the_server_profile_survives_a_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.server_profile().unwrap(), ServerProfile::default());
+        let profile = ServerProfile {
+            name: Some("Moss".into()),
+            avatar: Some(Hash([7; 32])),
+        };
+        db.set_server_avatar(profile.avatar).unwrap();
+        db.set_server_name(profile.name.as_deref()).unwrap();
+        db.set_server_name(profile.name.as_deref()).unwrap();
+        drop(db);
+        assert_eq!(
+            Database::open(&path).unwrap().server_profile().unwrap(),
+            profile
+        );
     }
 
     #[test]

@@ -42,6 +42,16 @@ impl State {
 pub struct ServerView {
     pub address: String,
     pub fingerprint: Fingerprint,
+    /// The name its admins gave it.
+    pub name: Option<String>,
+    pub avatar: Option<Hash>,
+}
+
+impl ServerView {
+    /// The name its admins gave it, or its address.
+    pub fn title(&self) -> &str {
+        self.name.as_deref().unwrap_or(&self.address)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

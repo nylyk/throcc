@@ -43,6 +43,10 @@ pub enum Command {
     SetName(String),
     /// Sets our profile picture, at most 64 KiB, or clears it.
     SetAvatar(Option<Vec<u8>>),
+    /// Names the server, or clears its name. Admins only.
+    SetServerName(Option<String>),
+    /// Sets the server's picture, at most 64 KiB, or clears it. Admins only.
+    SetServerPicture(Option<Vec<u8>>),
     FetchAvatar(Hash),
     CreateRoom(String),
     RenameRoom(RoomId, String),
@@ -237,6 +241,16 @@ impl Default for MockClient {
 }
 
 impl MockClient {
+    /// Keeps `bytes` as a picture, as the server would, and returns its hash.
+    fn keep_avatar(&self, bytes: Vec<u8>) -> Hash {
+        let hash = Hash(<sha2::Sha256 as sha2::Digest>::digest(&bytes).into());
+        self.avatars
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(hash, bytes.into());
+        hash
+    }
+
     pub fn new() -> Self {
         let (events, _) = broadcast::channel(EVENTS);
         Self {
@@ -328,15 +342,21 @@ impl ClientApi for MockClient {
                 });
                 self.events.send(Event::ProfileSaved).ok();
             }
-            Command::SetAvatar(picture) => {
-                let hash = picture.map(|bytes| {
-                    let hash = Hash(<sha2::Sha256 as sha2::Digest>::digest(&bytes).into());
-                    self.avatars
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .insert(hash, bytes.into());
-                    hash
+            Command::SetServerName(name) => self.update(|s| {
+                if let Some(server) = s.server.as_mut() {
+                    server.name = name;
+                }
+            }),
+            Command::SetServerPicture(picture) => {
+                let hash = picture.map(|bytes| self.keep_avatar(bytes));
+                self.update(|s| {
+                    if let Some(server) = s.server.as_mut() {
+                        server.avatar = hash;
+                    }
                 });
+            }
+            Command::SetAvatar(picture) => {
+                let hash = picture.map(|bytes| self.keep_avatar(bytes));
                 self.update(|s| {
                     if let Some(p) = s.people.get_mut(&me) {
                         p.avatar = hash;
@@ -482,6 +502,8 @@ fn sample_state() -> State {
         server: Some(ServerView {
             address: "voice.example.net".into(),
             fingerprint: Fingerprint([0x2c; 32]),
+            name: Some("Moss Co-op".into()),
+            avatar: None,
         }),
         connection: ConnectionStatus::Connected,
         me: Some(UserId(1)),

@@ -8,7 +8,8 @@ use throcc_crypto::identity::IdentityKey;
 use throcc_proto::framing;
 use throcc_proto::ids::{Epoch, Hash, Role, UserId};
 use throcc_proto::messages::{
-    AuthResult, Hello, PROTOCOL, Placed, Request, Response, ServerHello, ServerMessage, Welcome,
+    AuthResult, Hello, PROTOCOL, Placed, Request, Response, ServerHello, ServerMessage,
+    ServerProfile, Welcome,
 };
 use throcc_proto::transport::close;
 use throcc_server::identity::ServerIdentity;
@@ -103,6 +104,7 @@ async fn unknown_reply_id_closes_the_connection() {
                 tracks: None,
                 peers: vec![],
             },
+            server: ServerProfile::default(),
         };
         send.write_all(&framing::encode(&AuthResult::Ok(Box::new(welcome))).unwrap())
             .await

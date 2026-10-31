@@ -19,7 +19,7 @@ use super::common::{
     TRAFFIC_LIGHTS, avatar, caption, card, chip, ghost_icon, mono, moves_window, primary,
     secondary, section,
 };
-use crate::app::{ProfileStatus, Screen, SettingsPage, ThroccApp};
+use crate::app::{PictureFor, ProfileStatus, Screen, SettingsPage, ThroccApp};
 use crate::theme;
 
 pub fn render(
@@ -274,7 +274,7 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             secondary("choose-picture", "Choose picture…").on_click(cx.listener(
                 |app, _, _, cx| {
                     app.profile_status = None;
-                    app.choose_picture(cx);
+                    app.choose_picture(PictureFor::Profile, cx);
                 },
             )),
         )

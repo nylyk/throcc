@@ -46,8 +46,16 @@ pub enum SettingsPage {
 /// Pages about the server we are connected to, apart from this machine's settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServerPage {
+    Overview,
     Keys,
     Members,
+}
+
+/// Whose picture a chosen file becomes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PictureFor {
+    Profile,
+    Server,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,6 +113,9 @@ pub struct ThroccApp {
     pub code: Entity<InputState>,
     pub name: Entity<InputState>,
     pub room_name: Entity<InputState>,
+    pub server_name: Entity<InputState>,
+    /// Why the server's new picture couldn't be used.
+    pub server_picture_error: Option<String>,
     /// One hex field per palette colour, in [`theme::Palette::LABELS`] order.
     pub palette_fields: Vec<Entity<InputState>>,
     pub pictures: std::collections::HashMap<Hash, Arc<RenderImage>>,
@@ -152,6 +163,7 @@ impl ThroccApp {
         let code = cx.new(|cx| InputState::new(window, cx).placeholder("K7Q-M2XPD"));
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Your name"));
         let room_name = cx.new(|cx| InputState::new(window, cx).placeholder("Room name"));
+        let server_name = cx.new(|cx| InputState::new(window, cx).placeholder("Server name"));
         let palette_fields: Vec<Entity<InputState>> = theme::palette()
             .colors()
             .iter()
@@ -206,6 +218,8 @@ impl ThroccApp {
             code,
             name,
             room_name,
+            server_name,
+            server_picture_error: None,
             palette_fields,
             pictures: std::collections::HashMap::new(),
             joining: false,
@@ -582,8 +596,21 @@ impl ThroccApp {
         self.name.update(cx, |s, cx| s.set_value(name, window, cx));
     }
 
-    /// Asks for a picture file, shrinks it and sets it as our profile picture.
-    pub fn choose_picture(&mut self, cx: &mut Context<Self>) {
+    /// Puts the server's name in the server page's name field.
+    pub fn fill_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.server_picture_error = None;
+        let name = self
+            .state
+            .server
+            .as_ref()
+            .and_then(|s| s.name.clone())
+            .unwrap_or_default();
+        self.server_name
+            .update(cx, |s, cx| s.set_value(name, window, cx));
+    }
+
+    /// Asks for a picture file, shrinks it and sets it as our or the server's picture.
+    pub fn choose_picture(&mut self, target: PictureFor, cx: &mut Context<Self>) {
         let chosen = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -605,13 +632,20 @@ impl ThroccApp {
                 })
                 .await;
             this.update(cx, |app, cx| {
-                match prepared {
-                    Ok(bytes) => {
+                match (target, prepared) {
+                    (PictureFor::Profile, Ok(bytes)) => {
                         app.profile_preview = Some(crate::avatar::decode(&bytes));
                         app.profile_status = Some(app.saving_status());
                         app.command(Command::SetAvatar(Some(bytes)));
                     }
-                    Err(message) => app.profile_status = Some(ProfileStatus::Failed(message)),
+                    (PictureFor::Profile, Err(message)) => {
+                        app.profile_status = Some(ProfileStatus::Failed(message))
+                    }
+                    (PictureFor::Server, Ok(bytes)) => {
+                        app.server_picture_error = None;
+                        app.command(Command::SetServerPicture(Some(bytes)));
+                    }
+                    (PictureFor::Server, Err(message)) => app.server_picture_error = Some(message),
                 }
                 cx.notify();
             })
@@ -787,6 +821,10 @@ impl ThroccApp {
                 self.screen = Screen::Settings(SettingsPage::Profile);
                 joined(self);
                 self.command(Command::SetAvatar(Some(crate::avatar::sample())));
+            }
+            "server" => {
+                self.screen = Screen::Server(ServerPage::Overview);
+                self.fill_server(window, cx);
             }
             "members" => {
                 self.screen = Screen::Server(ServerPage::Members);
