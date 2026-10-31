@@ -259,6 +259,18 @@ impl MediaEngine {
         out_rx
     }
 
+    /// Asks the sender of `media_id` for a fresh keyframe each time it is called.
+    pub fn idr_requester(&self, media_id: MediaId) -> impl Fn() + Send + 'static {
+        let requests = self.requests.clone();
+        move || {
+            let request = Request::RequestKeyframe {
+                media_id,
+                kind: Recovery::Idr,
+            };
+            requests.send(request).ok();
+        }
+    }
+
     pub fn unsubscribe(&self, media_id: MediaId) {
         if let Some(sink) = lock(&self.sinks).get_mut(&media_id) {
             sink.inbox = None;

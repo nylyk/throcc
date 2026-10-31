@@ -814,7 +814,8 @@ impl Session {
             #[cfg(feature = "ffmpeg")]
             {
                 let units = self.call.engine.subscribe(video, Kind::Video, 64);
-                match crate::media::share::receive(units, config.codec, playout) {
+                let ask_idr = self.call.engine.idr_requester(video);
+                match crate::media::share::receive(units, config.codec, playout, ask_idr) {
                     Ok(picture) => self.shared.set_picture(user, Some(picture)),
                     Err(e) => self.shared.notice(format!("Can't show this share: {e}")),
                 }

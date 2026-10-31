@@ -243,10 +243,13 @@ const MAX_HELD: usize = 32;
 
 /// Decodes one remote share and keeps its newest due picture. With `playout`, a frame is
 /// due once the share audio reaching the speakers has caught up with it.
+/// Decodes `units` on a thread of its own. After a unit fails to decode, `ask_idr` is called
+/// once, and again only after a unit has decoded since.
 pub fn receive(
     units: mpsc::Receiver<Received>,
     codec: Codec,
     playout: Option<Arc<Playout>>,
+    ask_idr: impl Fn() + Send + 'static,
 ) -> Result<Picture, String> {
     let mut decoder = Decoder::new(codec).map_err(|e| e.to_string())?;
     let (tx, picture) = watch::channel(None);
@@ -255,6 +258,7 @@ pub fn receive(
         .spawn(move || {
             let mut units = units;
             let mut held: VecDeque<Arc<VideoFrame>> = VecDeque::new();
+            let mut asked = false;
             loop {
                 let unit = if held.is_empty() {
                     units.blocking_recv()
@@ -271,13 +275,20 @@ pub fn receive(
                 if let Some(unit) = &unit {
                     match decoder.decode(&unit.data, unit.timestamp) {
                         Ok(Some(frame)) => {
+                            asked = false;
                             if held.len() == MAX_HELD {
                                 held.pop_front();
                             }
                             held.push_back(Arc::new(frame));
                         }
-                        Ok(None) => {}
-                        Err(e) => warn!("decoding failed: {e}"),
+                        Ok(None) => asked = false,
+                        Err(e) => {
+                            warn!("decoding failed: {e}");
+                            if !asked {
+                                ask_idr();
+                                asked = true;
+                            }
+                        }
                     }
                 } else if held.is_empty() {
                     return;

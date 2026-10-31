@@ -100,7 +100,7 @@ async fn a_shared_picture_arrives_within_a_few_frames() {
         return;
     };
     let units = watch(&bob, tracks.video).await;
-    let mut picture = share::receive(units, sender.config.codec, None).unwrap();
+    let mut picture = share::receive(units, sender.config.codec, None, || {}).unwrap();
 
     let mut latencies = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);

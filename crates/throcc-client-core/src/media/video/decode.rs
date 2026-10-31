@@ -171,13 +171,13 @@ impl Decoder {
     }
 }
 
-/// Copies a decoded 4:2:0 frame into NV12.
+/// Copies a decoded 4:2:0 frame into NV12, cropped to even dimensions.
 fn to_nv12(frame: &AVFrame, timestamp: u32) -> Result<VideoFrame, DecodeError> {
-    let (width, height) = (frame.width as usize, frame.height as usize);
+    let (width, height) = (frame.width as usize & !1, frame.height as usize & !1);
     let mut picture = VideoFrame::blank(width, height);
     picture.timestamp = timestamp;
-    let chroma_rows = height.div_ceil(2);
-    let chroma_cols = width.div_ceil(2);
+    let chroma_rows = height / 2;
+    let chroma_cols = width / 2;
     let planar = [ffi::AV_PIX_FMT_YUV420P, ffi::AV_PIX_FMT_YUVJ420P];
     // SAFETY: the decoder sized each plane for `width`×`height` 4:2:0 with the strides in
     // `linesize`; reads stay within one row of one plane.

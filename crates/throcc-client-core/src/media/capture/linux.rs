@@ -277,7 +277,7 @@ impl Capture for PipeWireCapture {
             let picture = slot.picture.take();
             let stamped = picture.as_ref().and_then(|picture| {
                 let ticks = self.zero.ticks(picture.at, VIDEO_CLOCK_HZ);
-                Some((picture, u32::try_from(ticks).ok()?))
+                (ticks >= 0).then_some((picture, ticks as u32))
             });
             if let Some((picture, timestamp)) = stamped {
                 convert(&slot.bytes, picture, into);
@@ -552,6 +552,7 @@ fn on_process(stream: &Stream, state: &mut StreamState) {
         }
     }
     if let Err(rtrb::PushError::Full(slot)) = state.filled.push(slot) {
+        state.dropped.fetch_add(1, Ordering::Relaxed);
         state.spare = Some(slot);
     }
 }

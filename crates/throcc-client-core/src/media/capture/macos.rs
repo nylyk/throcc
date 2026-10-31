@@ -21,7 +21,7 @@ use super::clock::{AudioChunker, ShareZero};
 use super::{Capture, CaptureConfig, CaptureError};
 use crate::media::audio::SAMPLE_RATE;
 use crate::media::share_audio::STEREO_FRAME;
-use crate::media::video::frame::{VideoFrame, fit_within};
+use crate::media::video::frame::{VideoFrame, share_size};
 use throcc_proto::frame::VIDEO_CLOCK_HZ;
 
 /// Captured frames waiting for the share thread. A full ring drops the newest frame.
@@ -49,15 +49,15 @@ pub fn start(config: CaptureConfig) -> Result<MacCapture, CaptureError> {
     capture(&filter, shape, config)
 }
 
-/// Captures `filter`, whose content has the aspect ratio of `shape`, at that aspect ratio
-/// fitted in the config's size.
+/// Captures `filter`, whose content is `shape` pixels, at that aspect ratio fitted in the
+/// config's size and never larger than the content.
 fn capture(
     filter: &SCContentFilter,
     shape: (usize, usize),
     config: CaptureConfig,
 ) -> Result<MacCapture, CaptureError> {
     let fps = config.fps.max(1);
-    let (width, height) = fit_within(shape, (config.width, config.height));
+    let (width, height) = share_size(shape, (config.width, config.height));
     let stream_config = SCStreamConfiguration::new()
         .with_width(width as u32)
         .with_height(height as u32)
@@ -157,7 +157,7 @@ fn pick() -> Result<(SCContentFilter, (usize, usize)), CaptureError> {
     });
     match rx.recv().map_err(|_| CaptureError::Cancelled)? {
         SCPickerOutcome::Picked(result) => {
-            let (width, height) = result.size();
+            let (width, height) = result.pixel_size();
             Ok((result.filter(), (width as usize, height as usize)))
         }
         SCPickerOutcome::Cancelled => Err(CaptureError::Cancelled),
@@ -174,9 +174,11 @@ impl Capture for MacCapture {
         let Ok((buffer, at)) = self.frames.pop() else {
             return false;
         };
-        let Ok(timestamp) = u32::try_from(self.zero.ticks(at, VIDEO_CLOCK_HZ)) else {
+        let ticks = self.zero.ticks(at, VIDEO_CLOCK_HZ);
+        if ticks < 0 {
             return false;
-        };
+        }
+        let timestamp = ticks as u32;
         let Ok(guard) = buffer.lock_read_only() else {
             return false;
         };
@@ -291,12 +293,16 @@ impl Drop for MacCapture {
 pub(crate) fn main_display(config: CaptureConfig) -> MacCapture {
     let content = SCShareableContent::get().expect("screen recording permission");
     let display = content.displays().into_iter().next().expect("a display");
-    let shape = (display.width() as usize, display.height() as usize);
     let filter = SCContentFilter::create()
         .with_display(&display)
         .with_excluding_windows(&[])
         .build()
         .expect("a display filter");
+    let scale = f64::from(filter.point_pixel_scale());
+    let shape = (
+        (f64::from(display.width()) * scale) as usize,
+        (f64::from(display.height()) * scale) as usize,
+    );
     capture(&filter, shape, config).expect("capture to start")
 }
 
