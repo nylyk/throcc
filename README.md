@@ -28,11 +28,14 @@ The unit runs the server as a throwaway system user with its data in `/var/lib/p
 
 ### In a container
 
+Every push to `main` publishes `ghcr.io/nylyk/throcc-server:latest` for amd64 and arm64 (and `:<version>` for tags):
+
 ```sh
-docker build -f crates/throcc-server/Dockerfile -t throcc-server .
-docker run -d --name throcc --restart unless-stopped -p 8476:8476/udp -v throcc-data:/data throcc-server
+docker run -d --name throcc --restart unless-stopped -p 8476:8476/udp -v throcc-data:/data ghcr.io/nylyk/throcc-server:latest
 docker logs throcc | grep 'becomes admin'
 ```
+
+To build it yourself instead: `docker build -f crates/throcc-server/Dockerfile -t throcc-server .`
 
 For development, the `dev` stage rebuilds and restarts the server on every change to the source mounted at `/src`:
 
