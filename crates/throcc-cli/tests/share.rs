@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use throcc_client_core::call::{Call, CallEvent};
-use throcc_client_core::media::capture::{CaptureConfig, TestPattern};
+use throcc_client_core::media::capture::{self, CaptureConfig, TestPattern};
 use throcc_client_core::media::engine::Kind;
 use throcc_client_core::media::reorder::REORDER_WINDOW;
 use throcc_client_core::media::share::{self, ShareSender};
@@ -257,4 +257,42 @@ async fn a_sixteen_by_ten_screen_is_sent_at_its_own_shape() {
         }
     };
     assert_eq!((sender.config.width, sender.config.height), (1728, 1080));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a desktop session with xdg-desktop-portal and someone to pick a screen"]
+async fn a_screen_share_runs_for_profiling() {
+    let seconds = std::env::var("THROCC_PROFILE_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(40);
+    let server = start_server();
+    let (alice, bob, _) = room_with_two(&server).await;
+    let tracks = first_share(&bob, &alice).await;
+    let wanted = throcc_client_core::state::ShareChoice::default().config(Codec::Av1, false);
+    let config = CaptureConfig::for_share(&wanted);
+    let capture = tokio::task::spawn_blocking(move || capture::start(config))
+        .await
+        .unwrap()
+        .unwrap();
+    let sender = ShareSender::start(alice.engine.clone(), tracks, wanted, capture).unwrap();
+    eprintln!(
+        "pid {} sharing {}×{} with {}",
+        std::process::id(),
+        sender.config.width,
+        sender.config.height,
+        sender.encoder
+    );
+    let mut units = watch(&bob, tracks.video).await;
+    let (mut count, mut bytes) = (0usize, 0usize);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
+    while let Ok(Some(unit)) = tokio::time::timeout_at(deadline, units.recv()).await {
+        count += 1;
+        bytes += unit.data.len();
+    }
+    eprintln!(
+        "{count} units, {:.1} Mbps",
+        bytes as f64 * 8.0 / seconds as f64 / 1e6
+    );
+    assert!(!sender.ended());
 }
