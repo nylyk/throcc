@@ -14,6 +14,9 @@ jobs:
         target: [framing, header, reassembly]
     steps:
       - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev
       - run: rustup toolchain install nightly --profile minimal
       - run: cargo +nightly install cargo-fuzz --locked
       - run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=600
