@@ -144,9 +144,8 @@ impl Resolution {
 pub const FRAME_RATES: [u8; 3] = [15, 30, 60];
 
 /// The bitrates a share can be set to, in kbps.
-pub const BITRATES: [u32; 14] = [
+pub const BITRATES: [u32; 13] = [
     1_000, 1_500, 2_000, 3_000, 4_000, 5_000, 6_000, 8_000, 10_000, 12_000, 15_000, 18_000, 20_000,
-    25_000,
 ];
 
 /// What a share asks for before the screen is known.
@@ -180,7 +179,7 @@ impl ShareChoice {
             (Resolution::P1080, _) => 15_000,
             (Resolution::P1440, ..=15) => 8_000,
             (Resolution::P1440, ..=30) => 15_000,
-            (Resolution::P1440, _) => 25_000,
+            (Resolution::P1440, _) => 20_000,
         }
     }
 
@@ -239,9 +238,9 @@ mod tests {
         let top = ShareChoice {
             resolution: Resolution::P1440,
             fps: 60,
-            kbps: 25_000,
+            kbps: 20_000,
         };
-        assert_eq!(top.bitrates().last(), Some(&25_000));
+        assert_eq!(top.bitrates().last(), Some(&20_000));
         let lower = top.with_resolution(Resolution::P720).with_fps(15);
         assert_eq!(lower.kbps, 3_000);
         assert_eq!(lower.bitrates(), [1_000, 1_500, 2_000, 3_000]);

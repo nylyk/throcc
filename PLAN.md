@@ -421,13 +421,13 @@ The fallbacks are `webrtc-audio-processing` and `opus` bindings.
 - Recovery: intra refresh with an unbounded GOP where supported. Otherwise a 4 s GOP cap plus IDR on request.
 - No hardware encoder: OpenH264 at up to 1080p30, or sharing disabled.
 
-The sharer picks a resolution (720p, 1080p or 1440p), a frame rate (15, 30 or 60 fps) and a bitrate in fixed steps from 1 to 25 Mbps, capped by resolution and frame rate:
+The sharer picks a resolution (720p, 1080p or 1440p), a frame rate (15, 30 or 60 fps) and a bitrate in fixed steps from 1 to 20 Mbps, capped by resolution and frame rate:
 
 | Resolution | 15 fps | 30 fps | 60 fps |
 | --- | --- | --- | --- |
 | 720p | 3 Mbps | 5 Mbps | 8 Mbps |
 | 1080p | 5 Mbps | 10 Mbps | 15 Mbps |
-| 1440p | 8 Mbps | 15 Mbps | 25 Mbps |
+| 1440p | 8 Mbps | 15 Mbps | 20 Mbps |
 
 The resolution is a 16:9 box. The share is sent at the screen's own aspect ratio, as large as fits in the box and never larger than the screen, and `ShareConfig` announces that size. Default: 1080p, 60 fps, 6 Mbps.
 
