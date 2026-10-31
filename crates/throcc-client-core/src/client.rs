@@ -530,6 +530,8 @@ fn sample_state() -> State {
         }],
         health: Health {
             rtt_ms: 18.0,
+            download_kbps: 10_480,
+            upload_kbps: 92,
             upload_loss: 0.0,
             download_loss: 0.3,
             dropped_for_you: 0,

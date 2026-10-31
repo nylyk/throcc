@@ -12,7 +12,7 @@ use throcc_proto::Fingerprint;
 use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::messages::Codec;
 
-use super::common::{caption, card, chip, danger, mono, primary, secondary, section, title};
+use super::common::{caption, card, chip, danger, mono, primary, rate, secondary, section, title};
 use crate::app::{Dialog, ThroccApp};
 use crate::theme;
 
@@ -325,13 +325,6 @@ fn stat(label: &str, value: String) -> impl IntoElement {
 
 fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let health = &app.state.health;
-    let kbps = |k: u32| {
-        if k >= 1000 {
-            format!("{:.1} Mbps", k as f32 / 1000.0)
-        } else {
-            format!("{k} kbps")
-        }
-    };
     let table_row = |cells: [String; 4]| {
         let [track, set, rate, last] = cells;
         div()
@@ -359,16 +352,16 @@ fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let receiving = health.receiving.iter().map(|row| {
         table_row([
             row.label.clone(),
-            row.set_kbps.map_or("–".to_owned(), kbps),
-            row.arriving_kbps.map_or("muted".to_owned(), kbps),
+            row.set_kbps.map_or("–".to_owned(), rate),
+            row.arriving_kbps.map_or("muted".to_owned(), rate),
             row.loss.map_or("–".to_owned(), |l| format!("{l:.1}%")),
         ])
     });
     let sending = health.sending.iter().map(|row| {
         table_row([
             row.label.to_owned(),
-            kbps(row.set_kbps),
-            kbps(row.leaving_kbps),
+            rate(row.set_kbps),
+            rate(row.leaving_kbps),
             row.dropped.map_or("–".to_owned(), |d| d.to_string()),
         ])
     });

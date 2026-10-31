@@ -182,6 +182,8 @@ pub(crate) struct Session {
     last_lost_sent: u64,
     last_local_drops: u64,
     last_sent_bytes: HashMap<MediaId, u64>,
+    last_udp_received: u64,
+    last_udp_sent: u64,
 }
 
 impl Session {
@@ -217,6 +219,8 @@ impl Session {
             last_lost_sent: 0,
             last_local_drops: 0,
             last_sent_bytes: HashMap::new(),
+            last_udp_received: 0,
+            last_udp_sent: 0,
             call,
         };
         session.profile = Profile::load(session.keystore.dir()).unwrap_or_else(|e| {
@@ -1349,8 +1353,11 @@ impl Session {
         rows.sort_by(|a, b| a.label.cmp(&b.label));
         let download_loss = percent(lost_total, received_total + lost_total);
         let dropped = std::mem::take(&mut self.dropped_for_you);
+        let udp = connection.stats();
         let health = Health {
             rtt_ms: connection.rtt().as_secs_f32() * 1000.0,
+            download_kbps: kbps(advance(&mut self.last_udp_received, udp.udp_rx.bytes)),
+            upload_kbps: kbps(advance(&mut self.last_udp_sent, udp.udp_tx.bytes)),
             upload_loss,
             download_loss,
             dropped_for_you: dropped,

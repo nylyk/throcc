@@ -15,7 +15,7 @@ use throcc_proto::ids::{RoomId, UserId};
 
 use super::common::{
     TRAFFIC_LIGHTS, avatar, caption, card, ghost_icon, icon, moves_window, player, player_button,
-    player_title, primary, section, sharing_icon,
+    player_title, primary, rate, section, sharing_icon,
 };
 use super::settings::{resize_handle, sidebar_column};
 use crate::app::{Dialog, Screen, ServerPage, SettingsPage, ThroccApp};
@@ -604,6 +604,20 @@ fn room(
                 .child(name),
         )
         .child(div().flex_1())
+        .child(
+            Button::new("traffic")
+                .label(format!(
+                    "↓ {}  ↑ {}",
+                    rate(state.health.download_kbps),
+                    rate(state.health.upload_kbps)
+                ))
+                .ghost()
+                .tooltip("Download and upload")
+                .on_click(cx.listener(|app, _, _, cx| {
+                    app.dialog = Some(Dialog::Connection);
+                    cx.notify();
+                })),
+        )
         .child(
             Button::new("rtt")
                 .label(format!("{rtt:.0} ms"))

@@ -14,6 +14,15 @@ pub fn icon(name: &'static str) -> Icon {
     Icon::empty().path(format!("icons/{name}.svg"))
 }
 
+/// A bitrate in kbps, in Mbps from 1000 up.
+pub fn rate(kbps: u32) -> String {
+    if kbps >= 1000 {
+        format!("{:.1} Mbps", kbps as f32 / 1000.0)
+    } else {
+        format!("{kbps} kbps")
+    }
+}
+
 pub fn initials(name: &str) -> String {
     name.chars()
         .find(|c| c.is_alphanumeric())

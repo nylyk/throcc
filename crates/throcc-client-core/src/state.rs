@@ -107,6 +107,9 @@ pub struct KeyWarning {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Health {
     pub rtt_ms: f32,
+    /// Everything the connection received and sent over the last refresh, overhead included.
+    pub download_kbps: u32,
+    pub upload_kbps: u32,
     pub upload_loss: f32,
     pub download_loss: f32,
     pub dropped_for_you: u32,
