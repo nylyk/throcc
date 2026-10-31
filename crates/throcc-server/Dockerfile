@@ -9,6 +9,7 @@ RUN cargo chef prepare --recipe-path recipe.json --bin throcc-server
 
 FROM chef AS build
 COPY --from=planner /src/recipe.json recipe.json
+COPY third_party third_party
 RUN cargo chef cook --release --recipe-path recipe.json -p throcc-server
 COPY . .
 RUN cargo build --release -p throcc-server \
