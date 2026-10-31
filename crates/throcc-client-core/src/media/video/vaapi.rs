@@ -195,7 +195,10 @@ unsafe extern "C" {
 
 /// Exports `surface` as one DMA-BUF layer, the way a compositor would share it.
 #[cfg(test)]
-pub(crate) fn export(display: Display, surface: SurfaceId) -> Result<DmaBuf, VaError> {
+pub(crate) fn export(
+    display: Display,
+    surface: SurfaceId,
+) -> Result<DmaBuf, Box<dyn std::error::Error>> {
     use std::os::fd::{FromRawFd, OwnedFd};
 
     const READ_ONLY: u32 = 1;
@@ -215,6 +218,11 @@ pub(crate) fn export(display: Display, surface: SurfaceId) -> Result<DmaBuf, VaE
             ),
         )?;
     }
+    let objects: Vec<OwnedFd> = descriptor.objects[..descriptor.num_objects as usize]
+        .iter()
+        // SAFETY: the export handed us these descriptors, each open and owned by nobody else.
+        .map(|object| unsafe { OwnedFd::from_raw_fd(object.fd) })
+        .collect();
     let layer = descriptor.layers[0];
     let mut planes = [const { None }; MAX_PLANES];
     for (index, plane) in planes
@@ -222,17 +230,11 @@ pub(crate) fn export(display: Display, surface: SurfaceId) -> Result<DmaBuf, VaE
         .enumerate()
         .take(layer.num_planes as usize)
     {
-        let object = descriptor.objects[layer.object_index[index] as usize];
         *plane = Some(crate::media::capture::DmaBufPlane {
-            // SAFETY: each exported object's fd is ours; planes sharing one get duplicates.
-            fd: unsafe { OwnedFd::from_raw_fd(libc::dup(object.fd)) },
+            fd: objects[layer.object_index[index] as usize].try_clone()?,
             offset: layer.offset[index],
             stride: layer.pitch[index],
         });
-    }
-    for object in &descriptor.objects[..descriptor.num_objects as usize] {
-        // SAFETY: the planes hold duplicates, so the originals are closed once here.
-        unsafe { libc::close(object.fd) };
     }
     Ok(DmaBuf {
         width: descriptor.width,
@@ -280,7 +282,9 @@ pub struct Vpp {
     context: c_uint,
 }
 
-// SAFETY: libva serialises calls on a display, and a Vpp is used by one thread at a time.
+// SAFETY: a VA display has no thread affinity. A Vpp is used only through the Encoder that
+// owns it, which lives on the share thread, and it is not Sync, so its display is never
+// used from two threads at once.
 unsafe impl Send for Vpp {}
 
 impl Vpp {

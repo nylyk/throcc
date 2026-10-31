@@ -41,6 +41,7 @@ unsafe fn query(fourccs: &[u32]) -> Option<Vec<(u32, Vec<u64>)>> {
         let address = unsafe { libc::dlsym(library, name.as_ptr()) };
         (!address.is_null()).then_some(address)
     };
+    // SAFETY: the symbol is eglGetProcAddress, whose C signature GetProcAddress spells out.
     let get_proc: GetProcAddress = unsafe { std::mem::transmute(symbol(c"eglGetProcAddress")?) };
     let extension = |name: &CStr| {
         // SAFETY: eglGetProcAddress takes a NUL-terminated name.
