@@ -31,6 +31,72 @@ const RING: usize = 4;
 const AUDIO_RING: usize = 32;
 const NANOS: i128 = 1_000_000_000;
 
+/// A captured picture, full-range NV12 in GPU memory.
+pub struct PixelBuffer {
+    pub buffer: CVPixelBuffer,
+    pub timestamp: u32,
+}
+
+impl PixelBuffer {
+    pub fn width(&self) -> usize {
+        self.buffer.width()
+    }
+
+    /// The picture `factor` times smaller each way, read out of GPU memory.
+    pub fn shrunk(&self, factor: usize) -> Option<VideoFrame> {
+        let guard = self.buffer.lock_read_only().ok()?;
+        let plane = |index: usize| {
+            let base = guard.base_address_of_plane(index)?;
+            let stride = guard.bytes_per_row_of_plane(index);
+            let len = stride * guard.height_of_plane(index);
+            // SAFETY: the buffer is locked, and plane `index` is `height_of_plane` rows of
+            // `stride` bytes.
+            Some((unsafe { std::slice::from_raw_parts(base, len) }, stride))
+        };
+        let (y, uv) = (plane(0)?, plane(1)?);
+        let size = (guard.width(), guard.height());
+        let mut out = VideoFrame::shrunk_nv12(y, uv, size, factor);
+        out.timestamp = self.timestamp;
+        Some(out)
+    }
+}
+
+/// ScreenCaptureKit's `420f`: full-range NV12.
+#[cfg(test)]
+const FULL_RANGE_NV12: u32 = u32::from_be_bytes(*b"420f");
+
+#[cfg(test)]
+impl PixelBuffer {
+    /// A pixel buffer holding `frame`, as ScreenCaptureKit would deliver it.
+    pub(crate) fn holding(frame: &VideoFrame) -> Self {
+        let buffer = CVPixelBuffer::create(frame.width, frame.height, FULL_RANGE_NV12)
+            .unwrap_or_else(|status| unreachable!("CVPixelBufferCreate failed: {status}"));
+        {
+            let mut guard = buffer
+                .lock_read_write()
+                .unwrap_or_else(|status| unreachable!("locking failed: {status}"));
+            for (index, plane) in [&frame.y, &frame.uv].into_iter().enumerate() {
+                let stride = guard.bytes_per_row_of_plane(index);
+                let Some(base) = guard.base_address_of_plane_mut(index) else {
+                    unreachable!("plane {index} has no address");
+                };
+                for (row, source) in plane.chunks_exact(frame.width).enumerate() {
+                    // SAFETY: the buffer is locked for writing, and each plane has as many
+                    // rows of `stride` bytes as `frame` has of `width`.
+                    unsafe {
+                        let destination = base.add(row * stride);
+                        std::ptr::copy_nonoverlapping(source.as_ptr(), destination, frame.width);
+                    }
+                }
+            }
+        }
+        Self {
+            buffer,
+            timestamp: frame.timestamp,
+        }
+    }
+}
+
 pub struct MacCapture {
     stream: SCStream,
     frames: rtrb::Consumer<(CVPixelBuffer, i64)>,
@@ -176,27 +242,37 @@ fn failed(e: impl std::fmt::Display) -> CaptureError {
     CaptureError::Failed(e.to_string())
 }
 
+impl MacCapture {
+    fn pop(&mut self) -> Option<PixelBuffer> {
+        let (buffer, at) = self.frames.pop().ok()?;
+        let ticks = self.zero.ticks(at, VIDEO_CLOCK_HZ);
+        (ticks >= 0).then_some(PixelBuffer {
+            buffer,
+            timestamp: ticks as u32,
+        })
+    }
+}
+
 impl Capture for MacCapture {
     fn next_frame(&mut self, into: &mut VideoFrame) -> bool {
-        let Ok((buffer, at)) = self.frames.pop() else {
+        let Some(picture) = self.pop() else {
             return false;
         };
-        let ticks = self.zero.ticks(at, VIDEO_CLOCK_HZ);
-        if ticks < 0 {
-            return false;
-        }
-        let timestamp = ticks as u32;
-        let Ok(guard) = buffer.lock_read_only() else {
+        let Ok(guard) = picture.buffer.lock_read_only() else {
             return false;
         };
         let (width, height) = (guard.width(), guard.height());
         if into.width != width || into.height != height {
             *into = VideoFrame::blank(width, height);
         }
-        into.timestamp = timestamp;
+        into.timestamp = picture.timestamp;
         copy_plane(&guard, 0, width, height, &mut into.y);
         copy_plane(&guard, 1, width, height.div_ceil(2), &mut into.uv);
         true
+    }
+
+    fn next_pixel_buffer(&mut self) -> Option<PixelBuffer> {
+        self.pop()
     }
 
     fn dropped(&self) -> Arc<AtomicU64> {
@@ -324,6 +400,13 @@ mod tests {
 
     use super::*;
     use crate::media::capture::Capture;
+
+    #[test]
+    fn a_pixel_buffer_shrinks_like_a_frame() {
+        let frame = VideoFrame::test_pattern(1280, 720, 7, 4500);
+        let shrunk = PixelBuffer::holding(&frame).shrunk(4).unwrap();
+        assert_eq!(shrunk, frame.shrunk(4));
+    }
 
     #[test]
     #[ignore = "needs a display and the screen recording permission"]

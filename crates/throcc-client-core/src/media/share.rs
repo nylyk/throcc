@@ -14,7 +14,7 @@ use super::capture::{Capture, CaptureConfig, CaptureError};
 use super::engine::{Kind, MediaEngine, Outgoing, Received};
 use super::share_audio::{Playout, STEREO_FRAME, ShareAudioEncoder, due_frames};
 use super::video::decode::{Decoder, MAX_PIXELS};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::video::encode::EncodeError;
 use super::video::encode::{EncodedUnit, Encoder, EncoderConfig};
 use super::video::frame::{VideoFrame, share_size};
@@ -105,6 +105,8 @@ impl ShareSender {
             ..wanted
         };
         let name = encoder.name();
+        #[cfg(target_os = "macos")]
+        let pixel_buffers = encoder.takes_pixel_buffers();
         let stop = Arc::new(AtomicBool::new(false));
         let (recover, recover_rx) = std_mpsc::channel();
         let (self_tx, self_view) = watch::channel(None);
@@ -123,6 +125,8 @@ impl ShareSender {
             preview: preview.clone(),
             #[cfg(target_os = "linux")]
             refused: Vec::new(),
+            #[cfg(target_os = "macos")]
+            pixel_buffers,
         };
         let thread = std::thread::Builder::new()
             .name("throcc-share".into())
@@ -175,6 +179,9 @@ struct Sending {
     /// Frames in GPU memory the share no longer takes.
     #[cfg(target_os = "linux")]
     refused: Vec<Refusal>,
+    /// Whether captured pixel buffers go to the encoder uncopied.
+    #[cfg(target_os = "macos")]
+    pixel_buffers: bool,
 }
 
 impl Sending {
@@ -192,6 +199,10 @@ impl Sending {
             self.send_audio(&mut sound);
             #[cfg(target_os = "linux")]
             if self.send_dmabuf(&mut count) {
+                continue;
+            }
+            #[cfg(target_os = "macos")]
+            if self.pixel_buffers && !self.unsent && self.send_pixel_buffer(&mut count) {
                 continue;
             }
             let fresh =
@@ -248,6 +259,32 @@ impl Sending {
                 }
                 None => warn!("encoding failed: {e}"),
             },
+        }
+        true
+    }
+
+    /// Encodes the next frame from the pixel buffer it was captured into. A picture of
+    /// another size than the encoder's sends this and later frames down the copying path.
+    /// True if there was one.
+    #[cfg(target_os = "macos")]
+    fn send_pixel_buffer(&mut self, count: &mut u32) -> bool {
+        let Some(picture) = self.capture.next_pixel_buffer() else {
+            return false;
+        };
+        *count = count.wrapping_add(1);
+        if count.is_multiple_of(SELF_VIEW_EVERY) && self.preview.wanted() {
+            let thumbnail = picture.shrunk(picture.width() / SELF_VIEW_WIDTH);
+            if let Some(thumbnail) = thumbnail {
+                self.self_view.send_replace(Some(Arc::new(thumbnail)));
+            }
+        }
+        match self.encoder.encode_pixel_buffer(&picture) {
+            Ok(units) => send_units(&self.engine, &self.tracks, units),
+            Err(e @ EncodeError::OtherSize(..)) => {
+                warn!("copying captured pictures from here on: {e}");
+                self.pixel_buffers = false;
+            }
+            Err(e) => warn!("encoding failed: {e}"),
         }
         true
     }

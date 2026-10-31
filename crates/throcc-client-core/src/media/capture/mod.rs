@@ -6,6 +6,8 @@ pub(crate) mod linux;
 pub use linux::{DmaBuf, DmaBufPlane};
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::PixelBuffer;
 #[cfg(windows)]
 pub(crate) mod windows;
 
@@ -64,6 +66,12 @@ pub trait Capture: Send {
     /// Frames already captured still arrive.
     #[cfg(target_os = "linux")]
     fn refuse_dmabuf(&mut self, _modifier: Option<u64>) {}
+    /// The oldest captured frame not yet taken, in the pixel buffer the system captured it
+    /// into. Never blocks.
+    #[cfg(target_os = "macos")]
+    fn next_pixel_buffer(&mut self) -> Option<PixelBuffer> {
+        None
+    }
     /// Frames the capture callback dropped because the ring was full.
     fn dropped(&self) -> Arc<AtomicU64>;
     /// Whether capturing stopped for good, as when the shared window closed or the system

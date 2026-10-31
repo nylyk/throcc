@@ -17,6 +17,8 @@ use super::frame::{VideoFrame, fit_within};
 use super::vaapi::{self, Rectangle, VaError, Vpp};
 #[cfg(target_os = "linux")]
 use crate::media::capture::DmaBuf;
+#[cfg(target_os = "macos")]
+use crate::media::capture::PixelBuffer;
 
 /// A GOP cap of this many seconds bounds how long a picture stays broken without a request.
 const GOP_SECONDS: i32 = 4;
@@ -29,10 +31,13 @@ pub enum EncodeError {
     Ffmpeg(#[from] RsmpegError),
     #[error("can't scale the picture to the encoder's size")]
     Scaler,
-    #[error("the VA-API encoder has no surface pool")]
+    #[error("the hardware encoder has no frame pool")]
     NoSurfaces,
     #[error("this encoder takes no frames in GPU memory")]
     NoGpuInput,
+    #[cfg(target_os = "macos")]
+    #[error("the captured picture is {0}×{1}, not the encoder's size")]
+    OtherSize(usize, usize),
     #[cfg(target_os = "linux")]
     #[error("importing a frame in GPU memory: {0}")]
     Import(VaError),
@@ -62,8 +67,17 @@ struct Candidate {
     input: Input,
     intra_refresh: bool,
     options: &'static [(&'static CStr, &'static CStr)],
-    /// Takes frames in VA-API surfaces, uploaded from the NV12 picture.
-    vaapi: bool,
+    frames: Frames,
+}
+
+/// Where an encoder takes its frames from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Frames {
+    Memory,
+    /// VA-API surfaces, uploaded from the NV12 picture.
+    Vaapi,
+    /// CoreVideo pixel buffers, uploaded from the NV12 picture or captured straight into.
+    VideoToolbox,
 }
 
 const LADDER: &[Candidate] = &[
@@ -73,7 +87,7 @@ const LADDER: &[Candidate] = &[
         input: Input::Nv12,
         intra_refresh: true,
         options: NVENC,
-        vaapi: false,
+        frames: Frames::Memory,
     },
     Candidate {
         name: c"av1_vaapi",
@@ -81,7 +95,7 @@ const LADDER: &[Candidate] = &[
         input: Input::Nv12,
         intra_refresh: false,
         options: VAAPI,
-        vaapi: true,
+        frames: Frames::Vaapi,
     },
     Candidate {
         name: c"hevc_nvenc",
@@ -89,7 +103,7 @@ const LADDER: &[Candidate] = &[
         input: Input::Nv12,
         intra_refresh: true,
         options: NVENC,
-        vaapi: false,
+        frames: Frames::Memory,
     },
     Candidate {
         name: c"hevc_mf",
@@ -97,7 +111,7 @@ const LADDER: &[Candidate] = &[
         input: Input::Nv12,
         intra_refresh: false,
         options: MEDIA_FOUNDATION,
-        vaapi: false,
+        frames: Frames::Memory,
     },
     Candidate {
         name: c"hevc_vaapi",
@@ -105,7 +119,7 @@ const LADDER: &[Candidate] = &[
         input: Input::Nv12,
         intra_refresh: false,
         options: VAAPI,
-        vaapi: true,
+        frames: Frames::Vaapi,
     },
     Candidate {
         name: c"hevc_videotoolbox",
@@ -113,7 +127,7 @@ const LADDER: &[Candidate] = &[
         input: Input::Nv12,
         intra_refresh: false,
         options: VIDEOTOOLBOX,
-        vaapi: false,
+        frames: Frames::VideoToolbox,
     },
     Candidate {
         name: c"h264_nvenc",
@@ -121,7 +135,7 @@ const LADDER: &[Candidate] = &[
         input: Input::Nv12,
         intra_refresh: true,
         options: NVENC,
-        vaapi: false,
+        frames: Frames::Memory,
     },
     Candidate {
         name: c"h264_mf",
@@ -129,7 +143,7 @@ const LADDER: &[Candidate] = &[
         input: Input::Nv12,
         intra_refresh: false,
         options: MEDIA_FOUNDATION,
-        vaapi: false,
+        frames: Frames::Memory,
     },
     Candidate {
         name: c"h264_vaapi",
@@ -137,7 +151,7 @@ const LADDER: &[Candidate] = &[
         input: Input::Nv12,
         intra_refresh: false,
         options: VAAPI,
-        vaapi: true,
+        frames: Frames::Vaapi,
     },
     Candidate {
         name: c"h264_videotoolbox",
@@ -145,7 +159,7 @@ const LADDER: &[Candidate] = &[
         input: Input::Nv12,
         intra_refresh: false,
         options: VIDEOTOOLBOX,
-        vaapi: false,
+        frames: Frames::VideoToolbox,
     },
     Candidate {
         name: c"libvpx-vp9",
@@ -153,7 +167,7 @@ const LADDER: &[Candidate] = &[
         input: Input::Yuv420p,
         intra_refresh: false,
         options: LIBVPX,
-        vaapi: false,
+        frames: Frames::Memory,
     },
 ];
 
@@ -203,7 +217,7 @@ pub struct Encoder {
     name: &'static str,
     input: Input,
     intra_refresh: bool,
-    vaapi: bool,
+    frames: Frames,
     width: usize,
     height: usize,
     idr_next: bool,
@@ -304,7 +318,7 @@ impl Encoder {
                     name,
                     input: candidate.input,
                     intra_refresh: candidate.intra_refresh,
-                    vaapi: candidate.vaapi,
+                    frames: candidate.frames,
                     width: config.width,
                     height: config.height,
                     idr_next: true,
@@ -345,7 +359,7 @@ impl Encoder {
         } else {
             self.fit(picture, &mut frame)?;
         }
-        if self.vaapi {
+        if self.frames != Frames::Memory {
             frame = self.upload(&frame)?;
         }
         self.submit(frame, picture.timestamp)
@@ -415,6 +429,50 @@ impl Encoder {
         drop(imported);
         let units = self.submit(surface, frame.timestamp)?;
         Ok(GpuEncoded { units, preview })
+    }
+
+    /// Whether [`Encoder::encode_pixel_buffer`] takes captured pixel buffers.
+    #[cfg(target_os = "macos")]
+    pub fn takes_pixel_buffers(&self) -> bool {
+        self.frames == Frames::VideoToolbox
+    }
+
+    /// Encodes a captured picture by handing its pixel buffer to VideoToolbox, uncopied.
+    /// Only VideoToolbox encoders take them, and only at the encoder's size.
+    #[cfg(target_os = "macos")]
+    pub fn encode_pixel_buffer(
+        &mut self,
+        picture: &PixelBuffer,
+    ) -> Result<Vec<EncodedUnit>, EncodeError> {
+        if !self.takes_pixel_buffers() {
+            return Err(EncodeError::NoGpuInput);
+        }
+        let size = (picture.buffer.width(), picture.buffer.height());
+        if size != (self.width, self.height) {
+            return Err(EncodeError::OtherSize(size.0, size.1));
+        }
+        let mut frame = AVFrame::new();
+        frame.set_format(ffi::AV_PIX_FMT_VIDEOTOOLBOX);
+        frame.set_width(size.0 as i32);
+        frame.set_height(size.1 as i32);
+        let raw = picture.buffer.as_ptr().cast::<u8>();
+        let held = Box::into_raw(Box::new(picture.buffer.clone()));
+        // SAFETY: the AVBufferRef owns `held` and frees it once, in `release_pixel_buffer`.
+        let buffer =
+            unsafe { ffi::av_buffer_create(raw, 1, Some(release_pixel_buffer), held.cast(), 0) };
+        if buffer.is_null() {
+            // SAFETY: `held` came from Box::into_raw above and nothing else took it.
+            drop(unsafe { Box::from_raw(held) });
+            return Err(RsmpegError::AVError(ffi::AVERROR(ffi::ENOMEM)).into());
+        }
+        // SAFETY: a VideoToolbox frame carries its CVPixelBufferRef in data[3], kept alive by
+        // buf[0], which the frame owns from here.
+        unsafe {
+            let frame = frame.as_mut_ptr();
+            (*frame).buf[0] = buffer;
+            (*frame).data[3] = raw;
+        }
+        self.submit(frame, picture.timestamp)
     }
 
     #[cfg(target_os = "linux")]
@@ -525,7 +583,7 @@ pub fn tries_gpu_input_first() -> bool {
     first_tried(|candidate| {
         has_driver(candidate) && AVCodec::find_encoder_by_name(candidate.name).is_some()
     })
-    .is_some_and(|candidate| candidate.vaapi)
+    .is_some_and(|candidate| candidate.frames == Frames::Vaapi)
 }
 
 #[cfg(target_os = "linux")]
@@ -671,6 +729,29 @@ fn surface_pool(
     Ok(pool)
 }
 
+/// Frees the pixel buffer held by an AVBufferRef from [`Encoder::encode_pixel_buffer`].
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn release_pixel_buffer(held: *mut std::ffi::c_void, _data: *mut u8) {
+    // SAFETY: `held` is the boxed CVPixelBuffer the AVBufferRef was created with.
+    drop(unsafe { Box::from_raw(held.cast::<screencapturekit::cv::CVPixelBuffer>()) });
+}
+
+/// A pool of full-range NV12 CoreVideo pixel buffers of `size`, as ScreenCaptureKit fills.
+fn pixel_buffer_pool(size: (usize, usize)) -> Result<AVHWFramesContext, RsmpegError> {
+    let device = AVHWDeviceContext::create(ffi::AV_HWDEVICE_TYPE_VIDEOTOOLBOX, None, None, 0)?;
+    let mut pool = device.hwframe_ctx_alloc();
+    let buffers = pool.data();
+    buffers.format = ffi::AV_PIX_FMT_VIDEOTOOLBOX;
+    buffers.sw_format = ffi::AV_PIX_FMT_NV12;
+    buffers.width = size.0 as i32;
+    buffers.height = size.1 as i32;
+    // SAFETY: a VideoToolbox frames context's hwctx is an AVVTFramesContext, whose only
+    // field is its colour range.
+    unsafe { *(buffers.hwctx as *mut ffi::AVColorRange) = ffi::AVCOL_RANGE_JPEG };
+    pool.init()?;
+    Ok(pool)
+}
+
 /// Opens `candidate`, and returns the VA-API device it encodes on, if any.
 fn open_candidate(
     codec: &AVCodec,
@@ -684,12 +765,22 @@ fn open_candidate(
     ctx.set_framerate(ra(config.fps as i32, 1));
     ctx.set_pix_fmt(pixel_format(candidate.input));
     let mut device = None;
-    if candidate.vaapi {
-        let vaapi = AVHWDeviceContext::create(ffi::AV_HWDEVICE_TYPE_VAAPI, None, None, 0)?;
-        let pool = surface_pool(&vaapi, (config.width, config.height), VAAPI_SURFACES)?;
-        ctx.set_pix_fmt(ffi::AV_PIX_FMT_VAAPI);
-        ctx.set_hw_frames_ctx(pool);
-        device = Some(vaapi);
+    match candidate.frames {
+        Frames::Memory => {}
+        Frames::Vaapi => {
+            let vaapi = AVHWDeviceContext::create(ffi::AV_HWDEVICE_TYPE_VAAPI, None, None, 0)?;
+            let pool = surface_pool(&vaapi, (config.width, config.height), VAAPI_SURFACES)?;
+            ctx.set_pix_fmt(ffi::AV_PIX_FMT_VAAPI);
+            ctx.set_hw_frames_ctx(pool);
+            device = Some(vaapi);
+        }
+        Frames::VideoToolbox => {
+            let pool = pixel_buffer_pool((config.width, config.height))?;
+            ctx.set_pix_fmt(ffi::AV_PIX_FMT_VIDEOTOOLBOX);
+            // SAFETY: `ctx` owns a live context, and sw_pix_fmt is a plain field of it.
+            unsafe { (*ctx.as_mut_ptr()).sw_pix_fmt = ffi::AV_PIX_FMT_NV12 };
+            ctx.set_hw_frames_ctx(pool);
+        }
     }
     let bitrate = i64::from(config.kbps) * 1000;
     ctx.set_bit_rate(bitrate);
@@ -964,7 +1055,7 @@ mod gpu_input {
         };
         LADDER
             .iter()
-            .filter(|c| c.vaapi)
+            .filter(|c| c.frames == Frames::Vaapi)
             .find_map(|c| Encoder::open_with(c, config))
     }
 
@@ -1103,5 +1194,149 @@ mod gpu_input {
             vp9.encode_dmabuf(&frame, None),
             Err(EncodeError::NoGpuInput)
         ));
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod pixel_buffers {
+    use super::super::decode::{Decoder, MAX_PIXELS};
+    use super::super::frame::luma_psnr;
+    use super::*;
+
+    fn opened(name: &CStr) -> Option<Encoder> {
+        let candidate = LADDER.iter().find(|c| c.name == name)?;
+        let config = EncoderConfig {
+            width: 1280,
+            height: 720,
+            fps: 30,
+            kbps: 4000,
+        };
+        Encoder::open_with(candidate, config)
+    }
+
+    #[test]
+    fn captured_pixel_buffers_encode_uncopied_and_decode_back() {
+        let Some(mut encoder) = opened(c"hevc_videotoolbox") else {
+            eprintln!("no VideoToolbox HEVC encoder here; skipping");
+            return;
+        };
+        let mut decoder = Decoder::new(Codec::Hevc, MAX_PIXELS).unwrap();
+        let mut shown = Vec::new();
+        for n in 0..30u16 {
+            let input = VideoFrame::test_pattern(1280, 720, n, u32::from(n) * 3000);
+            let picture = PixelBuffer::holding(&input);
+            for unit in encoder.encode_pixel_buffer(&picture).unwrap() {
+                if let Some(output) = decoder.decode(&unit.data, unit.timestamp).unwrap() {
+                    let number = output.read_test_number();
+                    let reference = VideoFrame::test_pattern(1280, 720, number, 0);
+                    shown.push(luma_psnr(&output, &reference));
+                }
+            }
+        }
+        assert!(
+            shown.len() >= 25,
+            "only {} of 30 frames came out",
+            shown.len()
+        );
+        let worst = shown.iter().copied().fold(f64::INFINITY, f64::min);
+        assert!(worst > 25.0, "picture quality {worst:.1} dB");
+    }
+
+    #[test]
+    fn a_picture_of_another_size_or_a_software_encoder_is_refused() {
+        let picture = PixelBuffer::holding(&VideoFrame::test_pattern(640, 360, 0, 0));
+        if let Some(mut videotoolbox) = opened(c"h264_videotoolbox") {
+            assert!(matches!(
+                videotoolbox.encode_pixel_buffer(&picture),
+                Err(EncodeError::OtherSize(640, 360))
+            ));
+        }
+        if let Some(mut vp9) = opened(c"libvpx-vp9") {
+            assert!(!vp9.takes_pixel_buffers());
+            assert!(matches!(
+                vp9.encode_pixel_buffer(&picture),
+                Err(EncodeError::NoGpuInput)
+            ));
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod main_display {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use crate::media::capture::{Capture, CaptureConfig, macos};
+
+    /// CPU time this process has used, in seconds.
+    fn cpu_seconds() -> f64 {
+        // SAFETY: getrusage fills the zeroed struct it is handed.
+        let usage = unsafe {
+            let mut usage = std::mem::zeroed::<libc::rusage>();
+            libc::getrusage(libc::RUSAGE_SELF, &mut usage);
+            usage
+        };
+        let seconds = |t: libc::timeval| t.tv_sec as f64 + f64::from(t.tv_usec) / 1e6;
+        seconds(usage.ru_utime) + seconds(usage.ru_stime)
+    }
+
+    #[test]
+    #[ignore = "needs a display, the screen recording permission and a changing picture"]
+    fn a_main_display_share_runs_for_profiling() {
+        let seconds = std::env::var("THROCC_PROFILE_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20);
+        let config = CaptureConfig {
+            width: 2560,
+            height: 1440,
+            fps: 60,
+            audio: false,
+        };
+        let mut capture = macos::main_display(config);
+        let mut frame = VideoFrame::blank(2, 2);
+        while !capture.next_frame(&mut frame) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let mut encoder = Encoder::open(EncoderConfig {
+            width: frame.width,
+            height: frame.height,
+            fps: 60,
+            kbps: 8000,
+        })
+        .unwrap();
+        let size = (frame.width, frame.height);
+        for copied in [true, false] {
+            let (started, cpu) = (Instant::now(), cpu_seconds());
+            let mut frames = 0;
+            while started.elapsed() < Duration::from_secs(seconds) {
+                let encoded = if copied {
+                    capture
+                        .next_frame(&mut frame)
+                        .then(|| encoder.encode(&frame))
+                } else {
+                    capture
+                        .next_pixel_buffer()
+                        .map(|picture| encoder.encode_pixel_buffer(&picture))
+                };
+                match encoded {
+                    Some(units) => {
+                        units.unwrap();
+                        frames += 1;
+                    }
+                    None => std::thread::sleep(Duration::from_millis(2)),
+                }
+            }
+            let elapsed = started.elapsed().as_secs_f64();
+            eprintln!(
+                "{} at {}×{}, {}: {:.0} fps, {:.1} % of a core",
+                encoder.name(),
+                size.0,
+                size.1,
+                if copied { "copied" } else { "uncopied" },
+                f64::from(frames) / elapsed,
+                (cpu_seconds() - cpu) / elapsed * 100.0
+            );
+        }
     }
 }
