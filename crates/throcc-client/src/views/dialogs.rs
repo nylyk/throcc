@@ -283,9 +283,6 @@ fn share(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         ))
         .child(section("Resolution"))
         .child(resolutions)
-        .child(caption(
-            "The most lines sent. The picture keeps your screen's own shape, and a smaller screen is sent at its own size.",
-        ))
         .child(section("Frame rate"))
         .child(frame_rates)
         .child(bitrate)
