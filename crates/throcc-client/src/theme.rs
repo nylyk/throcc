@@ -328,9 +328,10 @@ pub fn player_text() -> Hsla {
 pub fn player_hover() -> Hsla {
     gpui::white().opacity(0.16)
 }
-/// The shade behind a fullscreen stream's controls, darkest at the edge `toward_top` says.
-pub fn player_shade(toward_top: bool) -> gpui::Background {
-    let angle = if toward_top { 0. } else { 180. };
+/// The shade behind a fullscreen stream's controls, darkest at the window's edge: the
+/// bottom one when `at_bottom`, else the top one.
+pub fn player_shade(at_bottom: bool) -> gpui::Background {
+    let angle = if at_bottom { 180. } else { 0. };
     gpui::linear_gradient(
         angle,
         gpui::linear_color_stop(gpui::black().opacity(0.0), 0.0),
