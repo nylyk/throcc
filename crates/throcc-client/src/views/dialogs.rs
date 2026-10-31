@@ -278,9 +278,6 @@ fn share(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .flex_col()
         .gap_4()
         .child(title("Share your screen"))
-        .child(caption(
-            "Your system's own picker opens when you start sharing, so you choose a display or window there.",
-        ))
         .child(section("Resolution"))
         .child(resolutions)
         .child(section("Frame rate"))
@@ -295,19 +292,22 @@ fn share(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                     cx.notify();
                 })),
         )
-        .child(caption("Encoder: chosen when sharing starts, best of AV1, HEVC and H.264 in hardware."))
         .child(
             div()
                 .flex()
                 .justify_end()
                 .gap_2()
                 .child(close_button(cx))
-                .child(primary("start-share", "Start sharing").on_click(cx.listener(|app, _, _, cx| {
-                    let config = app.share_choice.config(Codec::Av1, app.share_audio);
-                    app.command(Command::StartShare(config));
-                    app.dialog = None;
-                    cx.notify();
-                }))),
+                .child(
+                    primary("start-share", "Start sharing").on_click(cx.listener(
+                        |app, _, _, cx| {
+                            let config = app.share_choice.config(Codec::Av1, app.share_audio);
+                            app.command(Command::StartShare(config));
+                            app.dialog = None;
+                            cx.notify();
+                        },
+                    )),
+                ),
         )
         .into_any_element()
 }

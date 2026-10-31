@@ -23,7 +23,7 @@ pub fn render(
         |id: &'static str, label: &'static str, target: ServerPage, cx: &mut Context<ThroccApp>| {
             nav_item(id, label, page == target).on_click(cx.listener(move |app, _, _, cx| {
                 app.screen = Screen::Server(target);
-                if target == ServerPage::Members {
+                if target == ServerPage::Members && app.state.role == Some(Role::Admin) {
                     app.command(Command::ListUsers);
                 }
                 cx.notify();
@@ -68,39 +68,53 @@ fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .gap_2()
                 .child(section("This server"))
                 .child(div().child(address))
-                .child(mono(fingerprint.to_string()).text_size(px(12.)).text_color(theme::text_2()))
-                .child(caption("Media is end-to-end encrypted. The server sees who is in which room, profiles and room names, not what anyone says or shows."))
+                .child(
+                    mono(fingerprint.to_string())
+                        .text_size(px(12.))
+                        .text_color(theme::text_2()),
+                )
         }))
         .child(
-            card().flex().flex_col().gap_1().child(section("People")).children(
-                state.people.iter().filter(|(u, _)| Some(**u) != me).map(|(user, person)| {
-                    let user = *user;
-                    let changed = state.key_warnings.iter().any(|w| w.user == user);
-                    div()
-                        .id(("contact", user.0 as usize))
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .min_h(theme::TOUCH)
-                        .px_2()
-                        .rounded(theme::RADIUS_ROW)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme::raised()))
-                        .child(avatar(&person.name, user.0, pictures.get(&user).cloned(), px(28.), false))
-                        .child(div().flex_1().child(person.name.clone()))
-                        .child(if changed {
-                            chip("Key changed", theme::warn_bg(), theme::warn_text())
-                        } else if person.verified {
-                            chip("Verified", theme::ok_bg(), theme::ok_text())
-                        } else {
-                            chip("Not verified", theme::raised(), theme::text_3())
-                        })
-                        .on_click(cx.listener(move |app, _, _, cx| {
-                            app.dialog = Some(Dialog::Verify(user));
-                            cx.notify();
-                        }))
-                }),
-            ),
+            card()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(section("People"))
+                .children(state.people.iter().filter(|(u, _)| Some(**u) != me).map(
+                    |(user, person)| {
+                        let user = *user;
+                        let changed = state.key_warnings.iter().any(|w| w.user == user);
+                        div()
+                            .id(("contact", user.0 as usize))
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .min_h(theme::TOUCH)
+                            .px_2()
+                            .rounded(theme::RADIUS_ROW)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme::raised()))
+                            .child(avatar(
+                                &person.name,
+                                user.0,
+                                pictures.get(&user).cloned(),
+                                px(28.),
+                                false,
+                            ))
+                            .child(div().flex_1().child(person.name.clone()))
+                            .child(if changed {
+                                chip("Key changed", theme::warn_bg(), theme::warn_text())
+                            } else if person.verified {
+                                chip("Verified", theme::ok_bg(), theme::ok_text())
+                            } else {
+                                chip("Not verified", theme::raised(), theme::text_3())
+                            })
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.dialog = Some(Dialog::Verify(user));
+                                cx.notify();
+                            }))
+                    },
+                )),
         )
         .into_any_element()
 }
@@ -121,8 +135,7 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .text_size(px(24.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .into_any_element(),
-            None => caption("Make a code and send it to the person you want to invite.")
-                .into_any_element(),
+            None => div().into_any_element(),
         })
         .child(caption(if is_admin {
             "Single use, expires in 24 h."
@@ -223,9 +236,6 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                         }))
                 })),
         );
-        page = page.child(caption(
-            "Removing someone can also remove everyone they invited.",
-        ));
     }
     page.into_any_element()
 }

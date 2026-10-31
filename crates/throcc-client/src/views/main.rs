@@ -160,9 +160,11 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                                 app.open_edit_room(id, window, cx);
                             }))
                     }))
-                    .on_click(
-                        cx.listener(move |app, _, _, _| app.command(Command::Join(Some(id)))),
-                    ),
+                    .on_click(cx.listener(move |app, _, _, _| {
+                        if app.state.current.as_ref().is_none_or(|c| c.room != id) {
+                            app.command(Command::Join(Some(id)));
+                        }
+                    })),
             )
             .children(
                 people
@@ -209,8 +211,7 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                 .child(
                     ghost_icon("server-settings", "settings-2", "Server settings").on_click(
                         cx.listener(|app, _, _, cx| {
-                            app.command(Command::ListUsers);
-                            app.screen = Screen::Server(ServerPage::Members);
+                            app.screen = Screen::Server(ServerPage::Keys);
                             cx.notify();
                         }),
                     ),
@@ -282,22 +283,18 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                         .child(caption(if in_room { "Connected" } else { "In the lobby" })),
                 )
                 .child(
-                    ghost_icon(
-                        "profile-mic",
-                        if mic { "mic" } else { "mic-off" },
-                        "Mute (⌘⇧M)",
-                    )
-                    .disabled(!in_room)
-                    .on_click(cx.listener(move |app, _, _, _| app.command(Command::SetMic(!mic)))),
+                    toggle_icon("profile-mic", "mic", "mic-off", !mic, "Mute (⌘⇧M)")
+                        .disabled(!in_room)
+                        .on_click(
+                            cx.listener(move |app, _, _, _| app.command(Command::SetMic(!mic))),
+                        ),
                 )
                 .child(
-                    ghost_icon(
+                    toggle_icon(
                         "profile-deafen",
-                        if deafened {
-                            "headphone-off"
-                        } else {
-                            "headphones"
-                        },
+                        "headphones",
+                        "headphone-off",
+                        deafened,
                         "Deafen (⌘⇧D)",
                     )
                     .disabled(!in_room)
@@ -309,13 +306,35 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                 )
                 .child(
                     ghost_icon("profile-settings", "settings", "Settings").on_click(cx.listener(
-                        |app, _, _, cx| {
-                            app.screen = Screen::Settings(SettingsPage::Audio);
+                        |app, _, window, cx| {
+                            app.fill_profile(window, cx);
+                            app.screen = Screen::Settings(SettingsPage::Profile);
                             cx.notify();
                         },
                     )),
                 ),
         )
+}
+
+/// A ghost icon that turns red, showing `active_icon`, while `active`.
+fn toggle_icon(
+    id: &'static str,
+    icon_name: &'static str,
+    active_icon: &'static str,
+    active: bool,
+    tooltip: &'static str,
+) -> Button {
+    let shown = if active { active_icon } else { icon_name };
+    let shown = icon(shown);
+    Button::new(id)
+        .icon(if active {
+            shown.text_color(theme::danger_text())
+        } else {
+            shown
+        })
+        .ghost()
+        .rounded(theme::RADIUS_ROW)
+        .tooltip(tooltip)
 }
 
 trait Selected {
@@ -434,9 +453,6 @@ fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
         .flex_col()
         .gap_4()
         .child(title("Lobby"))
-        .child(caption(
-            "You're connected but not in a room. Nobody sees or hears you until you join one.",
-        ))
         .child(div().flex().flex_wrap().gap_4().children(cards))
         .children(state.rooms.is_empty().then(|| {
             card().child(caption(if manages {
@@ -579,14 +595,6 @@ fn room(
                     }
                     cx.notify();
                 })),
-        )
-        .child(
-            control_button("settings", "settings", "Settings", true).on_click(cx.listener(
-                |app, _, _, cx| {
-                    app.screen = Screen::Settings(SettingsPage::Audio);
-                    cx.notify();
-                },
-            )),
         )
         .child(
             Button::new("leave")

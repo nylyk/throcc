@@ -48,7 +48,6 @@ pub fn render(
         .flex_col()
         .gap_4()
         .child(title("Join a server"))
-        .child(caption("Ask someone on the server for its address and an invite code."))
         .child(
             div()
                 .flex()

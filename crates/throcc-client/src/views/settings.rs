@@ -279,20 +279,19 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                         .child(picture_buttons),
                 )
                 .child(row("Name", name_field))
-                .children(app.profile_status.clone().map(|status| match status {
-                    ProfileStatus::Saving => caption("Saving…"),
-                    ProfileStatus::Saved => caption("Saved.").text_color(theme::ok_text()),
-                    ProfileStatus::UntilJoined => {
-                        caption("Saved here. Others see your picture once you join a room.")
+                .children(app.profile_status.clone().map(|status| {
+                    match status {
+                        ProfileStatus::Saving => caption("Saving…"),
+                        ProfileStatus::Saved => caption("Saved.").text_color(theme::ok_text()),
+                        ProfileStatus::UntilJoined => {
+                            caption("Saved here. Others see your picture once you join a room.")
+                        }
+                        ProfileStatus::Failed(reason) => caption(format!(
+                            "Kept on this computer, but this server refused it: {reason}"
+                        ))
+                        .text_color(theme::danger_text()),
                     }
-                    ProfileStatus::Failed(reason) => caption(format!(
-                        "Kept on this computer, but this server refused it: {reason}"
-                    ))
-                    .text_color(theme::danger_text()),
-                }))
-                .child(caption(
-                    "This computer keeps your name and picture and gives them to every server you join. A server takes one change every 10 seconds.",
-                )),
+                })),
         )
         .into_any_element()
 }
@@ -671,9 +670,6 @@ fn servers(app: &mut ThroccApp) -> AnyElement {
                     },
                 )),
         )
-        .child(caption(
-            "Servers you have joined from this computer, with the key each one is pinned to.",
-        ))
         .into_any_element()
 }
 
@@ -770,10 +766,7 @@ fn appearance(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .flex_col()
                 .gap_1()
                 .child(section("Colors"))
-                .children(colors)
-                .child(caption(
-                    "Every other colour is mixed from these eight. Type a hex value like #8C7BFF.",
-                )),
+                .children(colors),
         )
         .into_any_element()
 }
