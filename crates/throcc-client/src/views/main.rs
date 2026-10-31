@@ -1,6 +1,8 @@
+use std::sync::Arc;
+
 use gpui::{
-    AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, Window, div, px,
+    AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement, Pixels,
+    RenderImage, Size as Area, StatefulInteractiveElement, Styled, Window, div, px, relative, size,
 };
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_component::{Disableable, Sizable, Size};
@@ -9,11 +11,11 @@ use throcc_client_core::state::{Person, Preset, State, share_label};
 use throcc_proto::ids::{RoomId, UserId};
 
 use super::common::{
-    avatar, caption, card, chip, control_button, ghost_icon, icon, live_badge, primary, secondary,
-    section, title,
+    avatar, caption, card, chip, control_button, ghost_icon, icon, live_badge, primary, section,
+    title,
 };
-use crate::app::{Dialog, Screen, SettingsPage, ThroccApp};
-use crate::{theme, video};
+use crate::app::{Dialog, Screen, ServerPage, SettingsPage, ThroccApp};
+use crate::theme;
 
 pub fn render(
     app: &mut ThroccApp,
@@ -132,6 +134,15 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                         .child(server),
                 )
                 .child(
+                    ghost_icon("server-settings", "settings-2", "Server settings").on_click(
+                        cx.listener(|app, _, window, cx| {
+                            app.fill_profile(window, cx);
+                            app.screen = Screen::Server(ServerPage::Profile);
+                            cx.notify();
+                        }),
+                    ),
+                )
+                .child(
                     ghost_icon("leave-server", "log-out", "Leave this server")
                         .on_click(cx.listener(|app, _, _, cx| app.leave_server(cx))),
                 ),
@@ -241,7 +252,7 @@ trait Selected {
 impl<T: Styled> Selected for T {
     fn when_selected(self, selected: bool) -> Self {
         if selected {
-            self.bg(theme::raised())
+            self.bg(theme::selected())
         } else {
             self
         }
@@ -375,12 +386,27 @@ fn room(
         .as_ref()
         .map(|c| c.watching.clone())
         .unwrap_or_default();
-    let sharers: Vec<(UserId, Person)> = people
+    let tiles: Vec<Tile> = people
         .iter()
-        .filter(|(u, p)| p.sharing.is_some() && Some(*u) != me)
-        .cloned()
+        .map(|(user, person)| {
+            let user = *user;
+            let mine = Some(user) == me;
+            let sharing = person.sharing.is_some();
+            Tile {
+                user,
+                person: person.clone(),
+                picture: pictures.get(&user).cloned(),
+                mine,
+                watched: sharing
+                    && if mine {
+                        app.preview_self
+                    } else {
+                        watching.contains(&user)
+                    },
+                popped: app.popouts.contains_key(&user),
+            }
+        })
         .collect();
-    let staged = sharers.iter().find(|(u, _)| watching.contains(u)).cloned();
     let rtt = state.health.rtt_ms;
 
     let header = div()
@@ -427,193 +453,6 @@ fn room(
                     cx.notify();
                 })),
         );
-
-    let stage = match &staged {
-        Some((user, person)) => {
-            let user = *user;
-            let config = person.sharing.map(|c| share_label(&c)).unwrap_or_default();
-            div()
-                .flex_1()
-                .min_h(px(240.))
-                .relative()
-                .rounded(theme::RADIUS_TILE)
-                .bg(gpui::black())
-                .overflow_hidden()
-                .child(video::surface(app, user, window, cx))
-                .child(
-                    div()
-                        .absolute()
-                        .top_3()
-                        .left_3()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .px_2()
-                        .py_1()
-                        .rounded(theme::RADIUS_ROW)
-                        .bg(theme::surface().opacity(0.85))
-                        .child(avatar(
-                            &person.name,
-                            user.0,
-                            pictures.get(&user).cloned(),
-                            px(18.),
-                            person.speaking,
-                        ))
-                        .child(
-                            div()
-                                .text_size(px(13.))
-                                .child(format!("{}'s screen", person.name)),
-                        )
-                        .child(caption(config)),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .top_3()
-                        .right_3()
-                        .flex()
-                        .gap_1()
-                        .child(
-                            ghost_icon("stop-watching", "eye-off", "Stop watching").on_click(
-                                cx.listener(move |app, _, _, _| {
-                                    app.command(Command::Unwatch(user))
-                                }),
-                            ),
-                        )
-                        .child(
-                            ghost_icon("fullscreen", "maximize-2", "Fullscreen").on_click(
-                                cx.listener(|_, _, window, _| window.toggle_fullscreen()),
-                            ),
-                        ),
-                )
-                .into_any_element()
-        }
-        None => div()
-            .flex_1()
-            .min_h(px(160.))
-            .rounded(theme::RADIUS_TILE)
-            .border_1()
-            .border_color(theme::control())
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .child(
-                icon("screen-share")
-                    .size(px(28.))
-                    .text_color(theme::text_3()),
-            )
-            .child(caption(if sharers.is_empty() {
-                "Nobody is sharing. Share your screen from the bar below."
-            } else {
-                "Pick a share on the right to watch it."
-            }))
-            .into_any_element(),
-    };
-
-    let others: Vec<(UserId, Person)> = sharers
-        .iter()
-        .filter(|(u, _)| Some(*u) != staged.as_ref().map(|s| s.0))
-        .cloned()
-        .collect();
-    let rail = (!others.is_empty()).then(|| {
-        div()
-            .w(px(240.))
-            .flex_none()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .children(others.iter().map(|(user, person)| {
-                let user = *user;
-                card()
-                    .p_3()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(avatar(
-                                &person.name,
-                                user.0,
-                                pictures.get(&user).cloned(),
-                                px(22.),
-                                person.speaking,
-                            ))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .truncate()
-                                    .child(format!("{} is sharing", person.name)),
-                            )
-                            .child(live_badge()),
-                    )
-                    .child(caption(
-                        person.sharing.map(|c| share_label(&c)).unwrap_or_default(),
-                    ))
-                    .child(
-                        secondary(("watch", user.0 as usize), "Watch")
-                            .w_full()
-                            .on_click(
-                                cx.listener(move |app, _, _, _| app.command(Command::Watch(user))),
-                            ),
-                    )
-            }))
-    });
-
-    let tiles = div()
-        .flex()
-        .flex_wrap()
-        .gap_3()
-        .children(people.iter().map(|(user, person)| {
-            div()
-                .w(px(148.))
-                .h(px(112.))
-                .rounded(theme::RADIUS_TILE)
-                .bg(theme::surface())
-                .border_1()
-                .border_color(if person.speaking {
-                    theme::speaking()
-                } else {
-                    theme::control()
-                })
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .child(avatar(
-                    &person.name,
-                    user.0,
-                    pictures.get(user).cloned(),
-                    px(40.),
-                    person.speaking,
-                ))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_size(px(13.))
-                                .truncate()
-                                .child(person.name.clone()),
-                        )
-                        .children(
-                            (!person.mic)
-                                .then(|| icon("mic-off").size(px(13.)).text_color(theme::text_3())),
-                        )
-                        .children(person.deafened.then(|| {
-                            icon("headphone-off")
-                                .size(px(13.))
-                                .text_color(theme::text_3())
-                        })),
-                )
-        }));
 
     let mic = current.as_ref().is_some_and(|c| c.mic);
     let deafened = current.as_ref().is_some_and(|c| c.deafened);
@@ -701,24 +540,13 @@ fn room(
                 .on_click(cx.listener(|app, _, _, _| app.command(Command::Join(None)))),
         );
 
-    let body: AnyElement = div()
-        .flex_1()
-        .min_h_0()
-        .flex()
-        .gap_4()
-        .p_4()
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap_4()
-                .child(stage)
-                .child(tiles),
-        )
-        .children(rail)
-        .into_any_element();
+    let focus = app
+        .focus
+        .filter(|f| tiles.iter().any(|t| t.user == *f && t.shows_stream()));
+    let body = match focus {
+        Some(focus) => focused(app, &tiles, focus, window, cx),
+        None => grid(app, &tiles, window, cx),
+    };
 
     div()
         .size_full()
@@ -727,4 +555,384 @@ fn room(
         .child(header)
         .child(body)
         .child(controls)
+}
+
+/// One person in the room, and what their tile shows.
+struct Tile {
+    user: UserId,
+    person: Person,
+    picture: Option<Arc<RenderImage>>,
+    mine: bool,
+    watched: bool,
+    popped: bool,
+}
+
+impl Tile {
+    fn shows_stream(&self) -> bool {
+        self.watched && !self.popped
+    }
+}
+
+const TILE_GAP: Pixels = px(12.);
+const ROOM_PADDING: Pixels = px(16.);
+const STRIP_HEIGHT: Pixels = px(124.);
+
+/// How many columns of 16:9 tiles make `count` of them as large as fits `area`, and their size.
+fn grid_fit(count: usize, area: Area<Pixels>, gap: Pixels) -> (usize, Area<Pixels>) {
+    let (width, height, gap) = (
+        f32::from(area.width),
+        f32::from(area.height),
+        f32::from(gap),
+    );
+    (1..=count.max(1))
+        .map(|columns| {
+            let rows = count.max(1).div_ceil(columns);
+            let cell_width = (width - gap * (columns - 1) as f32) / columns as f32;
+            let cell_height = (height - gap * (rows - 1) as f32) / rows as f32;
+            let tile_width = cell_width.min(cell_height * 16.0 / 9.0).max(0.0).floor();
+            (columns, tile_width)
+        })
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(columns, tile_width)| {
+            let tile = size(px(tile_width), px((tile_width * 9.0 / 16.0).floor()));
+            (columns, tile)
+        })
+        .unwrap_or((1, size(px(0.), px(0.))))
+}
+
+fn grid(
+    app: &mut ThroccApp,
+    tiles: &[Tile],
+    window: &mut Window,
+    cx: &mut Context<ThroccApp>,
+) -> AnyElement {
+    let viewport = window.viewport_size();
+    let area = size(
+        viewport.width - theme::SIDEBAR_WIDTH - ROOM_PADDING * 2.,
+        viewport.height - theme::HEADER_HEIGHT - theme::FOOTER_HEIGHT - ROOM_PADDING * 2.,
+    );
+    let (_, tile_size) = grid_fit(tiles.len(), area, TILE_GAP);
+    div()
+        .flex_1()
+        .min_h_0()
+        .overflow_hidden()
+        .p(ROOM_PADDING)
+        .flex()
+        .flex_wrap()
+        .content_center()
+        .items_center()
+        .justify_center()
+        .gap(TILE_GAP)
+        .children(tiles.iter().map(|t| {
+            div()
+                .flex_none()
+                .w(tile_size.width)
+                .h(tile_size.height)
+                .child(tile(app, t, Layout::Grid, window, cx))
+        }))
+        .into_any_element()
+}
+
+fn focused(
+    app: &mut ThroccApp,
+    tiles: &[Tile],
+    focus: UserId,
+    window: &mut Window,
+    cx: &mut Context<ThroccApp>,
+) -> AnyElement {
+    let others: Vec<&Tile> = tiles.iter().filter(|t| t.user != focus).collect();
+    let stage = tiles
+        .iter()
+        .find(|t| t.user == focus)
+        .map(|t| tile(app, t, Layout::Stage, window, cx));
+    let strip_tile = size(STRIP_HEIGHT * (16. / 9.), STRIP_HEIGHT);
+    let strip_width = (strip_tile.width + TILE_GAP) * others.len() as f32;
+    let room_width = window.viewport_size().width - theme::SIDEBAR_WIDTH - ROOM_PADDING * 2.;
+    let strip = (!others.is_empty()).then(|| {
+        div()
+            .id("strip")
+            .flex_none()
+            .h(STRIP_HEIGHT)
+            .flex()
+            .gap(TILE_GAP)
+            .when_fits(strip_width <= room_width)
+            .overflow_x_scroll()
+            .children(others.into_iter().map(|t| {
+                div()
+                    .flex_none()
+                    .w(strip_tile.width)
+                    .h(strip_tile.height)
+                    .child(tile(app, t, Layout::Strip, window, cx))
+            }))
+    });
+    div()
+        .flex_1()
+        .min_h_0()
+        .p(ROOM_PADDING)
+        .flex()
+        .flex_col()
+        .gap(TILE_GAP)
+        .child(div().flex_1().min_h_0().children(stage))
+        .children(strip)
+        .into_any_element()
+}
+
+trait Centered {
+    fn when_fits(self, fits: bool) -> Self;
+}
+
+impl<T: Styled> Centered for T {
+    fn when_fits(self, fits: bool) -> Self {
+        if fits { self.justify_center() } else { self }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    Grid,
+    Stage,
+    Strip,
+}
+
+fn tile(
+    app: &mut ThroccApp,
+    t: &Tile,
+    layout: Layout,
+    window: &mut Window,
+    cx: &mut Context<ThroccApp>,
+) -> AnyElement {
+    let user = t.user;
+    let compact = layout == Layout::Strip;
+    let frame = div()
+        .id(("tile", user.0 as usize))
+        .size_full()
+        .relative()
+        .rounded(theme::RADIUS_TILE)
+        .overflow_hidden()
+        .border_1()
+        .border_color(if t.person.speaking {
+            theme::speaking()
+        } else {
+            theme::control()
+        });
+    if !t.shows_stream() {
+        return frame
+            .bg(theme::surface())
+            .child(person_card(t, compact, cx))
+            .into_any_element();
+    }
+    let config = t
+        .person
+        .sharing
+        .map(|c| share_label(&c))
+        .unwrap_or_default();
+    let label = div()
+        .absolute()
+        .bottom_2()
+        .left_2()
+        .max_w(relative(0.9))
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_2()
+        .py_1()
+        .rounded(theme::RADIUS_ROW)
+        .bg(theme::overlay())
+        .child(avatar(
+            &t.person.name,
+            user.0,
+            t.picture.clone(),
+            px(18.),
+            t.person.speaking,
+        ))
+        .child(
+            div()
+                .text_size(px(13.))
+                .truncate()
+                .child(t.person.name.clone()),
+        )
+        .children((!compact).then(|| caption(config)));
+    let mine = t.mine;
+    let buttons = (!compact).then(|| {
+        div()
+            .absolute()
+            .top_2()
+            .right_2()
+            .flex()
+            .gap_1()
+            .p_1()
+            .rounded(theme::RADIUS_ROW)
+            .bg(theme::overlay())
+            .children((!mine).then(|| {
+                ghost_icon(
+                    ("pop-out", user.0 as usize),
+                    "picture-in-picture-2",
+                    "Pop out",
+                )
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    cx.stop_propagation();
+                    app.pop_out(user, cx);
+                }))
+            }))
+            .child(
+                ghost_icon(
+                    ("stop-watching", user.0 as usize),
+                    "eye-off",
+                    "Stop watching",
+                )
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    cx.stop_propagation();
+                    if mine {
+                        app.preview_self = false;
+                    } else {
+                        app.command(Command::Unwatch(user));
+                    }
+                    cx.notify();
+                })),
+            )
+            .children((layout == Layout::Stage).then(|| {
+                ghost_icon("fullscreen", "maximize-2", "Fullscreen").on_click(cx.listener(
+                    |_, _, window, cx| {
+                        cx.stop_propagation();
+                        window.toggle_fullscreen();
+                    },
+                ))
+            }))
+    });
+    let picture = app.feeds.surface(app.client.as_ref(), user, window, cx);
+    frame
+        .cursor_pointer()
+        .child(picture)
+        .child(label)
+        .children(buttons)
+        .on_click(cx.listener(move |app, _, _, cx| {
+            app.focus = (layout != Layout::Stage).then_some(user);
+            cx.notify();
+        }))
+        .into_any_element()
+}
+
+/// A tile for someone whose share isn't shown here: their picture and name, and a way to
+/// watch it when they share.
+fn person_card(t: &Tile, compact: bool, cx: &mut Context<ThroccApp>) -> Div {
+    let user = t.user;
+    let person = &t.person;
+    let action = person.sharing.map(|_| {
+        let (label, icon_name) = if t.popped {
+            ("Bring back", "panel-top-open")
+        } else if t.mine {
+            ("Preview", "eye")
+        } else if compact {
+            ("Watch", "eye")
+        } else {
+            ("Watch stream", "eye")
+        };
+        let popped = t.popped;
+        let mine = t.mine;
+        Button::new(("watch", user.0 as usize))
+            .label(label)
+            .icon(icon(icon_name))
+            .primary()
+            .rounded(theme::RADIUS_BUTTON)
+            .with_size(if compact { Size::Small } else { Size::Medium })
+            .on_click(cx.listener(move |app, _, _, cx| {
+                if popped {
+                    app.close_popout(user, cx);
+                } else if mine {
+                    app.preview_self = true;
+                } else {
+                    app.command(Command::Watch(user));
+                }
+                cx.notify();
+            }))
+    });
+    let status = person.sharing.map(|config| {
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(live_badge())
+            .children((!compact).then(|| caption(share_label(&config))))
+    });
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(if compact { px(4.) } else { px(10.) })
+        .p_2()
+        .child(avatar(
+            &person.name,
+            user.0,
+            t.picture.clone(),
+            if compact { px(32.) } else { px(56.) },
+            person.speaking,
+        ))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .max_w_full()
+                .child(
+                    div()
+                        .text_size(px(if compact { 12. } else { 14. }))
+                        .font_weight(FontWeight::MEDIUM)
+                        .truncate()
+                        .child(if t.mine {
+                            format!("{} (you)", person.name)
+                        } else {
+                            person.name.clone()
+                        }),
+                )
+                .children(
+                    (!person.mic)
+                        .then(|| icon("mic-off").size(px(13.)).text_color(theme::text_3())),
+                )
+                .children(person.deafened.then(|| {
+                    icon("headphone-off")
+                        .size(px(13.))
+                        .text_color(theme::text_3())
+                })),
+        )
+        .children((!compact).then_some(status).flatten())
+        .children(action)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fit(count: usize, width: f32, height: f32) -> (usize, f32, f32) {
+        let (columns, tile) = grid_fit(count, size(px(width), px(height)), px(10.));
+        (columns, f32::from(tile.width), f32::from(tile.height))
+    }
+
+    #[test]
+    fn one_tile_fills_the_tighter_side() {
+        assert_eq!(fit(1, 1600., 900.), (1, 1600., 900.));
+        assert_eq!(fit(1, 800., 900.), (1, 800., 450.));
+        assert_eq!(fit(1, 1600., 450.), (1, 800., 450.));
+    }
+
+    #[test]
+    fn tiles_spread_out_to_use_the_room() {
+        assert_eq!(fit(2, 1610., 600.), (2, 800., 450.));
+        assert_eq!(fit(2, 600., 1000.).0, 1);
+        assert_eq!(fit(4, 1610., 910.), (2, 800., 450.));
+        assert_eq!(fit(5, 1610., 910.).0, 3);
+    }
+
+    #[test]
+    fn tiles_always_fit_the_area() {
+        for count in 1..=16 {
+            for (width, height) in [(400., 300.), (1000., 500.), (700., 1200.), (2500., 1300.)] {
+                let (columns, tile_width, tile_height) = fit(count, width, height);
+                let rows = count.div_ceil(columns);
+                assert!(tile_width * columns as f32 + 10. * (columns - 1) as f32 <= width);
+                assert!(tile_height * rows as f32 + 10. * (rows - 1) as f32 <= height);
+            }
+        }
+    }
 }

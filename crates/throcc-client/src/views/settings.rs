@@ -1,5 +1,5 @@
 use gpui::{
-    AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement, Stateful,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 use gpui_component::input::Input;
@@ -8,12 +8,9 @@ use throcc_client_core::client::Command;
 use throcc_client_core::media::audio::{
     DEFAULT_VAD_THRESHOLD, NoiseSuppressionLevel, Transmit, VoiceSettings,
 };
-use throcc_proto::ids::Role;
 
-use super::common::{
-    avatar, caption, card, chip, ghost_icon, mono, primary, secondary, section, short_key, title,
-};
-use crate::app::{Dialog, Screen, SettingsPage, ThroccApp};
+use super::common::{avatar, caption, card, chip, mono, primary, secondary, section, title};
+use crate::app::{Screen, SettingsPage, ThroccApp};
 use crate::theme;
 
 pub fn render(
@@ -22,33 +19,35 @@ pub fn render(
     _window: &mut Window,
     cx: &mut Context<ThroccApp>,
 ) -> impl IntoElement {
-    let is_admin = app.state.role == Some(Role::Admin);
-    let nav_item = |id: &'static str,
-                    label: &'static str,
-                    target: SettingsPage,
-                    cx: &mut Context<ThroccApp>| {
-        div()
-            .id(id)
-            .px_3()
-            .min_h(px(36.))
-            .flex()
-            .items_center()
-            .rounded(theme::RADIUS_ROW)
-            .cursor_pointer()
-            .when_page(page == target)
-            .hover(|s| s.bg(theme::raised()))
-            .child(label)
-            .on_click(cx.listener(move |app, _, window, cx| {
-                app.screen = Screen::Settings(target);
-                match target {
-                    SettingsPage::Members => app.command(Command::ListUsers),
-                    SettingsPage::Profile => app.fill_profile(window, cx),
-                    _ => {}
-                }
-                cx.notify();
-            }))
+    let item = |id: &'static str,
+                label: &'static str,
+                target: SettingsPage,
+                cx: &mut Context<ThroccApp>| {
+        nav_item(id, label, page == target).on_click(cx.listener(move |app, _, _, cx| {
+            app.screen = Screen::Settings(target);
+            cx.notify();
+        }))
     };
-    let nav = div()
+    let nav = nav(cx)
+        .child(item("nav-audio", "Audio", SettingsPage::Audio, cx))
+        .child(item(
+            "nav-appearance",
+            "Appearance",
+            SettingsPage::Appearance,
+            cx,
+        ))
+        .child(item("nav-servers", "Servers", SettingsPage::Servers, cx));
+    let content = match page {
+        SettingsPage::Audio => audio(app, cx),
+        SettingsPage::Appearance => appearance(app, cx),
+        SettingsPage::Servers => servers(app),
+    };
+    frame(nav, content)
+}
+
+/// The settings sidebar with its Back button, for pages to be added to.
+pub(super) fn nav(cx: &mut Context<ThroccApp>) -> Div {
+    div()
         .w(theme::SIDEBAR_WIDTH)
         .h_full()
         .flex_none()
@@ -68,39 +67,24 @@ pub fn render(
                 })),
         )
         .child(div().h_2())
-        .child(nav_item(
-            "nav-profile",
-            "Profile",
-            SettingsPage::Profile,
-            cx,
-        ))
-        .child(nav_item("nav-audio", "Audio", SettingsPage::Audio, cx))
-        .child(nav_item(
-            "nav-keys",
-            "Privacy and keys",
-            SettingsPage::Keys,
-            cx,
-        ))
-        .child(nav_item(
-            "nav-members",
-            if is_admin { "Members" } else { "Invites" },
-            SettingsPage::Members,
-            cx,
-        ))
-        .child(nav_item(
-            "nav-servers",
-            "Servers",
-            SettingsPage::Servers,
-            cx,
-        ));
+}
 
-    let content = match page {
-        SettingsPage::Profile => profile(app, cx),
-        SettingsPage::Audio => audio(app, cx),
-        SettingsPage::Keys => keys(app, cx),
-        SettingsPage::Members => members(app, cx),
-        SettingsPage::Servers => servers(app, cx),
-    };
+pub(super) fn nav_item(id: &'static str, label: &'static str, selected: bool) -> Stateful<Div> {
+    div()
+        .id(id)
+        .px_3()
+        .min_h(px(36.))
+        .flex()
+        .items_center()
+        .rounded(theme::RADIUS_ROW)
+        .cursor_pointer()
+        .when_page(selected)
+        .hover(|s| s.bg(theme::raised()))
+        .child(label)
+}
+
+/// The settings sidebar beside a scrolling page.
+pub(super) fn frame(nav: Div, content: AnyElement) -> Div {
     div().size_full().flex().child(nav).child(
         div()
             .id("settings-content")
@@ -111,7 +95,7 @@ pub fn render(
     )
 }
 
-trait PageHighlight {
+pub(super) trait PageHighlight {
     fn when_page(self, selected: bool) -> Self;
 }
 
@@ -125,7 +109,7 @@ impl<T: Styled> PageHighlight for T {
     }
 }
 
-fn row(label: &str, control: impl IntoElement) -> Div {
+pub(super) fn row(label: &str, control: impl IntoElement) -> Div {
     div()
         .flex()
         .items_center()
@@ -141,7 +125,7 @@ fn row(label: &str, control: impl IntoElement) -> Div {
 }
 
 /// A row of mutually exclusive choices.
-fn segmented<T: Copy + PartialEq + 'static>(
+pub(super) fn segmented<T: Copy + PartialEq + 'static>(
     id: &'static str,
     options: &[(T, &'static str)],
     selected: T,
@@ -373,264 +357,7 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .into_any_element()
 }
 
-fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
-    let me = app
-        .state
-        .me
-        .and_then(|me| Some((me, app.state.person(me)?.clone())));
-    let (seed, name, avatar_hash) = me.map_or((0, String::new(), None), |(me, person)| {
-        (me.0, person.name, person.avatar)
-    });
-    let picture = app.picture(avatar_hash);
-    let picture_buttons = div()
-        .flex()
-        .gap_2()
-        .child(
-            secondary("choose-picture", "Choose picture…").on_click(cx.listener(
-                |app, _, _, cx| {
-                    app.profile_error = None;
-                    app.choose_picture(cx);
-                },
-            )),
-        )
-        .children(avatar_hash.map(|_| {
-            secondary("remove-picture", "Remove").on_click(cx.listener(|app, _, _, cx| {
-                app.command(Command::SetAvatar(None));
-                cx.notify();
-            }))
-        }));
-    let name_field = div()
-        .flex()
-        .gap_2()
-        .child(div().flex_1().child(Input::new(&app.name)))
-        .child(
-            primary("save-name", "Save").on_click(cx.listener(|app, _, _, cx| {
-                let name = app.name.read(cx).value().trim().to_owned();
-                if !name.is_empty() {
-                    app.command(Command::SetName(name));
-                }
-                cx.notify();
-            })),
-        );
-    div()
-        .flex()
-        .flex_col()
-        .gap_6()
-        .child(title("Profile"))
-        .child(
-            card()
-                .flex()
-                .flex_col()
-                .gap_4()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_4()
-                        .child(avatar(&name, seed, picture, px(64.), false))
-                        .child(picture_buttons),
-                )
-                .child(row("Name", name_field))
-                .children(
-                    app.profile_error
-                        .clone()
-                        .map(|error| caption(error).text_color(theme::danger_text())),
-                )
-                .child(caption(
-                    "Everyone on this server sees your name and picture. You can change them once every 10 seconds.",
-                )),
-        )
-        .into_any_element()
-}
-
-fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
-    let pictures = app.pictures_of_people();
-    let state = app.state.clone();
-    let server = state
-        .server
-        .as_ref()
-        .map(|s| (s.address.clone(), s.fingerprint));
-    let me = state.me;
-    div()
-        .flex()
-        .flex_col()
-        .gap_6()
-        .child(title("Privacy and keys"))
-        .children(server.map(|(address, fingerprint)| {
-            card()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(section("This server"))
-                .child(div().child(address))
-                .child(mono(fingerprint.to_string()).text_size(px(12.)).text_color(theme::text_2()))
-                .child(caption("Media is end-to-end encrypted. The server sees who is in which room, profiles and room names, not what anyone says or shows."))
-        }))
-        .child(
-            card().flex().flex_col().gap_1().child(section("People")).children(
-                state.people.iter().filter(|(u, _)| Some(**u) != me).map(|(user, person)| {
-                    let user = *user;
-                    let changed = state.key_warnings.iter().any(|w| w.user == user);
-                    div()
-                        .id(("contact", user.0 as usize))
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .min_h(theme::TOUCH)
-                        .px_2()
-                        .rounded(theme::RADIUS_ROW)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme::raised()))
-                        .child(avatar(&person.name, user.0, pictures.get(&user).cloned(), px(28.), false))
-                        .child(div().flex_1().child(person.name.clone()))
-                        .child(if changed {
-                            chip("Key changed", theme::warn_bg(), theme::warn_text())
-                        } else if person.verified {
-                            chip("Verified", theme::ok_bg(), theme::ok_text())
-                        } else {
-                            chip("Not verified", theme::raised(), theme::text_3())
-                        })
-                        .on_click(cx.listener(move |app, _, _, cx| {
-                            app.dialog = Some(Dialog::Verify(user));
-                            cx.notify();
-                        }))
-                }),
-            ),
-        )
-        .into_any_element()
-}
-
-fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
-    let pictures = app.pictures_of_people();
-    let is_admin = app.state.role == Some(Role::Admin);
-    let invite = app.invite.clone();
-    let users = app.users.clone();
-    let name_of = |id| users.iter().find(|u| u.id == id).map(|u| u.name.clone());
-    let invite_card = card()
-        .flex()
-        .flex_col()
-        .gap_3()
-        .child(section("Invite"))
-        .child(match &invite {
-            Some((code, _)) => mono(code.clone())
-                .text_size(px(24.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .into_any_element(),
-            None => caption("Make a code and send it to the person you want to invite.")
-                .into_any_element(),
-        })
-        .child(caption(if is_admin {
-            "Single use, expires in 24 h."
-        } else {
-            "Single use, expires in 24 h. You can make 3 a day."
-        }))
-        .child(
-            div()
-                .flex()
-                .gap_2()
-                .children(invite.clone().map(|(code, _)| {
-                    secondary("copy-invite", "Copy").on_click(cx.listener(move |_, _, _, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.clone()));
-                    }))
-                }))
-                .child(
-                    primary(
-                        "new-invite",
-                        if invite.is_some() {
-                            "New code"
-                        } else {
-                            "Make a code"
-                        },
-                    )
-                    .on_click(cx.listener(|app, _, _, _| app.command(Command::CreateInvite))),
-                ),
-        );
-    let mut page = div()
-        .flex()
-        .flex_col()
-        .gap_6()
-        .child(title(if is_admin { "Members" } else { "Invites" }))
-        .child(invite_card);
-    if is_admin {
-        let my_id = app.state.me;
-        page = page.child(
-            card()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(section(format!("{} people", users.len())))
-                .children(users.iter().map(|user| {
-                    let id = user.id;
-                    let name = user.name.clone();
-                    let editable = user.role != Role::Admin && Some(id) != my_id;
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .min_h(theme::TOUCH)
-                        .child(avatar(
-                            &user.name,
-                            id.0,
-                            pictures.get(&id).cloned(),
-                            px(28.),
-                            false,
-                        ))
-                        .child(
-                            div()
-                                .flex_1()
-                                .flex()
-                                .flex_col()
-                                .child(div().child(format!(
-                                    "{}{}",
-                                    user.name,
-                                    if Some(id) == my_id { " (you)" } else { "" }
-                                )))
-                                .children(
-                                    user.invited_by
-                                        .and_then(name_of)
-                                        .map(|by| caption(format!("invited by {by}"))),
-                                ),
-                        )
-                        .child(
-                            mono(short_key(&user.identity_key))
-                                .text_size(px(12.))
-                                .text_color(theme::text_3()),
-                        )
-                        .child(if editable {
-                            segmented(
-                                "role",
-                                &[(Role::Manager, "Manager"), (Role::User, "User")],
-                                user.role,
-                                cx,
-                                move |app, role| app.command(Command::SetRole(id, role)),
-                            )
-                            .into_any_element()
-                        } else {
-                            chip(format!("{:?}", user.role), theme::raised(), theme::text_2())
-                                .into_any_element()
-                        })
-                        .children(editable.then(|| {
-                            ghost_icon(("remove", id.0 as usize), "x", "Remove").on_click(
-                                cx.listener(move |app, _, _, cx| {
-                                    app.dialog = Some(Dialog::Remove {
-                                        user: id,
-                                        name: name.clone(),
-                                        cascade: false,
-                                    });
-                                    cx.notify();
-                                }),
-                            )
-                        }))
-                })),
-        );
-        page = page.child(caption(
-            "Removing someone can also remove everyone they invited.",
-        ));
-    }
-    page.into_any_element()
-}
-
-fn servers(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
+fn servers(app: &mut ThroccApp) -> AnyElement {
     let current = app.state.server.as_ref().map(|s| s.address.clone());
     div()
         .flex()
@@ -669,9 +396,123 @@ fn servers(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                     },
                 )),
         )
+        .child(caption(
+            "Servers you have joined from this computer, with the key each one is pinned to.",
+        ))
+        .into_any_element()
+}
+
+fn appearance(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
+    let current = theme::palette();
+    let presets =
+        div()
+            .flex()
+            .flex_wrap()
+            .gap_3()
+            .children(
+                theme::PRESETS
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (name, palette))| {
+                        let palette = *palette;
+                        let selected = palette == current;
+                        div()
+                            .id(("preset", i))
+                            .w(px(136.))
+                            .p_2()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .rounded(theme::RADIUS_BUTTON)
+                            .border_1()
+                            .border_color(if selected {
+                                theme::accent()
+                            } else {
+                                theme::control()
+                            })
+                            .when_some_bg(selected.then(theme::selected))
+                            .cursor_pointer()
+                            .hover(|s| s.border_color(theme::border_strong()))
+                            .child(
+                                div()
+                                    .flex()
+                                    .h(px(24.))
+                                    .rounded(px(6.))
+                                    .overflow_hidden()
+                                    .children(palette.colors().map(|color| {
+                                        div().flex_1().h_full().bg(theme::swatch(color))
+                                    })),
+                            )
+                            .child(div().font_weight(FontWeight::MEDIUM).child(*name))
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                app.use_palette(palette, window, cx);
+                                cx.notify();
+                            }))
+                    }),
+            );
+    let colors = theme::Palette::LABELS
+        .iter()
+        .zip(current.colors())
+        .zip(app.palette_fields.iter())
+        .map(|((label, color), field)| {
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .min_h(theme::TOUCH)
+                .child(
+                    div()
+                        .size(px(24.))
+                        .flex_none()
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(theme::control())
+                        .bg(theme::swatch(color)),
+                )
+                .child(div().flex_1().child(*label))
+                .child(
+                    div()
+                        .w(px(112.))
+                        .font_family(theme::mono_font())
+                        .child(Input::new(field)),
+                )
+        });
+    div()
+        .flex()
+        .flex_col()
+        .gap_6()
+        .child(title("Appearance"))
         .child(
-            secondary("disconnect", "Leave this server")
-                .on_click(cx.listener(|app, _, _, cx| app.leave_server(cx))),
+            card()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(section("Theme"))
+                .child(presets),
+        )
+        .child(
+            card()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(section("Colors"))
+                .children(colors)
+                .child(caption(
+                    "Every other colour is mixed from these eight. Type a hex value like #8C7BFF.",
+                )),
         )
         .into_any_element()
+}
+
+trait OptionalBg {
+    fn when_some_bg(self, bg: Option<gpui::Hsla>) -> Self;
+}
+
+impl<T: Styled> OptionalBg for T {
+    fn when_some_bg(self, bg: Option<gpui::Hsla>) -> Self {
+        match bg {
+            Some(bg) => self.bg(bg),
+            None => self,
+        }
+    }
 }

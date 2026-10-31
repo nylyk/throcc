@@ -95,7 +95,8 @@ impl Keystore {
     }
 }
 
-pub(crate) fn default_dir() -> Result<PathBuf> {
+/// Where throcc keeps its keys, pins and settings on this machine.
+pub fn default_dir() -> Result<PathBuf> {
     let dirs = directories::ProjectDirs::from("", "", "throcc")
         .context("no home directory to keep throcc's data in")?;
     Ok(dirs.data_dir().to_owned())

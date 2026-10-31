@@ -2,11 +2,12 @@ use std::sync::Arc;
 
 use gpui::{
     App, AppContext, Context, Entity, InteractiveElement, IntoElement, KeyBinding, ParentElement,
-    PathPromptOptions, Render, RenderImage, Styled, Subscription, Task, Window, actions, div,
+    PathPromptOptions, Render, RenderImage, Styled, Subscription, Task, Window, WindowHandle,
+    actions, div,
 };
-use gpui_component::WindowExt;
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::notification::Notification;
+use gpui_component::{Root, WindowExt};
 use throcc_client_core::account::SignInError;
 use throcc_client_core::client::{Client, ClientApi, ClientOptions, Command, Event, MockClient};
 use throcc_client_core::keystore::Keystore;
@@ -35,11 +36,17 @@ pub fn bind_keys(cx: &mut App) {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsPage {
-    Profile,
     Audio,
+    Appearance,
+    Servers,
+}
+
+/// Pages about the server we are connected to, apart from this machine's settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServerPage {
+    Profile,
     Keys,
     Members,
-    Servers,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +54,7 @@ pub enum Screen {
     Join,
     Main,
     Settings(SettingsPage),
+    Server(ServerPage),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -89,6 +97,8 @@ pub struct ThroccApp {
     pub code: Entity<InputState>,
     pub name: Entity<InputState>,
     pub room_name: Entity<InputState>,
+    /// One hex field per palette colour, in [`theme::Palette::LABELS`] order.
+    pub palette_fields: Vec<Entity<InputState>>,
     pub pictures: std::collections::HashMap<Hash, Arc<RenderImage>>,
     pub joining: bool,
     pub join_error: Option<String>,
@@ -103,7 +113,12 @@ pub struct ThroccApp {
     pub output_device: Option<String>,
     pub mic_test: bool,
     push_to_talk: Option<(crate::hotkey::PushToTalkKey, Task<()>)>,
-    pub shown: std::collections::HashMap<UserId, crate::video::Shown>,
+    pub feeds: crate::video::Feeds,
+    /// The watched share shown large, with everyone else in a strip below it.
+    pub focus: Option<UserId>,
+    /// Whether our own share's self-view shows in our tile.
+    pub preview_self: bool,
+    pub popouts: std::collections::HashMap<UserId, WindowHandle<Root>>,
     events: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -114,7 +129,34 @@ impl ThroccApp {
         let code = cx.new(|cx| InputState::new(window, cx).placeholder("K7Q-M2XPD"));
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Your name"));
         let room_name = cx.new(|cx| InputState::new(window, cx).placeholder("Room name"));
-        let subscriptions = vec![
+        let palette_fields: Vec<Entity<InputState>> = theme::palette()
+            .colors()
+            .iter()
+            .map(|color| {
+                cx.new(|cx| {
+                    let mut field = InputState::new(window, cx);
+                    field.set_value(theme::format_hex(*color), window, cx);
+                    field
+                })
+            })
+            .collect();
+        let mut subscriptions: Vec<Subscription> = palette_fields
+            .iter()
+            .enumerate()
+            .map(|(i, field)| {
+                cx.subscribe_in(
+                    field,
+                    window,
+                    move |app, field, event: &InputEvent, _, cx| {
+                        if matches!(event, InputEvent::Change) {
+                            let typed = field.read(cx).value().to_string();
+                            app.set_palette_color(i, &typed, cx);
+                        }
+                    },
+                )
+            })
+            .collect();
+        subscriptions.extend([
             cx.subscribe_in(&code, window, Self::on_code_input),
             cx.subscribe_in(&room_name, window, |app, _, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
@@ -125,7 +167,7 @@ impl ThroccApp {
                     }
                 }
             }),
-        ];
+        ]);
         let known_servers = if mock { Vec::new() } else { known_servers() };
         let (inputs, outputs) = devices::list();
         let mut app = Self {
@@ -137,6 +179,7 @@ impl ThroccApp {
             code,
             name,
             room_name,
+            palette_fields,
             pictures: std::collections::HashMap::new(),
             joining: false,
             join_error: None,
@@ -151,7 +194,10 @@ impl ThroccApp {
             output_device: None,
             mic_test: false,
             push_to_talk: None,
-            shown: std::collections::HashMap::new(),
+            feeds: crate::video::Feeds::default(),
+            focus: None,
+            preview_self: false,
+            popouts: std::collections::HashMap::new(),
             events: None,
             _subscriptions: subscriptions,
         };
@@ -213,11 +259,17 @@ impl ThroccApp {
 
     fn on_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         match event {
-            Event::State(state) => self.state = state,
+            Event::State(state) => {
+                self.state = state;
+                self.close_unwatched_popouts(cx);
+            }
             Event::Invite { code, expires } => self.invite = Some((code, expires)),
             Event::Users(users) => self.users = users,
             Event::Notice(text) => window.push_notification(Notification::new().message(text), cx),
             Event::Kicked(reason) => {
+                for user in self.popouts.keys().copied().collect::<Vec<_>>() {
+                    self.close_popout(user, cx);
+                }
                 self.client = None;
                 self.screen = Screen::Join;
                 self.join_error = Some(reason);
@@ -250,6 +302,97 @@ impl ThroccApp {
         let picture = crate::avatar::decode(&self.client.as_ref()?.avatar(hash)?)?;
         self.pictures.insert(hash, picture.clone());
         Some(picture)
+    }
+
+    /// Switches every window to `palette`, keeps it for next time and shows it in the fields.
+    pub fn use_palette(
+        &mut self,
+        palette: theme::Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        theme::set(palette, cx);
+        theme::save(palette);
+        for (field, color) in self.palette_fields.iter().zip(palette.colors()) {
+            field.update(cx, |field, cx| {
+                field.set_value(theme::format_hex(color), window, cx)
+            });
+        }
+    }
+
+    /// Takes a typed hex colour into the palette once it parses.
+    fn set_palette_color(&mut self, index: usize, typed: &str, cx: &mut Context<Self>) {
+        let Some(color) = theme::parse_hex(typed) else {
+            return;
+        };
+        let mut colors = theme::palette().colors();
+        if colors[index] == color {
+            return;
+        }
+        colors[index] = color;
+        let palette = theme::Palette::from_colors(colors);
+        theme::set(palette, cx);
+        theme::save(palette);
+    }
+
+    /// Moves a watched share into a window of its own.
+    pub fn pop_out(&mut self, user: UserId, cx: &mut Context<Self>) {
+        if self.popouts.contains_key(&user) {
+            return;
+        }
+        let name = self
+            .state
+            .person(user)
+            .map_or("Someone".into(), |p| p.name.clone());
+        let title = format!("{name}'s screen");
+        let app = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            let Some(window) = crate::popout::PopOut::open(app.clone(), user, title, cx) else {
+                return;
+            };
+            app.update(cx, |app, cx| {
+                app.popouts.insert(user, window);
+                cx.notify();
+            })
+            .ok();
+        });
+        if self.focus == Some(user) {
+            self.focus = None;
+        }
+        cx.notify();
+    }
+
+    pub fn close_popout(&mut self, user: UserId, cx: &mut Context<Self>) {
+        if let Some(window) = self.popouts.remove(&user) {
+            window
+                .update(cx, |_, window, _| window.remove_window())
+                .ok();
+        }
+        cx.notify();
+    }
+
+    fn close_unwatched_popouts(&mut self, cx: &mut Context<Self>) {
+        let watching = self
+            .state
+            .current
+            .as_ref()
+            .map(|c| c.watching.clone())
+            .unwrap_or_default();
+        let gone: Vec<UserId> = self
+            .popouts
+            .keys()
+            .filter(|user| {
+                !watching.contains(user)
+                    || self
+                        .state
+                        .person(**user)
+                        .is_none_or(|p| p.sharing.is_none())
+            })
+            .copied()
+            .collect();
+        for user in gone {
+            self.close_popout(user, cx);
+        }
     }
 
     /// Whether we may create, rename and delete rooms.
@@ -431,6 +574,9 @@ impl ThroccApp {
     }
 
     pub fn leave_server(&mut self, cx: &mut Context<Self>) {
+        for user in self.popouts.keys().copied().collect::<Vec<_>>() {
+            self.close_popout(user, cx);
+        }
         self.command(Command::Disconnect);
         self.client = None;
         self.events = None;
@@ -439,9 +585,9 @@ impl ThroccApp {
         cx.notify();
     }
 
-    /// Opens a screen of the mock client by name, for screenshots: join, lobby, room,
-    /// share, settings, connection, verify, members or keychange.
-    pub fn show_sample(&mut self, screen: &str) {
+    /// Opens a screen of the mock client by name, for screenshots: join, lobby, room, focus,
+    /// popout, share, settings, appearance, profile, connection, verify, members or keychange.
+    pub fn show_sample(&mut self, screen: &str, cx: &mut Context<Self>) {
         let room = throcc_proto::ids::RoomId(1);
         let joined = |app: &mut Self| {
             app.command(Command::Join(Some(room)));
@@ -455,6 +601,20 @@ impl ThroccApp {
                 self.known_servers = vec![("voice.example.net".into(), Fingerprint([0x2c; 32]))];
             }
             "room" => joined(self),
+            "focus" => {
+                joined(self);
+                self.focus = Some(UserId(4));
+            }
+            "popout" => {
+                joined(self);
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(300))
+                        .await;
+                    this.update(cx, |app, cx| app.pop_out(UserId(4), cx)).ok();
+                })
+                .detach();
+            }
             "share" => {
                 joined(self);
                 self.dialog = Some(Dialog::Share {
@@ -469,6 +629,7 @@ impl ThroccApp {
             "verify" => self.dialog = Some(Dialog::Verify(UserId(2))),
             "keychange" => self.dialog = Some(Dialog::Verify(UserId(3))),
             "settings" => self.screen = Screen::Settings(SettingsPage::Audio),
+            "appearance" => self.screen = Screen::Settings(SettingsPage::Appearance),
             "newroom" => self.dialog = Some(Dialog::NewRoom),
             "editroom" => {
                 self.dialog = Some(Dialog::EditRoom {
@@ -483,12 +644,12 @@ impl ThroccApp {
                 })
             }
             "profile" => {
-                self.screen = Screen::Settings(SettingsPage::Profile);
+                self.screen = Screen::Server(ServerPage::Profile);
                 joined(self);
                 self.command(Command::SetAvatar(Some(crate::avatar::sample())));
             }
             "members" => {
-                self.screen = Screen::Settings(SettingsPage::Members);
+                self.screen = Screen::Server(ServerPage::Members);
                 self.command(Command::ListUsers);
                 self.command(Command::CreateInvite);
             }
@@ -577,6 +738,9 @@ impl Render for ThroccApp {
             Screen::Main => views::main::render(self, window, cx).into_any_element(),
             Screen::Settings(page) => {
                 views::settings::render(self, page, window, cx).into_any_element()
+            }
+            Screen::Server(page) => {
+                views::server::render(self, page, window, cx).into_any_element()
             }
         };
         div()

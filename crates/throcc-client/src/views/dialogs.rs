@@ -1,5 +1,5 @@
 use gpui::{
-    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 use gpui_component::input::Input;
@@ -22,7 +22,7 @@ pub fn render(
 ) -> AnyElement {
     let body = match dialog {
         Dialog::Share { preset, audio } => share(preset, audio, cx),
-        Dialog::Connection => connection(app),
+        Dialog::Connection => connection(app, cx),
         Dialog::Verify(user) => verify(app, user, cx),
         Dialog::Remove {
             user,
@@ -42,9 +42,17 @@ pub fn render(
     };
     let _ = window;
     div()
+        .id("scrim")
         .absolute()
         .inset_0()
-        .bg(gpui::black().opacity(0.6))
+        .bg(theme::scrim())
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|app, _, _, cx| {
+                app.dialog = None;
+                cx.notify();
+            }),
+        )
         .flex()
         .items_center()
         .justify_center()
@@ -57,6 +65,7 @@ pub fn render(
                 .rounded(theme::RADIUS_DIALOG)
                 .border_color(theme::border_strong())
                 .p_6()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(body),
         )
         .into_any_element()
@@ -257,7 +266,7 @@ fn stat(label: &str, value: String) -> impl IntoElement {
         )
 }
 
-fn connection(app: &ThroccApp) -> AnyElement {
+fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let health = &app.state.health;
     let rows = health.receiving.iter().map(|row| {
         let kbps = |k: Option<u32>| {
@@ -327,6 +336,17 @@ fn connection(app: &ThroccApp) -> AnyElement {
         .children(rows)
         .child(section("Sending"))
         .child(mono(health.sending.clone()))
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .child(secondary("close-connection", "Close").on_click(cx.listener(
+                    |app, _, _, cx| {
+                        app.dialog = None;
+                        cx.notify();
+                    },
+                ))),
+        )
         .into_any_element()
 }
 

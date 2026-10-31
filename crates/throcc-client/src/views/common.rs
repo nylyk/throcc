@@ -50,7 +50,7 @@ pub fn avatar(
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(theme::text())
+                .text_color(theme::on_avatar())
                 .text_size(size * 0.42)
                 .font_weight(FontWeight::MEDIUM)
                 .overflow_hidden()

@@ -495,31 +495,28 @@ impl Client {
 
 The mockups are a Design canvas the human iterates on. When they are final, the human exports them into `design/mockups/`, one `.dc.html` per screen. The markup uses inline styles, so the files are the exact spec for spacing, colour and type. Treat them as the source of truth, and this section as the summary.
 
-**Look:** dark, quiet, minimal. One accent. No gradients, no shadows beyond focus rings, no emoji.
+**Look:** quiet and minimal. One accent. No gradients, no shadows beyond focus rings, no emoji.
 
-| Token | Value | Use |
-| --- | --- | --- |
-| `bg` | `#0E0F11` | Window background |
-| `sidebar` | `#121417` | Sidebars, nav |
-| `surface` | `#16181B` | Cards, dialogs, inputs |
-| `raised` | `#1D2024` | Selected nav row, subtle fills |
-| `control` | `#24272C` | Secondary buttons, also the default border |
-| `border-strong` | `#2A2E33` | Inputs, dialog borders |
-| `text` | `#E8EAED` | Primary text |
-| `text-2` | `#C9CDD2` / `#9AA0A6` | Secondary text |
-| `text-3` | `#8A9097` | Captions (still ≥4.5:1 on `surface`) |
-| `accent` | `#7C9CFF`, text on it `#0E0F11` | Primary buttons, selection, focus |
-| `link` | `#9DB4FF` | Links, inline highlights |
-| `speaking` | `#3DDC97` | 2 px ring on avatars, signal |
-| `ok` | bg `#14261D`, text `#6FE3AE` | Status chips |
-| `warn` | bg `#2A2114`, border `#5A4520`, text `#F2C27A` | Warnings, key changes |
-| `danger` | bg `#3A1F24`, text `#FF8A8A` | LIVE badge, leave, remove |
+**Themes:** the whole client is drawn from an 8-colour palette the user picks in Appearance, from presets or by typing hex values. Ink (dark) is the default; Paper (light), Moss and Dusk are the other presets, with the values in `Appearance.dc.html`.
+
+| Palette colour | Use |
+| --- | --- |
+| Background | Window background, text on accent and avatars |
+| Panel | Sidebars, cards, dialogs, inputs |
+| Text | Primary text |
+| Muted text | Captions, secondary text |
+| Accent | Primary buttons, selection, focus |
+| Warning | Warnings, key changes |
+| Good | Speaking ring, OK chips |
+| Bad | LIVE badge, leave, remove |
+
+Everything else is mixed in Oklab, like CSS `color-mix(in oklab, …)`: raised fills are Text 6 % over Panel, borders Text 10 % over Panel, selection Accent 18 % over Panel, chip backgrounds their colour 14–18 % over Panel, avatar hues from Accent, Warning, Good and Bad.
 
 - Type: Geist and Geist Mono (OFL, bundled with the app). Sizes 12/13/14/16/18/20/24, weights 400/500/600. Mono is used for addresses, codes, fingerprints, numbers and codecs.
 - Radius 8 (rows), 10 (buttons, inputs), 12 (tiles), 14 (cards), 18 (dialogs), pills 999.
 - Spacing on a 4 px grid. Touch targets at least 44 px.
-- Avatars are initials on muted hues.
-- Put every token in `throcc-client/theme.rs` and nowhere else.
+- Avatars are initials on palette hues.
+- Put the palette, presets and mixing in `throcc-client/theme.rs` and nowhere else.
 
 **Screens** (mockup file → behaviour):
 
@@ -527,12 +524,16 @@ The mockups are a Design canvas the human iterates on. When they are final, the 
 | --- | --- | --- |
 | `Join.dc.html` | Join | Address plus invite code. The code input upper-cases, inserts the dash and normalises Crockford characters. Lists known servers |
 | `Main.dc.html` | Lobby | Sidebar: rooms with occupants, LIVE badges, mute and deafen icons, speaking rings, profile bar. Main: room cards with Join |
-| `Room.dc.html` | In room | Header: E2EE badge and RTT (opens Connection). Stage: the watched share with an info chip and volume, stop-watching and fullscreen controls. Rail: other shares with **Watch**. Participant tiles. Control bar: mic, deafen, share, settings, leave |
+| `Room.dc.html` | In room | Header: E2EE badge and RTT (opens Connection). A grid of 16:9 tiles, one per person: avatar and name; a sharer's tile adds **Watch stream**; a watched share fills its tile with the picture, scaled to fit with the aspect kept, plus pop-out and stop-watching. Clicking a share switches to focus: that share large, everyone else in a strip below; clicking it again returns to the grid. Control bar: mic, deafen, share, settings, leave |
+| `PoppedOut.dc.html` | Popped-out share | A watched share in its own window: header with the sharer, room, resolution and codec, return-to-main and fullscreen. Its tile in the room offers **Bring back** |
 | `Share.dc.html` | Share dialog | Source picker (uses the OS picker where the OS requires one: `SCContentSharingPicker`, the portal). Preset, share-audio switch, encoder line |
+| `Appearance.dc.html` | Appearance | Preset themes as swatch strips, then the eight colours with a swatch and a hex field each. Applies at once and is remembered |
 | `Settings.dc.html` | Audio settings | Devices, voice activity or push-to-talk with a live level meter and threshold, PTT key, AEC, noise suppression level, AGC, mic test |
 | `Connection.dc.html` | Connection | RTT, loss each way, frames dropped for you, one plain-language verdict, per-track table, sending status |
 | `Verify.dc.html` | Safety number / key changed | 12×5-digit safety number, mark verified. Key-changed warning with old and new fingerprints |
 | `Admin.dc.html` | Members | Invite code with copy and remaining daily count. Members with role, invited-by and key fingerprint. Remove, with optional cascade |
+
+Settings are split in two. The gear opens this computer's settings: Audio, Appearance and the list of known servers. The server header opens the connected server's pages: Profile, Privacy and keys, Members (or Invites), and Leave this server.
 
 Screens not mocked that you design in the same language: pin mismatch, enrollment errors (wrong code, burned invite, rate-limited), reconnecting banner, empty states, the remove-with-cascade confirm. Keep them consistent with the tokens, and add a mockup request to `docs/DECISIONS.md` if any is non-trivial.
 
