@@ -1,16 +1,25 @@
+use std::time::Duration;
+
 use gpui::{
-    AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement, Stateful,
-    StatefulInteractiveElement, Styled, Window, div, px,
+    AnyElement, AppContext, Context, Div, Entity, FontWeight, InteractiveElement, IntoElement,
+    MouseButton, ParentElement, Pixels, SharedString, Stateful, StatefulInteractiveElement, Styled,
+    Subscription, Window, div, px, relative,
 };
+use gpui_component::IndexPath;
 use gpui_component::input::Input;
+use gpui_component::select::{Select, SelectEvent, SelectState};
+use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::switch::Switch;
 use throcc_client_core::client::Command;
 use throcc_client_core::media::audio::{
-    DEFAULT_VAD_THRESHOLD, NoiseSuppressionLevel, Transmit, VoiceSettings,
+    DEFAULT_GATE_DBFS, NoiseSuppressionLevel, Transmit, VoiceSettings,
 };
 
-use super::common::{avatar, caption, card, chip, ghost_icon, mono, primary, secondary, section};
-use crate::app::{ProfileStatus, Screen, SettingsPage, ThroccApp};
+use super::common::{
+    TRAFFIC_LIGHTS, avatar, caption, card, chip, ghost_icon, mono, moves_window, primary,
+    secondary, section,
+};
+use crate::app::{PictureFor, ProfileStatus, Screen, SettingsPage, ThroccApp};
 use crate::theme;
 
 pub fn render(
@@ -53,7 +62,47 @@ pub fn render(
         SettingsPage::Appearance => "Appearance",
         SettingsPage::Servers => "Servers",
     };
-    frame("Settings", links, page_title, content, cx)
+    frame(
+        app.sidebar_width,
+        "Settings",
+        links,
+        page_title,
+        content,
+        cx,
+    )
+}
+
+/// A sidebar `width` wide, see-through to the blurred desktop on macOS.
+pub(super) fn sidebar_column(width: Pixels) -> Div {
+    div()
+        .relative()
+        .w(width)
+        .h_full()
+        .flex_none()
+        .flex()
+        .flex_col()
+        .bg(theme::sidebar_glass())
+        .border_r_1()
+        .border_color(theme::control())
+}
+
+/// The strip along a sidebar's right edge that drags its width.
+pub(super) fn resize_handle(cx: &mut Context<ThroccApp>) -> Stateful<Div> {
+    div()
+        .id("sidebar-resize")
+        .absolute()
+        .top_0()
+        .right_0()
+        .h_full()
+        .w(px(6.))
+        .cursor_col_resize()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|app, _, _, cx| {
+                app.resizing_sidebar = true;
+                cx.stop_propagation();
+            }),
+        )
 }
 
 /// The column of page links in the settings sidebar.
@@ -78,6 +127,7 @@ pub(super) fn nav_item(id: &'static str, label: &'static str, selected: bool) ->
 /// A settings screen laid out like the main one: the sidebar under a bar with a back
 /// arrow and `heading`, the page under a bar with its `page_title`.
 pub(super) fn frame(
+    width: Pixels,
     heading: &'static str,
     links: Div,
     page_title: &'static str,
@@ -85,7 +135,7 @@ pub(super) fn frame(
     cx: &mut Context<ThroccApp>,
 ) -> Div {
     let top_bar = || {
-        div()
+        moves_window(div())
             .flex()
             .items_center()
             .h(theme::HEADER_HEIGHT)
@@ -93,19 +143,12 @@ pub(super) fn frame(
             .border_b_1()
             .border_color(theme::control())
     };
-    let sidebar = div()
-        .w(theme::SIDEBAR_WIDTH)
-        .h_full()
-        .flex_none()
-        .flex()
-        .flex_col()
-        .bg(theme::sidebar())
-        .border_r_1()
-        .border_color(theme::control())
+    let sidebar = sidebar_column(width)
         .child(
             top_bar()
                 .gap_2()
                 .px_3()
+                .pl(px(12.) + TRAFFIC_LIGHTS)
                 .child(
                     ghost_icon("settings-back", "arrow-left", "Back").on_click(cx.listener(
                         |app, _, _, cx| {
@@ -116,8 +159,10 @@ pub(super) fn frame(
                 )
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(heading)),
         )
-        .child(links);
+        .child(links)
+        .child(resize_handle(cx));
     let page = div()
+        .bg(theme::bg())
         .flex_1()
         .min_w_0()
         .h_full()
@@ -229,7 +274,7 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             secondary("choose-picture", "Choose picture…").on_click(cx.listener(
                 |app, _, _, cx| {
                     app.profile_status = None;
-                    app.choose_picture(cx);
+                    app.choose_picture(PictureFor::Profile, cx);
                 },
             )),
         )
@@ -273,72 +318,221 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                         .child(picture_buttons),
                 )
                 .child(row("Name", name_field))
-                .children(app.profile_status.clone().map(|status| match status {
-                    ProfileStatus::Saving => caption("Saving…"),
-                    ProfileStatus::Saved => caption("Saved.").text_color(theme::ok_text()),
-                    ProfileStatus::UntilJoined => {
-                        caption("Saved here. Others see your picture once you join a room.")
+                .children(app.profile_status.clone().map(|status| {
+                    match status {
+                        ProfileStatus::Saving => caption("Saving…"),
+                        ProfileStatus::Saved => caption("Saved.").text_color(theme::ok_text()),
+                        ProfileStatus::UntilJoined => {
+                            caption("Saved here. Others see your picture once you join a room.")
+                        }
+                        ProfileStatus::Failed(reason) => caption(format!(
+                            "Kept on this computer, but this server refused it: {reason}"
+                        ))
+                        .text_color(theme::danger_text()),
                     }
-                    ProfileStatus::Failed(reason) => caption(format!(
-                        "Kept on this computer, but this server refused it: {reason}"
-                    ))
-                    .text_color(theme::danger_text()),
-                }))
-                .child(caption(
-                    "This computer keeps your name and picture and gives them to every server you join. A server takes one change every 10 seconds.",
-                )),
+                })),
         )
         .into_any_element()
 }
 
+const SYSTEM_DEFAULT: &str = "System default";
+/// The quietest level the meter and the threshold slider show.
+const METER_FLOOR_DBFS: f32 = -80.0;
+const METER_EVERY: Duration = Duration::from_millis(100);
+
+type Devices = Vec<SharedString>;
+
+/// The audio page's dropdowns and sliders, which keep their state between renders.
+pub struct AudioControls {
+    input: Entity<SelectState<Devices>>,
+    output: Entity<SelectState<Devices>>,
+    input_volume: Entity<SliderState>,
+    output_volume: Entity<SliderState>,
+    threshold: Entity<SliderState>,
+    /// Whether a timer redraws the level meter.
+    metering: bool,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl AudioControls {
+    pub fn new(
+        voice: &VoiceSettings,
+        inputs: &[String],
+        outputs: &[String],
+        window: &mut Window,
+        cx: &mut Context<ThroccApp>,
+    ) -> Self {
+        let mut device_select = |names: &[String]| {
+            let mut items: Devices = vec![SYSTEM_DEFAULT.into()];
+            items.extend(names.iter().cloned().map(SharedString::from));
+            cx.new(|cx| SelectState::new(items, Some(IndexPath::new(0)), window, cx))
+        };
+        let input = device_select(inputs);
+        let output = device_select(outputs);
+        let mut slider = |min: f32, max: f32, value: f32| {
+            cx.new(|_| {
+                SliderState::new()
+                    .min(min)
+                    .max(max)
+                    .step(1.)
+                    .default_value(value)
+            })
+        };
+        let input_volume = slider(0., 200., voice.input_volume * 100.);
+        let output_volume = slider(0., 200., voice.output_volume * 100.);
+        let threshold = slider(
+            METER_FLOOR_DBFS,
+            0.,
+            match voice.transmit {
+                Transmit::VoiceActivity { threshold_dbfs } => threshold_dbfs,
+                Transmit::PushToTalk => DEFAULT_GATE_DBFS,
+            },
+        );
+        let on_device = |is_input: bool| {
+            move |app: &mut ThroccApp,
+                  _,
+                  event: &SelectEvent<Devices>,
+                  cx: &mut Context<ThroccApp>| {
+                let SelectEvent::Confirm(picked) = event;
+                let device = picked
+                    .as_ref()
+                    .filter(|name| name.as_ref() != SYSTEM_DEFAULT)
+                    .map(ToString::to_string);
+                if is_input {
+                    app.input_device = device;
+                } else {
+                    app.output_device = device;
+                }
+                app.command(Command::Devices {
+                    input: app.input_device.clone(),
+                    output: app.output_device.clone(),
+                });
+                cx.notify();
+            }
+        };
+        let on_slide = |change: fn(&mut VoiceSettings, f32)| {
+            move |app: &mut ThroccApp, _, event: &SliderEvent, cx: &mut Context<ThroccApp>| {
+                let (SliderEvent::Change(value) | SliderEvent::Release(value)) = event;
+                set_voice(app, |voice| change(voice, value.start()));
+                cx.notify();
+            }
+        };
+        let subscriptions = vec![
+            cx.subscribe(&input, on_device(true)),
+            cx.subscribe(&output, on_device(false)),
+            cx.subscribe(
+                &input_volume,
+                on_slide(|voice, percent| voice.input_volume = percent / 100.),
+            ),
+            cx.subscribe(
+                &output_volume,
+                on_slide(|voice, percent| voice.output_volume = percent / 100.),
+            ),
+            cx.subscribe(
+                &threshold,
+                on_slide(|voice, dbfs| {
+                    if let Transmit::VoiceActivity { threshold_dbfs } = &mut voice.transmit {
+                        *threshold_dbfs = dbfs;
+                    }
+                }),
+            ),
+        ];
+        Self {
+            input,
+            output,
+            input_volume,
+            output_volume,
+            threshold,
+            metering: false,
+            _subscriptions: subscriptions,
+        }
+    }
+}
+
+/// Redraws the page every 100 ms while it shows the audio settings, for the level meter.
+fn keep_metering(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) {
+    if app.audio.metering {
+        return;
+    }
+    app.audio.metering = true;
+    cx.spawn(async move |this, cx| {
+        loop {
+            cx.background_executor().timer(METER_EVERY).await;
+            let shown = this.update(cx, |app, cx| {
+                let shown = app.screen == Screen::Settings(SettingsPage::Audio);
+                app.audio.metering = shown;
+                if shown {
+                    cx.notify();
+                }
+                shown
+            });
+            if !matches!(shown, Ok(true)) {
+                return;
+            }
+        }
+    })
+    .detach();
+}
+
+/// The mic level as a bar, green while it is above `threshold_dbfs`, with a mark there.
+fn meter(level_dbfs: Option<f32>, threshold_dbfs: f32) -> Div {
+    let fraction = |dbfs: f32| (1. - dbfs / METER_FLOOR_DBFS).clamp(0., 1.);
+    let level = level_dbfs.unwrap_or(f32::NEG_INFINITY);
+    div()
+        .relative()
+        .h(px(8.))
+        .rounded_full()
+        .overflow_hidden()
+        .bg(theme::control())
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .top_0()
+                .h_full()
+                .w(relative(fraction(level)))
+                .bg(if level > threshold_dbfs {
+                    theme::ok_text()
+                } else {
+                    theme::text_3()
+                }),
+        )
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .h_full()
+                .w(px(2.))
+                .left(relative(fraction(threshold_dbfs)))
+                .bg(theme::text()),
+        )
+}
+
+fn percent_slider(state: &Entity<SliderState>, cx: &Context<ThroccApp>) -> Div {
+    let percent = state.read(cx).value().start().round();
+    div()
+        .flex()
+        .items_center()
+        .gap_3()
+        .child(div().flex_1().child(Slider::new(state)))
+        .child(
+            mono(format!("{percent:.0}%"))
+                .w(px(64.))
+                .flex_none()
+                .text_right(),
+        )
+}
+
 fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
+    keep_metering(app, cx);
     let voice = app.voice;
     let vad = matches!(voice.transmit, Transmit::VoiceActivity { .. });
-    let device_list = |id: &'static str,
-                       names: Vec<String>,
-                       selected: Option<String>,
-                       input: bool,
-                       cx: &mut Context<ThroccApp>| {
-        let mut choices: Vec<(Option<String>, String)> = vec![(None, "System default".into())];
-        choices.extend(names.into_iter().map(|n| (Some(n.clone()), n)));
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .children(choices.into_iter().enumerate().map(|(i, (value, label))| {
-                let picked = value == selected;
-                div()
-                    .id((id, i))
-                    .px_3()
-                    .py_1()
-                    .rounded(theme::RADIUS_ROW)
-                    .cursor_pointer()
-                    .when_page(picked)
-                    .hover(|s| s.bg(theme::raised()))
-                    .text_color(if picked {
-                        theme::text()
-                    } else {
-                        theme::text_2()
-                    })
-                    .child(label)
-                    .on_click(cx.listener(move |app, _, _, cx| {
-                        if input {
-                            app.input_device = value.clone();
-                        } else {
-                            app.output_device = value.clone();
-                        }
-                        app.command(Command::Devices {
-                            input: app.input_device.clone(),
-                            output: app.output_device.clone(),
-                        });
-                        cx.notify();
-                    }))
-            }))
-    };
     let threshold = match voice.transmit {
-        Transmit::VoiceActivity { threshold } => threshold,
-        Transmit::PushToTalk => DEFAULT_VAD_THRESHOLD,
+        Transmit::VoiceActivity { threshold_dbfs } => threshold_dbfs,
+        Transmit::PushToTalk => DEFAULT_GATE_DBFS,
     };
+    let level = app.client.as_ref().and_then(|c| c.mic_level());
+    let controls = &app.audio;
     div()
         .flex()
         .flex_col()
@@ -349,25 +543,15 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .flex_col()
                 .gap_2()
                 .child(section("Devices"))
+                .child(row("Input", Select::new(&controls.input).w_full()))
                 .child(row(
-                    "Input",
-                    device_list(
-                        "input",
-                        app.inputs.clone(),
-                        app.input_device.clone(),
-                        true,
-                        cx,
-                    ),
+                    "Input volume",
+                    percent_slider(&controls.input_volume, cx),
                 ))
+                .child(row("Output", Select::new(&controls.output).w_full()))
                 .child(row(
-                    "Output",
-                    device_list(
-                        "output",
-                        app.outputs.clone(),
-                        app.output_device.clone(),
-                        false,
-                        cx,
-                    ),
+                    "Output volume",
+                    percent_slider(&controls.output_volume, cx),
                 )),
         )
         .child(
@@ -386,7 +570,9 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                         move |app, voice_activity| {
                             set_voice(app, |v| {
                                 v.transmit = if voice_activity {
-                                    Transmit::VoiceActivity { threshold }
+                                    Transmit::VoiceActivity {
+                                        threshold_dbfs: threshold,
+                                    }
                                 } else {
                                     Transmit::PushToTalk
                                 }
@@ -397,17 +583,25 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .children(vad.then(|| {
                     row(
                         "Sensitivity",
-                        segmented(
-                            "sensitivity",
-                            &[(0.3f32, "High"), (0.5, "Normal"), (0.7, "Low")],
-                            threshold,
-                            cx,
-                            |app, threshold| {
-                                set_voice(app, |v| {
-                                    v.transmit = Transmit::VoiceActivity { threshold }
-                                })
-                            },
-                        ),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(meter(level, threshold))
+                                    .child(Slider::new(&controls.threshold)),
+                            )
+                            .child(
+                                mono(format!("{threshold:.0} dB"))
+                                    .w(px(64.))
+                                    .flex_none()
+                                    .text_right(),
+                            ),
                     )
                 }))
                 .children((!vad).then(|| {
@@ -474,9 +668,6 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 })),
             ),
         )
-        .child(caption(
-            "The test plays your processed microphone back to you, with echo cancellation applied.",
-        ))
         .into_any_element()
 }
 
@@ -518,9 +709,6 @@ fn servers(app: &mut ThroccApp) -> AnyElement {
                     },
                 )),
         )
-        .child(caption(
-            "Servers you have joined from this computer, with the key each one is pinned to.",
-        ))
         .into_any_element()
 }
 
@@ -617,10 +805,7 @@ fn appearance(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .flex_col()
                 .gap_1()
                 .child(section("Colors"))
-                .children(colors)
-                .child(caption(
-                    "Every other colour is mixed from these eight. Type a hex value like #8C7BFF.",
-                )),
+                .children(colors),
         )
         .into_any_element()
 }

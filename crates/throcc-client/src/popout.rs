@@ -13,7 +13,8 @@ use crate::app::ThroccApp;
 use crate::theme;
 use crate::video::Feeds;
 use crate::views::common::{
-    CONTROLS_LINGER, avatar, caption, ghost_icon, mono, player, player_button,
+    CONTROLS_LINGER, TRAFFIC_LIGHTS, app_titlebar, avatar, caption, moves_window, player,
+    player_button,
 };
 
 /// One watched share in a window of its own.
@@ -21,8 +22,6 @@ pub struct PopOut {
     app: WeakEntity<ThroccApp>,
     user: UserId,
     feeds: Feeds,
-    /// Whether the share fills the window with the header laid over it.
-    fullscreen: bool,
     controls_until: Instant,
     focus: FocusHandle,
     _released: Subscription,
@@ -36,18 +35,21 @@ impl PopOut {
         cx: &mut App,
     ) -> Option<WindowHandle<Root>> {
         let bounds = Bounds::centered(None, size(px(960.), px(588.)), cx);
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(320.), px(228.))),
-            ..Default::default()
-        };
+        let options = app_titlebar(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(320.), px(228.))),
+                ..Default::default()
+            },
+            px(25.),
+            false,
+        );
         let opened = cx.open_window(options, |window, cx| {
             window.set_window_title(&title);
             let view = cx.new(|cx| Self {
                 app,
                 user,
                 feeds: Feeds::default(),
-                fullscreen: false,
                 controls_until: Instant::now(),
                 focus: cx.focus_handle(),
                 _released: cx.on_release(move |this: &mut Self, cx| {
@@ -71,15 +73,11 @@ impl PopOut {
 
 impl PopOut {
     fn set_fullscreen(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.fullscreen = on;
-        if on {
-            window.focus(&self.focus, cx);
-            self.show_controls(cx);
-        }
+        window.focus(&self.focus, cx);
         if window.is_fullscreen() != on {
             window.toggle_fullscreen();
         }
-        cx.notify();
+        self.show_controls(cx);
     }
 
     fn show_controls(&mut self, cx: &mut Context<Self>) {
@@ -112,7 +110,7 @@ impl Render for PopOut {
             Some(config) => format!("{room} · {}", share_label(&config)),
             None => room,
         };
-        let fullscreen = self.fullscreen;
+        let fullscreen = window.is_fullscreen();
         let picture_of_sharer = picture;
         let picture = if config.is_some() {
             self.feeds
@@ -126,89 +124,58 @@ impl Render for PopOut {
                 .child(caption(format!("{name} stopped sharing.")))
                 .into_any_element()
         };
-        let page = div()
-            .id("popout")
+        let title = div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .pl(if fullscreen { px(0.) } else { TRAFFIC_LIGHTS })
+            .child(avatar(&name, user.0, picture_of_sharer, px(28.), false))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(px(16.))
+                            .child(format!("{name}'s screen")),
+                    )
+                    .child(div().text_size(px(12.)).opacity(0.75).child(details)),
+            );
+        let buttons = div()
+            .flex()
+            .gap_2()
+            .child(
+                player_button("return", "panel-top-open")
+                    .on_click(|_, window, _| window.remove_window()),
+            )
+            .child(
+                player_button(
+                    "popout-fullscreen",
+                    if fullscreen {
+                        "minimize-2"
+                    } else {
+                        "maximize-2"
+                    },
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.set_fullscreen(!fullscreen, window, cx)
+                })),
+            );
+        let controls = Instant::now() < self.controls_until;
+        moves_window(div().id("popout"))
             .track_focus(&self.focus)
             .size_full()
             .bg(theme::bg())
             .text_color(theme::text())
             .font_family(theme::font())
-            .text_size(px(14.));
-        if fullscreen {
-            let title = div()
-                .flex()
-                .items_center()
-                .gap_3()
-                .child(avatar(&name, user.0, picture_of_sharer, px(28.), false))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_size(px(16.))
-                                .child(format!("{name}'s screen")),
-                        )
-                        .child(div().text_size(px(12.)).opacity(0.75).child(details)),
-                );
-            let buttons = div()
-                .flex()
-                .gap_2()
-                .child(
-                    player_button("return", "panel-top-open")
-                        .on_click(|_, window, _| window.remove_window()),
-                )
-                .child(player_button("popout-fullscreen", "minimize-2").on_click(
-                    cx.listener(|this, _, window, cx| this.set_fullscreen(false, window, cx)),
-                ));
-            let controls = Instant::now() < self.controls_until;
-            return page
-                .on_mouse_move(cx.listener(|this, _, _, cx| this.show_controls(cx)))
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    if event.keystroke.key == "escape" {
-                        this.set_fullscreen(false, window, cx);
-                    }
-                }))
-                .child(player(picture, title, buttons, controls));
-        }
-        let header = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .h(px(48.))
-            .pl_3()
-            .pr(px(6.))
-            .flex_none()
-            .bg(theme::sidebar())
-            .border_b_1()
-            .border_color(theme::control())
-            .child(avatar(&name, user.0, picture_of_sharer, px(24.), false))
-            .child(
-                div()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(format!("{name}'s screen")),
-            )
-            .child(
-                mono(details)
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(12.))
-                    .text_color(theme::text_3()),
-            )
-            .child(
-                ghost_icon("return", "panel-top-open", "Return to the main window")
-                    .on_click(|_, window, _| window.remove_window()),
-            )
-            .child(
-                ghost_icon("popout-fullscreen", "maximize-2", "Fullscreen").on_click(
-                    cx.listener(|this, _, window, cx| this.set_fullscreen(true, window, cx)),
-                ),
-            );
-        page.flex()
-            .flex_col()
-            .child(header)
-            .child(div().flex_1().min_h_0().bg(theme::stage()).child(picture))
+            .text_size(px(14.))
+            .on_mouse_move(cx.listener(|this, _, _, cx| this.show_controls(cx)))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    this.set_fullscreen(false, window, cx);
+                }
+            }))
+            .child(player(picture, title, buttons, controls))
     }
 }

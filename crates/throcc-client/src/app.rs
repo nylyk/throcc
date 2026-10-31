@@ -46,8 +46,16 @@ pub enum SettingsPage {
 /// Pages about the server we are connected to, apart from this machine's settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServerPage {
+    Overview,
     Keys,
     Members,
+}
+
+/// Whose picture a chosen file becomes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PictureFor {
+    Profile,
+    Server,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,6 +113,9 @@ pub struct ThroccApp {
     pub code: Entity<InputState>,
     pub name: Entity<InputState>,
     pub room_name: Entity<InputState>,
+    pub server_name: Entity<InputState>,
+    /// Why the server's new picture couldn't be used.
+    pub server_picture_error: Option<String>,
     /// One hex field per palette colour, in [`theme::Palette::LABELS`] order.
     pub palette_fields: Vec<Entity<InputState>>,
     pub pictures: std::collections::HashMap<Hash, Arc<RenderImage>>,
@@ -118,11 +129,10 @@ pub struct ThroccApp {
     pub users: Vec<User>,
     pub invite: Option<(String, u64)>,
     pub voice: VoiceSettings,
-    pub inputs: Vec<String>,
-    pub outputs: Vec<String>,
     pub input_device: Option<String>,
     pub output_device: Option<String>,
     pub mic_test: bool,
+    pub audio: views::settings::AudioControls,
     push_to_talk: Option<(crate::hotkey::PushToTalkKey, Task<()>)>,
     pub feeds: crate::video::Feeds,
     /// What the share dialog asks for, kept between shares.
@@ -141,6 +151,8 @@ pub struct ThroccApp {
     /// Until when the controls over the fullscreen share show.
     pub controls_until: std::time::Instant,
     pub fullscreen_focus: gpui::FocusHandle,
+    pub sidebar_width: gpui::Pixels,
+    pub resizing_sidebar: bool,
     events: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -151,6 +163,7 @@ impl ThroccApp {
         let code = cx.new(|cx| InputState::new(window, cx).placeholder("K7Q-M2XPD"));
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Your name"));
         let room_name = cx.new(|cx| InputState::new(window, cx).placeholder("Room name"));
+        let server_name = cx.new(|cx| InputState::new(window, cx).placeholder("Server name"));
         let palette_fields: Vec<Entity<InputState>> = theme::palette()
             .colors()
             .iter()
@@ -194,6 +207,8 @@ impl ThroccApp {
         let share_choice = ShareChoice::default();
         let (bitrate, bitrate_changes) = Self::bitrate_slider(share_choice, cx);
         let (inputs, outputs) = devices::list();
+        let voice = VoiceSettings::default();
+        let audio = views::settings::AudioControls::new(&voice, &inputs, &outputs, window, cx);
         let mut app = Self {
             client: None,
             state: Arc::new(State::default()),
@@ -203,6 +218,8 @@ impl ThroccApp {
             code,
             name,
             room_name,
+            server_name,
+            server_picture_error: None,
             palette_fields,
             pictures: std::collections::HashMap::new(),
             joining: false,
@@ -212,12 +229,11 @@ impl ThroccApp {
             known_servers,
             users: Vec::new(),
             invite: None,
-            voice: VoiceSettings::default(),
-            inputs,
-            outputs,
+            voice,
             input_device: None,
             output_device: None,
             mic_test: false,
+            audio,
             push_to_talk: None,
             feeds: crate::video::Feeds::default(),
             share_choice,
@@ -230,6 +246,8 @@ impl ThroccApp {
             fullscreen: None,
             controls_until: std::time::Instant::now(),
             fullscreen_focus: cx.focus_handle(),
+            sidebar_width: theme::SIDEBAR_WIDTH,
+            resizing_sidebar: false,
             events: None,
             _subscriptions: subscriptions,
         };
@@ -578,8 +596,21 @@ impl ThroccApp {
         self.name.update(cx, |s, cx| s.set_value(name, window, cx));
     }
 
-    /// Asks for a picture file, shrinks it and sets it as our profile picture.
-    pub fn choose_picture(&mut self, cx: &mut Context<Self>) {
+    /// Puts the server's name in the server page's name field.
+    pub fn fill_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.server_picture_error = None;
+        let name = self
+            .state
+            .server
+            .as_ref()
+            .and_then(|s| s.name.clone())
+            .unwrap_or_default();
+        self.server_name
+            .update(cx, |s, cx| s.set_value(name, window, cx));
+    }
+
+    /// Asks for a picture file, shrinks it and sets it as our or the server's picture.
+    pub fn choose_picture(&mut self, target: PictureFor, cx: &mut Context<Self>) {
         let chosen = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -601,13 +632,20 @@ impl ThroccApp {
                 })
                 .await;
             this.update(cx, |app, cx| {
-                match prepared {
-                    Ok(bytes) => {
+                match (target, prepared) {
+                    (PictureFor::Profile, Ok(bytes)) => {
                         app.profile_preview = Some(crate::avatar::decode(&bytes));
                         app.profile_status = Some(app.saving_status());
                         app.command(Command::SetAvatar(Some(bytes)));
                     }
-                    Err(message) => app.profile_status = Some(ProfileStatus::Failed(message)),
+                    (PictureFor::Profile, Err(message)) => {
+                        app.profile_status = Some(ProfileStatus::Failed(message))
+                    }
+                    (PictureFor::Server, Ok(bytes)) => {
+                        app.server_picture_error = None;
+                        app.command(Command::SetServerPicture(Some(bytes)));
+                    }
+                    (PictureFor::Server, Err(message)) => app.server_picture_error = Some(message),
                 }
                 cx.notify();
             })
@@ -784,6 +822,10 @@ impl ThroccApp {
                 joined(self);
                 self.command(Command::SetAvatar(Some(crate::avatar::sample())));
             }
+            "server" => {
+                self.screen = Screen::Server(ServerPage::Overview);
+                self.fill_server(window, cx);
+            }
             "members" => {
                 self.screen = Screen::Server(ServerPage::Members);
                 self.command(Command::ListUsers);
@@ -903,8 +945,26 @@ impl Render for ThroccApp {
             }))
             .size_full()
             .relative()
-            .bg(theme::bg())
+            .bg(theme::window_bg())
             .text_color(theme::text())
+            .on_mouse_move(cx.listener(|app, event: &gpui::MouseMoveEvent, _, cx| {
+                if !app.resizing_sidebar {
+                    return;
+                }
+                if event.pressed_button == Some(gpui::MouseButton::Left) {
+                    app.sidebar_width = event
+                        .position
+                        .x
+                        .clamp(theme::SIDEBAR_MIN_WIDTH, theme::SIDEBAR_MAX_WIDTH);
+                } else {
+                    app.resizing_sidebar = false;
+                }
+                cx.notify();
+            }))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|app, _, _, _| app.resizing_sidebar = false),
+            )
             .font_family(theme::font())
             .text_size(gpui::px(14.))
             .child(screen)

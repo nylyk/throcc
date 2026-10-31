@@ -8,6 +8,7 @@ mod views;
 
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
+use views::common;
 
 fn main() {
     tracing_subscriber::fmt()
@@ -47,11 +48,15 @@ fn main() {
             theme::set(theme.or(saved).unwrap_or(theme::PRESETS[0].1), cx);
             app::bind_keys(cx);
             let bounds = Bounds::centered(None, window_size, cx);
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(900.), px(600.))),
-                ..Default::default()
-            };
+            let options = common::app_titlebar(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(900.), px(600.))),
+                    ..Default::default()
+                },
+                (theme::HEADER_HEIGHT - px(14.)) / 2.,
+                true,
+            );
             let opened = cx.open_window(options, |window, cx| {
                 window.set_window_title("throcc");
                 let view = cx.new(|cx| app::ThroccApp::new(mock, window, cx));

@@ -247,3 +247,58 @@ fn the_profile_follows_us_to_the_next_server() {
     wait_for(&bob, "alice's picture", |_| bob.avatar(hash).is_some());
     assert_eq!(&*bob.avatar(hash).unwrap(), picture.as_slice());
 }
+
+#[test]
+fn only_admins_name_the_server_and_everyone_sees_it() {
+    let (address, bootstrap) = server();
+    let (alice, _a) = client(&address, &bootstrap);
+    wait_for(&alice, "connected", |s| {
+        s.connection == ConnectionStatus::Connected
+    });
+    alice.command(Command::SetServerName(Some("  Moss Co-op ".into())));
+    wait_for(&alice, "the server's name", |s| {
+        s.server.as_ref().and_then(|s| s.name.as_deref()) == Some("Moss Co-op")
+    });
+
+    let code = invite(&alice);
+    let (bob, _b) = client(&address, &code);
+    assert_eq!(bob.state().server.clone().unwrap().title(), "Moss Co-op");
+
+    let picture: Vec<u8> = (0..1500u32).map(|i| (i * 3) as u8).collect();
+    alice.command(Command::SetServerPicture(Some(picture.clone())));
+    wait_for(&bob, "the server's picture", |s| {
+        s.server.as_ref().is_some_and(|s| s.avatar.is_some())
+    });
+    let hash = bob.state().server.clone().unwrap().avatar.unwrap();
+    wait_for(&bob, "the picture's bytes", |_| bob.avatar(hash).is_some());
+    assert_eq!(&*bob.avatar(hash).unwrap(), picture.as_slice());
+    assert_eq!(bob.state().server.clone().unwrap().title(), "Moss Co-op");
+
+    let mut events = bob.events();
+    bob.command(Command::SetServerName(Some("Bob's".into())));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(throcc_client_core::client::Event::Notice(_)) = events.try_recv() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "bob's rename wasn't refused");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(alice.state().server.clone().unwrap().title(), "Moss Co-op");
+
+    alice.command(Command::SetServerName(None));
+    wait_for(&bob, "the name cleared", |s| {
+        s.server
+            .as_ref()
+            .is_some_and(|s| s.name.is_none() && s.avatar == Some(hash))
+    });
+
+    let other: Vec<u8> = (0..900u32).map(|i| (i * 5) as u8).collect();
+    alice.command(Command::SetServerPicture(Some(other)));
+    alice.command(Command::SetServerName(Some("Fern".into())));
+    wait_for(&bob, "both quick changes", |s| {
+        s.server.as_ref().is_some_and(|s| {
+            s.name.as_deref() == Some("Fern") && s.avatar.is_some_and(|a| a != hash)
+        })
+    });
+}

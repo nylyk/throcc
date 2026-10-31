@@ -183,7 +183,8 @@ enum Hello {
 // Enroll continues: server -> PakeReply { pake_b, confirm_b }, client -> PakeFinish { confirm_a, signature }
 
 enum AuthResult {
-    Ok { me: UserId, role: Role, rooms: Vec<Room>, presence: Vec<Presence>, placed: Placed },
+    Ok { me: UserId, role: Role, rooms: Vec<Room>, presence: Vec<Presence>, placed: Placed,
+         server: ServerProfile },
     Err(AuthError),   // UnknownKey, BadSignature, BadInvite, ProtocolMismatch, Banned, RateLimited
 }
 
@@ -207,6 +208,8 @@ enum Request {
     ListUsers,                                                     // admin only
     SetRole { user: UserId, role: Role },
     RemoveUser { user: UserId, cascade: bool },
+    SetServerName(Option<String>),                                 // admin only
+    SetServerAvatar(Option<Hash>),                                 // admin only, a hash from SetAvatar
 }
 
 enum Response { Ok, Err { code: ErrorCode, message: String }, Placed(Placed),
@@ -222,8 +225,10 @@ enum Event {
     UserAdded(User), RoleChanged { user: UserId, role: Role }, UserRemoved(UserId),
     InviteBurned { code_id: String },                                      // the invite's minter
     Kicked { reason: String },
+    ServerProfileChanged(ServerProfile),                                   // everyone connected
 }
 
+struct ServerProfile { name: Option<String>, avatar: Option<Hash> }  // set by admins
 struct Placed     { room: Option<RoomId>, epoch: Epoch, tracks: Option<Tracks>, peers: Vec<RoomPeer> }
 struct MediaState { mic: bool, deafened: bool, share: Option<ShareConfig> }
 struct ShareConfig { audio: bool, kbps: u32, codec: Codec, width: u16, height: u16, fps: u8 }
@@ -383,8 +388,8 @@ Text chat or rooms well beyond 20 people would justify MLS (`openmls`). Until th
 
 1. `cpal` input, resampled to 48 kHz with `sonora-common-audio` only if the device refuses 48 kHz.
 2. `sonora` on 10 ms frames: high-pass, AEC3, noise suppression (default moderate), AGC2. Two frames per Opus frame.
-3. Gating: push-to-talk, or voice activation using sonora's VAD with a 300 ms hangover. Gated audio sends nothing.
-4. `ropus`: 48 kHz mono, VoIP mode, 20 ms, 32 kbps default, FEC on, DTX on. Expected-loss follows measured loss.
+3. Gating: push-to-talk, or voice activation when the processed mic level is above a threshold in dBFS, with a 300 ms hangover. Gated audio sends nothing.
+4. `ropus`: 48 kHz mono, VoIP mode, 20 ms, 64 kbps default, FEC on, DTX on. Expected-loss follows measured loss.
 5. One datagram per frame.
 
 **Receive:**

@@ -12,7 +12,7 @@ makedepends=('clang' 'ffnvcodec-headers' 'git' 'nasm' 'pkgconf' 'rust-bindgen' '
 optdepends=('mesa: VA-API video encoding on AMD GPUs'
             'intel-media-driver: VA-API video encoding on Intel GPUs'
             'nvidia-utils: NVENC video encoding on NVIDIA GPUs')
-options=('!lto')
+options=('!lto' '!debug')
 _ffmpeg=8.1.3
 source=("throcc::git+${THROCC_GIT:-https://github.com/nylyk/throcc.git}"
         "https://ffmpeg.org/releases/ffmpeg-$_ffmpeg.tar.xz")
@@ -26,8 +26,15 @@ pkgver() {
 
 build() {
     cd throcc
-    FFMPEG_TARBALL="$srcdir/ffmpeg-$_ffmpeg.tar.xz" packaging/ffmpeg/build.sh "$srcdir/ffmpeg"
-    packaging/ffmpeg/bindings.sh "$srcdir/ffmpeg" "$srcdir/ffmpeg/binding.rs"
+    local recipe
+    recipe=$( { cat packaging/ffmpeg/build.sh packaging/ffmpeg/bindings.sh packaging/ffmpeg/patches/*
+                pkg-config --modversion dav1d vpx libva ffnvcodec; } | sha256sum)
+    if [ "$(cat "$srcdir/ffmpeg/recipe" 2>/dev/null)" != "$recipe" ]; then
+        rm -rf "$srcdir/ffmpeg"
+        FFMPEG_TARBALL="$srcdir/ffmpeg-$_ffmpeg.tar.xz" packaging/ffmpeg/build.sh "$srcdir/ffmpeg"
+        packaging/ffmpeg/bindings.sh "$srcdir/ffmpeg" "$srcdir/ffmpeg/binding.rs"
+        echo "$recipe" >"$srcdir/ffmpeg/recipe"
+    fi
     export FFMPEG_DLL_PATH="$srcdir/ffmpeg/lib"
     export FFMPEG_BINDING_PATH="$srcdir/ffmpeg/binding.rs"
     export RUSTFLAGS="-C link-arg=-Wl,--disable-new-dtags,-rpath,/usr/lib/throcc"

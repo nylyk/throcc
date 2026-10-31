@@ -55,8 +55,6 @@ serde = { version = "1.0.229", features = ["derive"] }
 rustls-webpki = { version = "0.103.16", default-features = false, features = ["ring", "std"] }
 sonora = "0.2.0"
 sonora-common-audio = "0.2.0"
-sonora-agc2 = "0.2.0"
-sonora-simd = "0.2.0"
 spake2 = "0.4.0"
 subtle = "2.6.1"
 screencapturekit = { version = "=11.0.0", features = ["macos_14_0"] }

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Instant;
 
 use std::path::PathBuf;
 use throcc_proto::Fingerprint;
@@ -22,8 +23,8 @@ pub use crate::session::ClientOptions;
 use crate::session::{Session, Shared};
 
 use crate::state::{
-    ConnectionStatus, CurrentRoom, Health, KeyWarning, Person, RoomView, ServerView, State,
-    TrackHealth,
+    ConnectionStatus, CurrentRoom, Health, KeyWarning, Person, RoomView, SentTrack, ServerView,
+    State, TrackHealth,
 };
 
 const EVENTS: usize = 256;
@@ -42,6 +43,10 @@ pub enum Command {
     SetName(String),
     /// Sets our profile picture, at most 64 KiB, or clears it.
     SetAvatar(Option<Vec<u8>>),
+    /// Names the server, or clears its name. Admins only.
+    SetServerName(Option<String>),
+    /// Sets the server's picture, at most 64 KiB, or clears it. Admins only.
+    SetServerPicture(Option<Vec<u8>>),
     FetchAvatar(Hash),
     CreateRoom(String),
     RenameRoom(RoomId, String),
@@ -96,6 +101,8 @@ pub trait ClientApi: Send + Sync {
     fn picture(&self, user: UserId) -> Option<Picture>;
     /// The profile picture behind `hash`, fetched in the background on first ask.
     fn avatar(&self, hash: Hash) -> Option<Arc<[u8]>>;
+    /// The processed mic level in dBFS, refreshed every 100 ms while audio runs.
+    fn mic_level(&self) -> Option<f32>;
 }
 
 const COMMANDS: usize = 64;
@@ -140,6 +147,7 @@ impl Client {
             events,
             pictures: Mutex::default(),
             avatars: Mutex::default(),
+            mic_level: Mutex::default(),
         });
         let (commands, commands_rx) = mpsc::channel(COMMANDS);
         let call = {
@@ -208,6 +216,14 @@ impl ClientApi for Client {
         }
         bytes
     }
+
+    fn mic_level(&self) -> Option<f32> {
+        *self
+            .shared
+            .mic_level
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// A client with canned people and rooms that reacts to commands locally.
@@ -215,6 +231,7 @@ pub struct MockClient {
     state: Mutex<Arc<State>>,
     events: broadcast::Sender<Event>,
     avatars: Mutex<HashMap<Hash, Arc<[u8]>>>,
+    started: Instant,
 }
 
 impl Default for MockClient {
@@ -224,12 +241,23 @@ impl Default for MockClient {
 }
 
 impl MockClient {
+    /// Keeps `bytes` as a picture, as the server would, and returns its hash.
+    fn keep_avatar(&self, bytes: Vec<u8>) -> Hash {
+        let hash = Hash(<sha2::Sha256 as sha2::Digest>::digest(&bytes).into());
+        self.avatars
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(hash, bytes.into());
+        hash
+    }
+
     pub fn new() -> Self {
         let (events, _) = broadcast::channel(EVENTS);
         Self {
             state: Mutex::new(Arc::new(sample_state())),
             events,
             avatars: Mutex::default(),
+            started: Instant::now(),
         }
     }
 
@@ -314,15 +342,21 @@ impl ClientApi for MockClient {
                 });
                 self.events.send(Event::ProfileSaved).ok();
             }
-            Command::SetAvatar(picture) => {
-                let hash = picture.map(|bytes| {
-                    let hash = Hash(<sha2::Sha256 as sha2::Digest>::digest(&bytes).into());
-                    self.avatars
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .insert(hash, bytes.into());
-                    hash
+            Command::SetServerName(name) => self.update(|s| {
+                if let Some(server) = s.server.as_mut() {
+                    server.name = name;
+                }
+            }),
+            Command::SetServerPicture(picture) => {
+                let hash = picture.map(|bytes| self.keep_avatar(bytes));
+                self.update(|s| {
+                    if let Some(server) = s.server.as_mut() {
+                        server.avatar = hash;
+                    }
                 });
+            }
+            Command::SetAvatar(picture) => {
+                let hash = picture.map(|bytes| self.keep_avatar(bytes));
                 self.update(|s| {
                     if let Some(p) = s.people.get_mut(&me) {
                         p.avatar = hash;
@@ -405,6 +439,10 @@ impl ClientApi for MockClient {
             .get(&hash)
             .cloned()
     }
+    fn mic_level(&self) -> Option<f32> {
+        let wave = Instant::now().duration_since(self.started).as_secs_f32() * 3.0;
+        Some(-38.0 + 14.0 * wave.sin())
+    }
 }
 
 fn set_mine(state: &mut State, me: UserId, change: impl FnOnce(&mut CurrentRoom, &mut Person)) {
@@ -464,6 +502,8 @@ fn sample_state() -> State {
         server: Some(ServerView {
             address: "voice.example.net".into(),
             fingerprint: Fingerprint([0x2c; 32]),
+            name: Some("Moss Co-op".into()),
+            avatar: None,
         }),
         connection: ConnectionStatus::Connected,
         me: Some(UserId(1)),
@@ -504,18 +544,23 @@ fn sample_state() -> State {
                 },
                 TrackHealth {
                     label: "Mara, mic".into(),
-                    set_kbps: Some(32),
-                    arriving_kbps: Some(31),
+                    set_kbps: Some(64),
+                    arriving_kbps: Some(61),
                     loss: Some(0.3),
                 },
                 TrackHealth {
                     label: "Jonas, mic".into(),
-                    set_kbps: Some(32),
+                    set_kbps: Some(64),
                     arriving_kbps: None,
                     loss: None,
                 },
             ],
-            sending: "mic 32 kbps, 0 dropped".into(),
+            sending: vec![SentTrack {
+                label: "mic",
+                set_kbps: 64,
+                leaving_kbps: 61,
+                dropped: None,
+            }],
         },
         profile_name: Some("Felix".into()),
         profile_picture: None,

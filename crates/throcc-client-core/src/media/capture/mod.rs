@@ -1,4 +1,4 @@
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
 mod clock;
 #[cfg(target_os = "linux")]
 pub(crate) mod linux;

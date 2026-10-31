@@ -129,3 +129,21 @@ Pass: it prints the other app's tone near 0.3 and ours near 0. Then, in a call b
 Needs a server installed from `packaging/throcc-server.service` (or the container image), a Mac and an Arch machine. Download `throcc-macos` (the `.dmg`) and `throcc-windows` from the latest `packaging` workflow run, and build the Arch package with `makepkg -si` in `packaging/arch`.
 
 Pass: on each machine the packaged client opens (on macOS with right-click, Open the first time), joins with an invite code, shows the server fingerprint from the server's log, and holds a call with the others; sharing a screen shows the picture on the other side.
+
+## Share audio stays clean across gaps and rejoins
+
+Needs two machines in a call, one sharing with audio (test each of macOS, Windows and Linux as the sharer).
+
+Pass: play music on the sharer, pause it for a few seconds, play again; the watcher hears clean audio after each pause, with no crackle or hiss. Stop watching and watch again three times; each time the audio is clean within a second.
+
+## Audio settings
+
+Needs a client connected to a server, a mic and speakers.
+
+Pass: on the audio page the meter moves with your voice and turns green above the threshold mark; dragging the threshold above your speaking level stops the speaking ring, and below it brings it back. Input volume at 0 % silences you; output volume changes how loud others and shared audio play. Picking a device in either dropdown switches to it at once.
+
+## macOS window chrome
+
+Needs a Mac.
+
+Pass: the main window has no system titlebar; the traffic lights sit in the sidebar's top bar, left of the server name, and don't overlap it. Dragging any top bar moves the window, a double-click zooms it, and the buttons in the bars still work. The sidebar shows the desktop blurred behind it. Dragging the sidebar's right edge resizes it between about 210 and 420 px, on the main and settings screens. A pop-out shows the traffic lights over the picture with the title right of them; dragging the picture moves it.

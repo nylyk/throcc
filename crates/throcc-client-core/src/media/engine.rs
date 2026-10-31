@@ -67,6 +67,8 @@ pub struct Stats {
     pub send_dropped_units: AtomicU64,
     pub send_no_key: AtomicU64,
     pub sent_datagrams: AtomicU64,
+    /// Bytes sealed for sending on each of our tracks, counting each datagram once.
+    pub sent_bytes: Mutex<HashMap<MediaId, u64>>,
 }
 
 pub struct KeyState {
@@ -272,6 +274,14 @@ impl MediaEngine {
     /// Bytes received on `media_id` so far, counting each datagram once.
     pub fn received_bytes(&self, media_id: MediaId) -> u64 {
         lock(&self.sinks).get(&media_id).map_or(0, |s| s.bytes)
+    }
+
+    /// Bytes sealed for sending on our track `media_id` so far.
+    pub fn sent_bytes(&self, media_id: MediaId) -> u64 {
+        lock(&self.stats.sent_bytes)
+            .get(&media_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Queues a unit for sending. Never waits; a full queue drops the unit and counts it.
@@ -594,7 +604,10 @@ fn seal(
         stats.send_no_key.fetch_add(1, Ordering::Relaxed);
         return None;
     };
-    Some(sealer.seal(unit, epoch, &key))
+    let datagrams = sealer.seal(unit, epoch, &key);
+    let bytes: usize = datagrams.iter().map(Bytes::len).sum();
+    *lock(&stats.sent_bytes).entry(unit.media_id).or_default() += bytes as u64;
+    Some(datagrams)
 }
 
 /// Seals and sends one unit. False once the connection is gone.

@@ -9,7 +9,8 @@ use throcc_proto::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
     ErrorCode, Event, MAX_AVATAR_BYTES, MAX_NAME_CHARS, MediaState, Placed, Presence, Recovery,
-    Request, Response, Room, RoomPeer, ServerMessage, Share, SignedEncKey, Tracks, Welcome,
+    Request, Response, Room, RoomPeer, ServerMessage, ServerProfile, Share, SignedEncKey, Tracks,
+    Welcome,
 };
 use throcc_proto::transport::close;
 use tokio::sync::mpsc;
@@ -170,12 +171,17 @@ impl Hub {
         let placed = want_room
             .and_then(|room| self.place(user, Some(room)).ok())
             .unwrap_or_else(lobby);
+        let server = self.db.server_profile().unwrap_or_else(|e| {
+            warn!("reading the server profile: {e:#}");
+            ServerProfile::default()
+        });
         let welcome = Welcome {
             me: user,
             role,
             rooms: self.room_list(),
             presence: self.sessions.values().filter_map(presence).collect(),
             placed,
+            server,
         };
         Some((conn_id, welcome))
     }
@@ -227,6 +233,8 @@ impl Hub {
                 self.request_keyframe(user, media_id, kind)
             }
             Request::PublishKey { epoch, wrapped } => self.publish_key(user, epoch, wrapped),
+            Request::SetServerName(name) => self.set_server_name(user, name),
+            Request::SetServerAvatar(avatar) => self.set_server_avatar(user, avatar),
         };
         outcome.unwrap_or_else(|Refusal(code, message)| Response::Err { code, message })
     }
@@ -436,6 +444,37 @@ impl Hub {
         if let Some(p) = self.sessions.get(&user).and_then(presence) {
             self.emit_all(Event::PresenceChanged(p));
         }
+        Ok(Response::Ok)
+    }
+
+    fn set_server_name(&mut self, user: UserId, name: Option<String>) -> Outcome {
+        self.require(permissions::can_edit_server(self.role(user)?))?;
+        let name = match name.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(name) => Some(valid_name(name)?),
+        };
+        self.db
+            .set_server_name(name.as_deref())
+            .map_err(Refusal::internal)?;
+        self.announce_server_profile()
+    }
+
+    fn set_server_avatar(&mut self, user: UserId, avatar: Option<Hash>) -> Outcome {
+        self.require(permissions::can_edit_server(self.role(user)?))?;
+        if let Some(hash) = &avatar
+            && self.db.blob(hash).map_err(Refusal::internal)?.is_none()
+        {
+            return Err(Refusal::new(ErrorCode::NotFound, "no such picture"));
+        }
+        self.db
+            .set_server_avatar(avatar)
+            .map_err(Refusal::internal)?;
+        self.announce_server_profile()
+    }
+
+    fn announce_server_profile(&mut self) -> Outcome {
+        let profile = self.db.server_profile().map_err(Refusal::internal)?;
+        self.emit_all(Event::ServerProfileChanged(profile));
         Ok(Response::Ok)
     }
 

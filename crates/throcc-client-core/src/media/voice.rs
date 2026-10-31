@@ -51,7 +51,6 @@ pub enum VoiceCommand {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Levels {
     pub mic_dbfs: f32,
-    pub voice_probability: f32,
     pub transmitting: bool,
     pub speaking: HashMap<UserId, bool>,
     pub overruns: u64,
@@ -77,7 +76,13 @@ impl VoiceEngine {
         let chain = CaptureChain::new(&settings)?;
         let (commands, rx) = std_mpsc::channel();
         let levels: Arc<Mutex<Levels>> = Arc::default();
-        let worker = Worker::new(devices, chain, engine, levels.clone());
+        let worker = Worker::new(
+            devices,
+            chain,
+            settings.output_volume,
+            engine,
+            levels.clone(),
+        );
         let thread = std::thread::Builder::new()
             .name("throcc-audio".into())
             .spawn(move || worker.run(rx))?;
@@ -140,6 +145,7 @@ struct Worker {
     push_to_talk: bool,
     deafened: bool,
     loopback: bool,
+    output_volume: f32,
     /// Samples played, the local 48 kHz clock that packet arrivals are stamped with.
     played: u64,
 }
@@ -148,6 +154,7 @@ impl Worker {
     fn new(
         devices: Devices,
         chain: CaptureChain,
+        output_volume: f32,
         engine: Arc<MediaEngine>,
         levels: Arc<Mutex<Levels>>,
     ) -> Self {
@@ -175,6 +182,7 @@ impl Worker {
             push_to_talk: false,
             deafened: false,
             loopback: false,
+            output_volume,
             played: 0,
         }
     }
@@ -220,7 +228,10 @@ impl Worker {
 
     fn apply(&mut self, command: VoiceCommand) {
         match command {
-            VoiceCommand::Settings(settings) => self.chain.apply(&settings),
+            VoiceCommand::Settings(settings) => {
+                self.chain.apply(&settings);
+                self.output_volume = settings.output_volume;
+            }
             VoiceCommand::SendOn(track) => {
                 if track != self.mic_track {
                     self.chain.reset_clock();
@@ -308,7 +319,7 @@ impl Worker {
         }
         for (pair, voice) in stereo.as_chunks_mut::<2>().0.iter_mut().zip(voices) {
             for sample in pair {
-                *sample = (*sample + voice).clamp(-1.0, 1.0);
+                *sample = ((*sample + voice) * self.output_volume).clamp(-1.0, 1.0);
             }
         }
         let mut reference = [0.0f32; PULL];
@@ -407,7 +418,6 @@ impl Worker {
     fn publish_levels(&self) {
         let mut levels = self.levels.lock().unwrap_or_else(PoisonError::into_inner);
         levels.mic_dbfs = self.chain.level_dbfs;
-        levels.voice_probability = self.chain.voice_probability;
         levels.transmitting = self.chain.transmitting();
         levels.speaking = self.mixer.speaking().collect();
         levels.overruns = self

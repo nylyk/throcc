@@ -42,6 +42,16 @@ impl State {
 pub struct ServerView {
     pub address: String,
     pub fingerprint: Fingerprint,
+    /// The name its admins gave it.
+    pub name: Option<String>,
+    pub avatar: Option<Hash>,
+}
+
+impl ServerView {
+    /// The name its admins gave it, or its address.
+    pub fn title(&self) -> &str {
+        self.name.as_deref().unwrap_or(&self.address)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -102,7 +112,7 @@ pub struct Health {
     pub dropped_for_you: u32,
     pub verdict: String,
     pub receiving: Vec<TrackHealth>,
-    pub sending: String,
+    pub sending: Vec<SentTrack>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -111,6 +121,15 @@ pub struct TrackHealth {
     pub set_kbps: Option<u32>,
     pub arriving_kbps: Option<u32>,
     pub loss: Option<f32>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SentTrack {
+    pub label: &'static str,
+    pub set_kbps: u32,
+    pub leaving_kbps: u32,
+    /// Units dropped before they left, for tracks that can drop them.
+    pub dropped: Option<u64>,
 }
 
 /// The most lines a share is sent with; its width follows the screen's shape.

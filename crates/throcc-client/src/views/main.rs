@@ -11,9 +11,10 @@ use throcc_client_core::state::{Person, State, share_label};
 use throcc_proto::ids::{RoomId, UserId};
 
 use super::common::{
-    avatar, caption, card, control_button, ghost_icon, icon, player, player_button, primary,
-    section, sharing_icon, title,
+    TRAFFIC_LIGHTS, avatar, caption, card, control_button, ghost_icon, icon, moves_window, player,
+    player_button, primary, section, sharing_icon, title,
 };
+use super::settings::{resize_handle, sidebar_column};
 use crate::app::{Dialog, Screen, ServerPage, SettingsPage, ThroccApp};
 use crate::theme;
 
@@ -33,7 +34,14 @@ pub fn render(
         .size_full()
         .flex()
         .child(sidebar(app, cx))
-        .child(div().flex_1().min_w_0().h_full().child(content))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .bg(theme::bg())
+                .child(content),
+        )
         .into_any_element()
 }
 
@@ -119,7 +127,8 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
     let server = state
         .server
         .as_ref()
-        .map_or("server".to_owned(), |s| s.address.clone());
+        .map_or("server".to_owned(), |s| s.title().to_owned());
+    let server_picture = app.picture(state.server.as_ref().and_then(|s| s.avatar));
     let current_room = state.current.as_ref().map(|c| c.room);
     let manages = app.manages_rooms();
     let rooms = state.rooms.iter().map(|room| {
@@ -160,9 +169,11 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                                 app.open_edit_room(id, window, cx);
                             }))
                     }))
-                    .on_click(
-                        cx.listener(move |app, _, _, _| app.command(Command::Join(Some(id)))),
-                    ),
+                    .on_click(cx.listener(move |app, _, _, _| {
+                        if app.state.current.as_ref().is_none_or(|c| c.room != id) {
+                            app.command(Command::Join(Some(id)));
+                        }
+                    })),
             )
             .children(
                 people
@@ -179,26 +190,19 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
     let deafened = state.current.as_ref().is_some_and(|c| c.deafened);
     let in_room = state.current.is_some();
 
-    div()
-        .w(theme::SIDEBAR_WIDTH)
-        .h_full()
-        .flex_none()
-        .flex()
-        .flex_col()
-        .bg(theme::sidebar())
-        .border_r_1()
-        .border_color(theme::control())
+    sidebar_column(app.sidebar_width)
         .child(
-            div()
+            moves_window(div())
                 .flex()
                 .items_center()
                 .gap_2()
                 .px_3()
+                .pl(px(12.) + TRAFFIC_LIGHTS)
                 .h(theme::HEADER_HEIGHT)
                 .flex_none()
                 .border_b_1()
                 .border_color(theme::control())
-                .child(avatar(&server, 0, None, px(28.), false))
+                .child(avatar(&server, 0, server_picture, px(28.), false))
                 .child(
                     div()
                         .flex_1()
@@ -208,9 +212,9 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                 )
                 .child(
                     ghost_icon("server-settings", "settings-2", "Server settings").on_click(
-                        cx.listener(|app, _, _, cx| {
-                            app.command(Command::ListUsers);
-                            app.screen = Screen::Server(ServerPage::Members);
+                        cx.listener(|app, _, window, cx| {
+                            app.fill_server(window, cx);
+                            app.screen = Screen::Server(ServerPage::Overview);
                             cx.notify();
                         }),
                     ),
@@ -282,22 +286,18 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                         .child(caption(if in_room { "Connected" } else { "In the lobby" })),
                 )
                 .child(
-                    ghost_icon(
-                        "profile-mic",
-                        if mic { "mic" } else { "mic-off" },
-                        "Mute (⌘⇧M)",
-                    )
-                    .disabled(!in_room)
-                    .on_click(cx.listener(move |app, _, _, _| app.command(Command::SetMic(!mic)))),
+                    toggle_icon("profile-mic", "mic", "mic-off", !mic, "Mute (⌘⇧M)")
+                        .disabled(!in_room)
+                        .on_click(
+                            cx.listener(move |app, _, _, _| app.command(Command::SetMic(!mic))),
+                        ),
                 )
                 .child(
-                    ghost_icon(
+                    toggle_icon(
                         "profile-deafen",
-                        if deafened {
-                            "headphone-off"
-                        } else {
-                            "headphones"
-                        },
+                        "headphones",
+                        "headphone-off",
+                        deafened,
                         "Deafen (⌘⇧D)",
                     )
                     .disabled(!in_room)
@@ -309,13 +309,36 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                 )
                 .child(
                     ghost_icon("profile-settings", "settings", "Settings").on_click(cx.listener(
-                        |app, _, _, cx| {
-                            app.screen = Screen::Settings(SettingsPage::Audio);
+                        |app, _, window, cx| {
+                            app.fill_profile(window, cx);
+                            app.screen = Screen::Settings(SettingsPage::Profile);
                             cx.notify();
                         },
                     )),
                 ),
         )
+        .child(resize_handle(cx))
+}
+
+/// A ghost icon that turns red, showing `active_icon`, while `active`.
+fn toggle_icon(
+    id: &'static str,
+    icon_name: &'static str,
+    active_icon: &'static str,
+    active: bool,
+    tooltip: &'static str,
+) -> Button {
+    let shown = if active { active_icon } else { icon_name };
+    let shown = icon(shown);
+    Button::new(id)
+        .icon(if active {
+            shown.text_color(theme::danger_text())
+        } else {
+            shown
+        })
+        .ghost()
+        .rounded(theme::RADIUS_ROW)
+        .tooltip(tooltip)
 }
 
 trait Selected {
@@ -434,9 +457,6 @@ fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
         .flex_col()
         .gap_4()
         .child(title("Lobby"))
-        .child(caption(
-            "You're connected but not in a room. Nobody sees or hears you until you join one.",
-        ))
         .child(div().flex().flex_wrap().gap_4().children(cards))
         .children(state.rooms.is_empty().then(|| {
             card().child(caption(if manages {
@@ -486,7 +506,7 @@ fn room(
         .collect();
     let rtt = state.health.rtt_ms;
 
-    let header = div()
+    let header = moves_window(div())
         .flex()
         .items_center()
         .gap_3()
@@ -581,14 +601,6 @@ fn room(
                 })),
         )
         .child(
-            control_button("settings", "settings", "Settings", true).on_click(cx.listener(
-                |app, _, _, cx| {
-                    app.screen = Screen::Settings(SettingsPage::Audio);
-                    cx.notify();
-                },
-            )),
-        )
-        .child(
             Button::new("leave")
                 .label("Leave")
                 .icon(icon("log-out"))
@@ -658,6 +670,15 @@ fn grid_fit(count: usize, area: Area<Pixels>, gap: Pixels) -> (usize, Area<Pixel
         .unwrap_or((1, size(px(0.), px(0.))))
 }
 
+/// The largest size of shape `aspect` (width over height) that fits `area`.
+fn fit_aspect(area: Area<Pixels>, aspect: f32) -> Area<Pixels> {
+    let width = f32::from(area.width)
+        .min(f32::from(area.height) * aspect)
+        .max(0.)
+        .floor();
+    size(px(width), px((width / aspect).floor()))
+}
+
 fn grid(
     app: &mut ThroccApp,
     tiles: &[Tile],
@@ -666,7 +687,7 @@ fn grid(
 ) -> AnyElement {
     let viewport = window.viewport_size();
     let area = size(
-        viewport.width - theme::SIDEBAR_WIDTH - ROOM_PADDING * 2.,
+        viewport.width - app.sidebar_width - ROOM_PADDING * 2.,
         viewport.height - theme::HEADER_HEIGHT - theme::FOOTER_HEIGHT - ROOM_PADDING * 2.,
     );
     let (_, tile_size) = grid_fit(tiles.len(), area, TILE_GAP);
@@ -699,13 +720,33 @@ fn focused(
     cx: &mut Context<ThroccApp>,
 ) -> AnyElement {
     let others: Vec<&Tile> = tiles.iter().filter(|t| t.user != focus).collect();
-    let stage = tiles
-        .iter()
-        .find(|t| t.user == focus)
-        .map(|t| tile(app, t, Layout::Stage, window, cx));
+    let focused = tiles.iter().find(|t| t.user == focus);
+    let aspect = focused
+        .and_then(|t| t.person.sharing)
+        .map(|c| f32::from(c.width) / f32::from(c.height))
+        .filter(|aspect| aspect.is_finite() && *aspect > 0.)
+        .unwrap_or(16. / 9.);
+    let viewport = window.viewport_size();
+    let strip_room = if others.is_empty() {
+        px(0.)
+    } else {
+        STRIP_HEIGHT + TILE_GAP
+    };
+    let stage_size = fit_aspect(
+        size(
+            viewport.width - app.sidebar_width - ROOM_PADDING * 2.,
+            viewport.height
+                - theme::HEADER_HEIGHT
+                - theme::FOOTER_HEIGHT
+                - ROOM_PADDING * 2.
+                - strip_room,
+        ),
+        aspect,
+    );
+    let stage = focused.map(|t| tile(app, t, Layout::Stage, window, cx));
     let strip_tile = size(STRIP_HEIGHT * (16. / 9.), STRIP_HEIGHT);
     let strip_width = (strip_tile.width + TILE_GAP) * others.len() as f32;
-    let room_width = window.viewport_size().width - theme::SIDEBAR_WIDTH - ROOM_PADDING * 2.;
+    let room_width = window.viewport_size().width - app.sidebar_width - ROOM_PADDING * 2.;
     let strip = (!others.is_empty()).then(|| {
         div()
             .id("strip")
@@ -730,7 +771,21 @@ fn focused(
         .flex()
         .flex_col()
         .gap(TILE_GAP)
-        .child(div().flex_1().min_h_0().children(stage))
+        .child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .flex_none()
+                        .w(stage_size.width)
+                        .h(stage_size.height)
+                        .children(stage),
+                ),
+        )
         .children(strip)
         .into_any_element()
 }
@@ -976,6 +1031,20 @@ mod tests {
         assert_eq!(fit(1, 1600., 900.), (1, 1600., 900.));
         assert_eq!(fit(1, 800., 900.), (1, 800., 450.));
         assert_eq!(fit(1, 1600., 450.), (1, 800., 450.));
+    }
+
+    #[test]
+    fn the_stage_takes_the_shape_of_the_stream() {
+        let wide = fit_aspect(size(px(1000.), px(500.)), 16. / 9.);
+        assert_eq!(
+            (f32::from(wide.width), f32::from(wide.height)),
+            (888., 499.)
+        );
+        let tall = fit_aspect(size(px(1000.), px(900.)), 16. / 10.);
+        assert_eq!(
+            (f32::from(tall.width), f32::from(tall.height)),
+            (1000., 625.)
+        );
     }
 
     #[test]

@@ -5,7 +5,6 @@
     clippy::panic
 )]
 
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -18,9 +17,9 @@ use screencapturekit::content_sharing_picker::{
 use screencapturekit::cv::CVPixelBuffer;
 use screencapturekit::prelude::*;
 
+use super::clock::{AudioChunker, ShareZero};
 use super::{Capture, CaptureConfig, CaptureError};
 use crate::media::audio::SAMPLE_RATE;
-use crate::media::jitter::FRAME;
 use crate::media::share_audio::STEREO_FRAME;
 use crate::media::video::frame::{VideoFrame, fit_within};
 use throcc_proto::frame::VIDEO_CLOCK_HZ;
@@ -29,8 +28,6 @@ use throcc_proto::frame::VIDEO_CLOCK_HZ;
 const RING: usize = 4;
 /// Captured audio buffers waiting for the share thread, about 20 ms each.
 const AUDIO_RING: usize = 32;
-/// An audio buffer further than this from where the previous one ended starts afresh.
-const AUDIO_SLIP: i64 = FRAME as i64 / 2;
 const NANOS: i128 = 1_000_000_000;
 
 pub struct MacCapture {
@@ -39,11 +36,8 @@ pub struct MacCapture {
     audio: Option<rtrb::Consumer<(CMSampleBuffer, i64)>>,
     dropped: Arc<AtomicU64>,
     /// Host time, in nanoseconds, that both media clocks count from.
-    zero: Option<i64>,
-    /// Captured audio not yet taken, left and right interleaved.
-    pending: VecDeque<f32>,
-    /// Timestamp of the first pending sample, in 48 kHz ticks from `zero`.
-    pending_at: i64,
+    zero: ShareZero,
+    chunker: AudioChunker,
 }
 
 // SAFETY: SCStream is a reference to an Objective-C object that ScreenCaptureKit
@@ -134,9 +128,8 @@ fn capture(
         frames,
         audio,
         dropped,
-        zero: None,
-        pending: VecDeque::new(),
-        pending_at: 0,
+        zero: ShareZero::new(NANOS as i64),
+        chunker: AudioChunker::default(),
     })
 }
 
@@ -181,7 +174,7 @@ impl Capture for MacCapture {
         let Ok((buffer, at)) = self.frames.pop() else {
             return false;
         };
-        let Ok(timestamp) = u32::try_from(self.since_zero(at, VIDEO_CLOCK_HZ)) else {
+        let Ok(timestamp) = u32::try_from(self.zero.ticks(at, VIDEO_CLOCK_HZ)) else {
             return false;
         };
         let Ok(guard) = buffer.lock_read_only() else {
@@ -206,42 +199,25 @@ impl Capture for MacCapture {
     }
 
     fn next_audio(&mut self, into: &mut [f32; STEREO_FRAME]) -> Option<u32> {
-        while self.pending.len() < STEREO_FRAME {
-            let (sample, at) = self.audio.as_mut()?.pop().ok()?;
-            let ticks = self.since_zero(at, SAMPLE_RATE);
-            let expected = self.pending_at + (self.pending.len() / 2) as i64;
-            if self.pending.is_empty() || (ticks - expected).abs() > AUDIO_SLIP {
-                self.pending.clear();
-                self.pending_at = ticks;
+        let audio = self.audio.as_mut()?;
+        loop {
+            while self.chunker.needs_more() {
+                let (sample, at) = audio.pop().ok()?;
+                let ticks = self.zero.ticks(at, SAMPLE_RATE);
+                self.chunker.push(ticks, stereo(&sample));
             }
-            append_stereo(&sample, &mut self.pending);
+            if let Some(timestamp) = self.chunker.take(into) {
+                return Some(timestamp);
+            }
         }
-        if self.pending_at < 0 {
-            self.pending.drain(..STEREO_FRAME);
-            self.pending_at += FRAME as i64;
-            return None;
-        }
-        for (slot, sample) in into.iter_mut().zip(self.pending.drain(..STEREO_FRAME)) {
-            *slot = sample;
-        }
-        let timestamp = self.pending_at as u32;
-        self.pending_at += FRAME as i64;
-        Some(timestamp)
     }
 }
 
-impl MacCapture {
-    /// Ticks of a `rate` Hz clock from the first sample or frame taken to `at`.
-    fn since_zero(&mut self, at: i64, rate: u32) -> i64 {
-        let zero = *self.zero.get_or_insert(at);
-        (i128::from(at - zero) * i128::from(rate) / NANOS) as i64
-    }
-}
-
-/// Appends a buffer of 32-bit float audio, planar or interleaved, as interleaved stereo.
-fn append_stereo(sample: &CMSampleBuffer, out: &mut VecDeque<f32>) {
+/// A buffer of 32-bit float audio, planar or interleaved, as interleaved stereo.
+fn stereo(sample: &CMSampleBuffer) -> Vec<f32> {
+    let mut out = Vec::new();
     let Ok(list) = sample.audio_buffer_list() else {
-        return;
+        return out;
     };
     let floats = |buffer: &screencapturekit::cm::AudioBuffer| -> Vec<f32> {
         buffer
@@ -273,6 +249,7 @@ fn append_stereo(sample: &CMSampleBuffer, out: &mut VecDeque<f32>) {
         }
         _ => {}
     }
+    out
 }
 
 /// Copies `rows` rows of `row_bytes` from plane `index` into a tightly packed buffer.

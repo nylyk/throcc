@@ -278,9 +278,6 @@ fn share(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .flex_col()
         .gap_4()
         .child(title("Share your screen"))
-        .child(caption(
-            "Your system's own picker opens when you start sharing, so you choose a display or window there.",
-        ))
         .child(section("Resolution"))
         .child(resolutions)
         .child(section("Frame rate"))
@@ -295,19 +292,22 @@ fn share(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                     cx.notify();
                 })),
         )
-        .child(caption("Encoder: chosen when sharing starts, best of AV1, HEVC and H.264 in hardware."))
         .child(
             div()
                 .flex()
                 .justify_end()
                 .gap_2()
                 .child(close_button(cx))
-                .child(primary("start-share", "Start sharing").on_click(cx.listener(|app, _, _, cx| {
-                    let config = app.share_choice.config(Codec::Av1, app.share_audio);
-                    app.command(Command::StartShare(config));
-                    app.dialog = None;
-                    cx.notify();
-                }))),
+                .child(
+                    primary("start-share", "Start sharing").on_click(cx.listener(
+                        |app, _, _, cx| {
+                            let config = app.share_choice.config(Codec::Av1, app.share_audio);
+                            app.command(Command::StartShare(config));
+                            app.dialog = None;
+                            cx.notify();
+                        },
+                    )),
+                ),
         )
         .into_any_element()
 }
@@ -329,33 +329,52 @@ fn stat(label: &str, value: String) -> impl IntoElement {
 
 fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let health = &app.state.health;
-    let rows = health.receiving.iter().map(|row| {
-        let kbps = |k: Option<u32>| {
-            k.map_or("–".to_owned(), |k| {
-                if k >= 1000 {
-                    format!("{:.1} Mbps", k as f32 / 1000.0)
-                } else {
-                    format!("{k} kbps")
-                }
-            })
-        };
+    let kbps = |k: u32| {
+        if k >= 1000 {
+            format!("{:.1} Mbps", k as f32 / 1000.0)
+        } else {
+            format!("{k} kbps")
+        }
+    };
+    let table_row = |cells: [String; 4]| {
+        let [track, set, rate, last] = cells;
         div()
             .flex()
             .gap_2()
             .py_1()
             .border_b_1()
             .border_color(theme::control())
-            .child(div().flex_1().truncate().child(row.label.clone()))
-            .child(mono(kbps(row.set_kbps)).w(px(90.)))
-            .child(
-                mono(if row.arriving_kbps.is_none() {
-                    "muted".to_owned()
-                } else {
-                    kbps(row.arriving_kbps)
-                })
-                .w(px(90.)),
-            )
-            .child(mono(row.loss.map_or("–".to_owned(), |l| format!("{l:.1}%"))).w(px(60.)))
+            .child(div().flex_1().truncate().child(track))
+            .child(mono(set).w(px(90.)))
+            .child(mono(rate).w(px(90.)))
+            .child(mono(last).w(px(60.)))
+    };
+    let table_head = |rate: &'static str, last: &'static str| {
+        div()
+            .flex()
+            .gap_2()
+            .text_color(theme::text_3())
+            .text_size(px(12.))
+            .child(div().flex_1().child("Track"))
+            .child(div().w(px(90.)).child("Set"))
+            .child(div().w(px(90.)).child(rate))
+            .child(div().w(px(60.)).child(last))
+    };
+    let receiving = health.receiving.iter().map(|row| {
+        table_row([
+            row.label.clone(),
+            row.set_kbps.map_or("–".to_owned(), kbps),
+            row.arriving_kbps.map_or("muted".to_owned(), kbps),
+            row.loss.map_or("–".to_owned(), |l| format!("{l:.1}%")),
+        ])
+    });
+    let sending = health.sending.iter().map(|row| {
+        table_row([
+            row.label.to_owned(),
+            kbps(row.set_kbps),
+            kbps(row.leaving_kbps),
+            row.dropped.map_or("–".to_owned(), |d| d.to_string()),
+        ])
     });
     div()
         .flex()
@@ -383,20 +402,15 @@ fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .child(health.verdict.clone()),
         )
         .child(section("Receiving"))
-        .child(
-            div()
-                .flex()
-                .gap_2()
-                .text_color(theme::text_3())
-                .text_size(px(12.))
-                .child(div().flex_1().child("Track"))
-                .child(div().w(px(90.)).child("Set"))
-                .child(div().w(px(90.)).child("Arriving"))
-                .child(div().w(px(60.)).child("Loss")),
-        )
-        .children(rows)
+        .child(table_head("Arriving", "Loss"))
+        .children(receiving)
         .child(section("Sending"))
-        .child(mono(health.sending.clone()))
+        .child(if health.sending.is_empty() {
+            caption("Nothing").into_any_element()
+        } else {
+            table_head("Leaving", "Dropped").into_any_element()
+        })
+        .children(sending)
         .child(
             div()
                 .flex()

@@ -25,14 +25,14 @@ use crate::media::video::Picture;
 use crate::media::voice::{VoiceCommand, VoiceEngine};
 use crate::profile::Profile;
 use crate::state::{
-    ConnectionStatus, CurrentRoom, Health, KeyWarning, Person, RoomView, ServerView, State,
-    TrackHealth,
+    ConnectionStatus, CurrentRoom, Health, KeyWarning, Person, RoomView, SentTrack, ServerView,
+    State, TrackHealth,
 };
 
 const LEVELS_EVERY: Duration = Duration::from_millis(100);
 const HEALTH_EVERY: Duration = Duration::from_secs(2);
 const MAX_BACKOFF: Duration = Duration::from_secs(15);
-const MIC_KBPS: u32 = 32;
+const MIC_KBPS: u32 = 64;
 const SHARE_AUDIO_KBPS: u32 = 128;
 
 #[derive(Clone, Debug, Default)]
@@ -50,6 +50,8 @@ pub(crate) struct Shared {
     pub events: broadcast::Sender<Event>,
     pub pictures: Mutex<HashMap<UserId, Picture>>,
     pub avatars: Mutex<HashMap<Hash, AvatarSlot>>,
+    /// The processed mic level in dBFS while audio runs.
+    pub mic_level: Mutex<Option<f32>>,
 }
 
 /// A profile picture fetched once per hash and kept for the session.
@@ -161,6 +163,7 @@ pub(crate) struct Session {
     last_sent: u64,
     last_lost_sent: u64,
     last_local_drops: u64,
+    last_sent_bytes: HashMap<MediaId, u64>,
 }
 
 impl Session {
@@ -194,6 +197,7 @@ impl Session {
             last_sent: 0,
             last_lost_sent: 0,
             last_local_drops: 0,
+            last_sent_bytes: HashMap::new(),
             call,
         };
         session.profile = Profile::load(session.keystore.dir()).unwrap_or_else(|e| {
@@ -258,6 +262,11 @@ impl Session {
 
     fn start_voice(&mut self) {
         self.voice = None;
+        *self
+            .shared
+            .mic_level
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
         if !self.options.audio {
             return;
         }
@@ -401,6 +410,8 @@ impl Session {
             s.server = Some(ServerView {
                 address,
                 fingerprint,
+                name: welcome_copy.server.name.clone(),
+                avatar: welcome_copy.server.avatar,
             });
             s.connection = ConnectionStatus::Connected;
             s.me = Some(welcome_copy.me);
@@ -566,6 +577,17 @@ impl Session {
                 self.push_profile().await;
             }
             Command::FetchAvatar(hash) => self.fetch_avatar(hash).await,
+            Command::SetServerName(name) => self.simple(Request::SetServerName(name)).await,
+            Command::SetServerPicture(picture) => {
+                let avatar = match picture {
+                    Some(bytes) => match self.call.request(Request::SetAvatar(bytes)).await {
+                        Ok(Response::AvatarHash(hash)) => Some(hash),
+                        other => return self.refused(other),
+                    },
+                    None => None,
+                };
+                self.simple(Request::SetServerAvatar(avatar)).await;
+            }
             Command::CreateRoom(name) => self.simple(Request::CreateRoom { name }).await,
             Command::RenameRoom(room, name) => {
                 self.simple(Request::RenameRoom { room, name }).await
@@ -914,6 +936,12 @@ impl Session {
 
     async fn server_event(&mut self, event: ServerEvent) {
         match event {
+            ServerEvent::ServerProfileChanged(profile) => self.shared.update(|s| {
+                if let Some(server) = s.server.as_mut() {
+                    server.name = profile.name;
+                    server.avatar = profile.avatar;
+                }
+            }),
             ServerEvent::PresenceChanged(p) => {
                 self.shared.update(|s| {
                     let updated = match s.people.get(&p.user) {
@@ -1002,6 +1030,11 @@ impl Session {
     fn refresh_levels(&mut self) {
         let Some(voice) = &self.voice else { return };
         let levels = voice.levels();
+        *self
+            .shared
+            .mic_level
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(levels.mic_dbfs);
         let me = self.call.me();
         let mine = levels.transmitting;
         self.shared.update(|s| {
@@ -1066,10 +1099,43 @@ impl Session {
             download_loss,
             dropped_for_you: dropped,
             verdict: verdict(dropped, new_local_drops, download_loss),
-            sending: sending(&self.media, new_local_drops),
+            sending: self.sent_tracks(new_local_drops),
             receiving: rows,
         };
         self.shared.update(|s| s.health = health);
+    }
+
+    fn sent_tracks(&mut self, new_local_drops: u64) -> Vec<SentTrack> {
+        let Some(tracks) = &self.my_tracks else {
+            return Vec::new();
+        };
+        let mut wanted = Vec::new();
+        if self.media.mic {
+            wanted.push(("mic", tracks.mic, MIC_KBPS, None));
+        }
+        if let (Some(config), Some(share)) = (self.media.share, tracks.shares.first()) {
+            wanted.push(("screen", share.video, config.kbps, Some(new_local_drops)));
+            if config.audio {
+                wanted.push(("screen audio", share.audio, SHARE_AUDIO_KBPS, None));
+            }
+        }
+        wanted
+            .into_iter()
+            .map(|(label, media_id, set_kbps, dropped)| {
+                let bytes = self.call.engine.sent_bytes(media_id);
+                let last = self
+                    .last_sent_bytes
+                    .insert(media_id, bytes)
+                    .unwrap_or(bytes);
+                SentTrack {
+                    label,
+                    set_kbps,
+                    leaving_kbps: ((bytes - last.min(bytes)) * 8 / HEALTH_EVERY.as_secs() / 1000)
+                        as u32,
+                    dropped,
+                }
+            })
+            .collect()
     }
 }
 
@@ -1129,23 +1195,6 @@ fn verdict(dropped_for_you: u32, local_drops: u64, download_loss: f32) -> String
         return format!("{download_loss:.1}% of packets are lost between the server and you.");
     }
     "Everything is arriving.".into()
-}
-
-fn sending(media: &MediaState, local_drops: u64) -> String {
-    let mut parts = Vec::new();
-    if media.mic {
-        parts.push(format!("mic {MIC_KBPS} kbps"));
-    }
-    if let Some(share) = media.share {
-        parts.push(format!("screen {} kbps", share.kbps));
-        if share.audio {
-            parts.push(format!("screen audio {SHARE_AUDIO_KBPS} kbps"));
-        }
-    }
-    if parts.is_empty() {
-        return "nothing".into();
-    }
-    format!("{}, {local_drops} dropped", parts.join(", "))
 }
 
 #[cfg(test)]
