@@ -118,11 +118,10 @@ pub struct ThroccApp {
     pub users: Vec<User>,
     pub invite: Option<(String, u64)>,
     pub voice: VoiceSettings,
-    pub inputs: Vec<String>,
-    pub outputs: Vec<String>,
     pub input_device: Option<String>,
     pub output_device: Option<String>,
     pub mic_test: bool,
+    pub audio: views::settings::AudioControls,
     push_to_talk: Option<(crate::hotkey::PushToTalkKey, Task<()>)>,
     pub feeds: crate::video::Feeds,
     /// What the share dialog asks for, kept between shares.
@@ -194,6 +193,8 @@ impl ThroccApp {
         let share_choice = ShareChoice::default();
         let (bitrate, bitrate_changes) = Self::bitrate_slider(share_choice, cx);
         let (inputs, outputs) = devices::list();
+        let voice = VoiceSettings::default();
+        let audio = views::settings::AudioControls::new(&voice, &inputs, &outputs, window, cx);
         let mut app = Self {
             client: None,
             state: Arc::new(State::default()),
@@ -212,12 +213,11 @@ impl ThroccApp {
             known_servers,
             users: Vec::new(),
             invite: None,
-            voice: VoiceSettings::default(),
-            inputs,
-            outputs,
+            voice,
             input_device: None,
             output_device: None,
             mic_test: false,
+            audio,
             push_to_talk: None,
             feeds: crate::video::Feeds::default(),
             share_choice,

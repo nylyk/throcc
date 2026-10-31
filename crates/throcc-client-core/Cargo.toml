@@ -27,9 +27,7 @@ quinn.workspace = true
 ropus.workspace = true
 rsmpeg = { workspace = true, optional = true }
 sonora.workspace = true
-sonora-agc2.workspace = true
 sonora-common-audio.workspace = true
-sonora-simd.workspace = true
 rustls.workspace = true
 rustls-webpki.workspace = true
 thiserror.workspace = true

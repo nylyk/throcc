@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Instant;
 
 use std::path::PathBuf;
 use throcc_proto::Fingerprint;
@@ -96,6 +97,8 @@ pub trait ClientApi: Send + Sync {
     fn picture(&self, user: UserId) -> Option<Picture>;
     /// The profile picture behind `hash`, fetched in the background on first ask.
     fn avatar(&self, hash: Hash) -> Option<Arc<[u8]>>;
+    /// The processed mic level in dBFS, refreshed every 100 ms while audio runs.
+    fn mic_level(&self) -> Option<f32>;
 }
 
 const COMMANDS: usize = 64;
@@ -140,6 +143,7 @@ impl Client {
             events,
             pictures: Mutex::default(),
             avatars: Mutex::default(),
+            mic_level: Mutex::default(),
         });
         let (commands, commands_rx) = mpsc::channel(COMMANDS);
         let call = {
@@ -208,6 +212,14 @@ impl ClientApi for Client {
         }
         bytes
     }
+
+    fn mic_level(&self) -> Option<f32> {
+        *self
+            .shared
+            .mic_level
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// A client with canned people and rooms that reacts to commands locally.
@@ -215,6 +227,7 @@ pub struct MockClient {
     state: Mutex<Arc<State>>,
     events: broadcast::Sender<Event>,
     avatars: Mutex<HashMap<Hash, Arc<[u8]>>>,
+    started: Instant,
 }
 
 impl Default for MockClient {
@@ -230,6 +243,7 @@ impl MockClient {
             state: Mutex::new(Arc::new(sample_state())),
             events,
             avatars: Mutex::default(),
+            started: Instant::now(),
         }
     }
 
@@ -404,6 +418,10 @@ impl ClientApi for MockClient {
             .unwrap_or_else(PoisonError::into_inner)
             .get(&hash)
             .cloned()
+    }
+    fn mic_level(&self) -> Option<f32> {
+        let wave = Instant::now().duration_since(self.started).as_secs_f32() * 3.0;
+        Some(-38.0 + 14.0 * wave.sin())
     }
 }
 

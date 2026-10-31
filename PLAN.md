@@ -383,7 +383,7 @@ Text chat or rooms well beyond 20 people would justify MLS (`openmls`). Until th
 
 1. `cpal` input, resampled to 48 kHz with `sonora-common-audio` only if the device refuses 48 kHz.
 2. `sonora` on 10 ms frames: high-pass, AEC3, noise suppression (default moderate), AGC2. Two frames per Opus frame.
-3. Gating: push-to-talk, or voice activation using sonora's VAD with a 300 ms hangover. Gated audio sends nothing.
+3. Gating: push-to-talk, or voice activation when the processed mic level is above a threshold in dBFS, with a 300 ms hangover. Gated audio sends nothing.
 4. `ropus`: 48 kHz mono, VoIP mode, 20 ms, 64 kbps default, FEC on, DTX on. Expected-loss follows measured loss.
 5. One datagram per frame.
 

@@ -5,7 +5,6 @@ use sonora::config::{
     AdaptiveDigital, EchoCanceller, GainController2, HighPassFilter, NoiseSuppression,
 };
 use sonora::{AudioProcessing, Config, StreamConfig};
-use sonora_agc2::vad_wrapper::VoiceActivityDetectorWrapper;
 use throcc_proto::ids::UserId;
 
 pub use sonora::config::NoiseSuppressionLevel;
@@ -16,14 +15,14 @@ pub const SAMPLE_RATE: u32 = 48_000;
 /// Voice activation keeps sending this long after speech stops.
 const HANGOVER_PULLS: u32 = 30;
 const MAX_PACKET: usize = 1500;
-/// Speech probability above which voice activation opens, unless configured otherwise.
-pub const DEFAULT_VAD_THRESHOLD: f32 = 0.5;
+/// Processed mic level (dBFS) above which voice activation opens, unless configured otherwise.
+pub const DEFAULT_GATE_DBFS: f32 = -50.0;
 /// A decoded level above this (dBFS) counts as speaking for the UI's ring.
 const SPEAKING_DBFS: f32 = -45.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Transmit {
-    VoiceActivity { threshold: f32 },
+    VoiceActivity { threshold_dbfs: f32 },
     PushToTalk,
 }
 
@@ -34,6 +33,10 @@ pub struct VoiceSettings {
     pub automatic_gain: bool,
     pub transmit: Transmit,
     pub kbps: u32,
+    /// Gain on the mic before processing, 0 to 2.
+    pub input_volume: f32,
+    /// Gain on everything played, 0 to 2.
+    pub output_volume: f32,
 }
 
 impl Default for VoiceSettings {
@@ -43,9 +46,11 @@ impl Default for VoiceSettings {
             noise_suppression: Some(NoiseSuppressionLevel::Moderate),
             automatic_gain: true,
             transmit: Transmit::VoiceActivity {
-                threshold: DEFAULT_VAD_THRESHOLD,
+                threshold_dbfs: DEFAULT_GATE_DBFS,
             },
             kbps: 64,
+            input_volume: 1.0,
+            output_volume: 1.0,
         }
     }
 }
@@ -67,15 +72,16 @@ pub struct Packet<'a> {
 }
 
 /// Mic input to Opus packets: 10 ms frames through AEC3, noise suppression and AGC2, then
-/// a voice-activity or push-to-talk gate, then 20 ms Opus frames with FEC and DTX.
+/// a level or push-to-talk gate, then 20 ms Opus frames with FEC and DTX.
 /// The media clock runs on while gated, so timestamps stay real time.
 pub struct CaptureChain {
     apm: AudioProcessing,
-    vad: VoiceActivityDetectorWrapper,
     encoder: Encoder,
     transmit: Transmit,
+    input_volume: f32,
+    /// Echo cancellation, noise suppression and gain control as last applied.
+    processing: (bool, Option<NoiseSuppressionLevel>, bool),
     processed: [f32; PULL],
-    scaled: [f32; PULL],
     frame: [f32; FRAME],
     frame_len: usize,
     frame_open: bool,
@@ -84,8 +90,6 @@ pub struct CaptureChain {
     hangover: u32,
     muted: bool,
     transmitting: bool,
-    /// Speech probability of the last 10 ms, 0 to 1.
-    pub voice_probability: f32,
     /// Level of the last 10 ms after processing, in dBFS.
     pub level_dbfs: f32,
 }
@@ -107,14 +111,11 @@ impl CaptureChain {
             .map_err(|e| AudioError::Encoder(e.to_string()))?;
         Ok(Self {
             apm,
-            vad: VoiceActivityDetectorWrapper::new(
-                sonora_simd::detect_backend(),
-                SAMPLE_RATE as i32,
-            ),
             encoder,
             transmit: settings.transmit,
+            input_volume: settings.input_volume,
+            processing: processing_choice(settings),
             processed: [0.0; PULL],
-            scaled: [0.0; PULL],
             frame: [0.0; FRAME],
             frame_len: 0,
             frame_open: false,
@@ -123,14 +124,18 @@ impl CaptureChain {
             hangover: 0,
             muted: false,
             transmitting: false,
-            voice_probability: 0.0,
             level_dbfs: f32::NEG_INFINITY,
         })
     }
 
     pub fn apply(&mut self, settings: &VoiceSettings) {
-        self.apm.apply_config(processing_config(settings));
+        let processing = processing_choice(settings);
+        if processing != self.processing {
+            self.apm.apply_config(processing_config(settings));
+            self.processing = processing;
+        }
         self.transmit = settings.transmit;
+        self.input_volume = settings.input_volume;
         self.encoder
             .set_bitrate(Bitrate::Bits(settings.kbps * 1000))
             .ok();
@@ -172,19 +177,16 @@ impl CaptureChain {
         input: &[f32; PULL],
         push_to_talk: bool,
     ) -> Result<Option<Packet<'_>>, AudioError> {
+        let input = input.map(|sample| sample * self.input_volume);
         self.apm
-            .process_capture_f32(&[input], &mut [&mut self.processed])
+            .process_capture_f32(&[&input], &mut [&mut self.processed])
             .map_err(AudioError::Processing)?;
-        for (scaled, sample) in self.scaled.iter_mut().zip(&self.processed) {
-            *scaled = sample * 32768.0;
-        }
-        self.voice_probability = self.vad.analyze(&self.scaled);
         self.level_dbfs = dbfs(&self.processed);
 
         let open = match self.transmit {
             Transmit::PushToTalk => push_to_talk,
-            Transmit::VoiceActivity { threshold } => {
-                if self.voice_probability > threshold {
+            Transmit::VoiceActivity { threshold_dbfs } => {
+                if self.level_dbfs > threshold_dbfs {
                     self.hangover = HANGOVER_PULLS;
                 } else {
                     self.hangover = self.hangover.saturating_sub(1);
@@ -223,6 +225,14 @@ impl CaptureChain {
     pub fn stats(&self) -> &sonora::AudioProcessingStats {
         self.apm.statistics()
     }
+}
+
+fn processing_choice(settings: &VoiceSettings) -> (bool, Option<NoiseSuppressionLevel>, bool) {
+    (
+        settings.echo_cancellation,
+        settings.noise_suppression,
+        settings.automatic_gain,
+    )
 }
 
 fn processing_config(settings: &VoiceSettings) -> Config {
@@ -558,6 +568,23 @@ pub(crate) mod tests {
             timestamps[0] >= 50 * FRAME as u32,
             "the clock stopped while gated"
         );
+    }
+
+    #[test]
+    fn a_muted_input_volume_keeps_the_gate_shut() {
+        let settings = VoiceSettings {
+            input_volume: 0.0,
+            ..VoiceSettings::default()
+        };
+        let mut chain = CaptureChain::new(&settings).unwrap();
+        let voice = speech(5, 2.0);
+        let sent = voice
+            .as_chunks::<PULL>()
+            .0
+            .iter()
+            .filter(|frame| chain.capture(frame, false).unwrap().is_some())
+            .count();
+        assert_eq!(sent, 0);
     }
 
     #[test]

@@ -322,3 +322,4 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 - **The package is versioned by commit** (`0.1.0.r<commits>.g<hash>`, from `pkgver()`), so pacman sees each nightly as an upgrade.
 - **Install by downloading first, then `pacman -U` the file:** pacman wants a signature for packages given by URL, and these aren't signed.
 
+- **Voice activation gates on the processed mic level in dBFS, not on speech probability.** The human chose a plain loudness threshold, set with a slider over a live level meter, like other voice apps. AGC2's voice-activity detector and its crates are gone. Keyboard noise loud enough to cross the threshold opens the gate; noise suppression keeps most of it below.

@@ -50,6 +50,8 @@ pub(crate) struct Shared {
     pub events: broadcast::Sender<Event>,
     pub pictures: Mutex<HashMap<UserId, Picture>>,
     pub avatars: Mutex<HashMap<Hash, AvatarSlot>>,
+    /// The processed mic level in dBFS while audio runs.
+    pub mic_level: Mutex<Option<f32>>,
 }
 
 /// A profile picture fetched once per hash and kept for the session.
@@ -260,6 +262,11 @@ impl Session {
 
     fn start_voice(&mut self) {
         self.voice = None;
+        *self
+            .shared
+            .mic_level
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
         if !self.options.audio {
             return;
         }
@@ -1004,6 +1011,11 @@ impl Session {
     fn refresh_levels(&mut self) {
         let Some(voice) = &self.voice else { return };
         let levels = voice.levels();
+        *self
+            .shared
+            .mic_level
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(levels.mic_dbfs);
         let me = self.call.me();
         let mine = levels.transmitting;
         self.shared.update(|s| {
