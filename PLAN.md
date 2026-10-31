@@ -467,7 +467,7 @@ Self-view takes a second reference before the encoder and never touches the netw
 | Server egress drops | `LinkStats` every 2 s | Your downlink can't carry what you watch |
 | Path loss | `seq` gaps the server didn't cause | Loss between the server and you, or upstream |
 | Late fragments | Fragments arriving after their unit was abandoned | The reorder window is too tight |
-| Configured vs arriving | `ShareConfig.kbps` against measured rate | Sender uplink vs your own link |
+| Configured vs arriving | `ShareConfig.kbps` against measured rate | Shown per track only: a still screen encodes far below its configured rate, so a gap alone says nothing |
 | Decrypt failures | AEAD failures and missing keys | Key distribution broken or lagging |
 
 The connection panel (mockup *Connection*) turns these into one plain-language verdict.

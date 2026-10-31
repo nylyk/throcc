@@ -1065,7 +1065,7 @@ impl Session {
             upload_loss,
             download_loss,
             dropped_for_you: dropped,
-            verdict: verdict(&rows, dropped, new_local_drops, download_loss),
+            verdict: verdict(dropped, new_local_drops, download_loss),
             sending: sending(&self.media, new_local_drops),
             receiving: rows,
         };
@@ -1116,12 +1116,7 @@ fn percent(part: u64, whole: u64) -> f32 {
 }
 
 /// One plain-language sentence on what limits the call right now (PLAN §5.11).
-fn verdict(
-    rows: &[TrackHealth],
-    dropped_for_you: u32,
-    local_drops: u64,
-    download_loss: f32,
-) -> String {
+fn verdict(dropped_for_you: u32, local_drops: u64, download_loss: f32) -> String {
     if dropped_for_you > 0 {
         return format!(
             "{dropped_for_you} frames were dropped for you in the last 2 s. Your download can't carry everything you watch."
@@ -1129,19 +1124,6 @@ fn verdict(
     }
     if local_drops > 0 {
         return "Your upload can't carry your share's bitrate, so frames are dropped before they leave.".into();
-    }
-    let slow = rows.iter().find(|r| match (r.set_kbps, r.arriving_kbps) {
-        (Some(set), Some(arriving)) => set >= 1000 && arriving * 10 < set * 8,
-        _ => false,
-    });
-    if let Some(row) = slow {
-        let mbps = |k: u32| f64::from(k) / 1000.0;
-        return format!(
-            "{} arrives at {:.1} of the {:.0} Mbps set. Nothing was dropped for you, so the sender's upload is the bottleneck.",
-            row.label,
-            mbps(row.arriving_kbps.unwrap_or(0)),
-            mbps(row.set_kbps.unwrap_or(0))
-        );
     }
     if download_loss > 2.0 {
         return format!("{download_loss:.1}% of packets are lost between the server and you.");
@@ -1172,20 +1154,9 @@ mod tests {
 
     #[test]
     fn verdict_names_the_bottleneck() {
-        let row = |set, arriving| TrackHealth {
-            label: "Ilse, screen".into(),
-            set_kbps: Some(set),
-            arriving_kbps: Some(arriving),
-            loss: Some(0.0),
-        };
-        assert!(
-            verdict(&[row(10_000, 6_100)], 0, 0, 0.0).contains("arrives at 6.1 of the 10 Mbps")
-        );
-        assert!(verdict(&[row(10_000, 6_100)], 3, 0, 0.0).contains("dropped for you"));
-        assert_eq!(
-            verdict(&[row(10_000, 9_900)], 0, 0, 0.0),
-            "Everything is arriving."
-        );
-        assert!(verdict(&[], 0, 0, 4.0).contains("4.0% of packets"));
+        assert!(verdict(3, 0, 0.0).contains("dropped for you"));
+        assert!(verdict(0, 2, 0.0).contains("Your upload"));
+        assert!(verdict(0, 0, 4.0).contains("4.0% of packets"));
+        assert_eq!(verdict(0, 0, 0.0), "Everything is arriving.");
     }
 }

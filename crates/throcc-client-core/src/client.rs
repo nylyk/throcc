@@ -461,29 +461,59 @@ fn sample_state() -> State {
         p.deafened = true;
     }
     State {
-        server: Some(ServerView { address: "voice.example.net".into(), fingerprint: Fingerprint([0x2c; 32]) }),
+        server: Some(ServerView {
+            address: "voice.example.net".into(),
+            fingerprint: Fingerprint([0x2c; 32]),
+        }),
         connection: ConnectionStatus::Connected,
         me: Some(UserId(1)),
         role: Some(Role::Admin),
         rooms: ["General", "Gaming", "Work", "AFK"]
             .iter()
             .enumerate()
-            .map(|(i, name)| RoomView { id: RoomId(i as u64 + 1), name: (*name).into() })
+            .map(|(i, name)| RoomView {
+                id: RoomId(i as u64 + 1),
+                name: (*name).into(),
+            })
             .collect(),
         people,
         current: None,
-        key_warnings: vec![KeyWarning { user: UserId(3), pinned: Fingerprint([0x7c; 32]), now: Fingerprint([0xb8; 32]) }],
+        key_warnings: vec![KeyWarning {
+            user: UserId(3),
+            pinned: Fingerprint([0x7c; 32]),
+            now: Fingerprint([0xb8; 32]),
+        }],
         health: Health {
             rtt_ms: 18.0,
             upload_loss: 0.0,
             download_loss: 0.3,
             dropped_for_you: 0,
-            verdict: "Ilse's screen arrives at 6.1 of the 10 Mbps she set. Nothing was dropped for you, so her upload is the bottleneck.".into(),
+            verdict: "Everything is arriving.".into(),
             receiving: vec![
-                TrackHealth { label: "Ilse, screen".into(), set_kbps: Some(10_000), arriving_kbps: Some(6_100), loss: Some(4.2) },
-                TrackHealth { label: "Ilse, screen audio".into(), set_kbps: Some(128), arriving_kbps: Some(128), loss: Some(0.0) },
-                TrackHealth { label: "Mara, mic".into(), set_kbps: Some(32), arriving_kbps: Some(31), loss: Some(0.3) },
-                TrackHealth { label: "Jonas, mic".into(), set_kbps: Some(32), arriving_kbps: None, loss: None },
+                TrackHealth {
+                    label: "Ilse, screen".into(),
+                    set_kbps: Some(10_000),
+                    arriving_kbps: Some(6_100),
+                    loss: Some(4.2),
+                },
+                TrackHealth {
+                    label: "Ilse, screen audio".into(),
+                    set_kbps: Some(128),
+                    arriving_kbps: Some(128),
+                    loss: Some(0.0),
+                },
+                TrackHealth {
+                    label: "Mara, mic".into(),
+                    set_kbps: Some(32),
+                    arriving_kbps: Some(31),
+                    loss: Some(0.3),
+                },
+                TrackHealth {
+                    label: "Jonas, mic".into(),
+                    set_kbps: Some(32),
+                    arriving_kbps: None,
+                    loss: None,
+                },
             ],
             sending: "mic 32 kbps, 0 dropped".into(),
         },
