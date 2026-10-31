@@ -35,12 +35,12 @@ case "$(uname -s)" in
         flags+=(--enable-videotoolbox)
         ;;
     Linux)
-        have ffnvcodec && flags+=(--enable-ffnvcodec --enable-nvenc)
+        have ffnvcodec && flags+=(--enable-ffnvcodec --enable-nvenc --enable-nvdec)
         have libva && flags+=(--enable-vaapi)
         ;;
     MINGW* | MSYS*)
         flags+=(--toolchain=msvc --enable-d3d11va --enable-mediafoundation)
-        have ffnvcodec && flags+=(--enable-ffnvcodec --enable-nvenc)
+        have ffnvcodec && flags+=(--enable-ffnvcodec --enable-nvenc --enable-nvdec)
         ;;
 esac
 

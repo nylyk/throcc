@@ -1,10 +1,11 @@
 use std::ffi::CStr;
 
 use rsmpeg::avcodec::{AVCodec, AVCodecContext, AVPacket};
-use rsmpeg::avutil::AVFrame;
+use rsmpeg::avutil::{AVFrame, AVHWDeviceContext};
 use rsmpeg::error::RsmpegError;
 use rsmpeg::ffi;
 use throcc_proto::messages::Codec;
+use tracing::{info, warn};
 
 use super::frame::VideoFrame;
 
@@ -18,7 +19,7 @@ pub enum DecodeError {
     Ffmpeg(#[from] RsmpegError),
 }
 
-/// Software decoders, fastest first. A hardware path replaces these per platform.
+/// Software decoders, fastest first.
 fn decoders(codec: Codec) -> &'static [&'static CStr] {
     match codec {
         Codec::Av1 => &[c"libdav1d", c"av1"],
@@ -28,13 +29,76 @@ fn decoders(codec: Codec) -> &'static [&'static CStr] {
     }
 }
 
-/// Decodes one remote share. Shows the newest frame; presentation time is ignored.
+/// FFmpeg's own decoder for `codec`, the one that hands work to a hardware device.
+fn native(codec: Codec) -> &'static CStr {
+    match codec {
+        Codec::Av1 => c"av1",
+        Codec::Hevc => c"hevc",
+        Codec::H264 => c"h264",
+        Codec::Vp9 => c"vp9",
+    }
+}
+
+/// Hardware decoding devices on this platform, tried in order before software.
+fn devices() -> &'static [ffi::AVHWDeviceType] {
+    if cfg!(target_os = "macos") {
+        &[ffi::AV_HWDEVICE_TYPE_VIDEOTOOLBOX]
+    } else if cfg!(target_os = "linux") {
+        &[ffi::AV_HWDEVICE_TYPE_VAAPI, ffi::AV_HWDEVICE_TYPE_CUDA]
+    } else if cfg!(windows) {
+        &[ffi::AV_HWDEVICE_TYPE_D3D11VA, ffi::AV_HWDEVICE_TYPE_CUDA]
+    } else {
+        &[]
+    }
+}
+
+/// Decodes one remote share, on the GPU where it can. Shows the newest frame;
+/// presentation time is ignored.
 pub struct Decoder {
     ctx: AVCodecContext,
+    codec: Codec,
+    hardware: bool,
 }
 
 impl Decoder {
     pub fn new(codec: Codec) -> Result<Self, DecodeError> {
+        let decoder = match Self::on_hardware(codec) {
+            Some(decoder) => decoder,
+            None => Self::in_software(codec)?,
+        };
+        let place = if decoder.hardware {
+            "hardware"
+        } else {
+            "software"
+        };
+        info!("decoding {codec:?} in {place}");
+        Ok(decoder)
+    }
+
+    fn on_hardware(codec: Codec) -> Option<Self> {
+        let found = AVCodec::find_decoder_by_name(native(codec))?;
+        devices().iter().find_map(|&device_type| {
+            let supported = (0..).map_while(|i| found.hw_config(i)).any(|config| {
+                config.device_type == device_type
+                    && config.methods & ffi::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32 != 0
+            });
+            if !supported {
+                return None;
+            }
+            let device = AVHWDeviceContext::create(device_type, None, None, 0).ok()?;
+            let mut ctx = AVCodecContext::new(&found);
+            ctx.set_flags(ctx.flags | ffi::AV_CODEC_FLAG_LOW_DELAY as i32);
+            ctx.set_hw_device_ctx(device);
+            ctx.open(None).ok()?;
+            Some(Self {
+                ctx,
+                codec,
+                hardware: true,
+            })
+        })
+    }
+
+    fn in_software(codec: Codec) -> Result<Self, DecodeError> {
         let found = decoders(codec)
             .iter()
             .find_map(|name| AVCodec::find_decoder_by_name(name))
@@ -42,11 +106,36 @@ impl Decoder {
         let mut ctx = AVCodecContext::new(&found);
         ctx.set_flags(ctx.flags | ffi::AV_CODEC_FLAG_LOW_DELAY as i32);
         ctx.open(None)?;
-        Ok(Self { ctx })
+        Ok(Self {
+            ctx,
+            codec,
+            hardware: false,
+        })
     }
 
-    /// Decodes one access unit. Returns the newest picture it produced, if any.
+    /// Whether frames are decoded on a hardware device.
+    pub fn is_hardware(&self) -> bool {
+        self.hardware
+    }
+
+    /// Decodes one access unit. Returns the newest picture it produced, if any. A hardware
+    /// decoder that fails is swapped for a software one, which decodes the same unit.
     pub fn decode(
+        &mut self,
+        unit: &[u8],
+        timestamp: u32,
+    ) -> Result<Option<VideoFrame>, DecodeError> {
+        match self.decode_unit(unit, timestamp) {
+            Err(e) if self.hardware => {
+                warn!("hardware decoding failed ({e}); decoding in software");
+                *self = Self::in_software(self.codec)?;
+                self.decode_unit(unit, timestamp)
+            }
+            result => result,
+        }
+    }
+
+    fn decode_unit(
         &mut self,
         unit: &[u8],
         timestamp: u32,
@@ -64,7 +153,14 @@ impl Decoder {
         let mut newest = None;
         loop {
             match self.ctx.receive_frame() {
-                Ok(frame) => newest = Some(to_nv12(&frame, timestamp)?),
+                Ok(frame) if frame.hw_frames_ctx.is_null() => {
+                    newest = Some(to_nv12(&frame, timestamp)?);
+                }
+                Ok(frame) => {
+                    let mut copied = AVFrame::new();
+                    copied.hwframe_transfer_data(&frame)?;
+                    newest = Some(to_nv12(&copied, timestamp)?);
+                }
                 Err(RsmpegError::DecoderDrainError) | Err(RsmpegError::DecoderFlushedError) => {
                     break;
                 }

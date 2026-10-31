@@ -624,3 +624,64 @@ mod vp9 {
         assert!(worst > 25.0, "picture quality {worst:.1} dB");
     }
 }
+
+#[cfg(test)]
+mod round_trip {
+    use super::super::decode::Decoder;
+    use super::super::frame::{VideoFrame, luma_psnr};
+    use super::*;
+
+    /// Encodes 30 frames with `encoder` and decodes them. Returns whether decoding ran
+    /// on hardware, or `None` when this machine can't open the encoder.
+    fn round_trip(encoder: &CStr, codec: Codec) -> Option<bool> {
+        let candidate = LADDER.iter().find(|c| c.name == encoder)?;
+        let config = EncoderConfig {
+            width: 1280,
+            height: 720,
+            fps: 30,
+            kbps: 4000,
+        };
+        let mut encoder = Encoder::open_with(candidate, config)?;
+        let mut decoder = Decoder::new(codec).unwrap();
+        let mut shown = Vec::new();
+        for n in 0..30u16 {
+            let input = VideoFrame::test_pattern(1280, 720, n, u32::from(n) * 3000);
+            for unit in encoder.encode(&input).unwrap() {
+                if let Some(output) = decoder.decode(&unit.data, unit.timestamp).unwrap() {
+                    let number = output.read_test_number();
+                    let reference = VideoFrame::test_pattern(1280, 720, number, 0);
+                    shown.push(luma_psnr(&output, &reference));
+                }
+            }
+        }
+        assert!(
+            shown.len() >= 25,
+            "only {} of 30 frames came out",
+            shown.len()
+        );
+        let worst = shown.iter().copied().fold(f64::INFINITY, f64::min);
+        assert!(worst > 25.0, "picture quality {worst:.1} dB");
+        Some(decoder.is_hardware())
+    }
+
+    #[test]
+    fn every_codec_this_machine_encodes_decodes_back() {
+        for (encoder, codec) in [
+            (c"hevc_videotoolbox", Codec::Hevc),
+            (c"h264_videotoolbox", Codec::H264),
+            (c"hevc_vaapi", Codec::Hevc),
+            (c"h264_vaapi", Codec::H264),
+            (c"libvpx-vp9", Codec::Vp9),
+        ] {
+            if let Some(hardware) = round_trip(encoder, codec) {
+                eprintln!("{encoder:?} decoded on hardware: {hardware}");
+                if encoder.to_bytes().ends_with(b"videotoolbox") {
+                    assert!(
+                        hardware,
+                        "{encoder:?} encodes on the GPU but decodes in software"
+                    );
+                }
+            }
+        }
+    }
+}
