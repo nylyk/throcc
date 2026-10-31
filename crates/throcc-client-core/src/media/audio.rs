@@ -45,7 +45,7 @@ impl Default for VoiceSettings {
             transmit: Transmit::VoiceActivity {
                 threshold: DEFAULT_VAD_THRESHOLD,
             },
-            kbps: 32,
+            kbps: 64,
         }
     }
 }

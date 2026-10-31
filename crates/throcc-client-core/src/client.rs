@@ -22,8 +22,8 @@ pub use crate::session::ClientOptions;
 use crate::session::{Session, Shared};
 
 use crate::state::{
-    ConnectionStatus, CurrentRoom, Health, KeyWarning, Person, RoomView, ServerView, State,
-    TrackHealth,
+    ConnectionStatus, CurrentRoom, Health, KeyWarning, Person, RoomView, SentTrack, ServerView,
+    State, TrackHealth,
 };
 
 const EVENTS: usize = 256;
@@ -504,18 +504,23 @@ fn sample_state() -> State {
                 },
                 TrackHealth {
                     label: "Mara, mic".into(),
-                    set_kbps: Some(32),
-                    arriving_kbps: Some(31),
+                    set_kbps: Some(64),
+                    arriving_kbps: Some(61),
                     loss: Some(0.3),
                 },
                 TrackHealth {
                     label: "Jonas, mic".into(),
-                    set_kbps: Some(32),
+                    set_kbps: Some(64),
                     arriving_kbps: None,
                     loss: None,
                 },
             ],
-            sending: "mic 32 kbps, 0 dropped".into(),
+            sending: vec![SentTrack {
+                label: "mic",
+                set_kbps: 64,
+                leaving_kbps: 61,
+                dropped: None,
+            }],
         },
         profile_name: Some("Felix".into()),
         profile_picture: None,
