@@ -12,6 +12,7 @@ pub mod tls;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use throcc_proto::Fingerprint;
@@ -22,23 +23,31 @@ use tracing::{info, warn};
 use crate::auth::{SourceKey, SourceLimiter};
 use crate::database::Database;
 use crate::identity::ServerIdentity;
-use crate::limits::{Caps, Gate};
+use crate::limits::{Caps, Gate, Pass};
 use crate::rooms::{Hub, unix_now};
 use crate::sfu::Sfu;
 pub use crate::tls::Congestion;
 
 pub const DATABASE_FILE: &str = "throcc.sqlite";
+/// Connections that have signed in.
 pub const CONNECTIONS: Caps = Caps {
     per_source: 32,
     per_network: 128,
     total: 1024,
+};
+/// Connections from their first packet until they have signed in.
+pub const UNAUTHENTICATED: Caps = Caps {
+    per_source: 32,
+    per_network: 32,
+    total: 512,
 };
 pub const HANDSHAKES: Caps = Caps {
     per_source: 4,
     per_network: 16,
     total: 128,
 };
-const KEYFRAME_TICK: std::time::Duration = std::time::Duration::from_millis(100);
+pub const TLS_TIMEOUT: Duration = Duration::from_secs(10);
+const KEYFRAME_TICK: Duration = Duration::from_millis(100);
 
 pub struct Config {
     pub data_dir: PathBuf,
@@ -52,6 +61,7 @@ pub struct Shared {
     pub sfu: Arc<Sfu>,
     hub: Mutex<Hub>,
     limiter: Mutex<SourceLimiter>,
+    unauthenticated: Arc<Gate>,
     connections: Arc<Gate>,
     handshakes: Arc<Gate>,
 }
@@ -99,6 +109,7 @@ impl Server {
             sfu,
             hub: Mutex::new(hub),
             limiter: Mutex::default(),
+            unauthenticated: Gate::new(UNAUTHENTICATED),
             connections: Gate::new(CONNECTIONS),
             handshakes: Gate::new(HANDSHAKES),
         });
@@ -146,17 +157,21 @@ impl Server {
                 }
                 continue;
             }
-            let Some(pass) = self.shared.connections.try_enter(SourceKey::of(peer.ip())) else {
-                warn!(%peer, "refusing connection: too many connections from its network");
+            let Some(pass) = self
+                .shared
+                .unauthenticated
+                .try_enter(SourceKey::of(peer.ip()))
+            else {
+                warn!(%peer, "refusing connection: too many sign-ins from its network");
                 incoming.refuse();
                 continue;
             };
             let shared = self.shared.clone();
             tokio::spawn(async move {
-                let _pass = pass;
-                match incoming.await {
-                    Ok(connection) => handle(shared, connection).await,
-                    Err(e) => warn!("handshake failed: {e}"),
+                match tokio::time::timeout(TLS_TIMEOUT, incoming).await {
+                    Ok(Ok(connection)) => handle(shared, connection, pass).await,
+                    Ok(Err(e)) => warn!(%peer, "handshake failed: {e}"),
+                    Err(_) => warn!(%peer, "handshake timed out"),
                 }
             });
         }
@@ -164,7 +179,7 @@ impl Server {
     }
 }
 
-async fn handle(shared: Arc<Shared>, connection: quinn::Connection) {
+async fn handle(shared: Arc<Shared>, connection: quinn::Connection, unauthenticated: Pass) {
     let peer = connection.remote_address();
     if let Err(e) = check_datagrams(connection.max_datagram_size()) {
         warn!(%peer, "refusing connection: {e}");
@@ -172,7 +187,7 @@ async fn handle(shared: Arc<Shared>, connection: quinn::Connection) {
         return;
     }
     info!(%peer, "connected");
-    session::run(shared, connection).await;
+    session::run(shared, connection, unauthenticated).await;
 }
 
 fn create_private_dir(path: &std::path::Path) -> Result<()> {

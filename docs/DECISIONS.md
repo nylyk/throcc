@@ -55,6 +55,7 @@ Each entry: date, decision, why, alternatives.
 - **An invite's try is counted before the server sends `PakeReply`**, and the burn check runs whenever a run ends without success. A client that disconnects mid-run still uses a try.
 - **The bootstrap invite has no minter**; whoever enrolls with it becomes Admin.
 - **Only admins set roles, and only to a rank below their own.** The mockup offers only Manager and User, so there is one Admin. Cascade removal is refused if anyone in the invite tree has a rank at or above the actor's.
+- **Members leave a server with `RemoveUser` on themselves without cascade**, which skips the rank check and is cleaned up like any removal. The only admin is refused, since nobody else can become Admin.
 - **A second connection by the same user kicks the first**, because presence is keyed by user.
 - **Lobby clients publish no presence.** `Presence.room` is always `Some`; leaving to the lobby sends `PresenceEnded`.
 - **`SetEncKey` is verified by the server** against the identity key and is required before `SetRoom`. Changing it while in a room bumps the epoch.
@@ -354,6 +355,10 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 ## 2026-10-31 Server limits against abuse
 
 - **Every connection proves its address with a QUIC Retry before the server keeps any state for it.** It costs one round trip per connect and stops spoofed packets from using up another source's slots.
-- **Caps per source (an IPv4 address or IPv6 /64), per network (/24 or /48) and in total**: 32, 128 and 1024 connections; 4, 16 and 128 handshakes at once, where a handshake over the cap waits up to 5 s; 10 enrollment runs per source and 30 per network every 10 minutes. Clients may open no streams of their own, and receive windows are 128 KiB per stream and connection with a 256 KiB datagram buffer, enough for a 20 Mbps share.
-- **Members are limited to 100 requests in a burst and 20 a second**, and to about one new picture every 10 s; at most 500 rooms; 8 MiB of queued video per receiver.
+- **Caps per source (an IPv4 address or IPv6 /64), per network (/24 or /48) and in total**: 32, 32 and 512 connections that haven't signed in yet, from their first packet, with 10 s for TLS; 32, 128 and 1024 signed-in connections, a separate pool that connections still signing in can't fill; 4, 16 and 128 handshakes at once, where a handshake over the cap waits up to 5 s; 10 enrollment runs per source and 30 per network every 10 minutes. Clients may open no streams of their own, and receive windows are 128 KiB per stream and connection with a 256 KiB datagram buffer, enough for a 20 Mbps share.
+- **Members are limited to 100 requests in a burst and 20 a second**, and to about one new picture every 10 s; at most 500 rooms; 8 MiB of queued video per receiver. Picture downloads are not counted as requests, so a room's worth loads at once; a connection stops reading requests while 256 KiB of pictures wait for its client.
 - **Accepted risks, kept as they are:** a member who also runs the server, or works with it, can send media under another member's track, because track keys are shared by the room; per-sender signatures would cost about 25 kbps on every voice stream. Invite ids have 3 characters, so an attacker with many networks can still slowly burn live invites; that takes a targeted attack, and a longer id would change the invite format.
+
+## 2026-10-31 A pre-sign-in flood from many networks
+
+- **Accepted:** the pool for connections that haven't signed in yet holds 32 per network and 512 in all, so an attacker with 16 networks (16 IPv4 /24s or an IPv6 /44) can keep it full and stop new sign-ins while the attack lasts. Signed-in members stay connected. Any total cap can be filled by enough networks; telling a returning member apart before TLS would need a change to the handshake.

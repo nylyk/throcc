@@ -7,9 +7,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use throcc_client_core::account;
-use throcc_proto::ids::{Epoch, RoomId, UserId};
+use throcc_proto::framing;
+use throcc_proto::ids::{Epoch, Role, RoomId, UserId};
 use throcc_proto::messages::{
-    ErrorCode, Event, MAX_AVATAR_BYTES, Placed, Presence, Request, Response, SignedEncKey, Welcome,
+    ClientMessage, ErrorCode, Event, MAX_AVATAR_BYTES, Placed, Presence, Request, Response,
+    ServerMessage, SignedEncKey, Welcome,
 };
 use throcc_server::database::Database;
 use throcc_server::rooms::{MAX_ROOMS, unix_now};
@@ -460,7 +462,8 @@ async fn a_server_holds_a_bounded_number_of_rooms() {
 async fn members_leave_on_their_own_but_the_only_admin_cannot() {
     let server = start_server();
     let alice = admin(&server).await;
-    let bob = invited(&server, &alice).await;
+    let mut bob = invited(&server, &alice).await;
+    let carol = invited(&server, &bob).await;
     let leave = |user| Request::RemoveUser {
         user,
         cascade: false,
@@ -469,9 +472,86 @@ async fn members_leave_on_their_own_but_the_only_admin_cannot() {
     assert_error(&alice.request(leave(alice_id)).await, ErrorCode::Forbidden);
 
     let bob_id = bob.link.welcome.me;
+    let carol_id = carol.link.welcome.me;
+    for other in [alice_id, carol_id] {
+        assert_error(&bob.request(leave(other)).await, ErrorCode::Forbidden);
+    }
+    let cascade = Request::RemoveUser {
+        user: bob_id,
+        cascade: true,
+    };
+    assert_error(&bob.request(cascade).await, ErrorCode::Forbidden);
+    invite(&bob).await;
+
     bob.link.requester.request(leave(bob_id)).await.ok();
+    bob.event(|e| matches!(e, Event::Kicked { .. }).then_some(()))
+        .await;
     let Response::Users(users) = alice.request(Request::ListUsers).await else {
         panic!("no user list");
     };
     assert!(users.iter().all(|u| u.id != bob_id));
+    let carol_row = users.iter().find(|u| u.id == carol_id).unwrap();
+    assert_eq!((carol_row.role, carol_row.invited_by), (Role::User, None));
+    let now = unix_now();
+    let bobs_invites = server
+        .shared
+        .hub()
+        .db
+        .invites_used(bob_id, now, now)
+        .unwrap();
+    assert_eq!(bobs_invites, 0);
+}
+
+#[tokio::test]
+async fn a_member_who_stops_reading_pictures_stops_being_read() {
+    const FETCHES: u32 = 40;
+    let server = start_server();
+    let alice = admin(&server).await;
+    let picture: Vec<u8> = (0..MAX_AVATAR_BYTES).map(|i| (i % 251) as u8).collect();
+    let Response::AvatarHash(hash) = alice.request(Request::SetAvatar(picture)).await else {
+        panic!("upload refused");
+    };
+    let code = invite(&alice).await;
+    let mut bob = raw_enroll(&server.addr, &code, small_window_transport(16 * 1024)).await;
+    let bob_id = bob.welcome.me;
+
+    let requests = (0..FETCHES)
+        .map(|_| Request::GetAvatar(hash))
+        .chain([Request::CreateInvite]);
+    for (id, req) in (0..).zip(requests) {
+        let message = ClientMessage::Request { id, req };
+        bob.send
+            .write_all(&framing::encode(&message).unwrap())
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let invites = || {
+        let now = unix_now();
+        server
+            .shared
+            .hub()
+            .db
+            .invites_used(bob_id, now, now)
+            .unwrap()
+    };
+    assert_eq!(invites(), 0);
+
+    let mut pictures = 0;
+    loop {
+        let message = framing::decode(&read_frame(&mut bob.recv).await).unwrap();
+        match message {
+            ServerMessage::Response {
+                res: Response::Avatar(_),
+                ..
+            } => pictures += 1,
+            ServerMessage::Response { id, res } if id == FETCHES => {
+                assert!(matches!(res, Response::Invite { .. }), "{res:?}");
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(pictures, FETCHES);
+    assert_eq!(invites(), 1);
 }

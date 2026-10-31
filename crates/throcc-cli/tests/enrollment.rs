@@ -12,8 +12,8 @@ use throcc_proto::framing;
 use throcc_proto::ids::Role;
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
-    AuthError, AuthResult, ErrorCode, Event, Hello, PakeFinish, PakeStep, Request, Response,
-    ServerHello,
+    AuthError, AuthResult, ErrorCode, Event, Hello, PROTOCOL, PakeFinish, PakeStep, Request,
+    Response, ServerHello,
 };
 use throcc_server::{Congestion, HANDSHAKES, tls};
 
@@ -298,14 +298,6 @@ async fn parallel_runs_from_one_source_are_rate_limited() {
     assert_eq!(limited, 10);
 }
 
-async fn read_frame(recv: &mut quinn::RecvStream) -> Vec<u8> {
-    let mut header = [0u8; 4];
-    recv.read_exact(&mut header).await.unwrap();
-    let mut body = vec![0u8; framing::body_len(header).unwrap()];
-    recv.read_exact(&mut body).await.unwrap();
-    body
-}
-
 #[tokio::test]
 async fn a_failed_run_does_not_burn_an_invite_while_another_run_is_in_flight() {
     let server = start_server();
@@ -382,4 +374,53 @@ async fn one_source_signs_in_a_few_connections_at_a_time() {
         .unwrap()
         .unwrap();
     assert_eq!(admin.link.welcome.role, Role::Admin);
+}
+
+#[tokio::test]
+async fn a_run_whose_client_stops_reading_still_burns_the_invite() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let code = invite(&alice).await;
+    let server_hello = ServerHello {
+        nonce: [0; 32],
+        protocol: PROTOCOL,
+    };
+    let window = framing::encode(&server_hello).unwrap().len() as u32;
+    let stuck = connect_with_transport(&server.addr, small_window_transport(window)).await;
+    let (mut send, _recv) = stuck.connection.accept_bi().await.unwrap();
+    let (_, pake_a) = ClientPake::start(&code.id, &code.secret);
+    let enroll = Hello::Enroll {
+        code_id: code.id.clone(),
+        pubkey: IdentityKey::generate().public(),
+        client_nonce: [7; 32],
+        pake_a,
+    };
+    send.write_all(&framing::encode(&enroll).unwrap())
+        .await
+        .unwrap();
+    wait_for("the stuck run to claim a try", || {
+        failures(&server, &code) == Some(1)
+    })
+    .await;
+
+    let wrong = InviteCode {
+        id: code.id.clone(),
+        secret: "00000".into(),
+    };
+    for _ in 0..2 {
+        try_enroll(&server.addr, &wrong).await.unwrap_err();
+    }
+    assert_eq!(failures(&server, &code), Some(3));
+
+    wait_for("the stuck run to burn the invite", || {
+        failures(&server, &code).is_none()
+    })
+    .await;
+    let burned = alice
+        .event(|e| match e {
+            Event::InviteBurned { code_id } => Some(code_id.clone()),
+            _ => None,
+        })
+        .await;
+    assert_eq!(burned, code.id);
 }

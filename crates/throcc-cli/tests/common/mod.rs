@@ -8,11 +8,18 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use throcc_client_core::account;
 use throcc_client_core::call::Call;
+use throcc_client_core::connection::{self, Connected};
 use throcc_client_core::control::Link;
 use throcc_client_core::keystore::Keystore;
+use throcc_crypto::identity::IdentityKey;
+use throcc_crypto::pake::{ClientPake, Transcript};
+use throcc_proto::framing;
 use throcc_proto::ids::RoomId;
 use throcc_proto::invite::InviteCode;
-use throcc_proto::messages::{ErrorCode, Event, Request, Response, Share};
+use throcc_proto::messages::{
+    AuthResult, ErrorCode, Event, Hello, PakeFinish, PakeStep, Request, Response, ServerHello,
+    Share, Welcome,
+};
 use throcc_server::identity::ServerIdentity;
 use throcc_server::{Config, Congestion, Server, Shared, tls};
 use tokio::net::UdpSocket;
@@ -226,4 +233,121 @@ pub async fn lossy_relay(server: &str, nth: u64) -> LossyRelay {
         lossy,
         dropped,
     }
+}
+
+pub async fn read_frame(recv: &mut quinn::RecvStream) -> Vec<u8> {
+    let mut header = [0u8; 4];
+    recv.read_exact(&mut header).await.unwrap();
+    let mut body = vec![0u8; framing::body_len(header).unwrap()];
+    recv.read_exact(&mut body).await.unwrap();
+    body
+}
+
+/// Client transport settings with stream and connection receive windows of `window` bytes.
+pub fn small_window_transport(window: u32) -> quinn::TransportConfig {
+    let mut transport = connection::transport_config(0);
+    transport
+        .stream_receive_window(window.into())
+        .receive_window(window.into());
+    transport
+}
+
+pub async fn connect_with_transport(addr: &str, transport: quinn::TransportConfig) -> Connected {
+    let (config, verifier) = connection::client_config(None, transport).unwrap();
+    connection::connect_with(addr, config, &verifier)
+        .await
+        .unwrap()
+}
+
+/// A member enrolled over a bare connection, so the test reads and writes its control
+/// stream itself.
+pub struct RawMember {
+    pub connected: Connected,
+    pub welcome: Welcome,
+    pub send: quinn::SendStream,
+    pub recv: quinn::RecvStream,
+}
+
+pub async fn raw_enroll(
+    addr: &str,
+    code: &InviteCode,
+    transport: quinn::TransportConfig,
+) -> RawMember {
+    let connected = connect_with_transport(addr, transport).await;
+    let (mut send, mut recv) = connected.connection.accept_bi().await.unwrap();
+    let hello: ServerHello = framing::decode(&read_frame(&mut recv).await).unwrap();
+    let identity = IdentityKey::generate();
+    let pubkey = identity.public();
+    let client_nonce = [7; 32];
+    let (pake, pake_a) = ClientPake::start(&code.id, &code.secret);
+    let enroll = Hello::Enroll {
+        code_id: code.id.clone(),
+        pubkey,
+        client_nonce,
+        pake_a: pake_a.clone(),
+    };
+    send.write_all(&framing::encode(&enroll).unwrap())
+        .await
+        .unwrap();
+    let step: PakeStep = framing::decode(&read_frame(&mut recv).await).unwrap();
+    let reply = step.unwrap();
+    let transcript = Transcript {
+        server_nonce: &hello.nonce,
+        client_nonce: &client_nonce,
+        code_id: &code.id,
+        pubkey: &pubkey,
+        spki_hash: &connected.fingerprint.0,
+        exporter: &connected.exporter,
+        pake_a: &pake_a,
+        pake_b: &reply.pake_b,
+    };
+    let finish = PakeFinish {
+        confirm_a: pake.finish(&transcript, &reply.confirm_b).unwrap(),
+        signature: identity.sign(&transcript.to_bytes()),
+    };
+    send.write_all(&framing::encode(&finish).unwrap())
+        .await
+        .unwrap();
+    let AuthResult::Ok(welcome) = framing::decode(&read_frame(&mut recv).await).unwrap() else {
+        panic!("enrollment was refused");
+    };
+    RawMember {
+        connected,
+        welcome: *welcome,
+        send,
+        recv,
+    }
+}
+
+/// A UDP relay in front of the server that passes the client's packets on only until the
+/// server answers with anything but a Retry, so the server never completes its TLS handshake.
+pub async fn stalling_relay(server: &str) -> String {
+    const RETRY_HEADER: u8 = 0xf0;
+    let front = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let back = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    back.connect(server).await.unwrap();
+    let addr = front.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        let mut client = None;
+        let mut answered = false;
+        let mut up = vec![0u8; 65536];
+        let mut down = vec![0u8; 65536];
+        loop {
+            tokio::select! {
+                Ok((n, from)) = front.recv_from(&mut up) => {
+                    client = Some(from);
+                    if !answered {
+                        back.send(&up[..n]).await.ok();
+                    }
+                }
+                Ok(n) = back.recv(&mut down) => {
+                    answered |= n > 0 && down[0] & 0xf0 != RETRY_HEADER;
+                    if let Some(client) = client {
+                        front.send_to(&down[..n], client).await.ok();
+                    }
+                }
+            }
+        }
+    });
+    addr
 }

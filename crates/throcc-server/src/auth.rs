@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use throcc_crypto::identity::{self, random};
 use throcc_crypto::pake::{ServerPake, Transcript};
-use throcc_proto::ids::RoomId;
+use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::invite::{self, ID_CHARS, SECRET_CHARS};
 use throcc_proto::messages::{AuthError, Event, Hello, PakeFinish, PakeReply, PakeStep, PublicKey};
 use tracing::{info, warn};
@@ -16,6 +16,7 @@ use crate::session::{FrameStream, read_handshake, write_frame};
 
 pub const INVITE_TRIES: u32 = 3;
 const PAKE_TIMEOUT: Duration = Duration::from_secs(30);
+const PAKE_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 const SOURCE_RUNS: usize = 10;
 const NETWORK_RUNS: usize = 30;
 const SOURCE_WINDOW: Duration = Duration::from_secs(10 * 60);
@@ -107,44 +108,36 @@ impl Enrollment<'_> {
             Some(invite) => invite.secret.clone(),
             None => decoy_secret(),
         };
+        let _run = invite.as_ref().map(|invite| InviteRun {
+            shared: self.shared,
+            code_id: &self.code_id,
+            minted_by: invite.minted_by,
+        });
 
         let exchanged = self.exchange(stream, &secret, pake_a).await.is_ok();
-        let mut hub = self.shared.hub();
-        let last_run = invite.is_some() && hub.invite_runs.finish(&self.code_id);
-        if exchanged && invite.is_some() {
-            match hub.db.enroll(&self.pubkey, &self.code_id, now) {
-                Ok(Some(row)) => {
-                    hub.emit_admins(Event::UserAdded(row.to_user()));
-                    drop(hub);
-                    self.shared.limiter().forgive(self.source);
-                    info!(user = row.id.0, role = ?row.role, "enrolled");
-                    return Ok(row);
-                }
-                Ok(None) => info!(code_id = %self.code_id, "invite was used up during the run"),
-                Err(e) => return Err(internal(e)),
-            }
+        if !exchanged || invite.is_none() {
+            return Err(Refused::Hello(AuthError::BadInvite));
         }
-        if last_run
-            && let Some(invite) = &invite
-            && hub
-                .db
-                .invite(&self.code_id)
-                .ok()
-                .flatten()
-                .is_some_and(|i| i.failures >= INVITE_TRIES)
-        {
-            hub.db.delete_invite(&self.code_id).ok();
-            warn!(code_id = %self.code_id, "invite burned after {INVITE_TRIES} failed runs");
-            if let Some(minter) = invite.minted_by {
-                hub.emit_to(
-                    minter,
-                    Event::InviteBurned {
-                        code_id: self.code_id.clone(),
-                    },
-                );
+        let enrolled = {
+            let mut hub = self.shared.hub();
+            let enrolled = hub.db.enroll(&self.pubkey, &self.code_id, now);
+            if let Ok(Some(row)) = &enrolled {
+                hub.emit_admins(Event::UserAdded(row.to_user()));
             }
+            enrolled
+        };
+        match enrolled {
+            Ok(Some(row)) => {
+                self.shared.limiter().forgive(self.source);
+                info!(user = row.id.0, role = ?row.role, "enrolled");
+                Ok(row)
+            }
+            Ok(None) => {
+                info!(code_id = %self.code_id, "invite was used up during the run");
+                Err(Refused::Hello(AuthError::BadInvite))
+            }
+            Err(e) => Err(internal(e)),
         }
-        Err(Refused::Hello(AuthError::BadInvite))
     }
 
     /// Looks up the invite and uses up one of its tries before any PAKE message is sent,
@@ -194,8 +187,9 @@ impl Enrollment<'_> {
             confirm_b: confirm.confirm_b,
         };
         let step: PakeStep = Ok(reply);
-        write_frame(&mut stream.send, &step)
+        tokio::time::timeout(PAKE_REPLY_TIMEOUT, write_frame(&mut stream.send, &step))
             .await
+            .map_err(|_| AuthError::BadInvite)?
             .map_err(|_| AuthError::BadInvite)?;
         let finish: PakeFinish =
             tokio::time::timeout(PAKE_TIMEOUT, read_handshake(&mut stream.recv))
@@ -207,6 +201,42 @@ impl Enrollment<'_> {
             .map_err(|_| AuthError::BadInvite)?;
         identity::verify(&self.pubkey, &transcript.to_bytes(), &finish.signature)
             .map_err(|_| AuthError::BadSignature)
+    }
+}
+
+/// One PAKE run of a live invite, from its claimed try until it ends or is dropped. The last
+/// run of an invite that has used up its tries burns it.
+struct InviteRun<'a> {
+    shared: &'a Shared,
+    code_id: &'a str,
+    minted_by: Option<UserId>,
+}
+
+impl Drop for InviteRun<'_> {
+    fn drop(&mut self) {
+        let mut hub = self.shared.hub();
+        if !hub.invite_runs.finish(self.code_id) {
+            return;
+        }
+        let spent = hub
+            .db
+            .invite(self.code_id)
+            .ok()
+            .flatten()
+            .is_some_and(|i| i.failures >= INVITE_TRIES);
+        if !spent {
+            return;
+        }
+        hub.db.delete_invite(self.code_id).ok();
+        warn!(code_id = %self.code_id, "invite burned after {INVITE_TRIES} failed runs");
+        if let Some(minter) = self.minted_by {
+            hub.emit_to(
+                minter,
+                Event::InviteBurned {
+                    code_id: self.code_id.to_owned(),
+                },
+            );
+        }
     }
 }
 

@@ -2,14 +2,15 @@ mod common;
 
 use std::net::SocketAddr;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use throcc_client_core::connection::{self, ConnectError};
 use throcc_proto::frame::DATAGRAM_PAYLOAD_FLOOR;
+use throcc_proto::messages::{Request, Response};
 use throcc_proto::transport::{DatagramError, close};
-use throcc_server::{CONNECTIONS, Congestion, tls};
+use throcc_server::{Congestion, TLS_TIMEOUT, UNAUTHENTICATED, tls};
 
-use common::{bare_endpoint, bind_server};
+use common::{admin, bare_endpoint, bind_server, invited, stalling_relay};
 
 fn start_server(data_dir: &Path) -> (SocketAddr, throcc_proto::Fingerprint) {
     let server = bind_server(data_dir);
@@ -162,8 +163,51 @@ async fn one_source_holds_a_bounded_number_of_connections() {
     let dir = tempfile::tempdir().unwrap();
     let (addr, _) = start_server(dir.path());
     let mut held = Vec::new();
-    for _ in 0..CONNECTIONS.per_source {
+    for _ in 0..UNAUTHENTICATED.per_source {
         held.push(connection::connect(&addr.to_string(), None).await.unwrap());
     }
     assert!(connection::connect(&addr.to_string(), None).await.is_err());
+}
+
+#[tokio::test]
+async fn stalled_tls_handshakes_time_out_and_leave_signed_in_members_alone() {
+    let server = common::start_server();
+    let alice = admin(&server).await;
+    let bob = invited(&server, &alice).await;
+
+    let stalled_at = Instant::now();
+    let mut stalled = Vec::new();
+    for _ in 0..UNAUTHENTICATED.per_source {
+        let relay = stalling_relay(&server.addr).await;
+        stalled.push(connection::connect(&relay, None).await.unwrap());
+    }
+    let refused = tokio::time::timeout(
+        Duration::from_secs(5),
+        connection::connect(&server.addr, None),
+    )
+    .await
+    .unwrap();
+    assert!(refused.is_err());
+    let Response::Users(users) = alice.request(Request::ListUsers).await else {
+        panic!("no user list");
+    };
+    assert_eq!(users.len(), 2);
+    assert!(matches!(
+        bob.request(Request::SetRoom(None)).await,
+        Response::Placed(_)
+    ));
+
+    let deadline = stalled_at + TLS_TIMEOUT + Duration::from_secs(5);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "stalled handshakes still hold their slots"
+        );
+        let attempt = connection::connect(&server.addr, None);
+        if let Ok(Ok(_)) = tokio::time::timeout(Duration::from_secs(2), attempt).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    drop(stalled);
 }

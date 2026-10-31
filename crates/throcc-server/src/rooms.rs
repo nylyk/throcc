@@ -13,7 +13,7 @@ use throcc_proto::messages::{
     Welcome,
 };
 use throcc_proto::transport::close;
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tracing::{info, warn};
 
 use crate::auth::InviteRuns;
@@ -61,6 +61,8 @@ type Outcome = Result<Response, Refusal>;
 /// What the session writer sends next.
 pub enum Outgoing {
     Message(ServerMessage),
+    /// A message that keeps its share of the connection's queue budget until it is written.
+    Budgeted(ServerMessage, OwnedSemaphorePermit),
     /// Sends `Kicked`, finishes the stream once the client has read it, then closes.
     Kick {
         reason: String,
@@ -83,7 +85,14 @@ impl Link {
         };
         if self.outgoing.try_send(kick).is_err() {
             self.connection.close(code.into(), reason.as_bytes());
+            return;
         }
+        let connection = self.connection.clone();
+        let reason = reason.to_owned();
+        tokio::spawn(async move {
+            tokio::time::sleep(crate::session::LINGER).await;
+            connection.close(code.into(), reason.as_bytes());
+        });
     }
 }
 
@@ -760,7 +769,7 @@ impl Hub {
         if leaving && actor == Role::Admin && self.admins()? == 1 {
             return Err(Refusal::new(
                 ErrorCode::Forbidden,
-                "you are the only admin; make someone else admin first",
+                "you are the server's only admin, so you can't leave it",
             ));
         }
         let removed = if cascade {

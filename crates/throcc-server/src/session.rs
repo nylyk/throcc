@@ -6,16 +6,17 @@ use serde::de::DeserializeOwned;
 use throcc_crypto::identity::random;
 use throcc_proto::framing::{self, FrameError, HEADER_BYTES};
 use throcc_proto::messages::{
-    AuthError, AuthResult, ClientMessage, Event, Hello, PROTOCOL, PakeStep, ServerHello,
+    AuthError, AuthResult, ClientMessage, Event, Hello, PROTOCOL, PakeStep, Response, ServerHello,
     ServerMessage,
 };
 use throcc_proto::transport::close;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tracing::{debug, info, warn};
 
 use crate::Shared;
 use crate::auth::{self, Refused, SourceKey};
 use crate::egress;
+use crate::limits::Pass;
 use crate::rooms::{Link, Outgoing};
 
 /// How long a connection may wait for a handshake slot, and then how long it has to send
@@ -25,8 +26,10 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(40);
 pub const HANDSHAKE_FRAME_BYTES: usize = 4096;
 const EVENT_QUEUE: usize = 1024;
+/// Picture bytes a connection may have waiting for its client to read.
+const QUEUED_PICTURE_BYTES: usize = 256 * 1024;
 /// How long a closing session waits for the client to read its last message.
-const LINGER: Duration = Duration::from_secs(2);
+pub(crate) const LINGER: Duration = Duration::from_secs(2);
 
 pub struct FrameStream {
     pub send: quinn::SendStream,
@@ -80,9 +83,9 @@ pub async fn write_frame<T: Serialize>(
     Ok(())
 }
 
-pub async fn run(shared: Arc<Shared>, connection: quinn::Connection) {
+pub async fn run(shared: Arc<Shared>, connection: quinn::Connection, unauthenticated: Pass) {
     let peer = connection.remote_address();
-    match serve(&shared, &connection).await {
+    match serve(&shared, &connection, unauthenticated).await {
         Ok(()) => info!(%peer, "session ended"),
         Err(ReadError::Closed) => info!(%peer, "session closed"),
         Err(ReadError::Frame(e)) => {
@@ -92,7 +95,11 @@ pub async fn run(shared: Arc<Shared>, connection: quinn::Connection) {
     }
 }
 
-async fn serve(shared: &Shared, connection: &quinn::Connection) -> Result<(), ReadError> {
+async fn serve(
+    shared: &Shared,
+    connection: &quinn::Connection,
+    unauthenticated: Pass,
+) -> Result<(), ReadError> {
     let source = SourceKey::of(connection.remote_address().ip());
     let Ok(permit) = tokio::time::timeout(HELLO_TIMEOUT, shared.handshakes.enter(source)).await
     else {
@@ -107,6 +114,14 @@ async fn serve(shared: &Shared, connection: &quinn::Connection) -> Result<(), Re
         return Ok(());
     };
     let (mut stream, server_nonce, hello) = greeted?;
+    let Some(_signed_in) = shared.connections.try_enter(source) else {
+        warn!(peer = %connection.remote_address(), "refusing sign-in: its network is full");
+        connection.close(
+            close::SERVER_BUSY.into(),
+            b"too many connections from your network",
+        );
+        return Ok(());
+    };
 
     let signing_in = auth::authenticate(shared, connection, &mut stream, &server_nonce, hello);
     let authenticated = match tokio::time::timeout(SIGN_IN_TIMEOUT, signing_in).await {
@@ -145,6 +160,7 @@ async fn serve(shared: &Shared, connection: &quinn::Connection) -> Result<(), Re
         }
     };
     drop(permit);
+    drop(unauthenticated);
     let ingress = tokio::spawn(shared.sfu.clone().ingress(conn_id, connection.clone()));
     info!(user = user.0, "authenticated");
 
@@ -188,11 +204,21 @@ async fn read_loop(
     recv: &mut quinn::RecvStream,
     outgoing: &mpsc::Sender<Outgoing>,
 ) -> Result<(), ReadError> {
+    let pictures = Arc::new(Semaphore::new(QUEUED_PICTURE_BYTES));
     loop {
         let ClientMessage::Request { id, req } = read_frame(recv).await?;
         debug!(user = user.0, id, ?req, "request");
         let res = shared.hub().handle(user, conn_id, req);
-        let response = Outgoing::Message(ServerMessage::Response { id, res });
+        let response = match &res {
+            Response::Avatar(bytes) => {
+                let cost = bytes.len().min(QUEUED_PICTURE_BYTES) as u32;
+                let Ok(queued) = pictures.clone().acquire_many_owned(cost).await else {
+                    return Err(ReadError::Closed);
+                };
+                Outgoing::Budgeted(ServerMessage::Response { id, res }, queued)
+            }
+            _ => Outgoing::Message(ServerMessage::Response { id, res }),
+        };
         if outgoing.send(response).await.is_err() {
             return Err(ReadError::Closed);
         }
@@ -205,12 +231,9 @@ async fn write_loop(
     connection: quinn::Connection,
 ) {
     while let Some(next) = outgoing.recv().await {
-        match next {
-            Outgoing::Message(message) => {
-                if write_frame(&mut send, &message).await.is_err() {
-                    return;
-                }
-            }
+        let (message, budget) = match next {
+            Outgoing::Message(message) => (message, None),
+            Outgoing::Budgeted(message, budget) => (message, Some(budget)),
             Outgoing::Kick { reason, code } => {
                 let kicked = ServerMessage::Event(Event::Kicked {
                     reason: reason.clone(),
@@ -221,7 +244,11 @@ async fn write_loop(
                 connection.close(code.into(), reason.as_bytes());
                 return;
             }
+        };
+        if write_frame(&mut send, &message).await.is_err() {
+            return;
         }
+        drop(budget);
     }
 }
 
