@@ -242,10 +242,8 @@ impl Queues {
     }
 
     fn finish(&mut self, id: u64, fate: Fate) {
-        let Some(index) = self.video.iter().position(|u| u.id == id) else {
-            return;
-        };
-        let Some(unit) = self.video.remove(index) else {
+        let index = self.video.iter().position(|u| u.id == id);
+        let Some(unit) = index.and_then(|i| self.video.remove(i)) else {
             return;
         };
         if let Some(history) = self.history.get_mut(&unit.media_id) {

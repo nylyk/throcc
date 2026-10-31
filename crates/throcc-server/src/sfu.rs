@@ -60,6 +60,7 @@ impl Sfu {
     }
 }
 
+#[derive(Default)]
 struct Pending {
     last_sent: Option<Instant>,
     wanted: Option<Recovery>,
@@ -75,10 +76,7 @@ pub struct KeyframeAggregator {
 impl KeyframeAggregator {
     /// Records a request. Returns the request to forward now, if the track is due.
     pub fn request(&mut self, media_id: MediaId, kind: Recovery, now: Instant) -> Option<Recovery> {
-        let pending = self.tracks.entry(media_id).or_insert(Pending {
-            last_sent: None,
-            wanted: None,
-        });
+        let pending = self.tracks.entry(media_id).or_default();
         pending.wanted = pending.wanted.max(Some(kind));
         Self::take_if_due(pending, now)
     }

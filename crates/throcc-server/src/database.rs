@@ -85,36 +85,16 @@ impl Database {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.execute_batch(SCHEMA)?;
-        let db = Self { conn };
-        if db.next_media_id()? > u64::from(u32::MAX) {
+        if next_media_id(&conn)? as u64 > u64::from(u32::MAX) {
             bail!("media ids are exhausted; this server cannot allocate tracks any more");
         }
-        Ok(db)
-    }
-
-    fn next_media_id(&self) -> Result<u64> {
-        let value: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT value FROM counters WHERE name = ?1",
-                [NEXT_MEDIA_ID],
-                |r| r.get(0),
-            )
-            .optional()?;
-        Ok(value.unwrap_or(1) as u64)
+        Ok(Self { conn })
     }
 
     /// Reserves `count` consecutive media ids. Ids are never handed out twice, even across restarts.
     pub fn allocate_media_ids(&mut self, count: u32) -> Result<MediaId> {
         let tx = self.conn.transaction()?;
-        let first: i64 = tx
-            .query_row(
-                "SELECT value FROM counters WHERE name = ?1",
-                [NEXT_MEDIA_ID],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(1);
+        let first = next_media_id(&tx)?;
         let next = first + i64::from(count);
         if next - 1 > i64::from(u32::MAX) {
             bail!("media ids are exhausted");
@@ -344,21 +324,12 @@ impl Database {
             .optional()?)
     }
 
-    /// Records one failed PAKE run and returns the new failure count.
-    pub fn record_invite_failure(&self, code_id: &str) -> Result<u32> {
+    pub fn consume_invite_try(&self, code_id: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE invites SET failures = failures + 1 WHERE code_id = ?1",
             [code_id],
         )?;
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT failures FROM invites WHERE code_id = ?1",
-                [code_id],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(u32::MAX))
+        Ok(())
     }
 
     pub fn delete_invite(&self, code_id: &str) -> Result<()> {
@@ -485,6 +456,17 @@ fn user_row(r: &rusqlite::Row) -> rusqlite::Result<UserRow> {
         invited_by: r.get::<_, Option<i64>>(7)?.map(|id| UserId(id as u64)),
         created_at: r.get::<_, i64>(8)? as u64,
     })
+}
+
+fn next_media_id(conn: &Connection) -> rusqlite::Result<i64> {
+    Ok(conn
+        .query_row(
+            "SELECT value FROM counters WHERE name = ?1",
+            [NEXT_MEDIA_ID],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(1))
 }
 
 fn fixed<const N: usize>(bytes: Vec<u8>) -> rusqlite::Result<[u8; N]> {

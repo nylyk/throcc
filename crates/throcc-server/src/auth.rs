@@ -106,17 +106,15 @@ impl Enrollment<'_> {
             None => decoy_secret(),
         };
 
-        let outcome = self.exchange(stream, &secret, pake_a).await;
+        let exchanged = self.exchange(stream, &secret, pake_a).await.is_ok();
         let mut hub = self.shared.hub();
-        if let (Ok(()), Some(_)) = (&outcome, &invite) {
+        if exchanged && invite.is_some() {
             match hub.db.enroll(&self.pubkey, &self.code_id, now) {
                 Ok(Some(row)) => {
+                    hub.emit_admins(Event::UserAdded(row.to_user()));
                     drop(hub);
                     self.shared.limiter().forgive(self.source);
                     info!(user = row.id.0, role = ?row.role, "enrolled");
-                    self.shared
-                        .hub()
-                        .emit_admins(Event::UserAdded(row.to_user()));
                     return Ok(row);
                 }
                 Ok(None) => info!(code_id = %self.code_id, "invite was used up during the run"),
@@ -157,16 +155,13 @@ impl Enrollment<'_> {
         } else {
             None
         };
-        match &invite {
-            Some(_) => {
-                hub.db
-                    .record_invite_failure(&self.code_id)
-                    .map_err(|_| Refused::Enroll(AuthError::BadInvite))?;
-            }
-            None => {
-                let shown: String = self.code_id.chars().take(8).collect();
-                warn!(source = ?self.source, code_id = %shown, "enrollment with an unknown invite id");
-            }
+        if invite.is_some() {
+            hub.db
+                .consume_invite_try(&self.code_id)
+                .map_err(|_| Refused::Enroll(AuthError::BadInvite))?;
+        } else {
+            let shown: String = self.code_id.chars().take(8).collect();
+            warn!(source = ?self.source, code_id = %shown, "enrollment with an unknown invite id");
         }
         Ok(invite)
     }

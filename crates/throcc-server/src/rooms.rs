@@ -145,13 +145,7 @@ impl Hub {
             .ok()
             .flatten()
             .filter(|current| current.pubkey == row.pubkey)?;
-        if self.sessions.contains_key(&user) {
-            self.place(user, None).ok();
-            if let Some(old) = self.sessions.remove(&user) {
-                old.link
-                    .kick("you signed in from somewhere else", close::REMOVED);
-            }
-        }
+        self.evict(user, "you signed in from somewhere else");
         self.next_conn += 1;
         let conn_id = self.next_conn;
         let role = row.role;
@@ -239,6 +233,13 @@ impl Hub {
         outcome.unwrap_or_else(|Refusal(code, message)| Response::Err { code, message })
     }
 
+    fn evict(&mut self, user: UserId, reason: &str) {
+        self.place(user, None).ok();
+        if let Some(session) = self.sessions.remove(&user) {
+            session.link.kick(reason, close::REMOVED);
+        }
+    }
+
     pub fn emit_to(&self, user: UserId, event: Event) {
         if let Some(session) = self.sessions.get(&user) {
             send(session, event);
@@ -282,6 +283,24 @@ impl Hub {
         Ok(self.session(user)?.row.role)
     }
 
+    fn current_room(&self, user: UserId) -> Result<RoomId, Refusal> {
+        self.session(user)?
+            .room
+            .ok_or_else(|| Refusal::new(ErrorCode::Invalid, "join a room first"))
+    }
+
+    fn room_entry(&self, room: RoomId) -> Result<&RoomEntry, Refusal> {
+        self.rooms
+            .get(&room)
+            .ok_or_else(|| Refusal::new(ErrorCode::NotFound, "no such room"))
+    }
+
+    fn announce_presence(&self, user: UserId) {
+        if let Some(p) = self.sessions.get(&user).and_then(presence) {
+            self.emit_all(Event::PresenceChanged(p));
+        }
+    }
+
     fn room_list(&self) -> Vec<Room> {
         self.rooms
             .iter()
@@ -305,12 +324,8 @@ impl Hub {
     }
 
     fn bump_epoch(&mut self, room: RoomId) -> Result<Epoch, Refusal> {
-        let entry = self
-            .rooms
-            .get(&room)
-            .ok_or_else(|| Refusal::new(ErrorCode::NotFound, "no such room"))?;
         let epoch = Epoch(
-            entry
+            self.room_entry(room)?
                 .epoch
                 .0
                 .checked_add(1)
@@ -340,9 +355,7 @@ impl Hub {
             return Ok(self.placed(user));
         }
         if let Some(room) = target {
-            if !self.rooms.contains_key(&room) {
-                return Err(Refusal::new(ErrorCode::NotFound, "no such room"));
-            }
+            self.room_entry(room)?;
             if session.row.enc_key.is_none() {
                 return Err(Refusal::new(
                     ErrorCode::Invalid,
@@ -366,13 +379,12 @@ impl Hub {
         }
         let session = self.session_mut(user)?;
         session.room = target;
+        session.media = MediaState::default();
+        session.watching.clear();
         let old_tracks = std::mem::replace(&mut session.tracks, tracks);
         for share in old_tracks.iter().flat_map(|t| &t.shares) {
             self.keyframes.forget(share.video);
         }
-        let session = self.session_mut(user)?;
-        session.media = MediaState::default();
-        session.watching.clear();
 
         if let Some(old) = current
             && let Some(event) = self.room_state(old)
@@ -441,9 +453,7 @@ impl Hub {
         session.row.name = name;
         session.row.avatar = avatar;
         session.last_profile = Some(Instant::now());
-        if let Some(p) = self.sessions.get(&user).and_then(presence) {
-            self.emit_all(Event::PresenceChanged(p));
-        }
+        self.announce_presence(user);
         Ok(Response::Ok)
     }
 
@@ -529,10 +539,8 @@ impl Hub {
     }
 
     fn set_media(&mut self, user: UserId, media: MediaState) -> Outcome {
+        let room = self.current_room(user)?;
         let session = self.session_mut(user)?;
-        let Some(room) = session.room else {
-            return Err(Refusal::new(ErrorCode::Invalid, "join a room first"));
-        };
         let share_changed = session.media.share != media.share;
         let deafened_changed = session.media.deafened != media.deafened;
         session.media = media;
@@ -542,9 +550,7 @@ impl Hub {
         if deafened_changed {
             self.rebuild_routes();
         }
-        if let Some(p) = self.sessions.get(&user).and_then(presence) {
-            self.emit_all(Event::PresenceChanged(p));
-        }
+        self.announce_presence(user);
         Ok(Response::Ok)
     }
 
@@ -581,11 +587,7 @@ impl Hub {
 
     fn delete_room(&mut self, user: UserId, room: RoomId) -> Outcome {
         self.require(permissions::can_manage_rooms(self.role(user)?))?;
-        let entry = self
-            .rooms
-            .get(&room)
-            .ok_or_else(|| Refusal::new(ErrorCode::NotFound, "no such room"))?;
-        for member in entry.members.clone() {
+        for member in self.room_entry(room)?.members.clone() {
             self.place(member, None)?;
         }
         self.db.delete_room(room).map_err(Refusal::internal)?;
@@ -687,14 +689,7 @@ impl Hub {
         }
         self.db.remove_users(&removed).map_err(Refusal::internal)?;
         for id in &removed {
-            if self.sessions.contains_key(id) {
-                self.place(*id, None).ok();
-                if let Some(session) = self.sessions.remove(id) {
-                    session
-                        .link
-                        .kick("you were removed from this server", close::REMOVED);
-                }
-            }
+            self.evict(*id, "you were removed from this server");
             self.emit_admins(Event::UserRemoved(*id));
         }
         info!(?removed, "removed users");
@@ -708,10 +703,7 @@ impl Hub {
                 "watching too many tracks",
             ));
         }
-        let room = self
-            .session(user)?
-            .room
-            .ok_or_else(|| Refusal::new(ErrorCode::Invalid, "join a room first"))?;
+        let room = self.current_room(user)?;
         for id in &ids {
             match self.share_track(*id) {
                 Some((owner, _))
@@ -771,14 +763,7 @@ impl Hub {
         epoch: Epoch,
         wrapped: Vec<(UserId, Vec<u8>)>,
     ) -> Outcome {
-        let room = self
-            .session(user)?
-            .room
-            .ok_or_else(|| Refusal::new(ErrorCode::Invalid, "join a room first"))?;
-        let entry = self
-            .rooms
-            .get(&room)
-            .ok_or_else(|| Refusal::new(ErrorCode::NotFound, "no such room"))?;
+        let entry = self.room_entry(self.current_room(user)?)?;
         if epoch != entry.epoch {
             return Err(Refusal::new(
                 ErrorCode::StaleEpoch,
@@ -841,39 +826,22 @@ impl Hub {
                 let Some(tracks) = &sender.tracks else {
                     continue;
                 };
+                let owner = sender.conn_id;
                 let others = || members.iter().filter(|m| m.row.id != sender.row.id);
-                let hearing = || others().filter(|m| !m.media.deafened);
-                table.routes.insert(
-                    tracks.mic,
-                    Route {
-                        owner: sender.conn_id,
-                        kind: TrackKind::Audio,
-                        subscribers: hearing().map(|m| m.link.egress.clone()).collect(),
-                    },
-                );
+                let hearing = others().filter(|m| !m.media.deafened);
+                table
+                    .routes
+                    .insert(tracks.mic, route(owner, TrackKind::Audio, hearing));
                 for share in &tracks.shares {
                     let watchers = |id: MediaId| others().filter(move |m| m.watching.contains(&id));
-                    table.routes.insert(
-                        share.video,
-                        Route {
-                            owner: sender.conn_id,
-                            kind: TrackKind::Video,
-                            subscribers: watchers(share.video)
-                                .map(|m| m.link.egress.clone())
-                                .collect(),
-                        },
-                    );
-                    table.routes.insert(
-                        share.audio,
-                        Route {
-                            owner: sender.conn_id,
-                            kind: TrackKind::Audio,
-                            subscribers: watchers(share.audio)
-                                .filter(|m| !m.media.deafened)
-                                .map(|m| m.link.egress.clone())
-                                .collect(),
-                        },
-                    );
+                    let video = watchers(share.video);
+                    let audio = watchers(share.audio).filter(|m| !m.media.deafened);
+                    table
+                        .routes
+                        .insert(share.video, route(owner, TrackKind::Video, video));
+                    table
+                        .routes
+                        .insert(share.audio, route(owner, TrackKind::Audio, audio));
                 }
             }
         }
@@ -897,6 +865,18 @@ fn send(session: &Session, event: Event) {
             .link
             .connection
             .close(close::PROTOCOL_ERROR.into(), b"control queue full");
+    }
+}
+
+fn route<'a>(
+    owner: u64,
+    kind: TrackKind,
+    subscribers: impl Iterator<Item = &'a &'a Session>,
+) -> Route {
+    Route {
+        owner,
+        kind,
+        subscribers: subscribers.map(|m| m.link.egress.clone()).collect(),
     }
 }
 
