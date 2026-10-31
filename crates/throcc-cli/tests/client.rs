@@ -10,9 +10,6 @@ use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{Codec, MediaState, Request, Response, ShareConfig};
 use throcc_server::{Config, Congestion, Server};
 
-/// The server takes one profile change per 10 s.
-const PROFILE_INTERVAL: Duration = Duration::from_millis(10_500);
-
 /// Runs a server on its own runtime thread, as the blocking client API expects.
 fn server() -> (String, InviteCode) {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -146,7 +143,6 @@ fn a_picture_chosen_in_the_lobby_reaches_others_and_survives_a_rename() {
     wait_for(&bob, "alice's picture", |_| bob.avatar(hash).is_some());
     assert_eq!(&*bob.avatar(hash).unwrap(), picture.as_slice());
 
-    std::thread::sleep(PROFILE_INTERVAL);
     alice.command(Command::SetName("Alice".into()));
     wait_for(&bob, "alice's new name", |s| {
         s.person(alice_id).is_some_and(|p| p.name == "Alice")
@@ -220,7 +216,6 @@ fn the_profile_follows_us_to_the_next_server() {
     wait_for(&alice, "the name kept", |s| {
         s.profile_name.as_deref() == Some("Ilse")
     });
-    std::thread::sleep(PROFILE_INTERVAL);
     alice.command(Command::SetAvatar(Some(picture.clone())));
     wait_for(&alice, "the picture kept", |s| s.profile_picture.is_some());
     alice.command(Command::Disconnect);
