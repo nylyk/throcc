@@ -78,7 +78,6 @@ pub fn enc_key_message(
 /// Bytes from the operating system's CSPRNG.
 pub fn random<const N: usize>() -> [u8; N] {
     let mut out = [0u8; N];
-    #[allow(clippy::expect_used)]
     getrandom::fill(&mut out).expect("the OS random number generator failed");
     out
 }

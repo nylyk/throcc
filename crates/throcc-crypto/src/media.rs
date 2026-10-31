@@ -27,11 +27,9 @@ impl TrackKey {
         let mut info = b"throcc/media/1".to_vec();
         info.extend_from_slice(&media_id.0.to_be_bytes());
         let mut key = Zeroizing::new([0u8; 16]);
-        #[allow(clippy::expect_used)]
         Hkdf::<Sha256>::new(None, sender_secret)
             .expand(&info, key.as_mut())
             .expect("16 bytes is a valid HKDF length");
-        #[allow(clippy::expect_used)]
         Self(Aes128Gcm::new_from_slice(key.as_ref()).expect("AES-128 takes a 16-byte key"))
     }
 

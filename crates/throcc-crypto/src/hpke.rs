@@ -42,15 +42,11 @@ impl EncKeyPair {
     }
 
     pub fn secret(&self) -> Zeroizing<[u8; 32]> {
-        let mut out = Zeroizing::new([0u8; 32]);
-        out.copy_from_slice(&self.private.to_bytes());
-        out
+        Zeroizing::new(self.private.to_bytes().into())
     }
 
     pub fn public(&self) -> PublicKey {
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&self.public.to_bytes());
-        out
+        self.public.to_bytes().into()
     }
 
     fn keypair(&self) -> (Private, Public) {
@@ -185,5 +181,20 @@ mod tests {
             EncKeyPair::from_secret(&key.secret()).unwrap().public(),
             key.public()
         );
+    }
+
+    #[test]
+    fn a_pinned_wrap_still_opens() {
+        let alice = EncKeyPair::from_secret(&[0x11; 32]).unwrap();
+        let bob = EncKeyPair::from_secret(&[0x22; 32]).unwrap();
+        let hex = "80ac5e1aa2cda2bed51f33b7446b353d4cb0b6bd8d7537da971b4b67d992b713\
+                   fcab8196c40683d7d08362c585979811dfc9290a0f8a71aa6fe9b22301683036\
+                   10149bb547bfdf9146ef5540a2ec4490";
+        let wrapped: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        let secret = unwrap(&bob, &alice.public(), &context(5), &wrapped).unwrap();
+        assert_eq!(*secret, [9; 32]);
     }
 }

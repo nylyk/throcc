@@ -133,27 +133,31 @@ impl ConfirmKeys {
             a: Zeroizing::new([0; 32]),
             b: Zeroizing::new([0; 32]),
         };
-        #[allow(clippy::expect_used)]
-        {
-            hkdf.expand(b"throcc/confirm-a", keys.a.as_mut())
-                .expect("32 bytes is a valid HKDF length");
-            hkdf.expand(b"throcc/confirm-b", keys.b.as_mut())
-                .expect("32 bytes is a valid HKDF length");
-        }
+        hkdf.expand(b"throcc/confirm-a", keys.a.as_mut())
+            .expect("32 bytes is a valid HKDF length");
+        hkdf.expand(b"throcc/confirm-b", keys.b.as_mut())
+            .expect("32 bytes is a valid HKDF length");
         keys
     }
 }
 
+fn transcript_hmac(key: &[u8; 32], transcript: &Transcript) -> Hmac<Sha256> {
+    <Hmac<Sha256> as KeyInit>::new_from_slice(key)
+        .unwrap_or_else(|_| unreachable!())
+        .chain_update(transcript.to_bytes())
+}
+
 fn mac(key: &[u8; 32], transcript: &Transcript) -> [u8; 32] {
-    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(key).unwrap_or_else(|_| unreachable!());
-    mac.update(&transcript.to_bytes());
-    mac.finalize().into_bytes().into()
+    transcript_hmac(key, transcript)
+        .finalize()
+        .into_bytes()
+        .into()
 }
 
 fn verify(key: &[u8; 32], transcript: &Transcript, tag: &[u8; 32]) -> Result<(), PakeError> {
-    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(key).unwrap_or_else(|_| unreachable!());
-    mac.update(&transcript.to_bytes());
-    mac.verify_slice(tag).map_err(|_| PakeError::Confirmation)
+    transcript_hmac(key, transcript)
+        .verify_slice(tag)
+        .map_err(|_| PakeError::Confirmation)
 }
 
 #[cfg(test)]
@@ -212,5 +216,20 @@ mod tests {
             ServerPake::respond("K7Q", "M2XPD", &[0; 7]),
             Err(PakeError::Malformed)
         ));
+    }
+
+    #[test]
+    fn confirmation_tags_are_pinned() {
+        let t = transcript(&[6; 32], &[7; 32], &[5; 32]);
+        let keys = ConfirmKeys::derive(&[9; 32], &t);
+        let hex = |tag: [u8; 32]| tag.map(|b| format!("{b:02x}")).concat();
+        assert_eq!(
+            hex(mac(&keys.a, &t)),
+            "b2b93f7d6ed5a2f63448f19105da720986925d0178d6e2abefbd5470a6eaa3c3"
+        );
+        assert_eq!(
+            hex(mac(&keys.b, &t)),
+            "ea8af693a860f75877ec752cac0d6e7b086e0969a426b46105d53522875da3d7"
+        );
     }
 }
