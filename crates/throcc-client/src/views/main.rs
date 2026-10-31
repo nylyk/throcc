@@ -190,26 +190,43 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
     let deafened = state.current.as_ref().is_some_and(|c| c.deafened);
     let in_room = state.current.is_some();
 
+    let identity = div()
+        .flex()
+        .flex_1()
+        .min_w_0()
+        .items_center()
+        .gap_2()
+        .child(avatar(&server, 0, server_picture, px(28.), false))
+        .child(
+            div()
+                .flex_1()
+                .truncate()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(server),
+        );
+    let lights_take_the_header = TRAFFIC_LIGHTS > px(0.);
+    let (header_identity, identity_row) = if lights_take_the_header {
+        (
+            None,
+            Some(div().flex().px_3().pt_3().pb_1().child(identity)),
+        )
+    } else {
+        (Some(identity), None)
+    };
+
     sidebar_column(app.sidebar_width)
         .child(
             moves_window(div())
                 .flex()
                 .items_center()
+                .justify_end()
                 .gap_2()
                 .px_3()
-                .pl(px(12.) + TRAFFIC_LIGHTS)
                 .h(theme::HEADER_HEIGHT)
                 .flex_none()
                 .border_b_1()
                 .border_color(theme::control())
-                .child(avatar(&server, 0, server_picture, px(28.), false))
-                .child(
-                    div()
-                        .flex_1()
-                        .truncate()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(server),
-                )
+                .children(header_identity)
                 .child(
                     ghost_icon("server-settings", "settings-2", "Server settings").on_click(
                         cx.listener(|app, _, window, cx| {
@@ -224,6 +241,7 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                         .on_click(cx.listener(|app, _, _, cx| app.leave_server(cx))),
                 ),
         )
+        .children(identity_row)
         .child(
             div()
                 .id("rooms")

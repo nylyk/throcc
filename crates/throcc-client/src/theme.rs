@@ -240,7 +240,7 @@ pub fn sidebar() -> Hsla {
 /// The sidebar over the blurred desktop on macOS, solid elsewhere.
 pub fn sidebar_glass() -> Hsla {
     if cfg!(target_os = "macos") {
-        sidebar().opacity(0.8)
+        sidebar().opacity(0.92)
     } else {
         sidebar()
     }
