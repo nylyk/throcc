@@ -372,3 +372,10 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 - **Fallbacks:** a frame whose import fails refuses its modifier; a VPP failure or an encoder without VA-API (when every VA-API encoder failed to open) refuses DMA-BUFs altogether. Either way the share thread asks the PipeWire thread to renegotiate, frames already captured in GPU memory are dropped, and the share carries on with the CPU path in shared memory. Any other error, such as an empty surface pool or a failed send to the encoder, costs only that frame.
 - **The self-view is built only while the UI draws it.** `ClientApi::picture_drawn` is called on every frame a share's picture is on screen; our share builds its thumbnail every second frame while that happened in the last second. On the DMA-BUF path the thumbnail is a second VPP pass from the same import into a surface about 960 px wide, downloaded alone.
 - **NVENC encoders are skipped on Linux when `libcuda.so.1` won't load**, so machines without NVIDIA's driver don't probe them.
+
+## 2026-10-31 Zero-copy screen share on macOS
+
+- **VideoToolbox encoders take ScreenCaptureKit's pixel buffers uncopied.** They open with `pix_fmt = AV_PIX_FMT_VIDEOTOOLBOX` and `sw_pix_fmt = NV12`, and each captured `CVPixelBuffer` goes to the encoder as a frame whose `data[3]` is the buffer and whose `buf[0]` holds a retain on it; `av_frame_ref` refuses hardware frames without one. ScreenCaptureKit already scales and converts to full-range NV12 on the GPU, so neither the share thread nor ffmpeg copies the picture. On an M4 at 2216×1440 and 60 fps: 8.5 % of a core against 16.5 % copied.
+- **Pictures in memory still reach a VideoToolbox encoder**, uploaded into ffmpeg's VideoToolbox frame pool like VA-API surfaces. That path carries the share's first frame, test patterns, and pictures of another size than the encoder's; one of those switches the share to it for good. The pool is set to full range (`AVVTFramesContext.color_range`), so both paths encode `420f`.
+- **The self-view on this path is shrunk straight from the locked pixel buffer**, only while the UI draws it, as on the other paths.
+

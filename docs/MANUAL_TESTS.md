@@ -100,6 +100,16 @@ pidstat -t -u -p <pid it prints> 30 1
 
 Pass: the `gpu_input` tests pass, which import an exported VA surface, check red and blue against full-range BT.709 and check the black bars. `pw-dump` shows the stream's `Format` with a `modifier`. `throcc-share` uses a few percent of a core, and well under the 65 % the CPU path took for 2560×1440 at 60 fps. Run the share test again with `THROCC_PREVIEW=1`: still a few percent. Then share from the client and open and close the self-view: it appears within a second and looks right. For the fallback, run the share with an encoder that takes no GPU frames (on a machine with NVENC, or after renaming the VA driver): the log says `falling back to frames in shared memory`, the share keeps going, and `pw-dump` shows a `Format` without a `modifier`.
 
+## Zero-copy screen share on macOS
+
+Needs a Mac with VideoToolbox HEVC encoding, the screen recording permission for the terminal, and a changing picture on the main display.
+
+```sh
+THROCC_PROFILE_SECS=20 cargo test --release -p throcc-client-core --features ffmpeg --lib a_main_display_share_runs_for_profiling -- --ignored --nocapture
+```
+
+Pass: both lines show close to 60 fps, and the `uncopied` line uses clearly less CPU than the `copied` one (on an M4 at 2216×1440: 8.5 % against 16.5 % of a core). Then share a screen from the client and open and close the self-view: it appears within a second, looks right, and the receiver's picture keeps its colours.
+
 ## Shares drawn as NV12 surfaces on Linux and Windows
 
 Needs a Linux desktop with an AMD GPU and ffmpeg with VA-API (Mesa's `radeonsi` VA driver), a Windows machine with a GPU, and a third machine sharing 2560×1440 at 60 fps with moving content (a video full screen). Run the client built with `--features ffmpeg` and watch the share:
