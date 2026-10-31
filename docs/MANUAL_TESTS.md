@@ -81,6 +81,25 @@ cargo test -p throcc-client-core --lib portal_share -- --ignored --nocapture
 
 Pass: the portal's dialog appears once; pick a monitor or a window. Both shares print a size and get at least 10 frames, and the second share starts without a dialog. To ask again, delete `~/.local/share/throcc/screencast-restore-token`.
 
+## Zero-copy screen share on Linux
+
+Needs a Linux desktop whose portal shares DMA-BUFs (Hyprland, GNOME, KDE), a GPU with VA-API video processing and encoding (Mesa `radeonsi`, or Intel's `iHD`), and the LGPL ffmpeg from `packaging/ffmpeg/build.sh` with its bindings. Keep a monitor animating, for example `mpv --loop=inf --fs 'av://lavfi:testsrc2=size=2560x1440:rate=60'`. In one terminal:
+
+```sh
+export FFMPEG_DLL_PATH=<ffmpeg>/lib FFMPEG_BINDING_PATH=<ffmpeg>/binding.rs LD_LIBRARY_PATH=<ffmpeg>/lib
+cargo test --release -p throcc-client-core --features ffmpeg --lib gpu_input -- --nocapture
+THROCC_PROFILE_SECS=45 cargo test --release -p throcc-cli --features ffmpeg --test share a_screen_share_runs_for_profiling -- --ignored --nocapture
+```
+
+While the second test shares, in another terminal:
+
+```sh
+pw-dump | grep -A3 '"modifier"'
+pidstat -t -u -p <pid it prints> 30 1
+```
+
+Pass: the `gpu_input` tests pass, which import an exported VA surface, check red and blue against full-range BT.709 and check the black bars. `pw-dump` shows the stream's `Format` with a `modifier`. `throcc-share` uses a few percent of a core, and well under the 65 % the CPU path took for 2560×1440 at 60 fps. Run the share test again with `THROCC_PREVIEW=1`: still a few percent. Then share from the client and open and close the self-view: it appears within a second and looks right. For the fallback, run the share with an encoder that takes no GPU frames (on a machine with NVENC, or after renaming the VA driver): the log says `falling back to frames in shared memory`, the share keeps going, and `pw-dump` shows a `Format` without a `modifier`.
+
 ## Shares drawn as NV12 surfaces on Linux and Windows
 
 Needs a Linux desktop with an AMD GPU and ffmpeg with VA-API (Mesa's `radeonsi` VA driver), a Windows machine with a GPU, and a third machine sharing 2560×1440 at 60 fps with moving content (a video full screen). Run the client built with `--features ffmpeg` and watch the share:
