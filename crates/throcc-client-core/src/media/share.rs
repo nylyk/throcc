@@ -22,7 +22,7 @@ const IDLE: Duration = Duration::from_millis(2);
 /// Self-view gets every Nth frame, shrunk to about this wide; it is only a thumbnail of
 /// what is sent.
 const SELF_VIEW_EVERY: u32 = 2;
-const SELF_VIEW_WIDTH: usize = 640;
+const SELF_VIEW_WIDTH: usize = 960;
 
 /// Forced recoveries are at least this far apart, so a link too slow for whole keyframes
 /// gets one a second rather than one every frame.
