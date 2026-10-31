@@ -45,14 +45,18 @@ impl FromStr for Fingerprint {
     type Err = ParseFingerprintError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let digits: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+        let digits: Vec<u8> = s
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .map(|c| c.to_digit(16).map(|d| d as u8))
+            .collect::<Option<_>>()
+            .ok_or(ParseFingerprintError)?;
         if digits.len() != 64 {
             return Err(ParseFingerprintError);
         }
         let mut out = [0u8; 32];
-        for (byte, pair) in out.iter_mut().zip(digits.chunks(2)) {
-            let hex = std::str::from_utf8(pair).map_err(|_| ParseFingerprintError)?;
-            *byte = u8::from_str_radix(hex, 16).map_err(|_| ParseFingerprintError)?;
+        for (byte, [high, low]) in out.iter_mut().zip(digits.as_chunks::<2>().0) {
+            *byte = high << 4 | low;
         }
         Ok(Self(out))
     }
@@ -75,5 +79,13 @@ mod tests {
     fn rejects_bad_input() {
         assert!("abcd".parse::<Fingerprint>().is_err());
         assert!("zz".repeat(32).parse::<Fingerprint>().is_err());
+        assert!("+a".repeat(32).parse::<Fingerprint>().is_err());
+    }
+
+    #[test]
+    fn parses_upper_case_hex() {
+        let fp = Fingerprint::of_spki(b"spki");
+        let upper = fp.to_string().to_uppercase();
+        assert_eq!(upper.parse::<Fingerprint>().unwrap(), fp);
     }
 }

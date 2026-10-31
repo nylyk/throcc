@@ -23,6 +23,10 @@ impl InviteCode {
             .iter()
             .map(|b| ALPHABET[(b & 31) as usize] as char)
             .collect();
+        Self::from_chars(&chars)
+    }
+
+    fn from_chars(chars: &str) -> Self {
         let (id, secret) = chars.split_at(ID_CHARS);
         Self {
             id: id.to_owned(),
@@ -39,11 +43,7 @@ impl FromStr for InviteCode {
         if chars.len() != ID_CHARS + SECRET_CHARS || !input.chars().all(is_code_char) {
             return Err(BadInviteCode);
         }
-        let (id, secret) = chars.split_at(ID_CHARS);
-        Ok(Self {
-            id: id.to_owned(),
-            secret: secret.to_owned(),
-        })
+        Ok(Self::from_chars(&chars))
     }
 }
 
@@ -61,32 +61,30 @@ impl fmt::Debug for InviteCode {
 
 /// Formats partial input for a code field: normalized characters with the dash inserted.
 pub fn format_partial(input: &str) -> String {
-    let chars: String = normalize(input)
-        .chars()
-        .take(ID_CHARS + SECRET_CHARS)
-        .collect();
+    let mut chars = normalize(input);
+    chars.truncate(ID_CHARS + SECRET_CHARS);
     if chars.len() > ID_CHARS {
-        format!("{}-{}", &chars[..ID_CHARS], &chars[ID_CHARS..])
-    } else {
-        chars
+        chars.insert(ID_CHARS, '-');
     }
+    chars
 }
 
 /// Upper-cases, maps O to 0 and I, L to 1, and drops anything outside the alphabet.
 pub fn normalize(input: &str) -> String {
-    input
-        .chars()
-        .filter_map(|c| match c.to_ascii_uppercase() {
-            'O' => Some('0'),
-            'I' | 'L' => Some('1'),
-            c if ALPHABET.contains(&(c as u8)) && c.is_ascii() => Some(c),
-            _ => None,
-        })
-        .collect()
+    input.chars().filter_map(normalize_char).collect()
+}
+
+fn normalize_char(c: char) -> Option<char> {
+    match c.to_ascii_uppercase() {
+        'O' => Some('0'),
+        'I' | 'L' => Some('1'),
+        c if c.is_ascii() && ALPHABET.contains(&(c as u8)) => Some(c),
+        _ => None,
+    }
 }
 
 fn is_code_char(c: char) -> bool {
-    c == '-' || c.is_ascii_whitespace() || !normalize(&c.to_string()).is_empty()
+    c == '-' || c.is_ascii_whitespace() || normalize_char(c).is_some()
 }
 
 #[cfg(test)]

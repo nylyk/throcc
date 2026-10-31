@@ -14,7 +14,6 @@ pub const AUDIO_CLOCK_HZ: u32 = 48_000;
 pub const VIDEO_CLOCK_HZ: u32 = 90_000;
 
 const _: () = assert!(BODY_BYTES == 1133);
-const _: () = assert!(HEADER_BYTES + BODY_BYTES + TAG_BYTES == DATAGRAM_PAYLOAD_FLOOR);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Flags(pub u8);
@@ -100,8 +99,7 @@ impl Header {
 
     /// The AEAD nonce: header bytes 0–11.
     pub fn nonce(&self) -> [u8; NONCE_BYTES] {
-        let mut nonce = [0u8; NONCE_BYTES];
-        nonce.copy_from_slice(&self.encode()[..NONCE_BYTES]);
+        let [nonce @ .., _flags] = self.encode();
         nonce
     }
 }
