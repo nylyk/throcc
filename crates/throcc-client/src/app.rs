@@ -183,6 +183,10 @@ pub struct ThroccApp {
     /// Until when the controls over the fullscreen share show.
     pub controls_until: std::time::Instant,
     pub fullscreen_focus: gpui::FocusHandle,
+    /// Whether [`Self::enter_fullscreen`] made the window fullscreen, so leaving undoes only that.
+    made_window_fullscreen: bool,
+    /// The whole window's focus, so its key bindings work when no field has focus.
+    root_focus: gpui::FocusHandle,
     pub sidebar_width: gpui::Pixels,
     pub resizing_sidebar: bool,
     events: Option<Task<()>>,
@@ -225,6 +229,7 @@ impl ThroccApp {
             .collect();
         subscriptions.extend([
             cx.subscribe_in(&code, window, Self::on_code_input),
+            cx.on_focus_lost(window, |app, window, cx| window.focus(&app.root_focus, cx)),
             cx.subscribe(&name, Self::on_edit),
             cx.subscribe(&server_name, Self::on_edit),
             cx.subscribe_in(&room_name, window, |app, _, event: &InputEvent, _, cx| {
@@ -282,11 +287,14 @@ impl ThroccApp {
             fullscreen: None,
             controls_until: std::time::Instant::now(),
             fullscreen_focus: cx.focus_handle(),
+            made_window_fullscreen: false,
+            root_focus: cx.focus_handle(),
             sidebar_width: theme::SIDEBAR_WIDTH,
             resizing_sidebar: false,
             events: None,
             _subscriptions: subscriptions,
         };
+        window.focus(&app.root_focus, cx);
         if mock {
             app.attach(Arc::new(MockClient::new()), window, cx);
         }
@@ -325,6 +333,7 @@ impl ThroccApp {
         self.joining = false;
         self.adding_server = false;
         self.join_error = None;
+        window.focus(&self.root_focus, cx);
         self.sync_push_to_talk(cx);
         let window_handle = window.window_handle();
         self.events = Some(cx.spawn(async move |this, cx| {
@@ -480,12 +489,13 @@ impl ThroccApp {
         window.focus(&self.fullscreen_focus, cx);
         if !window.is_fullscreen() {
             window.toggle_fullscreen();
+            self.made_window_fullscreen = true;
         }
     }
 
     pub fn exit_fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.fullscreen = None;
-        if window.is_fullscreen() {
+        if std::mem::take(&mut self.made_window_fullscreen) && window.is_fullscreen() {
             window.toggle_fullscreen();
         }
         cx.notify();
@@ -795,6 +805,9 @@ impl ThroccApp {
     }
 
     pub fn join(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.joining || self.client.is_some() {
+            return;
+        }
         let address = self.address.read(cx).value().trim().to_owned();
         let code_text = self.code.read(cx).value().to_string();
         if address.is_empty() {
@@ -886,7 +899,10 @@ impl ThroccApp {
     fn end_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_all_popouts(cx);
         self.exit_fullscreen(window, cx);
+        self.stop_mic_test();
         self.client = None;
+        self.invite = None;
+        self.users.clear();
         self.dialog = None;
         self.focus = None;
         self.preview_self = false;
@@ -1037,6 +1053,18 @@ impl ThroccApp {
         self.screen == Screen::Main && self.dialog.is_none() && self.uses_push_to_talk()
     }
 
+    pub fn stop_mic_test(&mut self) {
+        if self.mic_test {
+            self.mic_test = false;
+            self.command(Command::MicTest(false));
+        }
+    }
+
+    /// Whether the push-to-talk key works while another app has focus.
+    pub fn has_global_push_to_talk(&self) -> bool {
+        self.push_to_talk.is_some()
+    }
+
     pub fn safety_number(&self, user: UserId) -> Option<String> {
         self.client.as_ref()?.safety_number(user)
     }
@@ -1073,6 +1101,7 @@ impl Render for ThroccApp {
         div()
             .id("throcc")
             .key_context("Throcc")
+            .track_focus(&self.root_focus)
             .on_action(cx.listener(Self::toggle_mic))
             .on_action(cx.listener(Self::toggle_deafen))
             .on_action(cx.listener(Self::close_dialog))

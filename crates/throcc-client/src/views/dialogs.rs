@@ -595,6 +595,7 @@ fn pin_mismatch(
                 .gap_2()
                 .child(primary("use-invite", "Use a fresh invite").on_click(cx.listener(|app, _, window, cx| {
                     app.dialog = None;
+                    app.adding_server = true;
                     app.code.update(cx, |s, cx| s.focus(window, cx));
                     cx.notify();
                 })))

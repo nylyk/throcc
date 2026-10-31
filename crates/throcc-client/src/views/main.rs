@@ -432,6 +432,8 @@ fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
                     .child(
                         div()
                             .flex_1()
+                            .min_w_0()
+                            .truncate()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_size(px(16.))
                             .child(room.name.clone()),

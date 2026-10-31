@@ -2,9 +2,9 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, AppContext, Context, Div, Entity, FontWeight, InteractiveElement, IntoElement,
-    MouseButton, ParentElement, Pixels, SharedString, Stateful, StatefulInteractiveElement, Styled,
-    Subscription, Window, div, px, relative,
+    AnyElement, AppContext, Context, Div, ElementId, Entity, FontWeight, InteractiveElement,
+    IntoElement, MouseButton, ParentElement, Pixels, SharedString, Stateful,
+    StatefulInteractiveElement, Styled, Subscription, Window, div, px, relative,
 };
 use gpui_component::button::Button;
 use gpui_component::input::Input;
@@ -216,13 +216,14 @@ pub(super) fn row(label: &str, control: impl IntoElement) -> Div {
 
 /// A row of mutually exclusive choices.
 pub(super) fn segmented<T: Copy + PartialEq + 'static>(
-    id: &'static str,
+    id: impl Into<ElementId>,
     options: &[(T, &'static str)],
     selected: T,
     cx: &mut Context<ThroccApp>,
     on_pick: impl Fn(&mut ThroccApp, T, &mut Context<ThroccApp>) + Clone + 'static,
-) -> Div {
+) -> Stateful<Div> {
     div()
+        .id(id)
         .flex()
         .gap_1()
         .p_1()
@@ -232,7 +233,7 @@ pub(super) fn segmented<T: Copy + PartialEq + 'static>(
             let value = *value;
             let on_pick = on_pick.clone();
             div()
-                .id((id, i))
+                .id(i)
                 .px_3()
                 .py_1()
                 .rounded(theme::RADIUS_ROW)
@@ -451,6 +452,8 @@ fn keep_metering(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) {
                 app.audio.metering = shown;
                 if shown {
                     cx.notify();
+                } else {
+                    app.stop_mic_test();
                 }
                 shown
             });
@@ -552,12 +555,11 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                         &[(true, "Voice activity"), (false, "Push to talk")],
                         vad,
                         cx,
-                        move |app, voice_activity, cx| {
+                        |app, voice_activity, cx| {
+                            let threshold_dbfs = app.audio.threshold.read(cx).value().start();
                             set_voice(app, |v| {
                                 v.transmit = if voice_activity {
-                                    Transmit::VoiceActivity {
-                                        threshold_dbfs: threshold,
-                                    }
+                                    Transmit::VoiceActivity { threshold_dbfs }
                                 } else {
                                     Transmit::PushToTalk
                                 }
@@ -593,7 +595,11 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .children((!vad).then(|| {
                     row(
                         "Push-to-talk key",
-                        mono("Alt + Space anywhere, or Space in this window"),
+                        mono(if app.has_global_push_to_talk() {
+                            "Alt + Space anywhere, or Space in this window"
+                        } else {
+                            "Space in this window"
+                        }),
                     )
                 })),
         )

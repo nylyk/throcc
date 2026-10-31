@@ -23,6 +23,7 @@ impl Feeds {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
+        window.request_animation_frame();
         let frame = client
             .and_then(|c| c.picture(user))
             .and_then(|picture| picture.borrow().clone());
@@ -42,7 +43,6 @@ impl Feeds {
         {
             previous.release(window, cx);
         }
-        window.request_animation_frame();
         div()
             .size_full()
             .relative()

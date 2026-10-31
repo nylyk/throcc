@@ -286,7 +286,7 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                         )
                         .child(if editable {
                             segmented(
-                                "role",
+                                ("role", id.0),
                                 &[(Role::Manager, "Manager"), (Role::User, "User")],
                                 user.role,
                                 cx,

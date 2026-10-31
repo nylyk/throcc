@@ -135,6 +135,9 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
                                 ),
                         )
                         .on_click(cx.listener(move |app, _, window, cx| {
+                            if app.joining {
+                                return;
+                            }
                             let address = address.clone();
                             app.address
                                 .update(cx, |s, cx| s.set_value(address, window, cx));

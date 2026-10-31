@@ -65,9 +65,20 @@ fn main() {
                 }
                 cx.new(|cx| Root::new(view, window, cx))
             });
-            if let Err(e) = opened {
-                eprintln!("could not open a window: {e}");
-                cx.quit();
+            match opened {
+                Ok(main_window) => {
+                    let main_window = main_window.window_id();
+                    cx.on_window_closed(move |cx, closed| {
+                        if closed == main_window {
+                            cx.quit();
+                        }
+                    })
+                    .detach();
+                }
+                Err(e) => {
+                    eprintln!("could not open a window: {e}");
+                    cx.quit();
+                }
             }
             cx.activate(true);
         });

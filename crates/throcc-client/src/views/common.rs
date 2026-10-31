@@ -32,7 +32,7 @@ pub fn avatar(
     let ring = if speaking {
         theme::speaking()
     } else {
-        gpui::transparent_black()
+        theme::transparent()
     };
     div()
         .flex_none()
@@ -297,6 +297,7 @@ pub fn player_button(id: impl Into<ElementId>, icon_name: &'static str) -> State
         .rounded_full()
         .cursor_pointer()
         .hover(|s| s.bg(theme::player_hover()))
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .child(
             icon(icon_name)
                 .size(px(22.))

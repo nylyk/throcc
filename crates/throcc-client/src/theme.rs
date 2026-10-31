@@ -299,6 +299,9 @@ pub fn link() -> Hsla {
 pub fn speaking() -> Hsla {
     hex(palette().good)
 }
+pub fn transparent() -> Hsla {
+    gpui::transparent_black()
+}
 pub fn ok_bg() -> Hsla {
     let p = palette();
     mixed(p.good, 0.15, p.panel)
