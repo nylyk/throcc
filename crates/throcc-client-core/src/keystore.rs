@@ -39,14 +39,15 @@ impl Keystore {
     }
 
     /// Opens the platform data directory, keeping the identity key in the OS keychain.
-    /// Falls back to a 0600 file only on a platform without a keychain.
+    /// Falls back to a 0600 file only on a platform without a keychain, and refuses to
+    /// start a new identity there while servers are known.
     pub fn open_default() -> Result<Self> {
         let dir = default_dir()?;
         fs::create_dir_all(&dir)?;
         let identity = match keychain_identity(&dir) {
             Err(e) if matches!(e.downcast_ref(), Some(keyring::Error::NoDefaultStore)) => {
                 warn!("no OS keychain ({e:#}); keeping the identity key in a file");
-                file_identity(&dir)?
+                fallback_identity(&dir)?
             }
             other => other.context("reading the identity key from the OS keychain")?,
         };
@@ -171,6 +172,18 @@ fn keychain_identity(dir: &Path) -> Result<IdentityKey> {
     }
 }
 
+/// The identity key in `dir`. A missing one is created only while no server is known.
+fn fallback_identity(dir: &Path) -> Result<IdentityKey> {
+    let known_servers = KnownServers::load(&dir.join(KNOWN_SERVERS_FILE))?;
+    if known_servers.iter().next().is_some() && !dir.join(IDENTITY_FILE).exists() {
+        bail!(
+            "the OS keychain holding your identity key can't be reached; unlock or start your \
+             keyring (Secret Service) and try again"
+        );
+    }
+    file_identity(dir)
+}
+
 fn file_identity(dir: &Path) -> Result<IdentityKey> {
     let path = dir.join(IDENTITY_FILE);
     match fs::read(&path) {
@@ -221,6 +234,22 @@ mod tests {
         let first = Keystore::open_in(dir.path()).unwrap().identity().public();
         let second = Keystore::open_in(dir.path()).unwrap().identity().public();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn the_fallback_starts_an_identity_only_while_no_server_is_known() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = fallback_identity(dir.path()).unwrap().public();
+        assert_eq!(fallback_identity(dir.path()).unwrap().public(), first);
+
+        let mut store = Keystore::open_in(dir.path()).unwrap();
+        store
+            .known_servers
+            .trust("voice.example.net:8476", Fingerprint([3; 32]))
+            .unwrap();
+        fs::remove_file(dir.path().join(IDENTITY_FILE)).unwrap();
+        assert!(fallback_identity(dir.path()).is_err());
+        assert!(!dir.path().join(IDENTITY_FILE).exists());
     }
 
     #[test]

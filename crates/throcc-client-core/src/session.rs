@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use throcc_crypto::hpke::EncKeyPair;
@@ -23,7 +23,7 @@ use crate::keys::KeyNotice;
 use crate::keystore::Keystore;
 use crate::lock;
 use crate::media::audio::VoiceSettings;
-use crate::media::engine::Kind;
+use crate::media::engine::{KeyState, Kind};
 use crate::media::share_audio::Playout;
 use crate::media::video::Picture;
 use crate::media::voice::{VoiceCommand, VoiceEngine};
@@ -37,6 +37,7 @@ const LEVELS_EVERY: Duration = Duration::from_millis(100);
 const HEALTH_EVERY: Duration = Duration::from_secs(2);
 const MAX_BACKOFF: Duration = Duration::from_secs(15);
 const RENEWAL_CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
+const MAX_QUEUED_WHILE_RECONNECTING: usize = 64;
 const MIC_KBPS: u32 = 64;
 const SHARE_AUDIO_KBPS: u32 = 128;
 
@@ -375,8 +376,9 @@ impl Session {
         true
     }
 
-    /// Reconnects with backoff, back into the same room. Returns the commands that arrived
-    /// meanwhile, or `None` if told to stop or the server won't take us back.
+    /// Reconnects with backoff, into the room last asked for, or else the same room.
+    /// Returns the other commands that arrived meanwhile, or `None` if told to stop or the
+    /// server won't take us back.
     async fn reconnect(&mut self, commands: &mut mpsc::Receiver<Command>) -> Option<Vec<Command>> {
         let reason = self
             .call
@@ -385,6 +387,8 @@ impl Session {
             .map_or("connection lost".to_owned(), |e| e.to_string());
         let mut backoff = Duration::from_secs(1);
         let mut queued = Vec::new();
+        let mut dropped_any = false;
+        let mut want_room = self.room;
         for attempt in 1.. {
             self.shared.update(|s| {
                 s.connection = ConnectionStatus::Reconnecting {
@@ -402,7 +406,17 @@ impl Session {
                             self.shared.update(|s| s.connection = ConnectionStatus::Disconnected);
                             return None;
                         }
-                        Some(command) => queued.push(command),
+                        Some(Command::Join(room)) => want_room = room,
+                        Some(command) => {
+                            queued.retain(|older| !supersedes(&command, older));
+                            if queued.len() < MAX_QUEUED_WHILE_RECONNECTING {
+                                queued.push(command);
+                            } else if !dropped_any {
+                                dropped_any = true;
+                                warn!("dropped a command while reconnecting");
+                                self.shared.notice("Still reconnecting, so that was dropped. Try again once connected.");
+                            }
+                        }
                     },
                 }
             }
@@ -410,7 +424,7 @@ impl Session {
             if let Err(e) = self.keystore.renew_enc_key_if_due() {
                 warn!("renewing the encryption key: {e:#}");
             }
-            let link = match account::sign_in(&self.keystore, &self.address, self.room).await {
+            let link = match account::sign_in(&self.keystore, &self.address, want_room).await {
                 Ok(link) => link,
                 Err(e) => {
                     if let SignInError::Login(LoginError::Refused(reason)) = &e
@@ -1041,7 +1055,8 @@ impl Session {
         let _ = kind;
     }
 
-    /// Pins `key` for `user` if it is the changed key we warned about.
+    /// Pins `key` for `user` if it is the changed key we warned about and the room state
+    /// still presents it.
     async fn accept_key(&mut self, user: UserId, key: PublicKey) {
         let warned = self
             .shared
@@ -1052,11 +1067,25 @@ impl Session {
         if !warned {
             return;
         }
-        let pinned = self.call.engine.keys().contacts.pin(user, key);
-        if let Err(e) = pinned {
-            warn!("saving the new key: {e:#}");
-            self.shared
-                .notice(format!("Couldn't keep the new key: {e}"));
+        let pinned = {
+            let mut state = self.call.engine.keys();
+            let KeyState { keys, contacts } = &mut *state;
+            keys.presents(user, &key).then(|| contacts.pin(user, key))
+        };
+        match pinned {
+            None => {
+                self.shared.notice(format!(
+                    "{} isn't presenting that key right now, so it wasn't accepted.",
+                    self.name_of(user)
+                ));
+                return;
+            }
+            Some(Err(e)) => {
+                warn!("saving the new key: {e:#}");
+                self.shared
+                    .notice(format!("Couldn't keep the new key: {e}"));
+            }
+            Some(Ok(())) => {}
         }
         self.shared
             .update(|s| s.key_warnings.retain(|w| w.user != user));
@@ -1086,7 +1115,11 @@ impl Session {
         let signed = self
             .keystore
             .signed_enc_key(&self.call.server(), self.call.me());
-        self.call.engine.keys().keys.replace_enc(enc);
+        self.call
+            .engine
+            .keys()
+            .keys
+            .replace_enc(enc, Instant::now());
         match self.call.request(Request::SetEncKey(signed)).await {
             Ok(Response::Ok) => info!("renewed the encryption key"),
             other => {
@@ -1122,6 +1155,9 @@ impl Session {
                         s.key_warnings.push(warning);
                     }
                 }),
+                KeyNotice::KeyRestored { user } => self
+                    .shared
+                    .update(|s| s.key_warnings.retain(|w| w.user != user)),
                 KeyNotice::BadEncKey { user } => {
                     self.shared.notice(format!(
                         "User {}'s encryption key failed its check; they can't hear you.",
@@ -1399,6 +1435,24 @@ fn verdict(dropped_for_you: u32, local_drops: u64, download_loss: f32) -> String
     "Everything is arriving.".into()
 }
 
+/// Whether `newer` sets the same thing as `older`, so only `newer` needs replaying.
+fn supersedes(newer: &Command, older: &Command) -> bool {
+    use std::mem::discriminant;
+    match (newer, older) {
+        (Command::SetVolume(a, _), Command::SetVolume(b, _)) => a == b,
+        (
+            Command::SetMic(_)
+            | Command::SetDeafened(_)
+            | Command::PushToTalk(_)
+            | Command::MicTest(_)
+            | Command::Voice(_)
+            | Command::Devices { .. },
+            _,
+        ) => discriminant(newer) == discriminant(older),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1409,5 +1463,26 @@ mod tests {
         assert!(verdict(0, 2, 0.0).contains("Your upload"));
         assert!(verdict(0, 0, 4.0).contains("4.0% of packets"));
         assert_eq!(verdict(0, 0, 0.0), "Everything is arriving.");
+    }
+
+    #[test]
+    fn only_the_latest_setting_is_replayed() {
+        use crate::client::Command;
+        assert!(supersedes(
+            &Command::PushToTalk(false),
+            &Command::PushToTalk(true)
+        ));
+        assert!(supersedes(&Command::SetMic(false), &Command::SetMic(true)));
+        assert!(!supersedes(
+            &Command::SetMic(false),
+            &Command::SetDeafened(true)
+        ));
+        let volume = |user, v| Command::SetVolume(UserId(user), v);
+        assert!(supersedes(&volume(1, 0.5), &volume(1, 1.0)));
+        assert!(!supersedes(&volume(1, 0.5), &volume(2, 1.0)));
+        assert!(!supersedes(
+            &Command::Watch(UserId(1)),
+            &Command::Watch(UserId(2))
+        ));
     }
 }

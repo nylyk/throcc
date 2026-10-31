@@ -227,6 +227,16 @@ impl MediaEngine {
         }
     }
 
+    /// Applies the current room state again, after a pin or presence changed.
+    pub fn refresh_keys(&self) -> Vec<KeyNotice> {
+        let mut state = self.keys();
+        let KeyState { keys, contacts } = &mut *state;
+        let (request, notices) = keys.reapply_room_state(contacts, Instant::now());
+        drop(state);
+        self.send_request(request);
+        notices
+    }
+
     fn send_request(&self, request: Option<Request>) {
         if let Some(request) = request {
             self.requests.send(request).ok();

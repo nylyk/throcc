@@ -15,6 +15,8 @@ use crate::contacts::{ContactStatus, Contacts};
 
 /// How long a sender's previous epoch key stays usable after it moves on.
 pub const OLD_KEY_GRACE: Duration = Duration::from_secs(2);
+/// How long our encryption key still unwraps secrets after a renewal replaced it.
+const RETIRED_ENC_KEPT: Duration = OLD_KEY_GRACE.saturating_mul(5);
 const MAX_EARLY: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +32,8 @@ pub enum KeyNotice {
     BadEncKey { user: UserId },
     /// A user's identity key was pinned on first sight.
     NewContact { user: UserId },
+    /// A user presents the identity key pinned for them.
+    KeyRestored { user: UserId },
     /// The room state gave two tracks the same media id. Nobody gets our key until a
     /// valid one arrives.
     ClashingTracks,
@@ -58,8 +62,8 @@ struct Received {
 pub struct KeyManager {
     me: UserId,
     enc: EncKeyPair,
-    /// Our encryption key before the last renewal.
-    retired_enc: Option<EncKeyPair>,
+    /// Our encryption key before the last renewal, until the time it is dropped.
+    retired_enc: Option<(EncKeyPair, Instant)>,
     server: Fingerprint,
     /// The room each user's presence shows them in.
     present: HashMap<UserId, RoomId>,
@@ -128,9 +132,24 @@ impl KeyManager {
         user != self.me && self.room.is_some() && (before == self.room) != (room == self.room)
     }
 
-    /// The room state last applied, to apply again after a pin or presence changes.
-    pub fn current_room_state(&self) -> Option<(RoomId, Epoch, Vec<RoomPeer>)> {
-        Some((self.room?, self.epoch, self.room_peers.clone()))
+    /// Applies the room state last applied again, after a pin or presence changed.
+    pub fn reapply_room_state(
+        &mut self,
+        contacts: &mut Contacts,
+        now: Instant,
+    ) -> (Option<Request>, Vec<KeyNotice>) {
+        let Some(room) = self.room else {
+            return (None, Vec::new());
+        };
+        let peers = self.room_peers.clone();
+        self.room_state(room, self.epoch, &peers, contacts, now)
+    }
+
+    /// True when the room state last applied gives `user` the identity key `key`.
+    pub fn presents(&self, user: UserId, key: &PublicKey) -> bool {
+        self.room_peers
+            .iter()
+            .any(|p| p.user == user && p.identity_key == *key)
     }
 
     /// The peers our key is wrapped to, as the server described them.
@@ -142,10 +161,11 @@ impl KeyManager {
             .collect()
     }
 
-    /// Switches to a renewed encryption key, keeping the old one to unwrap secrets that
-    /// peers sealed to it before they learn the new one.
-    pub fn replace_enc(&mut self, enc: EncKeyPair) {
-        self.retired_enc = Some(std::mem::replace(&mut self.enc, enc));
+    /// Switches to a renewed encryption key, keeping the old one for a short while to
+    /// unwrap secrets that peers sealed to it before they learn the new one.
+    pub fn replace_enc(&mut self, enc: EncKeyPair, now: Instant) {
+        let retired = std::mem::replace(&mut self.enc, enc);
+        self.retired_enc = Some((retired, now + RETIRED_ENC_KEPT));
     }
 
     /// Changes whenever a receive key may have become available.
@@ -321,7 +341,9 @@ impl KeyManager {
                     }
                     notices.push(KeyNotice::NewContact { user: peer.user });
                 }
-                ContactStatus::Known { .. } => {}
+                ContactStatus::Known { .. } => {
+                    notices.push(KeyNotice::KeyRestored { user: peer.user });
+                }
             }
             trusted.insert(
                 peer.user,
@@ -434,7 +456,7 @@ impl KeyManager {
         let secret =
             hpke::unwrap(&self.enc, &enc_key, &context, &wrapped).or_else(|e| {
                 match &self.retired_enc {
-                    Some(retired) => hpke::unwrap(retired, &enc_key, &context, &wrapped),
+                    Some((retired, _)) => hpke::unwrap(retired, &enc_key, &context, &wrapped),
                     None => Err(e),
                 }
             })?;
@@ -479,6 +501,13 @@ impl KeyManager {
 
     /// Zeroizes keys whose grace period has ended, and drops stale early keys.
     pub fn tick(&mut self, now: Instant) {
+        if self
+            .retired_enc
+            .as_ref()
+            .is_some_and(|(_, until)| *until <= now)
+        {
+            self.retired_enc = None;
+        }
         self.received
             .retain(|_, r| r.retire_at.is_none_or(|at| at > now));
         let received = &self.received;
@@ -809,8 +838,7 @@ mod tests {
     }
 
     fn reapply(m: &mut Member, now: Instant) -> (Option<Request>, Vec<KeyNotice>) {
-        let (room, epoch, peers) = m.keys.current_room_state().unwrap();
-        m.keys.room_state(room, epoch, &peers, &mut m.contacts, now)
+        m.keys.reapply_room_state(&mut m.contacts, now)
     }
 
     #[test]
@@ -882,8 +910,46 @@ mod tests {
         let Some(Request::PublishKey { epoch, wrapped }) = requests.into_iter().next() else {
             panic!()
         };
-        a.keys.replace_enc(EncKeyPair::generate());
+        a.keys.replace_enc(EncKeyPair::generate(), now);
         a.keys.sender_key(b.id, epoch, &wrapped[0].1, now).unwrap();
         assert!(can_read(&mut a, &b, 1));
+    }
+
+    #[test]
+    fn the_retired_enc_key_is_dropped_after_a_while() {
+        let now = Instant::now();
+        let mut a = member(1);
+        a.keys.replace_enc(EncKeyPair::generate(), now);
+        a.keys.tick(now + OLD_KEY_GRACE);
+        assert!(a.keys.retired_enc.is_some());
+        a.keys.tick(now + RETIRED_ENC_KEPT);
+        assert!(a.keys.retired_enc.is_none());
+    }
+
+    #[test]
+    fn a_changed_key_that_reverts_is_reported_restored_and_only_presented_keys_count() {
+        let now = Instant::now();
+        let (mut a, mut b) = (member(1), member(2));
+        rekey(&mut [&mut a, &mut b], 1, now);
+        let mut forged = peer(&b);
+        let impostor = IdentityKey::generate();
+        forged.identity_key = impostor.public();
+        let message =
+            identity::enc_key_message(&SERVER.0, b.id, forged.enc_key.not_after, &b.enc_public);
+        forged.enc_key.sig = impostor.sign(&message);
+        let (_, notices) =
+            a.keys
+                .room_state(ROOM, Epoch(2), &[peer(&a), forged], &mut a.contacts, now);
+        assert!(notices.iter().any(
+            |n| matches!(n, KeyNotice::KeyChanged { user, now, .. } if *user == b.id && *now == impostor.public())
+        ));
+        assert!(a.keys.presents(b.id, &impostor.public()));
+
+        let (_, notices) =
+            a.keys
+                .room_state(ROOM, Epoch(3), &[peer(&a), peer(&b)], &mut a.contacts, now);
+        assert!(notices.contains(&KeyNotice::KeyRestored { user: b.id }));
+        assert!(!a.keys.presents(b.id, &impostor.public()));
+        assert!(a.keys.presents(b.id, &b.identity.public()));
     }
 }

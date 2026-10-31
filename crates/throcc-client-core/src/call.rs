@@ -120,7 +120,7 @@ impl Call {
 
     /// Applies the current room state again, after a pin changed.
     pub fn refresh_keys(&self) -> Vec<KeyNotice> {
-        refresh_keys(&self.engine)
+        self.engine.refresh_keys()
     }
 
     pub async fn request(&self, request: Request) -> Result<Response> {
@@ -149,16 +149,8 @@ fn follow_presence(engine: &MediaEngine, event: &Event) -> Vec<KeyNotice> {
         _ => return Vec::new(),
     };
     if engine.keys().keys.set_presence(user, room) {
-        refresh_keys(engine)
+        engine.refresh_keys()
     } else {
         Vec::new()
-    }
-}
-
-fn refresh_keys(engine: &MediaEngine) -> Vec<KeyNotice> {
-    let current = engine.keys().keys.current_room_state();
-    match current {
-        Some((room, epoch, peers)) => engine.event(&Event::RoomState { room, epoch, peers }),
-        None => Vec::new(),
     }
 }
