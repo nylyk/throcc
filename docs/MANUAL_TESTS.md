@@ -163,7 +163,7 @@ Pass: on each machine the packaged client opens (on macOS with right-click, Open
 
 Needs two machines in a call, one sharing with audio (test each of macOS, Windows and Linux as the sharer).
 
-Pass: play music on the sharer, pause it for a few seconds, play again; the watcher hears clean audio after each pause, with no crackle or hiss. Stop watching and watch again three times; each time the audio is clean within a second.
+Pass: play music on the sharer, pause it for a few seconds, play again; the watcher hears clean audio after each pause, with no crackle or hiss. Stop watching and watch again three times; each time the audio is clean within a second. With Linux as the sharer, play the music from a player that raises PipeWire's quantum (`pw-top` shows a `QUANT` of 2048 or more) and repeat the watching steps on a Mac and a Windows watcher.
 
 ## Audio settings
 

@@ -379,3 +379,8 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 - **Pictures in memory still reach a VideoToolbox encoder**, uploaded into ffmpeg's VideoToolbox frame pool like VA-API surfaces. That path carries the share's first frame, test patterns, and pictures of another size than the encoder's; one of those switches the share to it for good. The pool is set to full range (`AVVTFramesContext.color_range`), so both paths encode `420f`.
 - **The self-view on this path is shrunk straight from the locked pixel buffer**, only while the UI draws it, as on the other paths.
 
+## 2026-10-31 Jitter buffers wait for late packets
+
+- **A missing packet with nothing buffered behind it is late, not lost.** The buffer plays one concealed frame without moving past it (`stretched`), which adds 20 ms of delay, and plays the packet when it comes. Before this, the buffer concealed and moved on, dropped the packet as late on arrival, and kept the delay it chose at start for as long as it played. Linux desktop audio arrives in bursts of PipeWire's graph quantum, which players raise to 2048 samples or more, so a watcher that started at a small delay concealed and dropped a frame every burst. Whether it did depended on how the first bursts fell, so re-watching seemed to fix or cause it at random.
+- **Excess delay is shed by the buffer's low point, not its peak.** A frame is skipped when the buffer stayed above 40 ms for a whole 200 ms window. Bursts fill the buffer far above its average just after they land, which the earlier check against the target mistook for excess. Bursty audio settles one burst plus 20 to 30 ms behind its capture, the least the bursts allow; share video waits for share audio, so that delay is also the video's.
+
