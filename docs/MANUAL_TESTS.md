@@ -146,4 +146,4 @@ Pass: on the audio page the meter moves with your voice and turns green above th
 
 Needs a Mac.
 
-Pass: the main window has no system titlebar; the traffic lights sit in the sidebar's top bar, left of the server name, and don't overlap it. Dragging any top bar moves the window, a double-click zooms it, and the buttons in the bars still work. The sidebar shows the desktop blurred behind it. Dragging the sidebar's right edge resizes it between about 210 and 420 px, on the main and settings screens. A pop-out shows the traffic lights over the picture with the title right of them; dragging the picture moves it.
+Pass: the main window has no system titlebar; the traffic lights sit in the sidebar's top bar, left of the server name, and don't overlap it. Dragging any top bar moves the window, a double-click zooms it, and the buttons in the bars still work. The sidebar shows the desktop blurred behind it. Dragging the sidebar's right edge resizes it between about 250 and 420 px, on the main and settings screens. A pop-out shows the traffic lights over the picture with the title right of them; dragging the picture moves it.

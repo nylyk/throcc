@@ -96,6 +96,16 @@ pub fn mono(text: impl Into<SharedString>) -> Div {
     div().font_family(theme::mono_font()).child(text.into())
 }
 
+/// A key on the keyboard, as in a shortcut hint.
+pub fn key_cap(text: impl Into<SharedString>) -> Div {
+    mono(text)
+        .flex_none()
+        .px_1p5()
+        .rounded(theme::RADIUS_ROW)
+        .bg(theme::raised())
+        .text_size(px(12.))
+}
+
 pub fn title(text: impl Into<SharedString>) -> Div {
     div()
         .text_size(px(20.))
@@ -142,26 +152,6 @@ pub fn danger(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Butto
         .danger()
         .rounded(theme::RADIUS_BUTTON)
         .with_size(Size::Medium)
-}
-
-/// A square control-bar button: an icon, red when `on` is false.
-pub fn control_button(
-    id: impl Into<ElementId>,
-    icon_name: &'static str,
-    tooltip: &'static str,
-    on: bool,
-) -> Button {
-    let button = Button::new(id)
-        .icon(icon(icon_name))
-        .rounded(theme::RADIUS_BUTTON)
-        .tooltip(tooltip)
-        .w(theme::TOUCH)
-        .h(theme::TOUCH);
-    if on {
-        button.secondary()
-    } else {
-        button.danger()
-    }
 }
 
 pub fn ghost_icon(

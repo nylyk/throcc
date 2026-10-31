@@ -406,10 +406,8 @@ impl ClientApi for MockClient {
                     p.verified = verified;
                 }
             }),
-            Command::Voice(_)
-            | Command::Devices { .. }
-            | Command::MicTest(_)
-            | Command::PushToTalk(_) => {}
+            Command::PushToTalk(down) => self.update(|s| set_mine(s, me, |_, p| p.speaking = down)),
+            Command::Voice(_) | Command::Devices { .. } | Command::MicTest(_) => {}
             Command::LeaveServer => {
                 self.update(|s| s.connection = ConnectionStatus::Disconnected);
                 self.events.send(Event::LeftServer).ok();

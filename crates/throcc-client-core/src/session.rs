@@ -158,6 +158,8 @@ pub(crate) struct Session {
     watched_video: HashMap<UserId, (MediaId, ShareConfig)>,
     watched_audio: HashMap<UserId, MediaId>,
     mic_test: bool,
+    /// Whether the mic was on when we deafened, so undeafening restores it.
+    mic_before_deafen: bool,
     /// A picture to put on our profile once the server tells us our name.
     pending_avatar: Option<Option<Hash>>,
     profile: Profile,
@@ -193,6 +195,7 @@ impl Session {
             watched_video: HashMap::new(),
             watched_audio: HashMap::new(),
             mic_test: false,
+            mic_before_deafen: false,
             pending_avatar: None,
             profile: Profile::default(),
             #[cfg(feature = "ffmpeg")]
@@ -643,10 +646,7 @@ impl Session {
                 self.push_media().await;
             }
             Command::SetDeafened(deafened) => {
-                self.media.deafened = deafened;
-                if deafened {
-                    self.media.mic = false;
-                }
+                set_deafened(&mut self.media, &mut self.mic_before_deafen, deafened);
                 self.push_media().await;
             }
             Command::StartShare(config) => self.start_share(config).await,
@@ -1435,6 +1435,20 @@ fn verdict(dropped_for_you: u32, local_drops: u64, download_loss: f32) -> String
     "Everything is arriving.".into()
 }
 
+/// Deafens, which also mutes, or undeafens back to the mic state from before.
+fn set_deafened(media: &mut MediaState, mic_before: &mut bool, deafened: bool) {
+    if deafened == media.deafened {
+        return;
+    }
+    if deafened {
+        *mic_before = media.mic;
+        media.mic = false;
+    } else {
+        media.mic = *mic_before;
+    }
+    media.deafened = deafened;
+}
+
 /// Whether `newer` sets the same thing as `older`, so only `newer` needs replaying.
 fn supersedes(newer: &Command, older: &Command) -> bool {
     use std::mem::discriminant;
@@ -1484,5 +1498,23 @@ mod tests {
             &Command::Watch(UserId(1)),
             &Command::Watch(UserId(2))
         ));
+    }
+
+    #[test]
+    fn undeafening_restores_the_mic_from_before() {
+        let mut media = MediaState {
+            mic: true,
+            ..MediaState::default()
+        };
+        let mut before = false;
+        set_deafened(&mut media, &mut before, true);
+        assert!(media.deafened && !media.mic);
+        set_deafened(&mut media, &mut before, false);
+        assert!(!media.deafened && media.mic);
+
+        media.mic = false;
+        set_deafened(&mut media, &mut before, true);
+        set_deafened(&mut media, &mut before, false);
+        assert!(!media.mic);
     }
 }

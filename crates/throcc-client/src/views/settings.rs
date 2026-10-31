@@ -18,7 +18,7 @@ use throcc_client_core::media::audio::{
 };
 
 use super::common::{
-    TRAFFIC_LIGHTS, avatar, caption, card, chip, ghost_icon, mono, moves_window, primary,
+    TRAFFIC_LIGHTS, avatar, caption, card, chip, ghost_icon, key_cap, mono, moves_window, primary,
     secondary, section,
 };
 use crate::app::{PictureEdit, PictureFor, ProfileStatus, Screen, SettingsPage, ThroccApp};
@@ -199,6 +199,21 @@ pub(super) fn save_line(status: Option<Div>, save: Button) -> Div {
         .child(save)
 }
 
+/// A labelled field, the label above the control.
+pub(super) fn field(label: &str, control: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1p5()
+        .child(
+            div()
+                .text_size(px(13.))
+                .text_color(theme::text_2())
+                .child(label.to_owned()),
+        )
+        .child(control)
+}
+
 pub(super) fn row(label: &str, control: impl IntoElement) -> Div {
     div()
         .flex()
@@ -325,7 +340,7 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                         .child(avatar(&name, seed, picture, px(64.), false))
                         .child(picture_buttons),
                 )
-                .child(row("Name", Input::new(&app.name)))
+                .child(field("Name", Input::new(&app.name)))
                 .child(save_line(status, save)),
         )
         .into_any_element()
@@ -593,13 +608,24 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                     )
                 }))
                 .children((!vad).then(|| {
+                    let global = app.has_global_push_to_talk().then(|| {
+                        let key = if cfg!(target_os = "macos") {
+                            "⌥ Space"
+                        } else {
+                            "Alt + Space"
+                        };
+                        [key_cap(key), caption("anywhere, or")]
+                    });
                     row(
                         "Push-to-talk key",
-                        mono(if app.has_global_push_to_talk() {
-                            "Alt + Space anywhere, or Space in this window"
-                        } else {
-                            "Space in this window"
-                        }),
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_1p5()
+                            .children(global.into_iter().flatten())
+                            .child(key_cap("Space"))
+                            .child(caption("while this window is in front")),
                     )
                 })),
         )

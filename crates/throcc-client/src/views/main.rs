@@ -2,19 +2,20 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement, Pixels,
-    RenderImage, Size as Area, StatefulInteractiveElement, Styled, Window, div, px, relative, size,
+    Anchor, AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    Pixels, RenderImage, Size as Area, StatefulInteractiveElement, Styled, Window, div, px,
+    relative, size,
 };
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_component::{Disableable, Sizable, Size};
+use gpui_component::{Disableable, Icon, Sizable, Size};
 use throcc_client_core::client::Command;
 use throcc_client_core::state::{Person, State, share_label};
 use throcc_proto::ids::{RoomId, UserId};
 
 use super::common::{
-    TRAFFIC_LIGHTS, avatar, caption, card, control_button, ghost_icon, icon, moves_window, player,
-    player_button, player_title, primary, section, sharing_icon,
+    TRAFFIC_LIGHTS, avatar, caption, card, ghost_icon, icon, moves_window, player, player_button,
+    player_title, primary, section, sharing_icon,
 };
 use super::settings::{resize_handle, sidebar_column};
 use crate::app::{Dialog, Screen, ServerPage, SettingsPage, ThroccApp};
@@ -133,16 +134,27 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                     .cursor_pointer()
                     .when(selected, |s| s.bg(theme::selected()))
                     .hover(|s| s.bg(theme::raised()))
-                    .child(icon("volume-2").text_color(theme::text_3()).size(px(14.)))
                     .child(
                         div()
-                            .flex_1()
+                            .size(px(6.))
+                            .flex_none()
+                            .rounded_full()
+                            .bg(if selected {
+                                theme::accent()
+                            } else {
+                                theme::text_3()
+                            }),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
                             .truncate()
                             .font_weight(FontWeight::MEDIUM)
                             .child(room.name.clone()),
                     )
-                    .children(sharing.then(sharing_icon))
                     .children((!people.is_empty()).then(|| caption(people.len().to_string())))
+                    .child(div().flex_1())
+                    .children(sharing.then(sharing_icon))
                     .children(manages.then(|| {
                         ghost_icon(("edit-room", id.0 as usize), "pencil", "Edit room")
                             .with_size(Size::Small)
@@ -234,6 +246,76 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                 )
         });
 
+    let speaking = me.is_some_and(|m| state.person(m).is_some_and(|p| p.speaking));
+    let profile_name_width = app.sidebar_width - px(168.);
+    let profile = cx.entity().downgrade();
+    let profile_menu = Button::new("profile-menu")
+        .ghost()
+        .rounded(theme::RADIUS_ROW)
+        .h(px(48.))
+        .px_2()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(avatar(
+                    &my_name,
+                    me.map_or(0, |m| m.0),
+                    my_picture,
+                    px(28.),
+                    speaking,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .max_w(profile_name_width)
+                        .child(
+                            div()
+                                .w_full()
+                                .truncate()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(my_name),
+                        )
+                        .child(
+                            caption(if in_room { "Connected" } else { "In the lobby" })
+                                .w_full()
+                                .truncate(),
+                        ),
+                ),
+        )
+        .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+            let edit = profile.clone();
+            let settings = profile.clone();
+            menu.min_w(px(200.))
+                .item(
+                    PopupMenuItem::new("Edit profile")
+                        .icon(icon("user-pen"))
+                        .on_click(move |_, window, cx| {
+                            edit.update(cx, |app, cx| {
+                                app.fill_profile(window, cx);
+                                app.screen = Screen::Settings(SettingsPage::Profile);
+                                cx.notify();
+                            })
+                            .ok();
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Settings")
+                        .icon(icon("settings"))
+                        .on_click(move |_, _, cx| {
+                            settings
+                                .update(cx, |app, cx| {
+                                    app.screen = Screen::Settings(SettingsPage::Audio);
+                                    cx.notify();
+                                })
+                                .ok();
+                        }),
+                )
+        });
+
     sidebar_column(app.sidebar_width)
         .child(
             moves_window(div())
@@ -287,29 +369,8 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                 .flex_none()
                 .border_t_1()
                 .border_color(theme::control())
-                .child(avatar(
-                    &my_name,
-                    me.map_or(0, |m| m.0),
-                    my_picture,
-                    px(28.),
-                    me.is_some_and(|m| state.person(m).is_some_and(|p| p.speaking)),
-                ))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .truncate()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(my_name),
-                        )
-                        .child(
-                            caption(if in_room { "Connected" } else { "In the lobby" }).truncate(),
-                        ),
-                )
+                .child(profile_menu)
+                .child(div().flex_1())
                 .child(
                     div()
                         .flex()
@@ -339,15 +400,6 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                                 .on_click(
                                     cx.listener(|app, _, window, cx| app.switch_server(window, cx)),
                                 ),
-                        )
-                        .child(
-                            ghost_icon("profile-settings", "settings", "Settings").on_click(
-                                cx.listener(|app, _, window, cx| {
-                                    app.fill_profile(window, cx);
-                                    app.screen = Screen::Settings(SettingsPage::Profile);
-                                    cx.notify();
-                                }),
-                            ),
                         ),
                 ),
         )
@@ -383,15 +435,15 @@ fn occupant(
     div()
         .flex()
         .items_center()
-        .gap_2()
-        .pl(px(28.))
+        .gap_2p5()
+        .pl(px(24.))
         .pr_2()
-        .min_h(px(30.))
+        .min_h(px(36.))
         .child(avatar(
             &person.name,
             user.0,
             picture,
-            px(20.),
+            px(26.),
             person.speaking,
         ))
         .child(
@@ -399,16 +451,24 @@ fn occupant(
                 .flex_1()
                 .truncate()
                 .text_color(theme::text_2_muted())
-                .text_size(px(13.))
+                .text_size(px(14.))
                 .child(person.name.clone()),
         )
         .children(person.sharing.is_some().then(sharing_icon))
-        .children((!person.mic).then(|| icon("mic-off").size(px(14.)).text_color(theme::text_3())))
-        .children(person.deafened.then(|| {
-            icon("headphone-off")
-                .size(px(14.))
-                .text_color(theme::text_3())
-        }))
+        .children(muted_icon(person, px(16.)))
+}
+
+/// The headphones-off icon while `person` is deafened, which mutes too, or else the
+/// mic-off icon while muted.
+fn muted_icon(person: &Person, size: Pixels) -> Option<Icon> {
+    let name = if person.deafened {
+        "headphone-off"
+    } else if !person.mic {
+        "mic-off"
+    } else {
+        return None;
+    };
+    Some(icon(name).size(size).text_color(theme::text_3()))
 }
 
 fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
@@ -543,7 +603,6 @@ fn room(
                 .text_size(px(16.))
                 .child(name),
         )
-        .child(caption(format!("{} people", people.len())))
         .child(div().flex_1())
         .child(
             Button::new("rtt")
@@ -557,8 +616,6 @@ fn room(
                 })),
         );
 
-    let mic = current.as_ref().is_some_and(|c| c.mic);
-    let deafened = current.as_ref().is_some_and(|c| c.deafened);
     let sharing = current.as_ref().is_some_and(|c| c.sharing.is_some());
     let controls = div()
         .flex()
@@ -570,30 +627,6 @@ fn room(
         .flex_none()
         .border_t_1()
         .border_color(theme::control())
-        .child(
-            control_button(
-                "mic",
-                if mic { "mic" } else { "mic-off" },
-                "Microphone (⌘⇧M)",
-                mic,
-            )
-            .on_click(cx.listener(move |app, _, _, _| app.command(Command::SetMic(!mic)))),
-        )
-        .child(
-            control_button(
-                "deafen",
-                if deafened {
-                    "headphone-off"
-                } else {
-                    "headphones"
-                },
-                "Deafen (⌘⇧D)",
-                !deafened,
-            )
-            .on_click(
-                cx.listener(move |app, _, _, _| app.command(Command::SetDeafened(!deafened))),
-            ),
-        )
         .child(
             Button::new("share")
                 .label(if sharing {
@@ -624,10 +657,11 @@ fn room(
         )
         .child(
             Button::new("leave")
-                .label("Leave")
-                .icon(icon("log-out"))
+                .icon(icon("phone-off"))
+                .tooltip("Leave the room")
                 .danger()
                 .rounded(theme::RADIUS_BUTTON)
+                .w(theme::TOUCH)
                 .h(theme::TOUCH)
                 .on_click(cx.listener(|app, _, _, _| app.command(Command::Join(None)))),
         );
@@ -913,7 +947,7 @@ fn tile(
         .surface(app.client.as_ref(), user, radius, window, cx);
     frame
         .cursor_pointer()
-        .bg(theme::stage())
+        .bg(theme::surface())
         .child(picture)
         .child(label)
         .children(buttons)
@@ -998,15 +1032,7 @@ fn person_card(t: &Tile, compact: bool, cx: &mut Context<ThroccApp>) -> Div {
                             person.name.clone()
                         }),
                 )
-                .children(
-                    (!person.mic)
-                        .then(|| icon("mic-off").size(px(13.)).text_color(theme::text_3())),
-                )
-                .children(person.deafened.then(|| {
-                    icon("headphone-off")
-                        .size(px(13.))
-                        .text_color(theme::text_3())
-                })),
+                .children(muted_icon(person, px(13.))),
         )
         .children((!compact).then_some(status).flatten())
         .children(action)

@@ -1049,8 +1049,13 @@ impl ThroccApp {
         self.voice.transmit == Transmit::PushToTalk
     }
 
-    fn push_to_talk_ready(&self) -> bool {
-        self.screen == Screen::Main && self.dialog.is_none() && self.uses_push_to_talk()
+    /// Whether Space should talk: in push-to-talk mode, connected, with no dialog open and no
+    /// text field taking the keys.
+    fn push_to_talk_ready(&self, window: &Window) -> bool {
+        self.client.is_some()
+            && self.dialog.is_none()
+            && self.uses_push_to_talk()
+            && self.root_focus.is_focused(window)
     }
 
     pub fn stop_mic_test(&mut self) {
@@ -1105,13 +1110,16 @@ impl Render for ThroccApp {
             .on_action(cx.listener(Self::toggle_mic))
             .on_action(cx.listener(Self::toggle_deafen))
             .on_action(cx.listener(Self::close_dialog))
-            .on_key_down(cx.listener(|app, event: &gpui::KeyDownEvent, _, _| {
-                if event.keystroke.key == "space" && !event.is_held && app.push_to_talk_ready() {
+            .on_key_down(cx.listener(|app, event: &gpui::KeyDownEvent, window, _| {
+                if event.keystroke.key == "space"
+                    && !event.is_held
+                    && app.push_to_talk_ready(window)
+                {
                     app.command(Command::PushToTalk(true));
                 }
             }))
-            .on_key_up(cx.listener(|app, event: &gpui::KeyUpEvent, _, _| {
-                if event.keystroke.key == "space" && app.push_to_talk_ready() {
+            .on_key_up(cx.listener(|app, event: &gpui::KeyUpEvent, window, _| {
+                if event.keystroke.key == "space" && app.push_to_talk_ready(window) {
                     app.command(Command::PushToTalk(false));
                 }
             }))

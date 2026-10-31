@@ -332,10 +332,6 @@ fn danger_hover() -> Hsla {
     mixed(p.bad, 0.28, p.panel)
 }
 /// Behind a stream, where its letterbox bars show.
-pub fn stage() -> Hsla {
-    let p = palette();
-    mixed(p.accent, 0.06, p.bg)
-}
 /// Behind a fullscreen stream, as in any video player, whatever the theme.
 pub fn player_bg() -> Hsla {
     gpui::black()
@@ -391,7 +387,7 @@ pub const RADIUS_CARD: Pixels = px(14.);
 pub const RADIUS_DIALOG: Pixels = px(18.);
 pub const TOUCH: Pixels = px(44.);
 pub const SIDEBAR_WIDTH: Pixels = px(264.);
-pub const SIDEBAR_MIN_WIDTH: Pixels = px(208.);
+pub const SIDEBAR_MIN_WIDTH: Pixels = px(248.);
 pub const SIDEBAR_MAX_WIDTH: Pixels = px(420.);
 
 const FONTS: &[&str] = &[

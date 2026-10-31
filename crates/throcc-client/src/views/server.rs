@@ -9,7 +9,7 @@ use throcc_proto::Fingerprint;
 use throcc_proto::ids::Role;
 
 use super::common::{avatar, caption, card, chip, ghost_icon, mono, primary, secondary, section};
-use super::settings::{frame, nav_item, nav_list, row, save_line, segmented};
+use super::settings::{field, frame, nav_item, nav_list, save_line, segmented};
 use crate::app::{Dialog, PictureEdit, PictureFor, Screen, ServerPage, ServerStatus, ThroccApp};
 use crate::theme;
 
@@ -108,8 +108,8 @@ fn overview(app: &mut ThroccApp, is_admin: bool, cx: &mut Context<ThroccApp>) ->
         .flex_col()
         .gap_4()
         .child(picture_row)
-        .child(row("Name", name))
-        .child(row("Address", mono(server.address.clone())))
+        .child(field("Name", name))
+        .child(field("Address", mono(server.address.clone())))
         .children(is_admin.then(|| {
             let status = app.server_status.clone().map(|status| match status {
                 ServerStatus::Saving => caption("Saving…"),

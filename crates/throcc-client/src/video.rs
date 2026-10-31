@@ -6,7 +6,10 @@ use throcc_client_core::client::ClientApi;
 use throcc_client_core::media::video::frame::VideoFrame;
 use throcc_proto::ids::UserId;
 
-use crate::views::common::caption;
+use gpui_component::spinner::Spinner;
+use gpui_component::{Sizable, Size};
+
+use crate::theme;
 
 /// The share pictures shown in one window, by sharer. The only place frames meet gpui.
 #[derive(Default)]
@@ -33,7 +36,7 @@ impl Feeds {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(caption("Waiting for the first picture…"))
+                .child(Spinner::new().with_size(Size::Large).color(theme::text_3()))
                 .into_any_element();
         };
         let previous = self.0.get(&user);
