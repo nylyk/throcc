@@ -508,7 +508,7 @@ The mockups are a Design canvas the human iterates on. When they are final, the 
 | Accent | Primary buttons, selection, focus |
 | Warning | Warnings, key changes |
 | Good | Speaking ring, OK chips |
-| Bad | LIVE badge, leave, remove |
+| Bad | Sharing icon, leave, remove |
 
 Everything else is mixed in Oklab, like CSS `color-mix(in oklab, …)`: raised fills are Text 6 % over Panel, borders Text 10 % over Panel, selection Accent 18 % over Panel, chip backgrounds their colour 14–18 % over Panel, avatar hues from Accent, Warning, Good and Bad.
 
@@ -523,8 +523,8 @@ Everything else is mixed in Oklab, like CSS `color-mix(in oklab, …)`: raised f
 | Mockup | Screen | Behaviour |
 | --- | --- | --- |
 | `Join.dc.html` | Join | Address plus invite code. The code input upper-cases, inserts the dash and normalises Crockford characters. Lists known servers |
-| `Main.dc.html` | Lobby | Sidebar: rooms with occupants, LIVE badges, mute and deafen icons, speaking rings, profile bar. Main: room cards with Join |
-| `Room.dc.html` | In room | Header: E2EE badge and RTT (opens Connection). A grid of 16:9 tiles, one per person: avatar and name; a sharer's tile adds **Watch stream**; a watched share fills its tile with the picture, scaled to fit with the aspect kept, plus pop-out and stop-watching. Clicking a share switches to focus: that share large, everyone else in a strip below; clicking it again returns to the grid. Control bar: mic, deafen, share, settings, leave |
+| `Main.dc.html` | Lobby | Sidebar: rooms with occupants, a red monitor icon beside sharers, mute and deafen icons, speaking rings, profile bar. Main: room cards with Join |
+| `Room.dc.html` | In room | Header: room name, head count and RTT (opens Connection); media is always end-to-end encrypted, so no badge says so. A grid of 16:9 tiles, one per person: avatar and name; a sharer's tile adds **Watch stream**; a watched share fills its tile with the picture, scaled to fit with the aspect kept, plus pop-out and stop-watching. Clicking a share switches to focus: that share large, everyone else in a strip below; clicking it again returns to the grid. Control bar: mic, deafen, share, settings, leave |
 | `PoppedOut.dc.html` | Popped-out share | A watched share in its own window: header with the sharer, room, resolution and codec, return-to-main and fullscreen. Its tile in the room offers **Bring back** |
 | `Share.dc.html` | Share dialog | Source picker (uses the OS picker where the OS requires one: `SCContentSharingPicker`, the portal). Preset, share-audio switch, encoder line |
 | `Appearance.dc.html` | Appearance | Preset themes as swatch strips, then the eight colours with a swatch and a hex field each. Applies at once and is remembered |

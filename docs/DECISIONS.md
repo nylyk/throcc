@@ -290,3 +290,9 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 - **Server pages are their own screen,** apart from this computer's settings, as the human asked: profile, keys and members belong to one server; audio, appearance and known servers to the machine.
 - **Clicking outside a dialog closes it**, and the Connection dialog has a Close button.
 
+
+## 2026-10-31 Share state and Linux frame times
+
+- **A presence update keeps what the room state said.** The server sends a room's state, then the sharer's presence; the presence handler rebuilt the person and dropped the share, so a share started mid-call only showed after rejoining. Presence now keeps sharing, verification, speaking and volume, and one function marks who shares: room peers that say so, and us while we share.
+- **Linux video frames are stamped with CLOCK_MONOTONIC when PipeWire hands them over.** The stream's own time didn't advance for at least one compositor's screencast, so every frame carried the first one's timestamp, and viewers, which redraw on a new timestamp, kept showing the first frame. Desktop audio stays on PipeWire's time, which counts on the same clock. Frame timestamps are also forced to rise, as encoders reject repeats.
+- **Profile changes report back:** the session emits saved or refused for each name or picture change, and the profile page shows a chosen picture at once.

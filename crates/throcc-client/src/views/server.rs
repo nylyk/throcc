@@ -11,7 +11,7 @@ use super::common::{
     title,
 };
 use super::settings::{frame, nav, nav_item, row, segmented};
-use crate::app::{Dialog, Screen, ServerPage, ThroccApp};
+use crate::app::{Dialog, ProfileStatus, Screen, ServerPage, ThroccApp};
 use crate::theme;
 
 pub fn render(
@@ -85,20 +85,26 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let (seed, name, avatar_hash) = me.map_or((0, String::new(), None), |(me, person)| {
         (me.0, person.name, person.avatar)
     });
-    let picture = app.picture(avatar_hash);
+    let picture = match app.profile_preview.clone() {
+        Some(preview) => preview,
+        None => app.picture(avatar_hash),
+    };
+    let has_picture = picture.is_some();
     let picture_buttons = div()
         .flex()
         .gap_2()
         .child(
             secondary("choose-picture", "Choose picture…").on_click(cx.listener(
                 |app, _, _, cx| {
-                    app.profile_error = None;
+                    app.profile_status = None;
                     app.choose_picture(cx);
                 },
             )),
         )
-        .children(avatar_hash.map(|_| {
+        .children(has_picture.then(|| {
             secondary("remove-picture", "Remove").on_click(cx.listener(|app, _, _, cx| {
+                app.profile_preview = Some(None);
+                app.profile_status = Some(app.saving_status());
                 app.command(Command::SetAvatar(None));
                 cx.notify();
             }))
@@ -111,6 +117,7 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             primary("save-name", "Save").on_click(cx.listener(|app, _, _, cx| {
                 let name = app.name.read(cx).value().trim().to_owned();
                 if !name.is_empty() {
+                    app.profile_status = Some(ProfileStatus::Saving);
                     app.command(Command::SetName(name));
                 }
                 cx.notify();
@@ -135,11 +142,16 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                         .child(picture_buttons),
                 )
                 .child(row("Name", name_field))
-                .children(
-                    app.profile_error
-                        .clone()
-                        .map(|error| caption(error).text_color(theme::danger_text())),
-                )
+                .children(app.profile_status.clone().map(|status| match status {
+                    ProfileStatus::Saving => caption("Saving…"),
+                    ProfileStatus::Saved => caption("Saved.").text_color(theme::ok_text()),
+                    ProfileStatus::UntilJoined => {
+                        caption("Saved here. Others see your picture once you join a room.")
+                    }
+                    ProfileStatus::Failed(reason) => {
+                        caption(format!("Not saved: {reason}")).text_color(theme::danger_text())
+                    }
+                }))
                 .child(caption(
                     "Everyone on this server sees your name and picture. You can change them once every 10 seconds.",
                 )),

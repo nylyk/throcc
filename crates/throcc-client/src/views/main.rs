@@ -11,8 +11,7 @@ use throcc_client_core::state::{Person, Preset, State, share_label};
 use throcc_proto::ids::{RoomId, UserId};
 
 use super::common::{
-    avatar, caption, card, chip, control_button, ghost_icon, icon, live_badge, primary, section,
-    title,
+    avatar, caption, card, control_button, ghost_icon, icon, primary, section, sharing_icon, title,
 };
 use crate::app::{Dialog, Screen, ServerPage, SettingsPage, ThroccApp};
 use crate::theme;
@@ -77,7 +76,7 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                             .font_weight(FontWeight::MEDIUM)
                             .child(room.name.clone()),
                     )
-                    .children(sharing.then(live_badge))
+                    .children(sharing.then(sharing_icon))
                     .children((!people.is_empty()).then(|| caption(people.len().to_string())))
                     .children(manages.then(|| {
                         ghost_icon(("edit-room", id.0 as usize), "pencil", "Edit room")
@@ -286,7 +285,7 @@ fn occupant(
                 .text_size(px(13.))
                 .child(person.name.clone()),
         )
-        .children(person.sharing.is_some().then(live_badge))
+        .children(person.sharing.is_some().then(sharing_icon))
         .children((!person.mic).then(|| icon("mic-off").size(px(14.)).text_color(theme::text_3())))
         .children(person.deafened.then(|| {
             icon("headphone-off")
@@ -333,11 +332,15 @@ fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
                     }))
                     .children(people.is_empty().then(|| caption("Empty")))
                     .children((sharing > 0).then(|| {
-                        chip(
-                            format!("{sharing} sharing"),
-                            theme::danger_bg(),
-                            theme::danger_text(),
-                        )
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .ml_2()
+                            .text_size(px(12.))
+                            .text_color(theme::danger_text())
+                            .child(sharing_icon())
+                            .child(sharing.to_string())
                     })),
             )
             .child(
@@ -426,22 +429,6 @@ fn room(
         )
         .child(caption(format!("{} people", people.len())))
         .child(div().flex_1())
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .child(
-                    icon("shield-check")
-                        .size(px(14.))
-                        .text_color(theme::ok_text()),
-                )
-                .child(chip(
-                    "End-to-end encrypted",
-                    theme::ok_bg(),
-                    theme::ok_text(),
-                )),
-        )
         .child(
             Button::new("rtt")
                 .label(format!("{rtt:.0} ms"))
@@ -851,7 +838,7 @@ fn person_card(t: &Tile, compact: bool, cx: &mut Context<ThroccApp>) -> Div {
             .flex()
             .items_center()
             .gap_2()
-            .child(live_badge())
+            .child(sharing_icon())
             .children((!compact).then(|| caption(share_label(&config))))
     });
     div()

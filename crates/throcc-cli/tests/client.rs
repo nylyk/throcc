@@ -1,9 +1,12 @@
 use std::time::{Duration, Instant};
 
+use throcc_client_core::account;
+use throcc_client_core::call::Call;
 use throcc_client_core::client::{Client, ClientApi, ClientOptions, Command};
 use throcc_client_core::keystore::Keystore;
 use throcc_client_core::state::{ConnectionStatus, State};
 use throcc_proto::invite::InviteCode;
+use throcc_proto::messages::{Codec, MediaState, Request, Response, ShareConfig};
 use throcc_server::{Config, Congestion, Server};
 
 /// The server takes one profile change per 10 s.
@@ -146,4 +149,57 @@ fn a_picture_chosen_in_the_lobby_reaches_others_and_survives_a_rename() {
         s.person(alice_id).is_some_and(|p| p.name == "Alice")
     });
     assert_eq!(bob.state().person(alice_id).unwrap().avatar, Some(hash));
+}
+
+#[test]
+fn a_share_started_mid_call_shows_without_rejoining() {
+    let (address, bootstrap) = server();
+    let (alice, _a) = client(&address, &bootstrap);
+    wait_for(&alice, "connected", |s| {
+        s.connection == ConnectionStatus::Connected
+    });
+    alice.command(Command::CreateRoom("General".into()));
+    wait_for(&alice, "the room", |s| !s.rooms.is_empty());
+    let room = alice.state().rooms[0].id;
+    alice.command(Command::Join(Some(room)));
+    wait_for(&alice, "alice in the room", |s| s.current.is_some());
+
+    let code = invite(&alice);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let bob = runtime.block_on(async {
+        let mut keystore = Keystore::open_in(dir.path()).unwrap();
+        let link = account::enroll(&mut keystore, &address, &code)
+            .await
+            .unwrap();
+        let bob = Call::start(link, &keystore).unwrap();
+        bob.join(Some(room)).await.unwrap();
+        bob
+    });
+    let bob_id = bob.me();
+    wait_for(&alice, "bob in the room", |s| {
+        s.person(bob_id).is_some_and(|p| p.room == Some(room))
+    });
+
+    let share = ShareConfig {
+        audio: false,
+        kbps: 6000,
+        codec: Codec::Vp9,
+        width: 1920,
+        height: 1080,
+        fps: 60,
+    };
+    let media = MediaState {
+        mic: true,
+        deafened: false,
+        share: Some(share),
+    };
+    let reply = runtime.block_on(bob.request(Request::SetMedia(media)));
+    assert_eq!(reply.unwrap(), Response::Ok);
+    wait_for(&alice, "bob's share", |s| {
+        s.person(bob_id)
+            .is_some_and(|p| p.mic && p.sharing == Some(share))
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(alice.state().person(bob_id).unwrap().sharing, Some(share));
 }

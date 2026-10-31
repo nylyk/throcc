@@ -78,8 +78,10 @@ pub fn chip(text: impl Into<SharedString>, bg: Hsla, fg: Hsla) -> Div {
         .child(text.into())
 }
 
-pub fn live_badge() -> Div {
-    chip("LIVE", theme::danger_bg(), theme::danger_text())
+pub fn sharing_icon() -> Icon {
+    icon("monitor")
+        .size(px(14.))
+        .text_color(theme::danger_text())
 }
 
 pub fn caption(text: impl Into<SharedString>) -> Div {

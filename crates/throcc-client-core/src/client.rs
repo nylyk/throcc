@@ -79,6 +79,10 @@ pub enum Event {
     Kicked(String),
     /// A profile picture asked for with [`ClientApi::avatar`] has arrived.
     AvatarReady(Hash),
+    /// The server took our new name or picture.
+    ProfileSaved,
+    /// The server refused our new name or picture, for this reason.
+    ProfileRefused(String),
 }
 
 /// The UI's view of a client. Implemented by the real client and by [`MockClient`].
@@ -301,11 +305,14 @@ impl ClientApi for MockClient {
                     p.volume = volume;
                 }
             }),
-            Command::SetName(name) => self.update(|s| {
-                if let Some(p) = s.people.get_mut(&me) {
-                    p.name = name;
-                }
-            }),
+            Command::SetName(name) => {
+                self.update(|s| {
+                    if let Some(p) = s.people.get_mut(&me) {
+                        p.name = name;
+                    }
+                });
+                self.events.send(Event::ProfileSaved).ok();
+            }
             Command::SetAvatar(picture) => {
                 let hash = picture.map(|bytes| {
                     let hash = Hash(<sha2::Sha256 as sha2::Digest>::digest(&bytes).into());
@@ -320,6 +327,7 @@ impl ClientApi for MockClient {
                         p.avatar = hash;
                     }
                 });
+                self.events.send(Event::ProfileSaved).ok();
             }
             Command::FetchAvatar(_) => {}
             Command::CreateRoom(name) => self.update(|s| {

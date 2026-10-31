@@ -326,6 +326,7 @@ impl Session {
         self.tracks.clear();
         self.watching.clear();
         self.last_room_state = None;
+        self.show_shares();
     }
 
     fn apply_welcome(&mut self, welcome: &Welcome) {
@@ -427,13 +428,22 @@ impl Session {
             }
         }
         self.peers = current;
-        let shares: Vec<(UserId, Option<ShareConfig>)> =
+        self.show_shares();
+    }
+
+    /// Marks who is sharing: the peers in our room that say so, and us while we share.
+    fn show_shares(&self) {
+        let me = self.call.me();
+        let mine = self.media.share.filter(|_| self.room.is_some());
+        let peers: BTreeMap<UserId, Option<ShareConfig>> =
             self.peers.values().map(|p| (p.user, p.share)).collect();
         self.shared.update(|s| {
-            for (user, share) in shares {
-                if let Some(person) = s.people.get_mut(&user) {
-                    person.sharing = share;
-                }
+            for (user, person) in &mut s.people {
+                person.sharing = if *user == me {
+                    mine
+                } else {
+                    peers.get(user).copied().flatten()
+                };
             }
         });
     }
@@ -488,8 +498,11 @@ impl Session {
                 });
             }
             Command::SetName(name) => {
-                let avatar = self.my_person().and_then(|p| p.avatar);
-                self.simple(Request::SetProfile { name, avatar }).await
+                let avatar = match self.pending_avatar.take() {
+                    Some(pending) => pending,
+                    None => self.my_person().and_then(|p| p.avatar),
+                };
+                self.save_profile(name, avatar).await;
             }
             Command::SetAvatar(picture) => self.set_avatar(picture).await,
             Command::FetchAvatar(hash) => self.fetch_avatar(hash).await,
@@ -577,7 +590,11 @@ impl Session {
                         self.shared.set_avatar(hash, AvatarSlot::Ready(shared));
                         Some(hash)
                     }
-                    other => return self.refused(other),
+                    other => {
+                        let message = refusal(other);
+                        self.shared.emit(Event::ProfileRefused(message));
+                        return;
+                    }
                 }
             }
             None => None,
@@ -594,12 +611,21 @@ impl Session {
         };
         let Some(me) = self.my_person() else { return };
         self.pending_avatar = None;
-        if me.avatar != avatar {
-            self.simple(Request::SetProfile {
-                name: me.name,
-                avatar,
-            })
-            .await;
+        if me.avatar == avatar {
+            self.shared.emit(Event::ProfileSaved);
+        } else {
+            self.save_profile(me.name, avatar).await;
+        }
+    }
+
+    async fn save_profile(&mut self, name: String, avatar: Option<Hash>) {
+        match self
+            .call
+            .request(Request::SetProfile { name, avatar })
+            .await
+        {
+            Ok(Response::Ok) => self.shared.emit(Event::ProfileSaved),
+            other => self.shared.emit(Event::ProfileRefused(refusal(other))),
         }
     }
 
@@ -622,12 +648,7 @@ impl Session {
     }
 
     fn refused(&self, response: anyhow::Result<Response>) {
-        let message = match response {
-            Ok(Response::Err { message, .. }) => message,
-            Ok(other) => format!("unexpected reply {other:?}"),
-            Err(e) => e.to_string(),
-        };
-        self.shared.emit(Event::Notice(message));
+        self.shared.emit(Event::Notice(refusal(response)));
     }
 
     async fn push_media(&mut self) {
@@ -644,6 +665,7 @@ impl Session {
                 c.sharing = media.share;
             }
         });
+        self.show_shares();
         self.simple(Request::SetMedia(media)).await;
     }
 
@@ -854,10 +876,20 @@ impl Session {
 
     async fn server_event(&mut self, event: ServerEvent) {
         match event {
-            ServerEvent::PresenceChanged(p) => self.shared.update(|s| {
-                let volume = s.people.get(&p.user).map_or(1.0, |old| old.volume);
-                s.people.insert(p.user, person(&p, volume));
-            }),
+            ServerEvent::PresenceChanged(p) => {
+                self.shared.update(|s| {
+                    let updated = match s.people.get(&p.user) {
+                        Some(old) => Person {
+                            verified: old.verified,
+                            speaking: old.speaking,
+                            ..person(&p, old.volume)
+                        },
+                        None => person(&p, 1.0),
+                    };
+                    s.people.insert(p.user, updated);
+                });
+                self.show_shares();
+            }
             ServerEvent::PresenceEnded(user) => self.shared.update(|s| {
                 s.people.remove(&user);
             }),
@@ -1025,6 +1057,15 @@ fn person(p: &Presence, volume: f32) -> Person {
         speaking: false,
         volume,
         verified: false,
+    }
+}
+
+/// Why the server didn't answer `Ok`, in its own words where it gave some.
+fn refusal(response: anyhow::Result<Response>) -> String {
+    match response {
+        Ok(Response::Err { message, .. }) => message,
+        Ok(other) => format!("unexpected reply {other:?}"),
+        Err(e) => e.to_string(),
     }
 }
 

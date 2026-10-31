@@ -57,6 +57,16 @@ pub enum Screen {
     Server(ServerPage),
 }
 
+/// How the last change on the profile page went.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProfileStatus {
+    Saving,
+    Saved,
+    /// The picture is kept and goes on our profile when we next join a room.
+    UntilJoined,
+    Failed(String),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Dialog {
     Share {
@@ -102,7 +112,10 @@ pub struct ThroccApp {
     pub pictures: std::collections::HashMap<Hash, Arc<RenderImage>>,
     pub joining: bool,
     pub join_error: Option<String>,
-    pub profile_error: Option<String>,
+    pub profile_status: Option<ProfileStatus>,
+    /// The picture just chosen on the profile page, or `Some(None)` once removed, shown
+    /// until the server has it.
+    pub profile_preview: Option<Option<Arc<RenderImage>>>,
     pub known_servers: Vec<(String, Fingerprint)>,
     pub users: Vec<User>,
     pub invite: Option<(String, u64)>,
@@ -183,7 +196,8 @@ impl ThroccApp {
             pictures: std::collections::HashMap::new(),
             joining: false,
             join_error: None,
-            profile_error: None,
+            profile_status: None,
+            profile_preview: None,
             known_servers,
             users: Vec::new(),
             invite: None,
@@ -275,6 +289,11 @@ impl ThroccApp {
                 self.join_error = Some(reason);
             }
             Event::AvatarReady(_) => {}
+            Event::ProfileSaved => self.profile_status = Some(ProfileStatus::Saved),
+            Event::ProfileRefused(reason) => {
+                self.profile_preview = None;
+                self.profile_status = Some(ProfileStatus::Failed(reason));
+            }
         }
         cx.notify();
     }
@@ -449,8 +468,19 @@ impl ThroccApp {
         cx.notify();
     }
 
+    /// What a picture change waits on: the server, or our next room while in the lobby.
+    pub fn saving_status(&self) -> ProfileStatus {
+        if self.state.current.is_some() {
+            ProfileStatus::Saving
+        } else {
+            ProfileStatus::UntilJoined
+        }
+    }
+
     /// Puts our current name in the profile page's name field.
     pub fn fill_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.profile_status = None;
+        self.profile_preview = None;
         let name = self
             .state
             .me
@@ -484,8 +514,12 @@ impl ThroccApp {
                 .await;
             this.update(cx, |app, cx| {
                 match prepared {
-                    Ok(bytes) => app.command(Command::SetAvatar(Some(bytes))),
-                    Err(message) => app.profile_error = Some(message),
+                    Ok(bytes) => {
+                        app.profile_preview = Some(crate::avatar::decode(&bytes));
+                        app.profile_status = Some(app.saving_status());
+                        app.command(Command::SetAvatar(Some(bytes)));
+                    }
+                    Err(message) => app.profile_status = Some(ProfileStatus::Failed(message)),
                 }
                 cx.notify();
             })
