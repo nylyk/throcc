@@ -62,6 +62,27 @@ impl VideoFrame {
         })
     }
 
+    /// The picture `factor` times smaller each way, each pixel the mean of the block it
+    /// covers. Sizes stay even.
+    pub fn shrunk(&self, factor: usize) -> VideoFrame {
+        let factor = factor.clamp(1, (self.width.min(self.height) / 2).max(1));
+        let width = ((self.width / factor) & !1).max(2);
+        let height = ((self.height / factor) & !1).max(2);
+        let mut out = VideoFrame::blank(width, height);
+        out.timestamp = self.timestamp;
+        shrink_plane(&self.y, self.width, 1, factor, &mut out.y, width, height);
+        shrink_plane(
+            &self.uv,
+            self.width,
+            2,
+            factor,
+            &mut out.uv,
+            width / 2,
+            height / 2,
+        );
+        out
+    }
+
     /// The same picture as BGRA, for renderers that take RGB images.
     pub fn to_bgra(&self) -> Vec<u8> {
         let mut out = vec![0u8; self.width * self.height * 4];
@@ -82,6 +103,49 @@ impl VideoFrame {
             }
         }
         out
+    }
+}
+
+/// Averages `factor`×`factor` blocks of samples of `channels` interleaved bytes from rows
+/// `stride` bytes apart into `columns`×`rows` samples, packed in rows as wide as `src`'s.
+fn shrink_plane(
+    src: &[u8],
+    stride: usize,
+    channels: usize,
+    factor: usize,
+    out: &mut [u8],
+    columns: usize,
+    rows: usize,
+) {
+    let out_stride = out.len() / rows.max(1);
+    let mut sums = vec![0u32; columns * channels];
+    for row in 0..rows {
+        sums.fill(0);
+        for line in 0..factor {
+            let start = (row * factor + line) * stride;
+            let Some(source) = src.get(start..start + columns * factor * channels) else {
+                continue;
+            };
+            for (block, sum) in source
+                .chunks_exact(factor * channels)
+                .zip(sums.chunks_exact_mut(channels))
+            {
+                if let [total] = sum {
+                    *total += block.iter().map(|v| u32::from(*v)).sum::<u32>();
+                } else {
+                    for sample in block.chunks_exact(channels) {
+                        for (total, value) in sum.iter_mut().zip(sample) {
+                            *total += u32::from(*value);
+                        }
+                    }
+                }
+            }
+        }
+        let area = (factor * factor) as u32;
+        let target = &mut out[row * out_stride..row * out_stride + columns * channels];
+        for (pixel, sum) in target.iter_mut().zip(&sums) {
+            *pixel = (sum / area) as u8;
+        }
     }
 }
 
@@ -119,6 +183,23 @@ pub fn share_size(source: (usize, usize), bound: (usize, usize)) -> (usize, usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shrunk_frame_averages_each_block() {
+        let mut frame = VideoFrame::blank(8, 4);
+        frame.timestamp = 7;
+        for (i, y) in frame.y.iter_mut().enumerate() {
+            *y = if (i % 8) < 4 { 40 } else { 200 };
+        }
+        frame.y[0] = 44;
+        for pair in frame.uv.as_chunks_mut::<2>().0 {
+            *pair = [100, 150];
+        }
+        let small = frame.shrunk(2);
+        assert_eq!((small.width, small.height, small.timestamp), (4, 2, 7));
+        assert_eq!(small.y, [41, 40, 200, 200, 40, 40, 200, 200]);
+        assert_eq!(small.uv, [100, 150, 100, 150]);
+    }
 
     #[test]
     fn a_share_keeps_its_screens_shape() {

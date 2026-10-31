@@ -19,8 +19,10 @@ use super::video::encode::{Encoder, EncoderConfig};
 use super::video::frame::{VideoFrame, share_size};
 
 const IDLE: Duration = Duration::from_millis(2);
-/// Self-view gets every Nth frame; it is only a thumbnail of what is sent.
-const SELF_VIEW_EVERY: u32 = 4;
+/// Self-view gets every Nth frame, shrunk to about this wide; it is only a thumbnail of
+/// what is sent.
+const SELF_VIEW_EVERY: u32 = 2;
+const SELF_VIEW_WIDTH: usize = 640;
 
 /// Forced recoveries are at least this far apart, so a link too slow for whole keyframes
 /// gets one a second rather than one every frame.
@@ -139,7 +141,8 @@ impl ShareSender {
                     }
                     count = count.wrapping_add(1);
                     if count.is_multiple_of(SELF_VIEW_EVERY) {
-                        self_tx.send_replace(Some(Arc::new(frame.clone())));
+                        let factor = frame.width / SELF_VIEW_WIDTH;
+                        self_tx.send_replace(Some(Arc::new(frame.shrunk(factor))));
                     }
                     match encoder.encode(&frame) {
                         Ok(units) => {
