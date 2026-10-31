@@ -1,9 +1,9 @@
 use std::time::Instant;
 
 use gpui::{
-    App, AppContext, Bounds, Context, FocusHandle, FontWeight, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Render, StatefulInteractiveElement, Styled, Subscription,
-    WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions, div, px, size,
+    App, AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window,
+    WindowBounds, WindowHandle, WindowOptions, div, px, size,
 };
 use gpui_component::Root;
 use throcc_client_core::state::share_label;
@@ -13,8 +13,8 @@ use crate::app::ThroccApp;
 use crate::theme;
 use crate::video::Feeds;
 use crate::views::common::{
-    CONTROLS_LINGER, TRAFFIC_LIGHTS, app_titlebar, avatar, caption, moves_window, player,
-    player_button,
+    CONTROLS_LINGER, TRAFFIC_LIGHTS, app_titlebar, caption, moves_window, player, player_button,
+    player_title,
 };
 
 /// One watched share in a window of its own.
@@ -97,7 +97,7 @@ impl Render for PopOut {
             (app.client.clone(), app.state.clone())
         };
         let person = state.person(user).cloned();
-        let picture = app.update(cx, |app, _| app.picture(person.as_ref()?.avatar));
+        let sharer_picture = app.update(cx, |app, _| app.picture(person.as_ref()?.avatar));
         let name = person.as_ref().map_or("Someone".into(), |p| p.name.clone());
         let room = state
             .current
@@ -111,7 +111,6 @@ impl Render for PopOut {
             None => room,
         };
         let fullscreen = window.is_fullscreen();
-        let picture_of_sharer = picture;
         let picture = if config.is_some() {
             self.feeds
                 .surface(client.as_ref(), user, px(0.), window, cx)
@@ -124,24 +123,11 @@ impl Render for PopOut {
                 .child(caption(format!("{name} stopped sharing.")))
                 .into_any_element()
         };
-        let title = div()
-            .flex()
-            .items_center()
-            .gap_3()
-            .pl(if fullscreen { px(0.) } else { TRAFFIC_LIGHTS })
-            .child(avatar(&name, user.0, picture_of_sharer, px(28.), false))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_size(px(16.))
-                            .child(format!("{name}'s screen")),
-                    )
-                    .child(div().text_size(px(12.)).opacity(0.75).child(details)),
-            );
+        let title = player_title(&name, user.0, sharer_picture, details).pl(if fullscreen {
+            px(0.)
+        } else {
+            TRAFFIC_LIGHTS
+        });
         let buttons = div()
             .flex()
             .gap_2()

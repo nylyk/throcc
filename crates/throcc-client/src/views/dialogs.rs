@@ -1,26 +1,23 @@
+use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, StatefulInteractiveElement, Styled, Window, div, px,
+    ParentElement, StatefulInteractiveElement, Styled, div, px,
 };
 use gpui_component::input::Input;
 use gpui_component::slider::Slider;
 use gpui_component::switch::Switch;
 use throcc_client_core::client::Command;
 use throcc_client_core::state::{FRAME_RATES, Resolution};
-use throcc_proto::ids::RoomId;
+use throcc_proto::Fingerprint;
+use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::messages::Codec;
 
-use super::common::{caption, card, danger, mono, primary, secondary, section, title};
+use super::common::{caption, card, chip, danger, mono, primary, secondary, section, title};
 use crate::app::{Dialog, ThroccApp};
 use crate::theme;
 
 /// The modal for `dialog`, over a dimmed window.
-pub fn render(
-    app: &mut ThroccApp,
-    dialog: Dialog,
-    window: &mut Window,
-    cx: &mut Context<ThroccApp>,
-) -> AnyElement {
+pub fn render(app: &mut ThroccApp, dialog: Dialog, cx: &mut Context<ThroccApp>) -> AnyElement {
     let body = match dialog {
         Dialog::Share => share(app, cx),
         Dialog::Connection => connection(app, cx),
@@ -41,7 +38,6 @@ pub fn render(
             confirm_delete,
         } => edit_room(app, room, confirm_delete, cx),
     };
-    let _ = window;
     div()
         .id("scrim")
         .absolute()
@@ -205,7 +201,7 @@ fn choices<T: Copy + PartialEq + 'static>(
                 .py_1()
                 .rounded(theme::RADIUS_ROW)
                 .cursor_pointer()
-                .when_picked(picked)
+                .when(picked, |s| s.bg(theme::surface()))
                 .text_color(if picked {
                     theme::text()
                 } else {
@@ -216,18 +212,17 @@ fn choices<T: Copy + PartialEq + 'static>(
         }))
 }
 
-trait Picked {
-    fn when_picked(self, picked: bool) -> Self;
-}
-
-impl<T: Styled> Picked for T {
-    fn when_picked(self, picked: bool) -> Self {
-        if picked {
-            self.bg(theme::surface())
-        } else {
-            self
-        }
-    }
+fn warning_box() -> Div {
+    div()
+        .p_4()
+        .rounded(theme::RADIUS_TILE)
+        .bg(theme::warn_bg())
+        .border_1()
+        .border_color(theme::warn_border())
+        .text_color(theme::warn_text())
+        .flex()
+        .flex_col()
+        .gap_2()
 }
 
 fn mbps(kbps: u32) -> String {
@@ -411,25 +406,11 @@ fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             table_head("Leaving", "Dropped").into_any_element()
         })
         .children(sending)
-        .child(
-            div()
-                .flex()
-                .justify_end()
-                .child(secondary("close-connection", "Close").on_click(cx.listener(
-                    |app, _, _, cx| {
-                        app.dialog = None;
-                        cx.notify();
-                    },
-                ))),
-        )
+        .child(div().flex().justify_end().child(close_button(cx)))
         .into_any_element()
 }
 
-fn verify(
-    app: &ThroccApp,
-    user: throcc_proto::ids::UserId,
-    cx: &mut Context<ThroccApp>,
-) -> AnyElement {
+fn verify(app: &ThroccApp, user: UserId, cx: &mut Context<ThroccApp>) -> AnyElement {
     let name = app
         .state
         .person(user)
@@ -448,22 +429,13 @@ fn verify(
         .gap_4()
         .child(title(name.clone()))
         .child(div().flex().gap_2().child(if verified {
-            super::common::chip("Verified", theme::ok_bg(), theme::ok_text())
+            chip("Verified", theme::ok_bg(), theme::ok_text())
         } else {
-            super::common::chip("Not verified", theme::raised(), theme::text_2())
+            chip("Not verified", theme::raised(), theme::text_2())
         }));
     if let Some(warning) = warning {
         content = content.child(
-            div()
-                .p_4()
-                .rounded(theme::RADIUS_TILE)
-                .bg(theme::warn_bg())
-                .border_1()
-                .border_color(theme::warn_border())
-                .text_color(theme::warn_text())
-                .flex()
-                .flex_col()
-                .gap_2()
+            warning_box()
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{name}'s key changed")))
                 .child("Check before you trust it.")
                 .child(div().flex().gap_2().child(caption("Before")).child(mono(warning.pinned.short())))
@@ -519,12 +491,7 @@ fn safety_groups(number: &str) -> Vec<String> {
         .collect()
 }
 
-fn remove(
-    user: throcc_proto::ids::UserId,
-    name: &str,
-    cascade: bool,
-    cx: &mut Context<ThroccApp>,
-) -> AnyElement {
+fn remove(user: UserId, name: &str, cascade: bool, cx: &mut Context<ThroccApp>) -> AnyElement {
     let name_for_toggle = name.to_owned();
     div()
         .flex()
@@ -566,8 +533,8 @@ fn remove(
 
 fn pin_mismatch(
     address: &str,
-    expected: throcc_proto::Fingerprint,
-    actual: throcc_proto::Fingerprint,
+    expected: Fingerprint,
+    actual: Fingerprint,
     cx: &mut Context<ThroccApp>,
 ) -> AnyElement {
     let address = address.to_owned();
@@ -577,16 +544,7 @@ fn pin_mismatch(
         .gap_4()
         .child(title("This server's key changed"))
         .child(
-            div()
-                .p_4()
-                .rounded(theme::RADIUS_TILE)
-                .bg(theme::warn_bg())
-                .border_1()
-                .border_color(theme::warn_border())
-                .text_color(theme::warn_text())
-                .flex()
-                .flex_col()
-                .gap_2()
+            warning_box()
                 .child(caption("You trusted"))
                 .child(mono(expected.to_string()).text_size(px(12.)))
                 .child(caption("It now has"))

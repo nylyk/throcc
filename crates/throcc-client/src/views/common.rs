@@ -176,11 +176,6 @@ pub fn ghost_icon(
         .tooltip(tooltip)
 }
 
-/// "2c4e 9a1b": the first two groups of a fingerprint.
-pub fn short_key(key: &[u8; 32]) -> String {
-    throcc_proto::Fingerprint(*key).short()
-}
-
 /// Room the macOS traffic lights take at the left of a window's top bar.
 pub const TRAFFIC_LIGHTS: Pixels = px(if cfg!(target_os = "macos") { 76. } else { 0. });
 
@@ -263,6 +258,32 @@ pub fn player(picture: AnyElement, title: Div, controls: Div, shown: bool) -> Di
                 .bg(theme::player_shade(true))
                 .child(controls)
         }))
+}
+
+/// The sharer's picture over "`name`'s screen" and `details`, for the top of a player.
+pub fn player_title(
+    name: &str,
+    seed: u64,
+    picture: Option<Arc<RenderImage>>,
+    details: impl Into<SharedString>,
+) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_3()
+        .child(avatar(name, seed, picture, px(28.), false))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(16.))
+                        .child(format!("{name}'s screen")),
+                )
+                .child(div().text_size(px(12.)).opacity(0.75).child(details.into())),
+        )
 }
 
 /// A round icon button over a fullscreen stream.

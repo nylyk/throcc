@@ -1,6 +1,6 @@
 use gpui::{
     Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, Window, div, px,
+    StatefulInteractiveElement, Styled, div, px,
 };
 use gpui_component::Disableable;
 use gpui_component::input::Input;
@@ -38,11 +38,7 @@ pub fn explain(error: &SignInError) -> String {
     }
 }
 
-pub fn render(
-    app: &mut ThroccApp,
-    _window: &mut Window,
-    cx: &mut Context<ThroccApp>,
-) -> impl IntoElement {
+pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
     let servers = app.known_servers.clone();
     let error_box = |error: String| {
         div()

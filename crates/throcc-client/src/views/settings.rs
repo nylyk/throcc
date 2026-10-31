@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, AppContext, Context, Div, Entity, FontWeight, InteractiveElement, IntoElement,
     MouseButton, ParentElement, Pixels, SharedString, Stateful, StatefulInteractiveElement, Styled,
@@ -26,7 +27,6 @@ use crate::theme;
 pub fn render(
     app: &mut ThroccApp,
     page: SettingsPage,
-    _window: &mut Window,
     cx: &mut Context<ThroccApp>,
 ) -> impl IntoElement {
     let item = |id: &'static str,
@@ -120,7 +120,7 @@ pub(super) fn nav_item(id: &'static str, label: &'static str, selected: bool) ->
         .items_center()
         .rounded(theme::RADIUS_ROW)
         .cursor_pointer()
-        .when_page(selected)
+        .when(selected, |s| s.bg(theme::raised()))
         .hover(|s| s.bg(theme::raised()))
         .child(label)
 }
@@ -188,20 +188,6 @@ pub(super) fn frame(
     div().size_full().flex().child(sidebar).child(page)
 }
 
-pub(super) trait PageHighlight {
-    fn when_page(self, selected: bool) -> Self;
-}
-
-impl<T: Styled> PageHighlight for T {
-    fn when_page(self, selected: bool) -> Self {
-        if selected {
-            self.bg(theme::raised())
-        } else {
-            self
-        }
-    }
-}
-
 /// A card's Save button at the bottom right, with how the last save went beside it.
 pub(super) fn save_line(status: Option<Div>, save: Button) -> Div {
     div()
@@ -234,7 +220,7 @@ pub(super) fn segmented<T: Copy + PartialEq + 'static>(
     options: &[(T, &'static str)],
     selected: T,
     cx: &mut Context<ThroccApp>,
-    on_pick: impl Fn(&mut ThroccApp, T) + Clone + 'static,
+    on_pick: impl Fn(&mut ThroccApp, T, &mut Context<ThroccApp>) + Clone + 'static,
 ) -> Div {
     div()
         .flex()
@@ -251,7 +237,7 @@ pub(super) fn segmented<T: Copy + PartialEq + 'static>(
                 .py_1()
                 .rounded(theme::RADIUS_ROW)
                 .cursor_pointer()
-                .when_page(value == selected)
+                .when(value == selected, |s| s.bg(theme::raised()))
                 .text_color(if value == selected {
                     theme::text()
                 } else {
@@ -259,11 +245,18 @@ pub(super) fn segmented<T: Copy + PartialEq + 'static>(
                 })
                 .child(*label)
                 .on_click(cx.listener(move |app, _, _, cx| {
-                    on_pick(app, value);
-                    app.sync_push_to_talk(cx);
+                    on_pick(app, value, cx);
                     cx.notify();
                 }))
         }))
+}
+
+/// The voice-activity gate in `transmit`, or the default one for push to talk.
+fn gate_dbfs(transmit: Transmit) -> f32 {
+    match transmit {
+        Transmit::VoiceActivity { threshold_dbfs } => threshold_dbfs,
+        Transmit::PushToTalk => DEFAULT_GATE_DBFS,
+    }
 }
 
 fn set_voice(app: &mut ThroccApp, change: impl FnOnce(&mut VoiceSettings)) {
@@ -279,23 +272,26 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         None => app.picture(app.state.profile_picture),
     };
     let has_picture = picture.is_some();
+    let saving = app.profile_status == Some(ProfileStatus::Saving);
     let picture_buttons = div()
         .flex()
         .gap_2()
         .child(
-            secondary("choose-picture", "Choose picture…").on_click(cx.listener(
-                |app, _, _, cx| {
+            secondary("choose-picture", "Choose picture…")
+                .disabled(saving)
+                .on_click(cx.listener(|app, _, _, cx| {
                     app.profile_status = None;
                     app.choose_picture(PictureFor::Profile, cx);
-                },
-            )),
+                })),
         )
         .children(has_picture.then(|| {
-            secondary("remove-picture", "Remove").on_click(cx.listener(|app, _, _, cx| {
-                app.profile_status = None;
-                app.profile_picture_edit = Some(PictureEdit::removed());
-                cx.notify();
-            }))
+            secondary("remove-picture", "Remove")
+                .disabled(saving)
+                .on_click(cx.listener(|app, _, _, cx| {
+                    app.profile_status = None;
+                    app.profile_picture_edit = Some(PictureEdit::removed());
+                    cx.notify();
+                }))
         }));
     let status = app.profile_status.clone().map(|status| match status {
         ProfileStatus::Saving => caption("Saving…"),
@@ -308,7 +304,6 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         ))
         .text_color(theme::danger_text()),
     });
-    let saving = app.profile_status == Some(ProfileStatus::Saving);
     let save = primary("save-profile", "Save")
         .disabled(saving || !app.profile_changed(cx))
         .on_click(cx.listener(|app, _, _, cx| app.save_profile(cx)));
@@ -380,14 +375,7 @@ impl AudioControls {
         };
         let input_volume = slider(0., 200., voice.input_volume * 100.);
         let output_volume = slider(0., 200., voice.output_volume * 100.);
-        let threshold = slider(
-            METER_FLOOR_DBFS,
-            0.,
-            match voice.transmit {
-                Transmit::VoiceActivity { threshold_dbfs } => threshold_dbfs,
-                Transmit::PushToTalk => DEFAULT_GATE_DBFS,
-            },
-        );
+        let threshold = slider(METER_FLOOR_DBFS, 0., gate_dbfs(voice.transmit));
         let on_device = |is_input: bool| {
             move |app: &mut ThroccApp,
                   _,
@@ -527,10 +515,7 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     keep_metering(app, cx);
     let voice = app.voice;
     let vad = matches!(voice.transmit, Transmit::VoiceActivity { .. });
-    let threshold = match voice.transmit {
-        Transmit::VoiceActivity { threshold_dbfs } => threshold_dbfs,
-        Transmit::PushToTalk => DEFAULT_GATE_DBFS,
-    };
+    let threshold = gate_dbfs(voice.transmit);
     let level = app.client.as_ref().and_then(|c| c.mic_level());
     let controls = &app.audio;
     div()
@@ -567,7 +552,7 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                         &[(true, "Voice activity"), (false, "Push to talk")],
                         vad,
                         cx,
-                        move |app, voice_activity| {
+                        move |app, voice_activity, cx| {
                             set_voice(app, |v| {
                                 v.transmit = if voice_activity {
                                     Transmit::VoiceActivity {
@@ -576,7 +561,8 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                                 } else {
                                     Transmit::PushToTalk
                                 }
-                            })
+                            });
+                            app.sync_push_to_talk(cx);
                         },
                     ),
                 ))
@@ -638,7 +624,7 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                         ],
                         voice.noise_suppression,
                         cx,
-                        |app, level| set_voice(app, |v| v.noise_suppression = level),
+                        |app, level, _| set_voice(app, |v| v.noise_suppression = level),
                     ),
                 ))
                 .child(
@@ -740,7 +726,7 @@ fn appearance(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                             } else {
                                 theme::control()
                             })
-                            .when_some_bg(selected.then(theme::selected))
+                            .when(selected, |s| s.bg(theme::selected()))
                             .cursor_pointer()
                             .hover(|s| s.border_color(theme::border_strong()))
                             .child(
@@ -808,17 +794,4 @@ fn appearance(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .children(colors),
         )
         .into_any_element()
-}
-
-trait OptionalBg {
-    fn when_some_bg(self, bg: Option<gpui::Hsla>) -> Self;
-}
-
-impl<T: Styled> OptionalBg for T {
-    fn when_some_bg(self, bg: Option<gpui::Hsla>) -> Self {
-        match bg {
-            Some(bg) => self.bg(bg),
-            None => self,
-        }
-    }
 }

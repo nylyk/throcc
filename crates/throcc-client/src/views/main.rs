@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement, Pixels,
     RenderImage, Size as Area, StatefulInteractiveElement, Styled, Window, div, px, relative, size,
@@ -13,7 +14,7 @@ use throcc_proto::ids::{RoomId, UserId};
 
 use super::common::{
     TRAFFIC_LIGHTS, avatar, caption, card, control_button, ghost_icon, icon, moves_window, player,
-    player_button, primary, section, sharing_icon,
+    player_button, player_title, primary, section, sharing_icon,
 };
 use super::settings::{resize_handle, sidebar_column};
 use crate::app::{Dialog, Screen, ServerPage, SettingsPage, ThroccApp};
@@ -61,35 +62,14 @@ fn fullscreen(
         .and_then(|p| p.sharing)
         .map(|c| share_label(&c))
         .unwrap_or_default();
-    let mine = Some(user) == app.state.me;
-    let title = div()
-        .flex()
-        .items_center()
-        .gap_3()
-        .child(avatar(&name, user.0, picture, px(28.), false))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(16.))
-                        .child(format!("{name}'s screen")),
-                )
-                .child(div().text_size(px(12.)).opacity(0.75).child(config)),
-        );
+    let title = player_title(&name, user.0, picture, config);
     let buttons = div()
         .flex()
         .gap_2()
         .child(
             player_button("fullscreen-stop-watching", "eye-off").on_click(cx.listener(
                 move |app, _, window, cx| {
-                    if mine {
-                        app.preview_self = false;
-                    } else {
-                        app.command(Command::Unwatch(user));
-                    }
+                    app.stop_watching(user);
                     app.exit_fullscreen(window, cx);
                 },
             )),
@@ -150,7 +130,7 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                     .min_h(px(36.))
                     .rounded(theme::RADIUS_ROW)
                     .cursor_pointer()
-                    .when_selected(selected)
+                    .when(selected, |s| s.bg(theme::selected()))
                     .hover(|s| s.bg(theme::raised()))
                     .child(icon("volume-2").text_color(theme::text_3()).size(px(14.)))
                     .child(
@@ -238,8 +218,10 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                 .item(
                     PopupMenuItem::new("Leave server")
                         .icon(icon("log-out"))
-                        .on_click(move |_, _, cx| {
-                            leave.update(cx, |app, cx| app.leave_server(cx)).ok();
+                        .on_click(move |_, window, cx| {
+                            leave
+                                .update(cx, |app, cx| app.leave_server(window, cx))
+                                .ok();
                         }),
                 )
         });
@@ -273,7 +255,7 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                         .justify_between()
                         .pl_2()
                         .child(section("Rooms"))
-                        .children(app.manages_rooms().then(|| {
+                        .children(manages.then(|| {
                             ghost_icon("new-room", "plus", "New room").on_click(
                                 cx.listener(|app, _, window, cx| app.open_new_room(window, cx)),
                             )
@@ -372,20 +354,6 @@ fn toggle_icon(
         .ghost()
         .rounded(theme::RADIUS_ROW)
         .tooltip(tooltip)
-}
-
-trait Selected {
-    fn when_selected(self, selected: bool) -> Self;
-}
-
-impl<T: Styled> Selected for T {
-    fn when_selected(self, selected: bool) -> Self {
-        if selected {
-            self.bg(theme::selected())
-        } else {
-            self
-        }
-    }
 }
 
 fn occupant(
@@ -525,31 +493,16 @@ fn room(
     let state = app.state.clone();
     let name = state.room(room).map_or("Room".into(), |r| r.name.clone());
     let people = people_in(&state, room);
-    let me = state.me;
     let current = state.current.clone();
-    let watching: Vec<UserId> = current
-        .as_ref()
-        .map(|c| c.watching.clone())
-        .unwrap_or_default();
     let tiles: Vec<Tile> = people
         .iter()
-        .map(|(user, person)| {
-            let user = *user;
-            let mine = Some(user) == me;
-            let sharing = person.sharing.is_some();
-            Tile {
-                user,
-                person: person.clone(),
-                picture: pictures.get(&user).cloned(),
-                mine,
-                watched: sharing
-                    && if mine {
-                        app.preview_self
-                    } else {
-                        watching.contains(&user)
-                    },
-                popped: app.popouts.contains_key(&user),
-            }
+        .map(|(user, person)| Tile {
+            user: *user,
+            person: person.clone(),
+            picture: pictures.get(user).cloned(),
+            mine: Some(*user) == state.me,
+            shows_stream: app.shows_stream(*user),
+            popped: app.popouts.contains_key(user),
         })
         .collect();
     let rtt = state.health.rtt_ms;
@@ -660,7 +613,7 @@ fn room(
 
     let focus = app
         .focus
-        .filter(|f| tiles.iter().any(|t| t.user == *f && t.shows_stream()));
+        .filter(|f| tiles.iter().any(|t| t.user == *f && t.shows_stream));
     let body = match focus {
         Some(focus) => focused(app, &tiles, focus, window, cx),
         None => grid(app, &tiles, window, cx),
@@ -681,14 +634,8 @@ struct Tile {
     person: Person,
     picture: Option<Arc<RenderImage>>,
     mine: bool,
-    watched: bool,
+    shows_stream: bool,
     popped: bool,
-}
-
-impl Tile {
-    fn shows_stream(&self) -> bool {
-        self.watched && !self.popped
-    }
 }
 
 const TILE_GAP: Pixels = px(12.);
@@ -718,6 +665,15 @@ fn grid_fit(count: usize, area: Area<Pixels>, gap: Pixels) -> (usize, Area<Pixel
         .unwrap_or((1, size(px(0.), px(0.))))
 }
 
+/// The space inside the room's padding, between its header and control bar.
+fn room_area(app: &ThroccApp, window: &Window) -> Area<Pixels> {
+    let viewport = window.viewport_size();
+    size(
+        viewport.width - app.sidebar_width - ROOM_PADDING * 2.,
+        viewport.height - theme::HEADER_HEIGHT - theme::FOOTER_HEIGHT - ROOM_PADDING * 2.,
+    )
+}
+
 /// The largest size of shape `aspect` (width over height) that fits `area`.
 fn fit_aspect(area: Area<Pixels>, aspect: f32) -> Area<Pixels> {
     let width = f32::from(area.width)
@@ -733,12 +689,7 @@ fn grid(
     window: &mut Window,
     cx: &mut Context<ThroccApp>,
 ) -> AnyElement {
-    let viewport = window.viewport_size();
-    let area = size(
-        viewport.width - app.sidebar_width - ROOM_PADDING * 2.,
-        viewport.height - theme::HEADER_HEIGHT - theme::FOOTER_HEIGHT - ROOM_PADDING * 2.,
-    );
-    let (_, tile_size) = grid_fit(tiles.len(), area, TILE_GAP);
+    let (_, tile_size) = grid_fit(tiles.len(), room_area(app, window), TILE_GAP);
     div()
         .flex_1()
         .min_h_0()
@@ -774,27 +725,16 @@ fn focused(
         .map(|c| f32::from(c.width) / f32::from(c.height))
         .filter(|aspect| aspect.is_finite() && *aspect > 0.)
         .unwrap_or(16. / 9.);
-    let viewport = window.viewport_size();
+    let area = room_area(app, window);
     let strip_room = if others.is_empty() {
         px(0.)
     } else {
         STRIP_HEIGHT + TILE_GAP
     };
-    let stage_size = fit_aspect(
-        size(
-            viewport.width - app.sidebar_width - ROOM_PADDING * 2.,
-            viewport.height
-                - theme::HEADER_HEIGHT
-                - theme::FOOTER_HEIGHT
-                - ROOM_PADDING * 2.
-                - strip_room,
-        ),
-        aspect,
-    );
+    let stage_size = fit_aspect(size(area.width, area.height - strip_room), aspect);
     let stage = focused.map(|t| tile(app, t, Layout::Stage, window, cx));
     let strip_tile = size(STRIP_HEIGHT * (16. / 9.), STRIP_HEIGHT);
     let strip_width = (strip_tile.width + TILE_GAP) * others.len() as f32;
-    let room_width = window.viewport_size().width - app.sidebar_width - ROOM_PADDING * 2.;
     let strip = (!others.is_empty()).then(|| {
         div()
             .id("strip")
@@ -802,7 +742,7 @@ fn focused(
             .h(STRIP_HEIGHT)
             .flex()
             .gap(TILE_GAP)
-            .when_fits(strip_width <= room_width)
+            .when(strip_width <= area.width, |s| s.justify_center())
             .overflow_x_scroll()
             .children(others.into_iter().map(|t| {
                 div()
@@ -838,16 +778,6 @@ fn focused(
         .into_any_element()
 }
 
-trait Centered {
-    fn when_fits(self, fits: bool) -> Self;
-}
-
-impl<T: Styled> Centered for T {
-    fn when_fits(self, fits: bool) -> Self {
-        if fits { self.justify_center() } else { self }
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Layout {
     Grid,
@@ -876,7 +806,7 @@ fn tile(
         } else {
             theme::control()
         });
-    if !t.shows_stream() {
+    if !t.shows_stream {
         return frame
             .bg(theme::surface())
             .child(person_card(t, compact, cx))
@@ -943,11 +873,7 @@ fn tile(
                 )
                 .on_click(cx.listener(move |app, _, _, cx| {
                     cx.stop_propagation();
-                    if mine {
-                        app.preview_self = false;
-                    } else {
-                        app.command(Command::Unwatch(user));
-                    }
+                    app.stop_watching(user);
                     cx.notify();
                 })),
             )

@@ -12,7 +12,7 @@ use gpui_component::{Root, WindowExt};
 use throcc_client_core::account::SignInError;
 use throcc_client_core::client::{Client, ClientApi, ClientOptions, Command, Event, MockClient};
 use throcc_client_core::keystore::Keystore;
-use throcc_client_core::media::audio::VoiceSettings;
+use throcc_client_core::media::audio::{Transmit, VoiceSettings};
 use throcc_client_core::media::devices;
 use throcc_client_core::state::{ShareChoice, State};
 use throcc_proto::Fingerprint;
@@ -323,6 +323,7 @@ impl ThroccApp {
         self.joining = false;
         self.adding_server = false;
         self.join_error = None;
+        self.sync_push_to_talk(cx);
         let window_handle = window.window_handle();
         self.events = Some(cx.spawn(async move |this, cx| {
             loop {
@@ -355,11 +356,7 @@ impl ThroccApp {
             Event::Users(users) => self.users = users,
             Event::Notice(text) => window.push_notification(Notification::new().message(text), cx),
             Event::Kicked(reason) => {
-                for user in self.popouts.keys().copied().collect::<Vec<_>>() {
-                    self.close_popout(user, cx);
-                }
-                self.client = None;
-                self.screen = Screen::Join;
+                self.end_session(window, cx);
                 self.join_error = Some(reason);
             }
             Event::AvatarReady(_) => {}
@@ -384,15 +381,11 @@ impl ThroccApp {
 
     /// The decoded pictures of everyone in the state who has one and has arrived.
     pub fn pictures_of_people(&mut self) -> std::collections::HashMap<UserId, Arc<RenderImage>> {
-        let wanted: Vec<(UserId, Option<Hash>)> = self
-            .state
+        let state = self.state.clone();
+        state
             .people
             .iter()
-            .map(|(user, p)| (*user, p.avatar))
-            .collect();
-        wanted
-            .into_iter()
-            .filter_map(|(user, avatar)| Some((user, self.picture(avatar)?)))
+            .filter_map(|(user, p)| Some((*user, self.picture(p.avatar)?)))
             .collect()
     }
 
@@ -545,27 +538,37 @@ impl ThroccApp {
         cx.notify();
     }
 
+    fn close_all_popouts(&mut self, cx: &mut Context<Self>) {
+        for user in self.popouts.keys().copied().collect::<Vec<_>>() {
+            self.close_popout(user, cx);
+        }
+    }
+
     fn close_unwatched_popouts(&mut self, cx: &mut Context<Self>) {
-        let watching = self
-            .state
-            .current
-            .as_ref()
-            .map(|c| c.watching.clone())
-            .unwrap_or_default();
+        let state = &self.state;
         let gone: Vec<UserId> = self
             .popouts
             .keys()
             .filter(|user| {
-                !watching.contains(user)
-                    || self
-                        .state
-                        .person(**user)
-                        .is_none_or(|p| p.sharing.is_none())
+                state
+                    .current
+                    .as_ref()
+                    .is_none_or(|c| !c.watching.contains(user))
+                    || state.person(**user).is_none_or(|p| p.sharing.is_none())
             })
             .copied()
             .collect();
         for user in gone {
             self.close_popout(user, cx);
+        }
+    }
+
+    /// Stops showing `user`'s share: our own self-view, or someone else's stream.
+    pub fn stop_watching(&mut self, user: UserId) {
+        if Some(user) == self.state.me {
+            self.preview_self = false;
+        } else {
+            self.command(Command::Unwatch(user));
         }
     }
 
@@ -842,23 +845,31 @@ impl ThroccApp {
         }
     }
 
-    pub fn leave_server(&mut self, cx: &mut Context<Self>) {
-        for user in self.popouts.keys().copied().collect::<Vec<_>>() {
-            self.close_popout(user, cx);
-        }
+    pub fn leave_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.command(Command::Disconnect);
-        self.client = None;
+        self.end_session(window, cx);
         self.events = None;
-        self.screen = Screen::Join;
         self.known_servers = known_servers();
         cx.notify();
+    }
+
+    /// Returns to the join screen without anything that belonged to the server's session.
+    fn end_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_all_popouts(cx);
+        self.exit_fullscreen(window, cx);
+        self.client = None;
+        self.dialog = None;
+        self.focus = None;
+        self.preview_self = false;
+        self.push_to_talk = None;
+        self.screen = Screen::Join;
     }
 
     /// Opens a screen of the mock client by name, for screenshots: join, lobby, room, focus,
     /// fullscreen, popout, share, settings, appearance, profile, connection, verify, members
     /// or keychange.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let room = throcc_proto::ids::RoomId(1);
+        let room = RoomId(1);
         let joined = |app: &mut Self| {
             app.command(Command::Join(Some(room)));
             app.command(Command::SetMic(true));
@@ -916,13 +927,13 @@ impl ThroccApp {
             "newroom" => self.dialog = Some(Dialog::NewRoom),
             "editroom" => {
                 self.dialog = Some(Dialog::EditRoom {
-                    room: throcc_proto::ids::RoomId(1),
+                    room,
                     confirm_delete: false,
                 })
             }
             "deleteroom" => {
                 self.dialog = Some(Dialog::EditRoom {
-                    room: throcc_proto::ids::RoomId(1),
+                    room,
                     confirm_delete: true,
                 })
             }
@@ -955,11 +966,7 @@ impl ThroccApp {
 
     /// Registers or drops the global push-to-talk key to match the transmit mode.
     pub fn sync_push_to_talk(&mut self, cx: &mut Context<Self>) {
-        let wanted = matches!(
-            self.voice.transmit,
-            throcc_client_core::media::audio::Transmit::PushToTalk
-        );
-        if !wanted {
+        if !self.uses_push_to_talk() {
             self.push_to_talk = None;
             return;
         }
@@ -993,13 +1000,12 @@ impl ThroccApp {
         }
     }
 
+    fn uses_push_to_talk(&self) -> bool {
+        self.voice.transmit == Transmit::PushToTalk
+    }
+
     fn push_to_talk_ready(&self) -> bool {
-        self.screen == Screen::Main
-            && self.dialog.is_none()
-            && matches!(
-                self.voice.transmit,
-                throcc_client_core::media::audio::Transmit::PushToTalk
-            )
+        self.screen == Screen::Main && self.dialog.is_none() && self.uses_push_to_talk()
     }
 
     pub fn safety_number(&self, user: UserId) -> Option<String> {
@@ -1030,14 +1036,10 @@ impl ThroccApp {
 impl Render for ThroccApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let screen = match self.screen {
-            Screen::Join => views::join::render(self, window, cx).into_any_element(),
+            Screen::Join => views::join::render(self, cx).into_any_element(),
             Screen::Main => views::main::render(self, window, cx).into_any_element(),
-            Screen::Settings(page) => {
-                views::settings::render(self, page, window, cx).into_any_element()
-            }
-            Screen::Server(page) => {
-                views::server::render(self, page, window, cx).into_any_element()
-            }
+            Screen::Settings(page) => views::settings::render(self, page, cx).into_any_element(),
+            Screen::Server(page) => views::server::render(self, page, cx).into_any_element(),
         };
         div()
             .id("throcc")
@@ -1084,7 +1086,7 @@ impl Render for ThroccApp {
             .children(
                 self.dialog
                     .clone()
-                    .map(|dialog| views::dialogs::render(self, dialog, window, cx)),
+                    .map(|dialog| views::dialogs::render(self, dialog, cx)),
             )
     }
 }

@@ -1,15 +1,14 @@
 use gpui::{
     AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, Window, div, px,
+    StatefulInteractiveElement, Styled, div, px,
 };
 use gpui_component::Disableable;
 use gpui_component::input::Input;
 use throcc_client_core::client::Command;
+use throcc_proto::Fingerprint;
 use throcc_proto::ids::Role;
 
-use super::common::{
-    avatar, caption, card, chip, ghost_icon, mono, primary, secondary, section, short_key,
-};
+use super::common::{avatar, caption, card, chip, ghost_icon, mono, primary, secondary, section};
 use super::settings::{frame, nav_item, nav_list, row, save_line, segmented};
 use crate::app::{Dialog, PictureEdit, PictureFor, Screen, ServerPage, ServerStatus, ThroccApp};
 use crate::theme;
@@ -17,7 +16,6 @@ use crate::theme;
 pub fn render(
     app: &mut ThroccApp,
     page: ServerPage,
-    _window: &mut Window,
     cx: &mut Context<ThroccApp>,
 ) -> impl IntoElement {
     let is_admin = app.state.role == Some(Role::Admin);
@@ -73,6 +71,7 @@ fn overview(app: &mut ThroccApp, is_admin: bool, cx: &mut Context<ThroccApp>) ->
         None => app.picture(server.avatar),
     };
     let has_picture = picture.is_some();
+    let saving = app.server_status == Some(ServerStatus::Saving);
     let picture_row = div()
         .flex()
         .items_center()
@@ -83,18 +82,20 @@ fn overview(app: &mut ThroccApp, is_admin: bool, cx: &mut Context<ThroccApp>) ->
                 .flex()
                 .gap_2()
                 .child(
-                    secondary("choose-server-picture", "Choose picture…").on_click(
-                        cx.listener(|app, _, _, cx| app.choose_picture(PictureFor::Server, cx)),
-                    ),
+                    secondary("choose-server-picture", "Choose picture…")
+                        .disabled(saving)
+                        .on_click(
+                            cx.listener(|app, _, _, cx| app.choose_picture(PictureFor::Server, cx)),
+                        ),
                 )
                 .children(has_picture.then(|| {
-                    secondary("remove-server-picture", "Remove").on_click(cx.listener(
-                        |app, _, _, cx| {
+                    secondary("remove-server-picture", "Remove")
+                        .disabled(saving)
+                        .on_click(cx.listener(|app, _, _, cx| {
                             app.server_status = None;
                             app.server_picture_edit = Some(PictureEdit::removed());
                             cx.notify();
-                        },
-                    ))
+                        }))
                 }))
         }));
     let name = if is_admin {
@@ -115,7 +116,6 @@ fn overview(app: &mut ThroccApp, is_admin: bool, cx: &mut Context<ThroccApp>) ->
                 ServerStatus::Saved => caption("Saved.").text_color(theme::ok_text()),
                 ServerStatus::Failed(reason) => caption(reason).text_color(theme::danger_text()),
             });
-            let saving = app.server_status == Some(ServerStatus::Saving);
             let save = primary("save-server", "Save")
                 .disabled(saving || !app.server_changed(cx))
                 .on_click(cx.listener(|app, _, _, cx| app.save_server(cx)));
@@ -280,7 +280,7 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                                 ),
                         )
                         .child(
-                            mono(short_key(&user.identity_key))
+                            mono(Fingerprint(user.identity_key).short())
                                 .text_size(px(12.))
                                 .text_color(theme::text_3()),
                         )
@@ -290,7 +290,7 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                                 &[(Role::Manager, "Manager"), (Role::User, "User")],
                                 user.role,
                                 cx,
-                                move |app, role| app.command(Command::SetRole(id, role)),
+                                move |app, role, _| app.command(Command::SetRole(id, role)),
                             )
                             .into_any_element()
                         } else {
