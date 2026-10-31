@@ -59,6 +59,46 @@ jobs:
       - run: ./scripts/ci-run.sh cargo test -p throcc-client-core -p throcc-cli --features ffmpeg
         shell: bash
 
+  linux-video:
+    runs-on: ubuntu-24.04
+    env:
+      FFMPEG_DLL_PATH: ${{ github.workspace }}/deps/ffmpeg-lgpl/lib
+      FFMPEG_BINDING_PATH: ${{ github.workspace }}/deps/ffmpeg-lgpl/binding.rs
+      LD_LIBRARY_PATH: ${{ github.workspace }}/deps/ffmpeg-lgpl/lib
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libvulkan-dev libfontconfig-dev libfreetype-dev libx11-xcb-dev libxcb1-dev libxcb-randr0-dev \
+            libxcb-shm0-dev libxcb-xfixes0-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev libgbm-dev \
+            libegl-dev libssl-dev libzstd-dev pkg-config libva-dev libdav1d-dev libvpx-dev nasm
+      - id: versions
+        run: echo "libs=$(pkg-config --modversion libva dav1d vpx | tr '\n' '-')" >>"$GITHUB_OUTPUT"
+      - id: ffmpeg
+        uses: actions/cache/restore@v4
+        with:
+          path: deps/ffmpeg-lgpl
+          key: linux-ffmpeg-${{ steps.versions.outputs.libs }}-${{ hashFiles('packaging/ffmpeg/build.sh', 'packaging/ffmpeg/patches/*', 'packaging/ffmpeg/bindings.sh') }}
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - if: steps.ffmpeg.outputs.cache-hit != 'true'
+        name: ffmpeg
+        run: |
+          ./scripts/ci-run.sh packaging/ffmpeg/build.sh deps/ffmpeg-lgpl
+          ./scripts/ci-run.sh cargo install bindgen-cli --version 0.72.1 --locked
+          ./scripts/ci-run.sh packaging/ffmpeg/bindings.sh deps/ffmpeg-lgpl deps/ffmpeg-lgpl/binding.rs
+        shell: bash
+      - if: steps.ffmpeg.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: deps/ffmpeg-lgpl
+          key: ${{ steps.ffmpeg.outputs.cache-primary-key }}
+      - run: ./scripts/ci-run.sh cargo clippy -p throcc-client-core --features ffmpeg --all-targets -- -D warnings
+        shell: bash
+      - run: ./scripts/ci-run.sh cargo test -p throcc-client-core --features ffmpeg --lib -- vaapi gpu_input
+        shell: bash
+
   surface:
     runs-on: ubuntu-latest
     steps:
