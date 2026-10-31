@@ -1,5 +1,5 @@
 pkgname=throcc
-pkgver=0.1.0
+pkgver=0.1.0.r142.g7014fce
 pkgrel=1
 pkgdesc='Self-hosted voice and screen share, end-to-end encrypted'
 arch=('x86_64' 'aarch64')

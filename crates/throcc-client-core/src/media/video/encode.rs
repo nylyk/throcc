@@ -201,6 +201,7 @@ impl Encoder {
     pub fn open(config: EncoderConfig) -> Result<Self, EncodeError> {
         LADDER
             .iter()
+            .filter(|candidate| has_driver(candidate))
             .find_map(|candidate| Self::open_with(candidate, config))
             .ok_or(EncodeError::NoEncoder)
     }
@@ -366,6 +367,29 @@ impl Encoder {
         }
         Ok(())
     }
+}
+
+/// Whether the driver an encoder loads is installed. Only NVENC is checked, by its CUDA
+/// library, so machines without NVIDIA's driver skip probing it.
+fn has_driver(candidate: &Candidate) -> bool {
+    !candidate.name.to_bytes().ends_with(b"_nvenc") || cuda_present()
+}
+
+#[cfg(target_os = "linux")]
+fn cuda_present() -> bool {
+    static PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PRESENT.get_or_init(|| {
+        // SAFETY: dlopen takes a NUL-terminated name, and the handle it returns is closed once.
+        unsafe {
+            let handle = libc::dlopen(c"libcuda.so.1".as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
+            !handle.is_null() && libc::dlclose(handle) == 0
+        }
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cuda_present() -> bool {
+    true
 }
 
 /// The largest rectangle with the aspect ratio of `source`, centred in `target`, as
