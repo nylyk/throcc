@@ -448,12 +448,13 @@ impl Vpp {
                 vaBeginPicture(self.display, self.context, target),
             )
             .and_then(|()| {
-                check(
+                let render = check(
                     "vaRenderPicture",
                     vaRenderPicture(self.display, self.context, &mut buffer, 1),
-                )
-            })
-            .and_then(|()| check("vaEndPicture", vaEndPicture(self.display, self.context)));
+                );
+                let end = check("vaEndPicture", vaEndPicture(self.display, self.context));
+                render.and(end)
+            });
             vaDestroyBuffer(self.display, buffer);
             rendered?;
             check("vaSyncSurface", vaSyncSurface(self.display, target))
