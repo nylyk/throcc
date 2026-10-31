@@ -315,3 +315,10 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 
 - **A share is encoded at its screen's aspect ratio,** as the human asked, so a 16:10 MacBook no longer arrives with black bars baked in. The chosen resolution is a 16:9 box; the sender fits the screen's shape in it and never goes above the screen's own size. macOS asks ScreenCaptureKit for that shape using the picker's content size, Windows sizes its GPU scaler from the capture item, and Linux already delivers the native size. The sender waits up to 2 s for the first frame and opens the encoder at its fitted size, falling back to the box. `ShareConfig` already carried width and height, so the wire format is unchanged. A window that changes shape mid-share is still fitted with bars into the first size.
 - **Presets gave way to resolution, frame rate and a stepped bitrate,** as the human asked. The bitrate cap per resolution and frame rate is a judgement call: past it, screen content shows no visible gain. The slider runs over the offered steps' indices and is rebuilt when the cap changes, because gpui-component's slider can't change its range.
+
+## 2026-10-31 Nightly Arch package
+
+- **Every push to `main` publishes the Arch package to a rolling `nightly` release,** so the human can update without compiling. The Arch job moved out of `packaging.yml` into `nightly.yml`, which runs on every push to `main` that touches more than docs and cancels an older run. `tests/arch/run.sh` takes an optional directory to copy the checked package into, and the workflow uploads it under one fixed name, replacing the last one. The release's tag stays where it was first made; its notes name the commit.
+- **The package is versioned by commit** (`0.1.0.r<commits>.g<hash>`, from `pkgver()`), so pacman sees each nightly as an upgrade.
+- **Install by downloading first, then `pacman -U` the file:** pacman wants a signature for packages given by URL, and these aren't signed.
+

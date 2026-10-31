@@ -19,6 +19,11 @@ source=("throcc::git+${THROCC_GIT:-https://github.com/nylyk/throcc.git}"
 sha256sums=('SKIP'
             '7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3')
 
+pkgver() {
+    cd throcc
+    printf '0.1.0.r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
 build() {
     cd throcc
     FFMPEG_TARBALL="$srcdir/ffmpeg-$_ffmpeg.tar.xz" packaging/ffmpeg/build.sh "$srcdir/ffmpeg"

@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-docker run --rm --platform linux/amd64 -v "$PWD":/src:ro archlinux:latest bash -euo pipefail -c '
+out=${1:-}
+mounts=(-v "$PWD":/src:ro)
+[ -n "$out" ] && mkdir -p "$out" && mounts+=(-v "$(cd "$out" && pwd)":/out)
+docker run --rm --platform linux/amd64 "${mounts[@]}" archlinux:latest bash -euo pipefail -c '
     sed -i "s/^\[options\]/[options]\nDisableSandbox/" /etc/pacman.conf
     sed -i "s|--retry 3|--retry 5 --retry-all-errors|" /etc/makepkg.conf
     pacman -Syu --noconfirm --needed base-devel git rustup >/dev/null
@@ -55,5 +58,9 @@ docker run --rm --platform linux/amd64 -v "$PWD":/src:ro archlinux:latest bash -
         exit 1
     fi
     echo "  ok    the app opens a Wayland window"
+    if [ -d /out ]; then
+        cp /home/builder/pkg/throcc-*.pkg.tar.zst /out/throcc-x86_64.pkg.tar.zst
+        echo "  ok    package copied out"
+    fi
     echo "all checks passed"
 '

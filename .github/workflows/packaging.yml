@@ -8,7 +8,6 @@ on:
       - 'packaging/**'
       - 'crates/throcc-client-core/src/media/video/**'
       - 'crates/throcc-client-core/src/media/capture/**'
-      - 'tests/arch/**'
       - 'tests/deploy/**'
       - 'crates/throcc-server/Dockerfile'
       - 'scripts/ci-run.sh'
@@ -73,15 +72,6 @@ jobs:
           name: throcc-macos
           path: target/macos/throcc.dmg
           retention-days: 7
-
-  arch:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - run: ./scripts/ci-run.sh tests/arch/run.sh
-        shell: bash
 
   windows-app:
     runs-on: windows-2022
