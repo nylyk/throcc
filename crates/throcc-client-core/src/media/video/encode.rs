@@ -10,7 +10,7 @@ use throcc_proto::frame::VIDEO_CLOCK_HZ;
 use throcc_proto::messages::{Codec, Recovery};
 use tracing::{debug, info};
 
-use super::frame::VideoFrame;
+use super::frame::{VideoFrame, fit_within};
 
 /// A GOP cap of this many seconds bounds how long a picture stays broken without a request.
 const GOP_SECONDS: i32 = 4;
@@ -371,15 +371,8 @@ impl Encoder {
 /// The largest rectangle with the aspect ratio of `source`, centred in `target`, as
 /// (x, y, width, height), all even.
 fn fitted(source: (usize, usize), target: (usize, usize)) -> (usize, usize, usize, usize) {
-    let (sw, sh) = (source.0.max(1), source.1.max(1));
     let (tw, th) = target;
-    let (width, height) = if sw * th > tw * sh {
-        (tw, sh * tw / sw)
-    } else {
-        (sw * th / sh, th)
-    };
-    let even = |v: usize| (v & !1).max(2);
-    let (width, height) = (even(width).min(tw & !1), even(height).min(th & !1));
+    let (width, height) = fit_within(source, target);
     (
         ((tw - width) / 2) & !1,
         ((th - height) / 2) & !1,

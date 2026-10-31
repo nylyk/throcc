@@ -16,7 +16,7 @@ use super::share_audio::{Playout, STEREO_FRAME, ShareAudioEncoder, due_frames};
 use super::video::Picture;
 use super::video::decode::Decoder;
 use super::video::encode::{Encoder, EncoderConfig};
-use super::video::frame::VideoFrame;
+use super::video::frame::{VideoFrame, share_size};
 
 const IDLE: Duration = Duration::from_millis(2);
 /// Self-view gets every Nth frame; it is only a thumbnail of what is sent.
@@ -71,9 +71,17 @@ impl ShareSender {
         mut capture: Box<dyn Capture>,
     ) -> Result<Self, ShareError> {
         let capture_config = CaptureConfig::for_share(&wanted);
+        let bound = (capture_config.width, capture_config.height);
+        let mut frame = VideoFrame::blank(bound.0, bound.1);
+        let mut first = first_frame(capture.as_mut(), &mut frame);
+        let (width, height) = if first {
+            share_size((frame.width, frame.height), bound)
+        } else {
+            bound
+        };
         let mut encoder = Encoder::open(EncoderConfig {
-            width: capture_config.width,
-            height: capture_config.height,
+            width,
+            height,
             fps: capture_config.fps,
             kbps: wanted.kbps,
         })
@@ -86,6 +94,8 @@ impl ShareSender {
         let config = ShareConfig {
             codec: encoder.codec(),
             audio: audio_encoder.is_some(),
+            width: u16::try_from(width).unwrap_or(wanted.width),
+            height: u16::try_from(height).unwrap_or(wanted.height),
             ..wanted
         };
         let name = encoder.name();
@@ -96,7 +106,6 @@ impl ShareSender {
         let thread = std::thread::Builder::new()
             .name("throcc-share".into())
             .spawn(move || {
-                let mut frame = VideoFrame::blank(capture_config.width, capture_config.height);
                 let mut sound = [0.0f32; STEREO_FRAME];
                 let mut count = 0u32;
                 let mut pacer = RecoveryPacer::default();
@@ -123,7 +132,8 @@ impl ShareSender {
                             engine.send(Kind::Audio, unit);
                         }
                     }
-                    if !capture.next_frame(&mut frame) {
+                    let fresh = std::mem::take(&mut first) || capture.next_frame(&mut frame);
+                    if !fresh {
                         std::thread::sleep(IDLE);
                         continue;
                     }
@@ -174,6 +184,21 @@ impl Drop for ShareSender {
             thread.join().ok();
         }
     }
+}
+
+/// How long a share waits for its first frame to learn the screen's size.
+const FIRST_FRAME_WAIT: Duration = Duration::from_secs(2);
+
+/// Waits for the capture's first frame, which tells the size of what is shared.
+fn first_frame(capture: &mut dyn Capture, into: &mut VideoFrame) -> bool {
+    let deadline = Instant::now() + FIRST_FRAME_WAIT;
+    while Instant::now() < deadline {
+        if capture.next_frame(into) {
+            return true;
+        }
+        std::thread::sleep(IDLE);
+    }
+    false
 }
 
 #[derive(Debug, thiserror::Error)]

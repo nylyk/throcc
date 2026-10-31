@@ -246,3 +246,35 @@ async fn share_audio_and_video_arrive_on_one_clock() {
         "audio {audio_ms} ms, video {video_ms} ms"
     );
 }
+
+#[tokio::test]
+async fn a_sixteen_by_ten_screen_is_sent_at_its_own_shape() {
+    let server = start_server();
+    let (alice, bob, _) = room_with_two(&server).await;
+    wait_for("bob to learn alice's tracks", || {
+        bob.engine.keys().keys.peer_tracks(alice.me()).is_some()
+    })
+    .await;
+    let tracks = bob
+        .engine
+        .keys()
+        .keys
+        .peer_tracks(alice.me())
+        .unwrap()
+        .shares[0];
+    let screen = CaptureConfig {
+        width: 2880,
+        height: 1800,
+        fps: 30,
+        audio: false,
+    };
+    let capture = Box::new(TestPattern::new(screen, Instant::now()));
+    let sender = match ShareSender::start(alice.engine.clone(), tracks, WANTED, capture) {
+        Ok(sender) => sender,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    assert_eq!((sender.config.width, sender.config.height), (1728, 1080));
+}

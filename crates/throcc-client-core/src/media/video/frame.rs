@@ -96,9 +96,39 @@ pub fn luma_psnr(a: &VideoFrame, b: &VideoFrame) -> f64 {
     10.0 * (255.0f64.powi(2) / mse.max(1e-9)).log10()
 }
 
+/// The largest even size with the aspect ratio of `source` that fits in `bound`.
+pub fn fit_within(source: (usize, usize), bound: (usize, usize)) -> (usize, usize) {
+    let (sw, sh) = (source.0.max(1), source.1.max(1));
+    let (bw, bh) = bound;
+    let (width, height) = if sw * bh > bw * sh {
+        (bw, sh * bw / sw)
+    } else {
+        (sw * bh / sh, bh)
+    };
+    let even = |v: usize| (v & !1).max(2);
+    (even(width).min(bw & !1), even(height).min(bh & !1))
+}
+
+/// The size a share of a `source`-sized screen is encoded at: its own aspect ratio, fitted
+/// in `bound` and never larger than the source.
+pub fn share_size(source: (usize, usize), bound: (usize, usize)) -> (usize, usize) {
+    let smaller = (bound.0.min(source.0).max(2), bound.1.min(source.1).max(2));
+    fit_within(source, smaller)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_share_keeps_its_screens_shape() {
+        assert_eq!(share_size((3024, 1964), (2560, 1440)), (2216, 1440));
+        assert_eq!(share_size((2560, 1600), (2560, 1440)), (2304, 1440));
+        assert_eq!(share_size((3440, 1440), (2560, 1440)), (2560, 1070));
+        assert_eq!(share_size((1920, 1080), (2560, 1440)), (1920, 1080));
+        assert_eq!(share_size((1365, 767), (2560, 1440)), (1364, 766));
+        assert_eq!(share_size((0, 0), (1280, 720)), (2, 2));
+    }
 
     #[test]
     fn test_pattern_number_reads_back() {

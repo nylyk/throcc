@@ -70,7 +70,7 @@ use super::{Capture, CaptureConfig, CaptureError};
 use crate::media::audio::SAMPLE_RATE;
 use crate::media::jitter::FRAME;
 use crate::media::share_audio::STEREO_FRAME;
-use crate::media::video::frame::VideoFrame;
+use crate::media::video::frame::{VideoFrame, share_size};
 use throcc_proto::frame::VIDEO_CLOCK_HZ;
 
 /// Captured frames waiting for the share thread. A full ring drops the newest frame.
@@ -117,7 +117,9 @@ fn capture(item: &GraphicsCaptureItem, config: CaptureConfig) -> windows::core::
     // SAFETY: `dxgi` is a live DXGI device.
     let device: IDirect3DDevice = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }?.cast()?;
     let size = item.Size()?;
-    let output = (config.width as u32, config.height as u32);
+    let source = (size.Width.max(0) as usize, size.Height.max(0) as usize);
+    let (width, height) = share_size(source, (config.width, config.height));
+    let output = (width as u32, height as u32);
     let converter = Converter::new(
         d3d,
         (size.Width as u32, size.Height as u32),

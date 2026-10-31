@@ -22,7 +22,7 @@ use super::{Capture, CaptureConfig, CaptureError};
 use crate::media::audio::SAMPLE_RATE;
 use crate::media::jitter::FRAME;
 use crate::media::share_audio::STEREO_FRAME;
-use crate::media::video::frame::VideoFrame;
+use crate::media::video::frame::{VideoFrame, fit_within};
 use throcc_proto::frame::VIDEO_CLOCK_HZ;
 
 /// Captured frames waiting for the share thread. A full ring drops the newest frame.
@@ -51,14 +51,22 @@ pub struct MacCapture {
 unsafe impl Send for MacCapture {}
 
 pub fn start(config: CaptureConfig) -> Result<MacCapture, CaptureError> {
-    capture(&pick()?, config)
+    let (filter, shape) = pick()?;
+    capture(&filter, shape, config)
 }
 
-fn capture(filter: &SCContentFilter, config: CaptureConfig) -> Result<MacCapture, CaptureError> {
+/// Captures `filter`, whose content has the aspect ratio of `shape`, at that aspect ratio
+/// fitted in the config's size.
+fn capture(
+    filter: &SCContentFilter,
+    shape: (usize, usize),
+    config: CaptureConfig,
+) -> Result<MacCapture, CaptureError> {
     let fps = config.fps.max(1);
+    let (width, height) = fit_within(shape, (config.width, config.height));
     let stream_config = SCStreamConfiguration::new()
-        .with_width(config.width as u32)
-        .with_height(config.height as u32)
+        .with_width(width as u32)
+        .with_height(height as u32)
         .with_pixel_format(PixelFormat::YCbCr_420f)
         .with_minimum_frame_interval(&CMTime::new(1, fps as i32))
         .with_queue_depth(5)
@@ -142,7 +150,8 @@ fn host_nanos(sample: &CMSampleBuffer) -> i64 {
 }
 
 /// Shows `SCContentSharingPicker` and waits for the person's choice.
-fn pick() -> Result<SCContentFilter, CaptureError> {
+/// Asks what to share; returns it with its size in points.
+fn pick() -> Result<(SCContentFilter, (usize, usize)), CaptureError> {
     let mut picker = SCContentSharingPickerConfiguration::new().map_err(failed)?;
     picker.set_allowed_picker_modes(&[
         SCContentSharingPickerMode::SingleDisplay,
@@ -154,7 +163,10 @@ fn pick() -> Result<SCContentFilter, CaptureError> {
         tx.send(outcome).ok();
     });
     match rx.recv().map_err(|_| CaptureError::Cancelled)? {
-        SCPickerOutcome::Picked(result) => Ok(result.filter()),
+        SCPickerOutcome::Picked(result) => {
+            let (width, height) = result.size();
+            Ok((result.filter(), (width as usize, height as usize)))
+        }
         SCPickerOutcome::Cancelled => Err(CaptureError::Cancelled),
         SCPickerOutcome::Error(message) => Err(CaptureError::Failed(message)),
     }
@@ -302,12 +314,13 @@ impl Drop for MacCapture {
 pub(crate) fn main_display(config: CaptureConfig) -> MacCapture {
     let content = SCShareableContent::get().expect("screen recording permission");
     let display = content.displays().into_iter().next().expect("a display");
+    let shape = (display.width() as usize, display.height() as usize);
     let filter = SCContentFilter::create()
         .with_display(&display)
         .with_excluding_windows(&[])
         .build()
         .expect("a display filter");
-    capture(&filter, config).expect("capture to start")
+    capture(&filter, shape, config).expect("capture to start")
 }
 
 #[cfg(test)]
