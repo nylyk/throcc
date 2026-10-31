@@ -14,7 +14,9 @@ use super::capture::{Capture, CaptureConfig, CaptureError};
 use super::engine::{Kind, MediaEngine, Outgoing, Received};
 use super::share_audio::{Playout, STEREO_FRAME, ShareAudioEncoder, due_frames};
 use super::video::decode::{Decoder, MAX_PIXELS};
-use super::video::encode::{EncodeError, EncodedUnit, Encoder, EncoderConfig};
+#[cfg(target_os = "linux")]
+use super::video::encode::EncodeError;
+use super::video::encode::{EncodedUnit, Encoder, EncoderConfig};
 use super::video::frame::{VideoFrame, share_size};
 use super::video::{Picture, PreviewDemand};
 
@@ -79,6 +81,7 @@ impl ShareSender {
         let first = first_frame(capture.as_mut(), &mut frame);
         let (width, height) = match first {
             Some(First::Copied) => share_size((frame.width, frame.height), bound),
+            #[cfg(target_os = "linux")]
             Some(First::InGpuMemory(size)) => share_size(size, bound),
             None => bound,
         };
@@ -118,6 +121,7 @@ impl ShareSender {
             unsent: first == Some(First::Copied),
             self_view: self_tx,
             preview: preview.clone(),
+            #[cfg(target_os = "linux")]
             refused: Vec::new(),
         };
         let thread = std::thread::Builder::new()
@@ -169,6 +173,7 @@ struct Sending {
     self_view: watch::Sender<Option<Arc<VideoFrame>>>,
     preview: Arc<PreviewDemand>,
     /// Modifiers of frames in GPU memory that failed, `None` for all of them.
+    #[cfg(target_os = "linux")]
     refused: Vec<Option<u64>>,
 }
 
@@ -284,6 +289,7 @@ const FIRST_FRAME_WAIT: Duration = Duration::from_secs(2);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum First {
     Copied,
+    #[cfg(target_os = "linux")]
     InGpuMemory((usize, usize)),
 }
 

@@ -210,6 +210,7 @@ pub struct Encoder {
     /// Fits pictures of another size into the encoder's, keyed by their size.
     scaler: Option<((usize, usize), SwsContext)>,
     /// The VA-API device of a VA-API encoder.
+    #[cfg(target_os = "linux")]
     device: Option<AVHWDeviceContext>,
     #[cfg(target_os = "linux")]
     gpu: Option<GpuInput>,
@@ -239,6 +240,8 @@ impl Encoder {
         let codec = AVCodec::find_encoder_by_name(candidate.name)?;
         match open_candidate(&codec, candidate, config) {
             Ok((ctx, device)) => {
+                #[cfg(not(target_os = "linux"))]
+                drop(device);
                 let name = candidate.name.to_str().unwrap_or("encoder");
                 info!(encoder = name, "video encoder ready");
                 Some(Self {
@@ -252,6 +255,7 @@ impl Encoder {
                     height: config.height,
                     idr_next: true,
                     scaler: None,
+                    #[cfg(target_os = "linux")]
                     device,
                     #[cfg(target_os = "linux")]
                     gpu: None,
