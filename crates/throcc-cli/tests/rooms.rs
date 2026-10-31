@@ -174,35 +174,17 @@ async fn reconnect_returns_to_the_wanted_room_with_fresh_tracks() {
 }
 
 #[tokio::test]
-async fn only_new_pictures_are_rate_limited_and_avatars_capped() {
+async fn profile_changes_are_rate_limited_and_avatars_capped() {
     let server = start_server();
     let alice = admin(&server).await;
-    let upload = |bytes: Vec<u8>| {
-        let alice = &alice;
-        async move {
-            match alice.request(Request::SetAvatar(bytes)).await {
-                Response::AvatarHash(hash) => hash,
-                other => panic!("upload refused: {other:?}"),
-            }
-        }
-    };
-    let (first, second) = (upload(vec![1; 64]).await, upload(vec![2; 64]).await);
-    let profile = |name: &str, avatar| Request::SetProfile {
+    let profile = |name: &str| Request::SetProfile {
         name: name.into(),
-        avatar,
+        avatar: None,
     };
-    assert_eq!(
-        alice.request(profile("Alice", Some(first))).await,
-        Response::Ok
-    );
-    assert_eq!(
-        alice.request(profile("Alicia", Some(first))).await,
-        Response::Ok
-    );
-    assert_eq!(alice.request(profile("Alicia", None)).await, Response::Ok);
-    let too_soon = alice.request(profile("Alicia", Some(second))).await;
+    assert_eq!(alice.request(profile("Alice")).await, Response::Ok);
+    let second = alice.request(profile("Alicia")).await;
     assert!(matches!(
-        too_soon,
+        second,
         Response::Err {
             code: ErrorCode::RateLimited,
             ..
@@ -218,7 +200,7 @@ async fn only_new_pictures_are_rate_limited_and_avatars_capped() {
             ..
         }
     ));
-    let empty_name = alice.request(profile("   ", None)).await;
+    let empty_name = alice.request(profile("   ")).await;
     assert!(matches!(
         empty_name,
         Response::Err {

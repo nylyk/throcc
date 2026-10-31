@@ -22,7 +22,7 @@ use crate::permissions;
 use crate::sfu::{ForwardingTable, KeyframeAggregator, Route, Sfu};
 
 pub const INVITE_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
-const PICTURE_INTERVAL: Duration = Duration::from_secs(10);
+const PROFILE_INTERVAL: Duration = Duration::from_secs(10);
 const TRACKS_PER_MEMBERSHIP: u32 = 3;
 const MINT_ATTEMPTS: usize = 64;
 const MAX_WATCHING: usize = 16;
@@ -82,7 +82,7 @@ struct Session {
     tracks: Option<Tracks>,
     media: MediaState,
     watching: Vec<MediaId>,
-    last_picture: Option<Instant>,
+    last_profile: Option<Instant>,
 }
 
 struct RoomEntry {
@@ -165,7 +165,7 @@ impl Hub {
                 tracks: None,
                 media: MediaState::default(),
                 watching: Vec::new(),
-                last_picture: None,
+                last_profile: None,
             },
         );
         let placed = want_room
@@ -425,15 +425,13 @@ impl Hub {
     fn set_profile(&mut self, user: UserId, name: String, avatar: Option<Hash>) -> Outcome {
         let name = valid_name(&name)?;
         let session = self.session(user)?;
-        let new_picture = avatar.is_some() && avatar != session.row.avatar;
-        if new_picture
-            && session
-                .last_picture
-                .is_some_and(|t| t.elapsed() < PICTURE_INTERVAL)
+        if session
+            .last_profile
+            .is_some_and(|t| t.elapsed() < PROFILE_INTERVAL)
         {
             return Err(Refusal::new(
                 ErrorCode::RateLimited,
-                "one new picture per 10 seconds",
+                "one profile change per 10 seconds",
             ));
         }
         self.db
@@ -442,9 +440,7 @@ impl Hub {
         let session = self.session_mut(user)?;
         session.row.name = name;
         session.row.avatar = avatar;
-        if new_picture {
-            session.last_picture = Some(Instant::now());
-        }
+        session.last_profile = Some(Instant::now());
         if let Some(p) = self.sessions.get(&user).and_then(presence) {
             self.emit_all(Event::PresenceChanged(p));
         }

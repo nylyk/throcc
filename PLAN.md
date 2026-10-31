@@ -193,7 +193,7 @@ enum ServerMessage { Response { id: u32, res: Response }, Event(Event) }
 
 enum Request {
     SetRoom(Option<RoomId>),                                       // -> Placed
-    SetProfile { name: String, avatar: Option<Hash> },             // full replace; a new picture 1 per 10 s
+    SetProfile { name: String, avatar: Option<Hash> },             // full replace, 1 per 10 s
     SetAvatar(Vec<u8>),                                            // -> AvatarHash, max 64 KiB
     GetAvatar(Hash),                                               // -> Avatar
     SetEncKey { key: [u8; 32], sig: [u8; 64] },                    // X25519 key signed by identity key
