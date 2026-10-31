@@ -5173,19 +5173,52 @@ impl Window {
     pub fn paint_surface(
         &mut self,
         bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
         image_buffer: CFRetained<CVPixelBuffer>,
     ) {
         use crate::PaintSurface;
 
         self.invalidator.debug_assert_paint();
 
+        let corner_radii = corner_radii
+            .clamp_radii_for_quad_size(bounds.size)
+            .scale(self.scale_factor());
         let bounds = self.snap_bounds(bounds);
         let content_mask = self.snapped_content_mask();
         self.next_frame.scene.insert_primitive(PaintSurface {
             order: 0,
             bounds,
             content_mask,
+            corner_radii,
             image_buffer,
+        });
+    }
+
+    /// Paint a frame of a video stream into the scene for the next frame at the current z-index.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    pub fn paint_surface(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        frame: crate::Nv12Frame,
+    ) {
+        use crate::PaintSurface;
+
+        self.invalidator.debug_assert_paint();
+
+        let corner_radii = corner_radii
+            .clamp_radii_for_quad_size(bounds.size)
+            .scale(self.scale_factor());
+        let bounds = self.snap_bounds(bounds);
+        let content_mask = self.snapped_content_mask();
+        self.next_frame.scene.insert_primitive(PaintSurface {
+            order: 0,
+            bounds,
+            content_mask,
+            corner_radii,
+            frame,
         });
     }
 

@@ -769,8 +769,11 @@ pub struct PaintSurface {
     pub order: DrawOrder,
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
+    pub corner_radii: Corners<ScaledPixels>,
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub image_buffer: objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>,
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    pub frame: crate::Nv12Frame,
 }
 
 impl From<PaintSurface> for Primitive {
