@@ -25,3 +25,7 @@ gpui-platform.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+gpui-wgpu = { package = "gpui-pre-wgpu", version = "=0.3.10", features = ["test-support"] }
+libc.workspace = true

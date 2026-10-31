@@ -14,5 +14,11 @@ converting every frame to BGRA on the UI thread:
   the size and the Y and CbCr planes) off Apple platforms. `PaintSurface` carries it and the
   element's corner radii. The macOS `CVPixelBuffer` path is unchanged apart from the radii,
   which the Metal renderer does not read.
+- **gpui-pre-wgpu:** draws the `Surfaces` batch, which it skipped. Each stream keeps an R8 Y
+  and an RG8 CbCr texture, recreated only when its size changes and written only when the
+  frame's generation changes; streams missing from a scene drop theirs. The surface parameters
+  sit in one uniform buffer behind a dynamic offset, so a stream's bind group is built once.
+  `fs_surface` uses full-range BT.709, which throcc captures and encodes, instead of BT.601,
+  and rounds corners with the quads' `quad_sdf`.
 
 See `docs/DECISIONS.md` for why they are vendored and how to refresh them.

@@ -1315,6 +1315,7 @@ fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
 struct SurfaceParams {
     bounds: Bounds,
     content_mask: Bounds,
+    corner_radii: Corners,
 }
 
 @group(1) @binding(0) var<uniform> surface_locals: SurfaceParams;
@@ -1322,11 +1323,12 @@ struct SurfaceParams {
 @group(1) @binding(2) var t_cb_cr: texture_2d<f32>;
 @group(1) @binding(3) var s_surface: sampler;
 
+// Full-range BT.709 with chroma centred on 128, as throcc captures and encodes.
 const ycbcr_to_RGB = mat4x4<f32>(
     vec4<f32>( 1.0000f,  1.0000f,  1.0000f, 0.0),
-    vec4<f32>( 0.0000f, -0.3441f,  1.7720f, 0.0),
-    vec4<f32>( 1.4020f, -0.7141f,  0.0000f, 0.0),
-    vec4<f32>(-0.7010f,  0.5291f, -0.8860f, 1.0),
+    vec4<f32>( 0.0000f, -0.1873f,  1.8556f, 0.0),
+    vec4<f32>( 1.5748f, -0.4681f,  0.0000f, 0.0),
+    vec4<f32>(-0.7905f,  0.3290f, -0.9314f, 1.0),
 );
 
 struct SurfaceVarying {
@@ -1357,6 +1359,7 @@ fn fs_surface(input: SurfaceVarying) -> @location(0) vec4<f32> {
         textureSampleLevel(t_y, s_surface, input.texture_position, 0.0).r,
         textureSampleLevel(t_cb_cr, s_surface, input.texture_position, 0.0).rg,
         1.0);
-
-    return ycbcr_to_RGB * y_cb_cr;
+    let color = vec4<f32>(saturate((ycbcr_to_RGB * y_cb_cr).rgb), 1.0);
+    let distance = quad_sdf(input.position.xy, surface_locals.bounds, surface_locals.corner_radii);
+    return blend_color(color, saturate(0.5 - distance));
 }

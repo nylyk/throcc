@@ -35,7 +35,7 @@ jobs:
           sudo apt-get install -y libasound2-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libvulkan-dev libfontconfig-dev libfreetype-dev libx11-xcb-dev libxcb1-dev libxcb-randr0-dev \
             libxcb-shm0-dev libxcb-xfixes0-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev libgbm-dev \
-            libegl-dev libssl-dev libzstd-dev pkg-config
+            libegl-dev libssl-dev libzstd-dev pkg-config mesa-vulkan-drivers
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/ci-run.sh cargo clippy --workspace --all-targets -- -D warnings

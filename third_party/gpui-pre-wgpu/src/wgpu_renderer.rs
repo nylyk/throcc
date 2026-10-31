@@ -4,8 +4,8 @@ use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
 use collections::FxHashMap;
 use gpui::{
-    AtlasTextureId, Background, Bounds, DevicePixels, GpuSpecs, Path, Point, PrimitiveBatch,
-    ScaledPixels, Scene, Size, get_gamma_correction_ratios,
+    AtlasTextureId, Background, Bounds, DevicePixels, GpuSpecs, Nv12Frame, PaintSurface, Path,
+    Point, PrimitiveBatch, ScaledPixels, Scene, Size, SurfaceId, get_gamma_correction_ratios,
 };
 use log::warn;
 #[cfg(not(target_family = "wasm"))]
@@ -85,6 +85,7 @@ impl From<Bounds<ScaledPixels>> for PodBounds {
 struct SurfaceParams {
     bounds: PodBounds,
     content_mask: PodBounds,
+    corner_radii: [f32; 4],
 }
 
 #[repr(C)]
@@ -133,7 +134,6 @@ struct WgpuPipelines {
     mono_sprites: wgpu::RenderPipeline,
     subpixel_sprites: Option<wgpu::RenderPipeline>,
     poly_sprites: wgpu::RenderPipeline,
-    #[allow(dead_code)]
     surfaces: wgpu::RenderPipeline,
 }
 
@@ -195,10 +195,25 @@ struct WgpuResources {
     path_intermediate_view: Option<wgpu::TextureView>,
     path_msaa_texture: Option<wgpu::Texture>,
     path_msaa_view: Option<wgpu::TextureView>,
+    /// One `SurfaceParams` per surface in the frame, each at a multiple of the uniform
+    /// offset alignment and bound through a dynamic offset.
+    surface_params_buffer: wgpu::Buffer,
+    surface_params_capacity: usize,
+    surface_textures: FxHashMap<SurfaceId, SurfaceTextures>,
 }
 
 struct CachedTextureBindGroup {
     texture_generation: u64,
+    bind_group: wgpu::BindGroup,
+}
+
+/// The planes of the last frame uploaded for one video stream.
+struct SurfaceTextures {
+    width: u32,
+    height: u32,
+    generation: Option<u64>,
+    y: wgpu::Texture,
+    cb_cr: wgpu::Texture,
     bind_group: wgpu::BindGroup,
 }
 
@@ -215,6 +230,7 @@ struct WgpuRendererCore {
     resources: WgpuResources,
     atlas: Arc<WgpuAtlas>,
     path_globals_offset: u64,
+    surface_params_stride: u64,
     gamma_offset: u64,
     instance_data_capacity: u64,
     max_instance_data_size: u64,
@@ -580,7 +596,7 @@ impl WgpuRendererCore {
                     visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
+                        has_dynamic_offset: true,
                         min_binding_size: NonZeroU64::new(
                             std::mem::size_of::<SurfaceParams>() as u64
                         ),
@@ -1331,6 +1347,11 @@ impl WgpuRendererCore {
             ],
         });
         let max_texture_size = device.limits().max_texture_dimension_2d;
+        let surface_params_stride =
+            (std::mem::size_of::<SurfaceParams>() as u64).next_multiple_of(uniform_alignment);
+        let surface_params_capacity = 4;
+        let surface_params_buffer =
+            Self::create_surface_params_buffer(&device, surface_params_stride, surface_params_capacity);
 
         Self {
             resources: WgpuResources {
@@ -1348,9 +1369,13 @@ impl WgpuRendererCore {
                 path_intermediate_view: None,
                 path_msaa_texture: None,
                 path_msaa_view: None,
+                surface_params_buffer,
+                surface_params_capacity,
+                surface_textures: FxHashMap::default(),
             },
             atlas,
             path_globals_offset,
+            surface_params_stride,
             gamma_offset,
             instance_data_capacity,
             max_instance_data_size,
@@ -1492,6 +1517,7 @@ impl WgpuRendererCore {
                 )
             })?;
         self.prepare_texture_bind_groups(scene);
+        self.prepare_surfaces(&scene.surfaces);
 
         let mut encoder =
             self.resources()
@@ -1604,9 +1630,9 @@ impl WgpuRendererCore {
                             &mut pass,
                         )?;
                     }
-                    // Surfaces are macOS-only for video playback and are not
-                    // implemented by the WGPU renderer.
-                    PrimitiveBatch::Surfaces(_surfaces) => {}
+                    PrimitiveBatch::Surfaces(range) => {
+                        self.draw_surfaces(&scene.surfaces[range.clone()], range.start, &mut pass)
+                    }
                 }
             }
         }
@@ -1724,6 +1750,225 @@ impl WgpuRendererCore {
                     bind_group,
                 },
             );
+        }
+    }
+
+    fn create_surface_params_buffer(
+        device: &wgpu::Device,
+        stride: u64,
+        capacity: usize,
+    ) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("surface_params_buffer"),
+            size: stride * capacity as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    fn create_surface_bind_group(
+        resources: &WgpuResources,
+        y: &wgpu::Texture,
+        cb_cr: &wgpu::Texture,
+    ) -> wgpu::BindGroup {
+        let y_view = y.create_view(&wgpu::TextureViewDescriptor::default());
+        let cb_cr_view = cb_cr.create_view(&wgpu::TextureViewDescriptor::default());
+        resources
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("surface_bind_group"),
+                layout: &resources.bind_group_layouts.surfaces,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &resources.surface_params_buffer,
+                            offset: 0,
+                            size: NonZeroU64::new(std::mem::size_of::<SurfaceParams>() as u64),
+                        }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&y_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&cb_cr_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(&resources.atlas_sampler),
+                    },
+                ],
+            })
+    }
+
+    /// Writes every surface's parameters and uploads the frames whose generation the
+    /// renderer has not seen. Streams absent from this scene release their textures.
+    fn prepare_surfaces(&mut self, surfaces: &[PaintSurface]) {
+        self.resources
+            .surface_textures
+            .retain(|id, _| surfaces.iter().any(|surface| surface.frame.id == *id));
+        if surfaces.is_empty() {
+            return;
+        }
+
+        if surfaces.len() > self.resources.surface_params_capacity {
+            let capacity = surfaces.len().next_power_of_two();
+            let resources = &mut self.resources;
+            resources.surface_params_buffer = Self::create_surface_params_buffer(
+                &resources.device,
+                self.surface_params_stride,
+                capacity,
+            );
+            resources.surface_params_capacity = capacity;
+            // Their bind groups point at the old buffer.
+            resources.surface_textures.clear();
+        }
+
+        let stride = self.surface_params_stride as usize;
+        let mut params = vec![0; stride * surfaces.len()];
+        for (surface, slot) in surfaces.iter().zip(params.chunks_exact_mut(stride)) {
+            let corners = surface.corner_radii;
+            let surface_params = SurfaceParams {
+                bounds: surface.bounds.into(),
+                content_mask: surface.content_mask.bounds.into(),
+                corner_radii: [
+                    corners.top_left.0,
+                    corners.top_right.0,
+                    corners.bottom_right.0,
+                    corners.bottom_left.0,
+                ],
+            };
+            slot[..std::mem::size_of::<SurfaceParams>()]
+                .copy_from_slice(bytemuck::bytes_of(&surface_params));
+            self.upload_surface(&surface.frame);
+        }
+        self.resources
+            .queue
+            .write_buffer(&self.resources.surface_params_buffer, 0, &params);
+    }
+
+    fn upload_surface(&mut self, frame: &Nv12Frame) {
+        let Some((y, cb_cr)) = frame.planes() else {
+            log::warn!("skipping a surface whose planes are shorter than its size");
+            return;
+        };
+        if frame.width == 0
+            || frame.height == 0
+            || frame.width > self.max_texture_size
+            || frame.height > self.max_texture_size
+        {
+            return;
+        }
+        let (chroma_width, chroma_height) = frame.chroma_size();
+        let resources = &mut self.resources;
+        let current = resources
+            .surface_textures
+            .get(&frame.id)
+            .is_some_and(|textures| {
+                textures.width == frame.width && textures.height == frame.height
+            });
+        if !current {
+            let plane = |label, width, height, format| {
+                resources.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                })
+            };
+            let y = plane(
+                "surface_y",
+                frame.width,
+                frame.height,
+                wgpu::TextureFormat::R8Unorm,
+            );
+            let cb_cr = plane(
+                "surface_cb_cr",
+                chroma_width,
+                chroma_height,
+                wgpu::TextureFormat::Rg8Unorm,
+            );
+            let bind_group = Self::create_surface_bind_group(resources, &y, &cb_cr);
+            resources.surface_textures.insert(
+                frame.id,
+                SurfaceTextures {
+                    width: frame.width,
+                    height: frame.height,
+                    generation: None,
+                    y,
+                    cb_cr,
+                    bind_group,
+                },
+            );
+        }
+
+        let Some(textures) = resources.surface_textures.get_mut(&frame.id) else {
+            return;
+        };
+        if textures.generation == Some(frame.generation) {
+            return;
+        }
+        let write = |texture: &wgpu::Texture, data: &[u8], bytes_per_row, width, height| {
+            resources.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                data,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: None,
+                },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        };
+        write(&textures.y, y, frame.width, frame.width, frame.height);
+        write(
+            &textures.cb_cr,
+            cb_cr,
+            2 * chroma_width,
+            chroma_width,
+            chroma_height,
+        );
+        textures.generation = Some(frame.generation);
+    }
+
+    fn draw_surfaces(
+        &self,
+        surfaces: &[PaintSurface],
+        first_surface: usize,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
+        let resources = self.resources();
+        pass.set_pipeline(&resources.pipelines.surfaces);
+        pass.set_bind_group(0, &resources.globals_bind_group, &[]);
+        for (index, surface) in (first_surface..).zip(surfaces) {
+            let Some(textures) = resources.surface_textures.get(&surface.frame.id) else {
+                continue;
+            };
+            if textures.generation != Some(surface.frame.generation) {
+                continue;
+            }
+            let offset = index as u64 * self.surface_params_stride;
+            pass.set_bind_group(1, &textures.bind_group, &[offset as u32]);
+            pass.draw(0..4, 0..1);
         }
     }
 
