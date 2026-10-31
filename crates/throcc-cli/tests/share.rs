@@ -283,6 +283,15 @@ async fn a_screen_share_runs_for_profiling() {
         sender.config.height,
         sender.encoder
     );
+    if std::env::var_os("THROCC_PREVIEW").is_some() {
+        let preview = sender.preview.clone();
+        tokio::spawn(async move {
+            loop {
+                preview.drawn();
+                tokio::time::sleep(Duration::from_millis(16)).await;
+            }
+        });
+    }
     let mut units = watch(&bob, tracks.video).await;
     let (mut count, mut bytes) = (0usize, 0usize);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);

@@ -25,7 +25,7 @@ use crate::lock;
 use crate::media::audio::VoiceSettings;
 use crate::media::engine::{KeyState, Kind};
 use crate::media::share_audio::Playout;
-use crate::media::video::Picture;
+use crate::media::video::{Picture, PreviewDemand};
 use crate::media::voice::{VoiceCommand, VoiceEngine};
 use crate::profile::Profile;
 use crate::state::{
@@ -55,6 +55,8 @@ pub(crate) struct Shared {
     pub state: Mutex<Arc<State>>,
     pub events: broadcast::Sender<Event>,
     pub pictures: Mutex<HashMap<UserId, Picture>>,
+    /// Our own user and the preview demand of our running share.
+    pub preview: Mutex<Option<(UserId, Arc<PreviewDemand>)>>,
     pub avatars: Mutex<HashMap<Hash, AvatarSlot>>,
     /// The processed mic level in dBFS while audio runs.
     pub mic_level: Mutex<Option<f32>>,
@@ -98,6 +100,15 @@ impl Shared {
 
     pub fn picture(&self, user: UserId) -> Option<Picture> {
         lock(&self.pictures).get(&user).cloned()
+    }
+
+    /// Marks `user`'s picture as drawn, which our own share needs to build its preview.
+    pub fn picture_drawn(&self, user: UserId) {
+        if let Some((me, demand)) = lock(&self.preview).as_ref()
+            && *me == user
+        {
+            demand.drawn();
+        }
     }
 
     fn set_picture(&self, user: UserId, picture: Option<Picture>) {
@@ -1009,6 +1020,7 @@ impl Session {
                 self.media.share = Some(sender.config);
                 self.shared
                     .set_picture(self.call.me(), Some(sender.self_view.clone()));
+                *lock(&self.shared.preview) = Some((self.call.me(), sender.preview.clone()));
                 info!(encoder = sender.encoder, "sharing");
                 self.sharing = Some(sender);
                 self.push_media().await;
@@ -1029,6 +1041,7 @@ impl Session {
         if let Some(sender) = self.sharing.take() {
             tokio::task::spawn_blocking(move || drop(sender));
             self.shared.set_picture(self.call.me(), None);
+            *lock(&self.shared.preview) = None;
         }
     }
 

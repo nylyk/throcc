@@ -13,10 +13,10 @@ use tracing::warn;
 use super::capture::{Capture, CaptureConfig, CaptureError};
 use super::engine::{Kind, MediaEngine, Outgoing, Received};
 use super::share_audio::{Playout, STEREO_FRAME, ShareAudioEncoder, due_frames};
-use super::video::Picture;
 use super::video::decode::{Decoder, MAX_PIXELS};
 use super::video::encode::{Encoder, EncoderConfig};
 use super::video::frame::{VideoFrame, share_size};
+use super::video::{Picture, PreviewDemand};
 
 const IDLE: Duration = Duration::from_millis(2);
 /// Self-view gets every Nth frame, shrunk to about this wide; it is only a thumbnail of
@@ -62,6 +62,7 @@ pub struct ShareSender {
     pub config: ShareConfig,
     pub encoder: &'static str,
     pub self_view: Picture,
+    pub preview: Arc<PreviewDemand>,
 }
 
 impl ShareSender {
@@ -104,6 +105,7 @@ impl ShareSender {
         let stop = Arc::new(AtomicBool::new(false));
         let (recover, recover_rx) = std_mpsc::channel();
         let (self_tx, self_view) = watch::channel(None);
+        let preview = Arc::new(PreviewDemand::default());
         let sending = Sending {
             stop: stop.clone(),
             recover: recover_rx,
@@ -115,6 +117,7 @@ impl ShareSender {
             frame,
             unsent: first,
             self_view: self_tx,
+            preview: preview.clone(),
         };
         let thread = std::thread::Builder::new()
             .name("throcc-share".into())
@@ -127,6 +130,7 @@ impl ShareSender {
             config,
             encoder: name,
             self_view,
+            preview,
         })
     }
 
@@ -162,6 +166,7 @@ struct Sending {
     /// Whether `frame` holds a captured picture that has not been sent yet.
     unsent: bool,
     self_view: watch::Sender<Option<Arc<VideoFrame>>>,
+    preview: Arc<PreviewDemand>,
 }
 
 impl Sending {
@@ -184,7 +189,7 @@ impl Sending {
                 continue;
             }
             count = count.wrapping_add(1);
-            if count.is_multiple_of(SELF_VIEW_EVERY) {
+            if count.is_multiple_of(SELF_VIEW_EVERY) && self.preview.wanted() {
                 let factor = self.frame.width / SELF_VIEW_WIDTH;
                 let thumbnail = Arc::new(self.frame.shrunk(factor));
                 self.self_view.send_replace(Some(thumbnail));

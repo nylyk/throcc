@@ -113,6 +113,9 @@ pub trait ClientApi: Send + Sync {
     fn safety_number(&self, user: UserId) -> Option<String>;
     /// The newest picture of `user`'s share while watched, or of ours while sharing.
     fn picture(&self, user: UserId) -> Option<Picture>;
+    /// Tells the core `user`'s picture is on screen. Our own share builds its preview only
+    /// while this keeps being called.
+    fn picture_drawn(&self, _user: UserId) {}
     /// The profile picture behind `hash`, fetched in the background on first ask.
     fn avatar(&self, hash: Hash) -> Option<Arc<[u8]>>;
     /// The processed mic level in dBFS, refreshed every 100 ms while audio runs.
@@ -161,6 +164,7 @@ impl Client {
             state: Mutex::new(Arc::new(State::default())),
             events,
             pictures: Mutex::default(),
+            preview: Mutex::default(),
             avatars: Mutex::default(),
             mic_level: Mutex::default(),
         });
@@ -216,6 +220,10 @@ impl ClientApi for Client {
 
     fn picture(&self, user: UserId) -> Option<Picture> {
         self.shared.picture(user)
+    }
+
+    fn picture_drawn(&self, user: UserId) {
+        self.shared.picture_drawn(user);
     }
 
     fn avatar(&self, hash: Hash) -> Option<Arc<[u8]>> {

@@ -27,6 +27,9 @@ impl Feeds {
         cx: &mut App,
     ) -> AnyElement {
         window.request_animation_frame();
+        if let Some(client) = client {
+            client.picture_drawn(user);
+        }
         let frame = client
             .and_then(|c| c.picture(user))
             .and_then(|picture| picture.borrow().clone());
