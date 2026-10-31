@@ -827,6 +827,7 @@ fn dmabuf_of(datas: &[Data], layout: Layout, drm: Drm) -> Option<DmaBuf> {
     let dmabufs = datas.iter().filter(|d| d.type_() == DataType::DmaBuf);
     for (data, plane) in dmabufs.zip(&mut planes) {
         let chunk = data.chunk();
+        // PipeWire lets producers leave a DMA-BUF chunk's size at 0, so it is not checked.
         if chunk.flags().contains(ChunkFlags::CORRUPTED) {
             return None;
         }
