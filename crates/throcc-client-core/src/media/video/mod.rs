@@ -3,6 +3,8 @@ pub mod decode;
 #[cfg(feature = "ffmpeg")]
 pub mod encode;
 pub mod frame;
+#[cfg(all(feature = "ffmpeg", target_os = "linux"))]
+pub(crate) mod vaapi;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

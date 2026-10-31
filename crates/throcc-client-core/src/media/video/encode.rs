@@ -2,7 +2,7 @@ use std::ffi::{CStr, CString};
 
 use bytes::Bytes;
 use rsmpeg::avcodec::{AVCodec, AVCodecContext};
-use rsmpeg::avutil::{AVFrame, AVHWDeviceContext, opt_set, ra};
+use rsmpeg::avutil::{AVFrame, AVHWDeviceContext, AVHWFramesContext, opt_set, ra};
 use rsmpeg::error::RsmpegError;
 use rsmpeg::ffi;
 use rsmpeg::swscale::SwsContext;
@@ -10,7 +10,13 @@ use throcc_proto::frame::VIDEO_CLOCK_HZ;
 use throcc_proto::messages::{Codec, Recovery};
 use tracing::{debug, info};
 
+#[cfg(target_os = "linux")]
+use super::frame::share_size;
 use super::frame::{VideoFrame, fit_within};
+#[cfg(target_os = "linux")]
+use super::vaapi::{self, Rectangle, VaError, Vpp};
+#[cfg(target_os = "linux")]
+use crate::media::capture::DmaBuf;
 
 /// A GOP cap of this many seconds bounds how long a picture stays broken without a request.
 const GOP_SECONDS: i32 = 4;
@@ -25,6 +31,14 @@ pub enum EncodeError {
     Scaler,
     #[error("the VA-API encoder has no surface pool")]
     NoSurfaces,
+    #[error("this encoder takes no frames in GPU memory")]
+    NoGpuInput,
+    #[cfg(target_os = "linux")]
+    #[error("importing a frame in GPU memory: {0}")]
+    Import(VaError),
+    #[cfg(target_os = "linux")]
+    #[error("GPU video processing: {0}")]
+    Gpu(VaError),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,6 +173,8 @@ const MEDIA_FOUNDATION: &[(&CStr, &CStr)] = &[
 ];
 /// Surfaces in a VA-API encoder's pool: enough for the frames it holds plus one uploading.
 const VAAPI_SURFACES: i32 = 8;
+#[cfg(target_os = "linux")]
+const PREVIEW_SURFACES: i32 = 2;
 const VAAPI: &[(&CStr, &CStr)] = &[(c"rc_mode", c"CBR"), (c"async_depth", c"1")];
 const LIBVPX: &[(&CStr, &CStr)] = &[
     (c"deadline", c"realtime"),
@@ -193,6 +209,18 @@ pub struct Encoder {
     idr_next: bool,
     /// Fits pictures of another size into the encoder's, keyed by their size.
     scaler: Option<((usize, usize), SwsContext)>,
+    /// The VA-API device of a VA-API encoder.
+    device: Option<AVHWDeviceContext>,
+    #[cfg(target_os = "linux")]
+    gpu: Option<GpuInput>,
+}
+
+/// Video processing on a VA-API encoder's device, and the pool previews are drawn into.
+#[cfg(target_os = "linux")]
+struct GpuInput {
+    vpp: Vpp,
+    device: AVHWDeviceContext,
+    previews: Option<((usize, usize), AVHWFramesContext)>,
 }
 
 impl Encoder {
@@ -210,7 +238,7 @@ impl Encoder {
     fn open_with(candidate: &Candidate, config: EncoderConfig) -> Option<Self> {
         let codec = AVCodec::find_encoder_by_name(candidate.name)?;
         match open_candidate(&codec, candidate, config) {
-            Ok(ctx) => {
+            Ok((ctx, device)) => {
                 let name = candidate.name.to_str().unwrap_or("encoder");
                 info!(encoder = name, "video encoder ready");
                 Some(Self {
@@ -224,6 +252,9 @@ impl Encoder {
                     height: config.height,
                     idr_next: true,
                     scaler: None,
+                    device,
+                    #[cfg(target_os = "linux")]
+                    gpu: None,
                 })
             }
             Err(e) => {
@@ -259,7 +290,15 @@ impl Encoder {
         if self.vaapi {
             frame = self.upload(&frame)?;
         }
-        frame.set_pts(i64::from(picture.timestamp));
+        self.submit(frame, picture.timestamp)
+    }
+
+    fn submit(
+        &mut self,
+        mut frame: AVFrame,
+        timestamp: u32,
+    ) -> Result<Vec<EncodedUnit>, EncodeError> {
+        frame.set_pts(i64::from(timestamp));
         if std::mem::take(&mut self.idr_next) {
             frame.set_pict_type(ffi::AV_PICTURE_TYPE_I);
         }
@@ -277,13 +316,96 @@ impl Encoder {
 
     /// Copies an NV12 frame into a VA-API surface from the encoder's pool.
     fn upload(&mut self, frame: &AVFrame) -> Result<AVFrame, EncodeError> {
+        let mut surface = self.surface()?;
+        surface.hwframe_transfer_data(frame)?;
+        Ok(surface)
+    }
+
+    /// A free surface from the encoder's pool.
+    fn surface(&mut self) -> Result<AVFrame, EncodeError> {
         let mut surface = AVFrame::new();
         let Some(mut pool) = self.ctx.hw_frames_ctx_mut() else {
             return Err(EncodeError::NoSurfaces);
         };
         pool.get_buffer(&mut surface)?;
-        surface.hwframe_transfer_data(frame)?;
         Ok(surface)
+    }
+
+    /// Encodes a frame in GPU memory, scaled and converted on the GPU into a surface of the
+    /// encoder's pool. Only VA-API encoders take them.
+    #[cfg(target_os = "linux")]
+    pub fn encode_dmabuf(&mut self, frame: &DmaBuf) -> Result<Vec<EncodedUnit>, EncodeError> {
+        let source = (frame.width as usize, frame.height as usize);
+        let region = rectangle(fitted(source, (self.width, self.height)));
+        self.gpu()?;
+        let surface = self.surface()?;
+        let vpp = &self.gpu()?.vpp;
+        let imported = vpp.import(frame).map_err(EncodeError::Import)?;
+        vpp.convert(
+            &imported,
+            (frame.width, frame.height),
+            surface_id(&surface),
+            region,
+        )
+        .map_err(EncodeError::Gpu)?;
+        drop(imported);
+        self.submit(surface, frame.timestamp)
+    }
+
+    /// A copy of a frame in GPU memory scaled on the GPU to at most `width` wide, for
+    /// showing the sharer what they send.
+    #[cfg(target_os = "linux")]
+    pub fn preview_dmabuf(
+        &mut self,
+        frame: &DmaBuf,
+        width: usize,
+    ) -> Result<VideoFrame, EncodeError> {
+        let source = (frame.width as usize, frame.height as usize);
+        let size = share_size(source, (width, width));
+        let gpu = self.gpu()?;
+        if gpu.previews.as_ref().is_none_or(|(made, _)| *made != size) {
+            let pool = surface_pool(&gpu.device, size, PREVIEW_SURFACES)?;
+            gpu.previews = Some((size, pool));
+        }
+        let Some((_, pool)) = gpu.previews.as_mut() else {
+            return Err(EncodeError::NoSurfaces);
+        };
+        let mut surface = AVFrame::new();
+        pool.get_buffer(&mut surface)?;
+        let imported = gpu.vpp.import(frame).map_err(EncodeError::Import)?;
+        let whole = rectangle((0, 0, size.0, size.1));
+        gpu.vpp
+            .convert(
+                &imported,
+                (frame.width, frame.height),
+                surface_id(&surface),
+                whole,
+            )
+            .map_err(EncodeError::Gpu)?;
+        drop(imported);
+        let mut downloaded = AVFrame::new();
+        downloaded.set_format(ffi::AV_PIX_FMT_NV12);
+        downloaded.hwframe_transfer_data(&surface)?;
+        let mut preview = VideoFrame::blank(size.0, size.1);
+        preview.timestamp = frame.timestamp;
+        copy_out(&downloaded, &mut preview);
+        Ok(preview)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn gpu(&mut self) -> Result<&mut GpuInput, EncodeError> {
+        if self.gpu.is_none() {
+            let device = self.device.as_ref().ok_or(EncodeError::NoGpuInput)?;
+            // SAFETY: the display stays initialised while `device` lives, which the Vpp
+            // keeps alive beside it.
+            let vpp = unsafe { Vpp::new(display(device)) }.map_err(EncodeError::Gpu)?;
+            self.gpu = Some(GpuInput {
+                vpp,
+                device: device.clone(),
+                previews: None,
+            });
+        }
+        self.gpu.as_mut().ok_or(EncodeError::NoGpuInput)
     }
 
     /// Takes every packet the encoder has ready.
@@ -405,6 +527,53 @@ fn fitted(source: (usize, usize), target: (usize, usize)) -> (usize, usize, usiz
     )
 }
 
+/// The VADisplay of a VA-API device context.
+#[cfg(target_os = "linux")]
+fn display(device: &AVHWDeviceContext) -> vaapi::Display {
+    // SAFETY: a VA-API device context's hwctx is an AVVAAPIDeviceContext, which begins with
+    // its VADisplay.
+    unsafe {
+        let context = device.data as *const ffi::AVHWDeviceContext;
+        *((*context).hwctx as *const vaapi::Display)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn rectangle((x, y, width, height): (usize, usize, usize, usize)) -> Rectangle {
+    Rectangle {
+        x: x as i16,
+        y: y as i16,
+        width: width as u16,
+        height: height as u16,
+    }
+}
+
+/// The VA surface a VA-API frame stands for.
+#[cfg(target_os = "linux")]
+fn surface_id(frame: &AVFrame) -> vaapi::SurfaceId {
+    frame.data[3] as usize as vaapi::SurfaceId
+}
+
+/// Copies a downloaded NV12 frame of the preview's size into it.
+#[cfg(target_os = "linux")]
+fn copy_out(frame: &AVFrame, into: &mut VideoFrame) {
+    let width = into.width;
+    let planes = [(0, &mut into.y), (1, &mut into.uv)];
+    for (plane, out) in planes {
+        let stride = frame.linesize[plane] as usize;
+        if frame.data[plane].is_null() || stride < width {
+            return;
+        }
+        for (row, out) in out.chunks_exact_mut(width).enumerate() {
+            // SAFETY: the transfer gave the plane at least as many rows of `stride` bytes
+            // as `out` has rows of `width`.
+            let source =
+                unsafe { std::slice::from_raw_parts(frame.data[plane].add(row * stride), width) };
+            out.copy_from_slice(source);
+        }
+    }
+}
+
 fn pixel_format(input: Input) -> i32 {
     match input {
         Input::Nv12 => ffi::AV_PIX_FMT_NV12,
@@ -443,29 +612,42 @@ fn fill_black(frame: &mut AVFrame, input: Input, height: usize) {
     }
 }
 
+/// A pool of `count` NV12 VA-API surfaces of `size` on `device`.
+fn surface_pool(
+    device: &AVHWDeviceContext,
+    size: (usize, usize),
+    count: i32,
+) -> Result<AVHWFramesContext, RsmpegError> {
+    let mut pool = device.hwframe_ctx_alloc();
+    let surfaces = pool.data();
+    surfaces.format = ffi::AV_PIX_FMT_VAAPI;
+    surfaces.sw_format = ffi::AV_PIX_FMT_NV12;
+    surfaces.width = size.0 as i32;
+    surfaces.height = size.1 as i32;
+    surfaces.initial_pool_size = count;
+    pool.init()?;
+    Ok(pool)
+}
+
+/// Opens `candidate`, and returns the VA-API device it encodes on, if any.
 fn open_candidate(
     codec: &AVCodec,
     candidate: &Candidate,
     config: EncoderConfig,
-) -> Result<AVCodecContext, RsmpegError> {
+) -> Result<(AVCodecContext, Option<AVHWDeviceContext>), RsmpegError> {
     let mut ctx = AVCodecContext::new(codec);
     ctx.set_width(config.width as i32);
     ctx.set_height(config.height as i32);
     ctx.set_time_base(ra(1, VIDEO_CLOCK_HZ as i32));
     ctx.set_framerate(ra(config.fps as i32, 1));
     ctx.set_pix_fmt(pixel_format(candidate.input));
+    let mut device = None;
     if candidate.vaapi {
-        let device = AVHWDeviceContext::create(ffi::AV_HWDEVICE_TYPE_VAAPI, None, None, 0)?;
-        let mut pool = device.hwframe_ctx_alloc();
-        let surfaces = pool.data();
-        surfaces.format = ffi::AV_PIX_FMT_VAAPI;
-        surfaces.sw_format = pixel_format(candidate.input);
-        surfaces.width = config.width as i32;
-        surfaces.height = config.height as i32;
-        surfaces.initial_pool_size = VAAPI_SURFACES;
-        pool.init()?;
+        let vaapi = AVHWDeviceContext::create(ffi::AV_HWDEVICE_TYPE_VAAPI, None, None, 0)?;
+        let pool = surface_pool(&vaapi, (config.width, config.height), VAAPI_SURFACES)?;
         ctx.set_pix_fmt(ffi::AV_PIX_FMT_VAAPI);
         ctx.set_hw_frames_ctx(pool);
+        device = Some(vaapi);
     }
     let bitrate = i64::from(config.kbps) * 1000;
     ctx.set_bit_rate(bitrate);
@@ -490,7 +672,7 @@ fn open_candidate(
     // rsmpeg 0.18 frees an options dictionary twice when opening fails after ffmpeg has
     // replaced it, which crashes the process; the options go straight onto the context.
     ctx.open(None)?;
-    Ok(ctx)
+    Ok((ctx, device))
 }
 
 /// ffmpeg's `AVERROR_OPTION_NOT_FOUND`, `-MKTAG(0xF8, 'O', 'P', 'T')`.
@@ -700,5 +882,161 @@ mod round_trip {
                 }
             }
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod gpu_input {
+    use super::super::decode::{Decoder, MAX_PIXELS};
+    use super::*;
+
+    /// A VA-API encoder, or `None` on machines without one.
+    fn vaapi_encoder(width: usize, height: usize) -> Option<Encoder> {
+        let config = EncoderConfig {
+            width,
+            height,
+            fps: 30,
+            kbps: 4000,
+        };
+        LADDER
+            .iter()
+            .filter(|c| c.vaapi)
+            .find_map(|c| Encoder::open_with(c, config))
+    }
+
+    /// A BGRx picture, red on the left half and blue on the right, in GPU memory shared as
+    /// a DMA-BUF.
+    fn shared_picture(encoder: &Encoder, width: usize, height: usize) -> DmaBuf {
+        let device = encoder.device.as_ref().unwrap();
+        let mut pool = device.hwframe_ctx_alloc();
+        let surfaces = pool.data();
+        surfaces.format = ffi::AV_PIX_FMT_VAAPI;
+        surfaces.sw_format = ffi::AV_PIX_FMT_BGR0;
+        surfaces.width = width as i32;
+        surfaces.height = height as i32;
+        surfaces.initial_pool_size = 1;
+        pool.init().unwrap();
+        let mut picture = AVFrame::new();
+        picture.set_width(width as i32);
+        picture.set_height(height as i32);
+        picture.set_format(ffi::AV_PIX_FMT_BGR0);
+        picture.alloc_buffer().unwrap();
+        let stride = picture.linesize[0] as usize;
+        for row in 0..height {
+            // SAFETY: the buffer has `height` rows of `stride` bytes.
+            let line = unsafe {
+                std::slice::from_raw_parts_mut(picture.data[0].add(row * stride), width * 4)
+            };
+            for (col, pixel) in line.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                *pixel = if col < width / 2 {
+                    [0, 0, 255, 0]
+                } else {
+                    [255, 0, 0, 0]
+                };
+            }
+        }
+        let mut surface = AVFrame::new();
+        pool.get_buffer(&mut surface).unwrap();
+        surface.hwframe_transfer_data(&picture).unwrap();
+        let frame = vaapi::export(display(device), surface_id(&surface)).unwrap();
+        eprintln!(
+            "shared {}x{} as {:?} with modifier {:#x}",
+            frame.width,
+            frame.height,
+            frame.fourcc.to_le_bytes().map(char::from),
+            frame.modifier
+        );
+        frame
+    }
+
+    fn assert_near(what: &str, got: u8, want: u8) {
+        assert!(got.abs_diff(want) <= 3, "{what}: {got}, want {want}");
+    }
+
+    fn assert_red_then_blue(frame: &VideoFrame, left: usize, right: usize) {
+        let row = frame.height / 2;
+        let at = |col: usize| {
+            let uv = (row / 2) * frame.width + (col & !1);
+            (
+                frame.y[row * frame.width + col],
+                frame.uv[uv],
+                frame.uv[uv + 1],
+            )
+        };
+        let (y, u, v) = at(left);
+        assert_near("red Y", y, 54);
+        assert_near("red U", u, 99);
+        assert_near("red V", v, 255);
+        let (y, u, v) = at(right);
+        assert_near("blue Y", y, 19);
+        assert_near("blue U", u, 255);
+        assert_near("blue V", v, 116);
+    }
+
+    #[test]
+    fn previews_are_scaled_and_converted_on_the_gpu() {
+        let Some(mut encoder) = vaapi_encoder(1280, 720) else {
+            eprintln!("no VA-API encoder here; skipping");
+            return;
+        };
+        let mut frame = shared_picture(&encoder, 2560, 1440);
+        frame.timestamp = 1234;
+        let preview = encoder.preview_dmabuf(&frame, 960).unwrap();
+        assert_eq!(
+            (preview.width, preview.height, preview.timestamp),
+            (960, 540, 1234)
+        );
+        assert_red_then_blue(&preview, 240, 720);
+    }
+
+    #[test]
+    fn frames_in_gpu_memory_are_encoded_with_black_bars() {
+        let Some(mut encoder) = vaapi_encoder(1280, 720) else {
+            eprintln!("no VA-API encoder here; skipping");
+            return;
+        };
+        let mut frame = shared_picture(&encoder, 1200, 900);
+        let mut decoder = Decoder::new(encoder.codec(), MAX_PIXELS).unwrap();
+        let mut last = None;
+        for n in 0..10 {
+            frame.timestamp = n * 3000;
+            for unit in encoder.encode_dmabuf(&frame).unwrap() {
+                if let Some(output) = decoder.decode(&unit.data, unit.timestamp).unwrap() {
+                    last = Some(output);
+                }
+            }
+        }
+        let output = last.expect("a decoded picture");
+        assert_eq!((output.width, output.height), (1280, 720));
+        let luma = |x: usize| output.y[360 * output.width + x];
+        assert!(luma(20) < 30, "left bar is {}", luma(20));
+        assert!(luma(1260) < 30, "right bar is {}", luma(1260));
+        assert_red_then_blue(&output, 400, 880);
+    }
+
+    #[test]
+    fn a_software_encoder_takes_no_frames_in_gpu_memory() {
+        let Some(mut vaapi) = vaapi_encoder(1280, 720) else {
+            eprintln!("no VA-API encoder here; skipping");
+            return;
+        };
+        let frame = shared_picture(&vaapi, 640, 360);
+        assert!(vaapi.encode_dmabuf(&frame).is_ok());
+        let Some(candidate) = LADDER.iter().find(|c| c.name == c"libvpx-vp9") else {
+            return;
+        };
+        let config = EncoderConfig {
+            width: 640,
+            height: 360,
+            fps: 30,
+            kbps: 1000,
+        };
+        let Some(mut vp9) = Encoder::open_with(candidate, config) else {
+            return;
+        };
+        assert!(matches!(
+            vp9.encode_dmabuf(&frame),
+            Err(EncodeError::NoGpuInput)
+        ));
     }
 }

@@ -14,7 +14,7 @@ use super::capture::{Capture, CaptureConfig, CaptureError};
 use super::engine::{Kind, MediaEngine, Outgoing, Received};
 use super::share_audio::{Playout, STEREO_FRAME, ShareAudioEncoder, due_frames};
 use super::video::decode::{Decoder, MAX_PIXELS};
-use super::video::encode::{Encoder, EncoderConfig};
+use super::video::encode::{EncodeError, EncodedUnit, Encoder, EncoderConfig};
 use super::video::frame::{VideoFrame, share_size};
 use super::video::{Picture, PreviewDemand};
 
@@ -118,6 +118,7 @@ impl ShareSender {
             unsent: first == Some(First::Copied),
             self_view: self_tx,
             preview: preview.clone(),
+            refused: Vec::new(),
         };
         let thread = std::thread::Builder::new()
             .name("throcc-share".into())
@@ -167,6 +168,8 @@ struct Sending {
     unsent: bool,
     self_view: watch::Sender<Option<Arc<VideoFrame>>>,
     preview: Arc<PreviewDemand>,
+    /// Modifiers of frames in GPU memory that failed, `None` for all of them.
+    refused: Vec<Option<u64>>,
 }
 
 impl Sending {
@@ -183,8 +186,7 @@ impl Sending {
             }
             self.send_audio(&mut sound);
             #[cfg(target_os = "linux")]
-            if self.capture.next_dmabuf().is_some() {
-                self.capture.refuse_dmabuf(None);
+            if self.send_dmabuf(&mut count) {
                 continue;
             }
             let fresh =
@@ -203,6 +205,40 @@ impl Sending {
         }
     }
 
+    /// Encodes the next frame if it is in GPU memory. On failure, asks the capture for
+    /// no more like it, so frames arrive in shared memory instead. True if there was one.
+    #[cfg(target_os = "linux")]
+    fn send_dmabuf(&mut self, count: &mut u32) -> bool {
+        let Some(frame) = self.capture.next_dmabuf() else {
+            return false;
+        };
+        let modifier = frame.modifier;
+        if self.refused.contains(&None) || self.refused.contains(&Some(modifier)) {
+            return true;
+        }
+        *count = count.wrapping_add(1);
+        match self.encoder.encode_dmabuf(frame) {
+            Ok(units) => {
+                send_units(&self.engine, &self.tracks, units);
+                if count.is_multiple_of(SELF_VIEW_EVERY) && self.preview.wanted() {
+                    match self.encoder.preview_dmabuf(frame, SELF_VIEW_WIDTH) {
+                        Ok(preview) => {
+                            self.self_view.send_replace(Some(Arc::new(preview)));
+                        }
+                        Err(e) => warn!("no self-view picture: {e}"),
+                    }
+                }
+            }
+            Err(e) => {
+                let refused = refusal(&e, modifier);
+                warn!(?refused, "falling back to frames in shared memory: {e}");
+                self.refused.push(refused);
+                self.capture.refuse_dmabuf(refused);
+            }
+        }
+        true
+    }
+
     fn send_audio(&mut self, sound: &mut [f32; STEREO_FRAME]) {
         let Some(audio_encoder) = &mut self.audio_encoder else {
             return;
@@ -218,15 +254,26 @@ impl Sending {
 
     fn send_video(&mut self) {
         match self.encoder.encode(&self.frame) {
-            Ok(units) => {
-                for unit in units {
-                    let outgoing =
-                        Outgoing::new(self.tracks.video, unit.data, unit.timestamp, unit.keyframe);
-                    self.engine.send(Kind::Video, outgoing);
-                }
-            }
+            Ok(units) => send_units(&self.engine, &self.tracks, units),
             Err(e) => warn!("encoding failed: {e}"),
         }
+    }
+}
+
+fn send_units(engine: &MediaEngine, tracks: &Share, units: Vec<EncodedUnit>) {
+    for unit in units {
+        let outgoing = Outgoing::new(tracks.video, unit.data, unit.timestamp, unit.keyframe);
+        engine.send(Kind::Video, outgoing);
+    }
+}
+
+/// Which frames in GPU memory to refuse after one failed with `error`: those with its
+/// `modifier` when only importing that layout failed, else all of them.
+#[cfg(target_os = "linux")]
+fn refusal(error: &EncodeError, modifier: u64) -> Option<u64> {
+    match error {
+        EncodeError::Import(_) => Some(modifier),
+        _ => None,
     }
 }
 
@@ -358,6 +405,24 @@ pub fn receive(
         })
         .map_err(|e| e.to_string())?;
     Ok(picture)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod refusal_tests {
+    use super::super::video::vaapi::VaError;
+    use super::*;
+
+    #[test]
+    fn a_layout_that_fails_to_import_is_refused_alone() {
+        let import = EncodeError::Import(VaError::Format(0));
+        assert_eq!(refusal(&import, 7), Some(7));
+        let processing = EncodeError::Gpu(VaError::Call {
+            call: "vaEndPicture",
+            status: 1,
+        });
+        assert_eq!(refusal(&processing, 7), None);
+        assert_eq!(refusal(&EncodeError::NoGpuInput, 7), None);
+    }
 }
 
 #[cfg(test)]
