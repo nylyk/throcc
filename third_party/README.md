@@ -20,5 +20,11 @@ converting every frame to BGRA on the UI thread:
   sit in one uniform buffer behind a dynamic offset, so a stream's bind group is built once.
   `fs_surface` uses full-range BT.709, which throcc captures and encodes, instead of BT.601,
   and rounds corners with the quads' `quad_sdf`.
+- **gpui-pre-windows:** `draw_surfaces`, an empty stub, draws each surface with a new
+  `surface_vertex`/`surface_fragment` pair in `shaders.hlsl` (registered in `build.rs` for the
+  release-mode fxc build): an R8 Y and an R8G8 CbCr texture per stream, written with
+  `UpdateSubresource` only for a new generation, sampled through a clamping sampler, with the
+  same content-mask clipping and `quad_sdf` rounding as polychrome sprites. A lost device drops
+  the textures.
 
 See `docs/DECISIONS.md` for why they are vendored and how to refresh them.

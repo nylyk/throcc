@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use collections::FxHashMap;
 use gpui_util::ResultExt;
 use windows::{
     Win32::{
@@ -45,6 +46,7 @@ pub(crate) struct DirectXRenderer {
     pipelines: DirectXRenderPipelines,
     direct_composition: Option<DirectComposition>,
     font_info: &'static FontInfo,
+    surface_textures: FxHashMap<SurfaceId, SurfaceTextures>,
 
     width: u32,
     height: u32,
@@ -92,12 +94,25 @@ struct DirectXRenderPipelines {
     mono_sprites: PipelineState<MonochromeSprite>,
     subpixel_sprites: PipelineState<SubpixelSprite>,
     poly_sprites: PipelineState<PolychromeSprite>,
+    surfaces: PipelineState<SurfaceSprite>,
 }
 
 struct DirectXGlobalElements {
     global_params_buffer: Option<ID3D11Buffer>,
     batch_params_buffer: Option<ID3D11Buffer>,
     sampler: Option<ID3D11SamplerState>,
+    /// Clamps rather than wraps, so a scaled video's edges don't bleed into each other.
+    surface_sampler: Option<ID3D11SamplerState>,
+}
+
+/// The planes of the last frame uploaded for one video stream.
+struct SurfaceTextures {
+    width: u32,
+    height: u32,
+    generation: Option<u64>,
+    y: ID3D11Texture2D,
+    cb_cr: ID3D11Texture2D,
+    views: [Option<ID3D11ShaderResourceView>; 2],
 }
 
 struct Annotation<'a>(&'a ID3DUserDefinedAnnotation);
@@ -191,6 +206,7 @@ impl DirectXRenderer {
             pipelines,
             direct_composition,
             font_info: Self::get_font_info(),
+            surface_textures: FxHashMap::default(),
             width: 1,
             height: 1,
             skip_draws: false,
@@ -272,6 +288,7 @@ impl DirectXRenderer {
             }
 
             self.resources.take();
+            self.surface_textures.clear();
             if let Some(devices) = &self.devices {
                 devices.device_context.OMSetRenderTargets(None, None);
                 devices.device_context.ClearState();
@@ -384,7 +401,9 @@ impl DirectXRenderer {
                 PrimitiveBatch::PolychromeSprites { texture_id, range } => {
                     self.draw_polychrome_sprites(texture_id, range.start, range.len())
                 }
-                PrimitiveBatch::Surfaces(range) => self.draw_surfaces(&scene.surfaces[range]),
+                PrimitiveBatch::Surfaces(range) => {
+                    self.draw_surfaces(&scene.surfaces[range.clone()], range.start)
+                }
             }
             .with_context(|| {
                 format!(
@@ -575,6 +594,30 @@ impl DirectXRenderer {
                 &devices.device_context,
                 &scene.polychrome_sprites,
             )?;
+        }
+
+        self.surface_textures
+            .retain(|id, _| scene.surfaces.iter().any(|surface| surface.frame.id == *id));
+        if !scene.surfaces.is_empty() {
+            let sprites = scene
+                .surfaces
+                .iter()
+                .map(|surface| SurfaceSprite {
+                    bounds: surface.bounds,
+                    content_mask: surface.content_mask.bounds,
+                    corner_radii: surface.corner_radii,
+                })
+                .collect::<Vec<_>>();
+            self.pipelines.surfaces.update_buffer(
+                &devices.device,
+                &devices.device_context,
+                &sprites,
+            )?;
+            for surface in &scene.surfaces {
+                upload_surface(devices, &mut self.surface_textures, &surface.frame)
+                    .context("Uploading a surface")
+                    .log_err();
+            }
         }
 
         Ok(())
@@ -813,9 +856,34 @@ impl DirectXRenderer {
         )
     }
 
-    fn draw_surfaces(&mut self, surfaces: &[PaintSurface]) -> Result<()> {
-        if surfaces.is_empty() {
-            return Ok(());
+    fn draw_surfaces(&mut self, surfaces: &[PaintSurface], first_surface: usize) -> Result<()> {
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let batch_params_buffer = self
+            .globals
+            .batch_params_buffer
+            .as_ref()
+            .context("batch params buffer missing")?;
+        for (index, surface) in (first_surface..).zip(surfaces) {
+            let Some(textures) = self.surface_textures.get(&surface.frame.id) else {
+                continue;
+            };
+            if textures.generation != Some(surface.frame.generation) {
+                continue;
+            }
+            unsafe {
+                devices
+                    .device_context
+                    .PSSetShaderResources(2, Some(&textures.views));
+                devices
+                    .device_context
+                    .PSSetSamplers(1, Some(slice::from_ref(&self.globals.surface_sampler)));
+            }
+            self.pipelines.surfaces.draw_range(
+                &devices.device_context,
+                batch_params_buffer,
+                index as u32,
+                1,
+            )?;
         }
         Ok(())
     }
@@ -997,6 +1065,13 @@ impl DirectXRenderPipelines {
             16,
             create_blend_state(device)?,
         )?;
+        let surfaces = PipelineState::new(
+            device,
+            "surface_pipeline",
+            ShaderModule::Surface,
+            4,
+            create_blend_state(device)?,
+        )?;
 
         Ok(Self {
             shadow_pipeline,
@@ -1007,6 +1082,7 @@ impl DirectXRenderPipelines {
             mono_sprites,
             subpixel_sprites,
             poly_sprites,
+            surfaces,
         })
     }
 }
@@ -1039,28 +1115,14 @@ impl DirectXGlobalElements {
         let global_params_buffer = create_constant_buffer::<GlobalParams>(device)?;
         let batch_params_buffer = create_constant_buffer::<BatchParams>(device)?;
 
-        let sampler = unsafe {
-            let desc = D3D11_SAMPLER_DESC {
-                Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
-                AddressU: D3D11_TEXTURE_ADDRESS_WRAP,
-                AddressV: D3D11_TEXTURE_ADDRESS_WRAP,
-                AddressW: D3D11_TEXTURE_ADDRESS_WRAP,
-                MipLODBias: 0.0,
-                MaxAnisotropy: 1,
-                ComparisonFunc: D3D11_COMPARISON_ALWAYS,
-                BorderColor: [0.0; 4],
-                MinLOD: 0.0,
-                MaxLOD: D3D11_FLOAT32_MAX,
-            };
-            let mut output = None;
-            device.CreateSamplerState(&desc, Some(&mut output))?;
-            output
-        };
+        let sampler = create_linear_sampler(device, D3D11_TEXTURE_ADDRESS_WRAP)?;
+        let surface_sampler = create_linear_sampler(device, D3D11_TEXTURE_ADDRESS_CLAMP)?;
 
         Ok(Self {
             global_params_buffer,
             batch_params_buffer,
             sampler,
+            surface_sampler,
         })
     }
 }
@@ -1279,6 +1341,14 @@ struct PathRasterizationSprite {
 #[repr(C)]
 struct PathSprite {
     bounds: Bounds<ScaledPixels>,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct SurfaceSprite {
+    bounds: Bounds<ScaledPixels>,
+    content_mask: Bounds<ScaledPixels>,
+    corner_radii: Corners<ScaledPixels>,
 }
 
 impl Drop for DirectXRenderer {
@@ -1570,6 +1640,120 @@ fn create_blend_state_for_path_sprite(device: &ID3D11Device) -> Result<ID3D11Ble
     }
 }
 
+fn create_linear_sampler(
+    device: &ID3D11Device,
+    address: D3D11_TEXTURE_ADDRESS_MODE,
+) -> Result<Option<ID3D11SamplerState>> {
+    let desc = D3D11_SAMPLER_DESC {
+        Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+        AddressU: address,
+        AddressV: address,
+        AddressW: address,
+        MipLODBias: 0.0,
+        MaxAnisotropy: 1,
+        ComparisonFunc: D3D11_COMPARISON_ALWAYS,
+        BorderColor: [0.0; 4],
+        MinLOD: 0.0,
+        MaxLOD: D3D11_FLOAT32_MAX,
+    };
+    let mut output = None;
+    unsafe { device.CreateSamplerState(&desc, Some(&mut output))? };
+    Ok(output)
+}
+
+/// Makes `textures` hold `frame`'s planes, recreating them when its size changed and writing
+/// them when its generation did.
+fn upload_surface(
+    devices: &DirectXRendererDevices,
+    textures: &mut FxHashMap<SurfaceId, SurfaceTextures>,
+    frame: &Nv12Frame,
+) -> Result<()> {
+    let (y, cb_cr) = frame
+        .planes()
+        .context("the planes are shorter than the frame's size")?;
+    anyhow::ensure!(frame.width > 0 && frame.height > 0, "empty frame");
+    let (chroma_width, chroma_height) = frame.chroma_size();
+    let current = textures
+        .get(&frame.id)
+        .is_some_and(|textures| textures.width == frame.width && textures.height == frame.height);
+    if !current {
+        let (y_texture, y_view) =
+            create_plane_texture(&devices.device, frame.width, frame.height, DXGI_FORMAT_R8_UNORM)?;
+        let (cb_cr_texture, cb_cr_view) = create_plane_texture(
+            &devices.device,
+            chroma_width,
+            chroma_height,
+            DXGI_FORMAT_R8G8_UNORM,
+        )?;
+        textures.insert(
+            frame.id,
+            SurfaceTextures {
+                width: frame.width,
+                height: frame.height,
+                generation: None,
+                y: y_texture,
+                cb_cr: cb_cr_texture,
+                views: [y_view, cb_cr_view],
+            },
+        );
+    }
+    let surface = textures
+        .get_mut(&frame.id)
+        .context("surface textures missing")?;
+    if surface.generation == Some(frame.generation) {
+        return Ok(());
+    }
+    unsafe {
+        devices.device_context.UpdateSubresource(
+            &surface.y,
+            0,
+            None,
+            y.as_ptr().cast(),
+            frame.width,
+            0,
+        );
+        devices.device_context.UpdateSubresource(
+            &surface.cb_cr,
+            0,
+            None,
+            cb_cr.as_ptr().cast(),
+            2 * chroma_width,
+            0,
+        );
+    }
+    surface.generation = Some(frame.generation);
+    Ok(())
+}
+
+fn create_plane_texture(
+    device: &ID3D11Device,
+    width: u32,
+    height: u32,
+    format: DXGI_FORMAT,
+) -> Result<(ID3D11Texture2D, Option<ID3D11ShaderResourceView>)> {
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: width,
+        Height: height,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: format,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+        CPUAccessFlags: 0,
+        MiscFlags: 0,
+    };
+    let mut texture = None;
+    unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture))? };
+    let texture = texture.context("CreateTexture2D returned no texture")?;
+    let mut view = None;
+    unsafe { device.CreateShaderResourceView(&texture, None, Some(&mut view))? };
+    Ok((texture, view))
+}
+
 #[inline]
 fn create_vertex_shader(device: &ID3D11Device, bytes: &[u8]) -> Result<ID3D11VertexShader> {
     unsafe {
@@ -1716,6 +1900,7 @@ pub(crate) mod shader_resources {
         MonochromeSprite,
         SubpixelSprite,
         PolychromeSprite,
+        Surface,
         EmojiRasterization,
     }
 
@@ -1789,6 +1974,10 @@ pub(crate) mod shader_resources {
                 ShaderModule::PolychromeSprite => match target {
                     ShaderTarget::Vertex => POLYCHROME_SPRITE_VERTEX_BYTES,
                     ShaderTarget::Fragment => POLYCHROME_SPRITE_FRAGMENT_BYTES,
+                },
+                ShaderModule::Surface => match target {
+                    ShaderTarget::Vertex => SURFACE_VERTEX_BYTES,
+                    ShaderTarget::Fragment => SURFACE_FRAGMENT_BYTES,
                 },
                 ShaderModule::EmojiRasterization => match target {
                     ShaderTarget::Vertex => EMOJI_RASTERIZATION_VERTEX_BYTES,
@@ -1880,6 +2069,7 @@ pub(crate) mod shader_resources {
                 ShaderModule::MonochromeSprite => "monochrome_sprite",
                 ShaderModule::SubpixelSprite => "subpixel_sprite",
                 ShaderModule::PolychromeSprite => "polychrome_sprite",
+                ShaderModule::Surface => "surface",
                 ShaderModule::EmojiRasterization => "emoji_rasterization",
             }
         }

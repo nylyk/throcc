@@ -7699,6 +7699,7 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
  "gpui-pre-wgpu",
+ "gpui-pre-windows",
  "image",
  "libc",
  "smallvec",

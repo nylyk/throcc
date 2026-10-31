@@ -1266,3 +1266,59 @@ float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Targe
     color.a *= sprite.opacity * saturate(0.5 - distance);
     return color;
 }
+
+/*
+**
+**              Surfaces
+**
+*/
+
+struct SurfaceSprite {
+    Bounds bounds;
+    Bounds content_mask;
+    Corners corner_radii;
+};
+
+struct SurfaceVertexOutput {
+    nointerpolation uint surface_id: TEXCOORD0;
+    float4 position: SV_Position;
+    float2 texture_position: POSITION;
+    float4 clip_distance: SV_ClipDistance;
+};
+
+struct SurfaceFragmentInput {
+    nointerpolation uint surface_id: TEXCOORD0;
+    float4 position: SV_Position;
+    float2 texture_position: POSITION;
+};
+
+StructuredBuffer<SurfaceSprite> surface_sprites: register(t1);
+Texture2D<float> surface_y: register(t2);
+Texture2D<float2> surface_cb_cr: register(t3);
+SamplerState s_surface: register(s1);
+
+SurfaceVertexOutput surface_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
+    float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
+    uint surface_id = batch_start_index + instance_id;
+    SurfaceSprite surface = surface_sprites[surface_id];
+
+    SurfaceVertexOutput output;
+    output.position = to_device_position(unit_vertex, surface.bounds);
+    output.texture_position = unit_vertex;
+    output.surface_id = surface_id;
+    output.clip_distance = distance_from_clip_rect(unit_vertex, surface.bounds, surface.content_mask);
+    return output;
+}
+
+// Full-range BT.709 with chroma centred on 128, as throcc captures and encodes.
+float4 surface_fragment(SurfaceFragmentInput input): SV_Target {
+    SurfaceSprite surface = surface_sprites[input.surface_id];
+    float y = surface_y.Sample(s_surface, input.texture_position);
+    float2 cb_cr = surface_cb_cr.Sample(s_surface, input.texture_position) - 128.0 / 255.0;
+    float3 color = float3(
+        y + 1.5748 * cb_cr.y,
+        y - 0.1873 * cb_cr.x - 0.4681 * cb_cr.y,
+        y + 1.8556 * cb_cr.x);
+    float distance = quad_sdf(input.position.xy, surface.bounds, surface.corner_radii);
+    return float4(saturate(color), saturate(0.5 - distance));
+}
