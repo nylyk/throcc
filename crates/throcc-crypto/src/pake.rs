@@ -72,9 +72,10 @@ impl ClientPake {
                 .finish(transcript.pake_b)
                 .map_err(|_| PakeError::Malformed)?,
         );
-        let keys = ConfirmKeys::derive(&key, transcript);
-        verify(&keys.b, transcript, confirm_b)?;
-        Ok(mac(&keys.a, transcript))
+        let transcript = transcript.to_bytes();
+        let keys = ConfirmKeys::derive(&key, &transcript);
+        verify(&keys.b, &transcript, confirm_b)?;
+        Ok(mac(&keys.a, &transcript))
     }
 }
 
@@ -96,20 +97,28 @@ impl ServerPake {
         Ok(Self { key, pake_b })
     }
 
-    pub fn confirm_b(&self, transcript: &Transcript) -> [u8; 32] {
-        mac(&ConfirmKeys::derive(&self.key, transcript).b, transcript)
-    }
-
-    pub fn check_confirm_a(
-        &self,
-        transcript: &Transcript,
-        confirm_a: &[u8; 32],
-    ) -> Result<(), PakeError> {
-        verify(
-            &ConfirmKeys::derive(&self.key, transcript).a,
+    /// Fixes the transcript: the result carries `confirm_b` and checks the client's `confirm_a`.
+    pub fn confirm(&self, transcript: &Transcript) -> ServerConfirm {
+        let transcript = transcript.to_bytes();
+        let keys = ConfirmKeys::derive(&self.key, &transcript);
+        ServerConfirm {
+            confirm_b: mac(&keys.b, &transcript),
+            key_a: keys.a,
             transcript,
-            confirm_a,
-        )
+        }
+    }
+}
+
+/// The server's confirmation step, bound to one transcript.
+pub struct ServerConfirm {
+    pub confirm_b: [u8; 32],
+    key_a: Zeroizing<[u8; 32]>,
+    transcript: Vec<u8>,
+}
+
+impl ServerConfirm {
+    pub fn check_confirm_a(&self, confirm_a: &[u8; 32]) -> Result<(), PakeError> {
+        verify(&self.key_a, &self.transcript, confirm_a)
     }
 }
 
@@ -126,8 +135,8 @@ struct ConfirmKeys {
 }
 
 impl ConfirmKeys {
-    fn derive(pake_key: &[u8], transcript: &Transcript) -> Self {
-        let salt = Sha256::digest(transcript.to_bytes());
+    fn derive(pake_key: &[u8], transcript: &[u8]) -> Self {
+        let salt = Sha256::digest(transcript);
         let hkdf = Hkdf::<Sha256>::new(Some(&salt), pake_key);
         let mut keys = Self {
             a: Zeroizing::new([0; 32]),
@@ -141,20 +150,20 @@ impl ConfirmKeys {
     }
 }
 
-fn transcript_hmac(key: &[u8; 32], transcript: &Transcript) -> Hmac<Sha256> {
+fn transcript_hmac(key: &[u8; 32], transcript: &[u8]) -> Hmac<Sha256> {
     <Hmac<Sha256> as KeyInit>::new_from_slice(key)
         .unwrap_or_else(|_| unreachable!())
-        .chain_update(transcript.to_bytes())
+        .chain_update(transcript)
 }
 
-fn mac(key: &[u8; 32], transcript: &Transcript) -> [u8; 32] {
+fn mac(key: &[u8; 32], transcript: &[u8]) -> [u8; 32] {
     transcript_hmac(key, transcript)
         .finalize()
         .into_bytes()
         .into()
 }
 
-fn verify(key: &[u8; 32], transcript: &Transcript, tag: &[u8; 32]) -> Result<(), PakeError> {
+fn verify(key: &[u8; 32], transcript: &[u8], tag: &[u8; 32]) -> Result<(), PakeError> {
     transcript_hmac(key, transcript)
         .verify_slice(tag)
         .map_err(|_| PakeError::Confirmation)
@@ -188,11 +197,10 @@ mod tests {
     ) -> Result<(), PakeError> {
         let (client, pake_a) = ClientPake::start("K7Q", client_secret);
         let server = ServerPake::respond("K7Q", server_secret, &pake_a)?;
-        let server_view = transcript(&pake_a, &server.pake_b, &[5; 32]);
-        let confirm_b = server.confirm_b(&server_view);
+        let confirm = server.confirm(&transcript(&pake_a, &server.pake_b, &[5; 32]));
         let client_view = transcript(&pake_a, &server.pake_b, &client_exporter);
-        let confirm_a = client.finish(&client_view, &confirm_b)?;
-        server.check_confirm_a(&server_view, &confirm_a)
+        let confirm_a = client.finish(&client_view, &confirm.confirm_b)?;
+        confirm.check_confirm_a(&confirm_a)
     }
 
     #[test]
@@ -220,7 +228,7 @@ mod tests {
 
     #[test]
     fn confirmation_tags_are_pinned() {
-        let t = transcript(&[6; 32], &[7; 32], &[5; 32]);
+        let t = transcript(&[6; 32], &[7; 32], &[5; 32]).to_bytes();
         let keys = ConfirmKeys::derive(&[9; 32], &t);
         let hex = |tag: [u8; 32]| tag.map(|b| format!("{b:02x}")).concat();
         assert_eq!(

@@ -12,6 +12,8 @@ pub enum MediaError {
     Header(#[from] HeaderError),
     #[error("plaintext of {0} bytes exceeds the {BODY_BYTES}-byte body")]
     TooLong(usize),
+    #[error("encryption failed")]
+    Seal,
     #[error("datagram too short for a tag")]
     Short,
     #[error("authentication failed")]
@@ -58,7 +60,7 @@ impl TrackKey {
                 &header_bytes,
                 (&mut out[HEADER_BYTES..]).into(),
             )
-            .map_err(|_| MediaError::TooLong(len))?;
+            .map_err(|_| MediaError::Seal)?;
         out.extend_from_slice(&tag);
         Ok(())
     }

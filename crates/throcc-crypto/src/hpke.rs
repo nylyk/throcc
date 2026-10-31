@@ -5,7 +5,7 @@ use hpke::{Deserializable, Kem, OpModeR, OpModeS, Serializable};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Epoch, RoomId, UserId};
 use throcc_proto::messages::PublicKey;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 type Private = <X25519HkdfSha256 as Kem>::PrivateKey;
 type Public = <X25519HkdfSha256 as Kem>::PublicKey;
@@ -42,7 +42,11 @@ impl EncKeyPair {
     }
 
     pub fn secret(&self) -> Zeroizing<[u8; 32]> {
-        Zeroizing::new(self.private.to_bytes().into())
+        let mut bytes = self.private.to_bytes();
+        let mut secret = Zeroizing::new([0u8; 32]);
+        secret.copy_from_slice(&bytes);
+        bytes[..].zeroize();
+        secret
     }
 
     pub fn public(&self) -> PublicKey {
