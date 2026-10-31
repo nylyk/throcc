@@ -6,7 +6,7 @@
 )]
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 
 use screencapturekit::cm::CMSampleBufferExt;
@@ -16,6 +16,7 @@ use screencapturekit::content_sharing_picker::{
 };
 use screencapturekit::cv::CVPixelBuffer;
 use screencapturekit::prelude::*;
+use screencapturekit::stream::ErrorHandler;
 
 use super::clock::{AudioChunker, ShareZero};
 use super::{Capture, CaptureConfig, CaptureError};
@@ -35,6 +36,7 @@ pub struct MacCapture {
     frames: rtrb::Consumer<(CVPixelBuffer, i64)>,
     audio: Option<rtrb::Consumer<(CMSampleBuffer, i64)>>,
     dropped: Arc<AtomicU64>,
+    ended: Arc<AtomicBool>,
     /// Host time, in nanoseconds, that both media clocks count from.
     zero: ShareZero,
     chunker: AudioChunker,
@@ -69,7 +71,11 @@ fn capture(
         .with_sample_rate(SAMPLE_RATE as i32)
         .with_channel_count(2)
         .with_excludes_current_process_audio(true);
-    let mut stream = SCStream::new(filter, &stream_config).map_err(failed)?;
+    let ended = Arc::new(AtomicBool::new(false));
+    let stopped = ended.clone();
+    let on_stop = ErrorHandler::new(move |_| stopped.store(true, Ordering::Relaxed));
+    let mut stream =
+        SCStream::new_with_delegate(filter, &stream_config, on_stop).map_err(failed)?;
 
     let (producer, frames) = rtrb::RingBuffer::new(RING);
     // The handler runs on one serial dispatch queue, so `try_lock` never finds it taken;
@@ -128,6 +134,7 @@ fn capture(
         frames,
         audio,
         dropped,
+        ended,
         zero: ShareZero::new(NANOS as i64),
         chunker: AudioChunker::default(),
     })
@@ -194,6 +201,10 @@ impl Capture for MacCapture {
 
     fn dropped(&self) -> Arc<AtomicU64> {
         self.dropped.clone()
+    }
+
+    fn ended(&self) -> bool {
+        self.ended.load(Ordering::Relaxed)
     }
 
     fn captures_audio(&self) -> bool {

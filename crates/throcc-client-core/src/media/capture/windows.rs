@@ -95,12 +95,15 @@ pub struct WinCapture {
     zero: ShareZero,
     chunker: AudioChunker,
     dropped: Arc<AtomicU64>,
+    ended: Arc<AtomicBool>,
     converter: Converter,
     device: IDirect3DDevice,
     pool: Direct3D11CaptureFramePool,
     pool_size: SizeInt32,
     session: GraphicsCaptureSession,
     arrived: i64,
+    item: GraphicsCaptureItem,
+    closed: i64,
 }
 
 // SAFETY: `device` only wraps the multithread-protected D3D11 device, and is used only to
@@ -170,6 +173,14 @@ fn capture(item: &GraphicsCaptureItem, config: CaptureConfig) -> windows::core::
             Ok(())
         },
     ))?;
+    let ended = Arc::new(AtomicBool::new(false));
+    let stopped = ended.clone();
+    let closed = item.Closed(
+        &TypedEventHandler::<GraphicsCaptureItem, IInspectable>::new(move |_, _| {
+            stopped.store(true, Ordering::Relaxed);
+            Ok(())
+        }),
+    )?;
     let audio = if config.audio {
         LoopbackAudio::start(dropped.clone())
             .inspect_err(|e| tracing::warn!("sharing without audio: {e}"))
@@ -184,12 +195,15 @@ fn capture(item: &GraphicsCaptureItem, config: CaptureConfig) -> windows::core::
         zero: ShareZero::new(TIME_SPAN_HZ as i64),
         chunker: AudioChunker::default(),
         dropped,
+        ended,
         converter,
         device,
         pool,
         pool_size: size,
         session,
         arrived,
+        item: item.clone(),
+        closed,
     })
 }
 
@@ -321,6 +335,10 @@ impl Capture for WinCapture {
 
     fn dropped(&self) -> Arc<AtomicU64> {
         self.dropped.clone()
+    }
+
+    fn ended(&self) -> bool {
+        self.ended.load(Ordering::Relaxed)
     }
 
     fn captures_audio(&self) -> bool {
@@ -917,6 +935,7 @@ impl IActivateAudioInterfaceCompletionHandler_Impl for Activated_Impl {
 impl Drop for WinCapture {
     fn drop(&mut self) {
         self.pool.RemoveFrameArrived(self.arrived).ok();
+        self.item.RemoveClosed(self.closed).ok();
         self.session.Close().ok();
         self.pool.Close().ok();
     }

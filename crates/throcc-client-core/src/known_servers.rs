@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use throcc_proto::Fingerprint;
 
+use crate::keystore::replace_file;
+
 /// Pinned server keys by address, stored one `address fingerprint` per line.
 pub struct KnownServers {
     path: PathBuf,
@@ -59,9 +61,7 @@ impl KnownServers {
         if let Some(dir) = self.path.parent() {
             fs::create_dir_all(dir)?;
         }
-        let tmp = self.path.with_extension("tmp");
-        fs::write(&tmp, text)?;
-        fs::rename(&tmp, &self.path).with_context(|| format!("writing {}", self.path.display()))
+        replace_file(&self.path, text.as_bytes())
     }
 }
 

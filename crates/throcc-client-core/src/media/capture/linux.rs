@@ -11,7 +11,7 @@ use std::io::Cursor;
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
@@ -77,6 +77,10 @@ impl Capture for LinuxCapture {
 
     fn dropped(&self) -> Arc<AtomicU64> {
         self.stream.dropped()
+    }
+
+    fn ended(&self) -> bool {
+        self.stream.ended()
     }
 
     fn captures_audio(&self) -> bool {
@@ -200,6 +204,7 @@ pub(crate) struct PipeWireCapture {
     filled: rtrb::Consumer<Slot>,
     free: rtrb::Producer<Slot>,
     dropped: Arc<AtomicU64>,
+    ended: Arc<AtomicBool>,
     quit: pw::channel::Sender<()>,
     thread: Option<JoinHandle<()>>,
     audio: Option<DesktopAudio>,
@@ -229,12 +234,14 @@ impl PipeWireCapture {
             spare: None,
             dropped: dropped.clone(),
         };
+        let ended = Arc::new(AtomicBool::new(false));
+        let stopped = ended.clone();
         let (quit, quit_rx) = pw::channel::channel();
         let (ready_tx, ready) = mpsc::sync_channel(1);
         let thread = std::thread::Builder::new()
             .name("throcc-pipewire".into())
             .spawn(move || {
-                if let Err(e) = run(node, fd, config, state, quit_rx, &ready_tx) {
+                if let Err(e) = run(node, fd, config, state, stopped, quit_rx, &ready_tx) {
                     ready_tx.send(Err(e)).ok();
                 }
             })
@@ -252,6 +259,7 @@ impl PipeWireCapture {
                 filled,
                 free,
                 dropped,
+                ended,
                 quit,
                 thread: Some(thread),
                 audio,
@@ -297,6 +305,10 @@ impl Capture for PipeWireCapture {
 
     fn dropped(&self) -> Arc<AtomicU64> {
         self.dropped.clone()
+    }
+
+    fn ended(&self) -> bool {
+        self.ended.load(Ordering::Relaxed)
     }
 
     fn captures_audio(&self) -> bool {
@@ -351,6 +363,7 @@ fn run(
     fd: Option<OwnedFd>,
     config: CaptureConfig,
     state: StreamState,
+    ended: Arc<AtomicBool>,
     quit: pw::channel::Receiver<()>,
     ready: &mpsc::SyncSender<Result<(), CaptureError>>,
 ) -> Result<(), CaptureError> {
@@ -375,6 +388,14 @@ fn run(
     let buffers = serialize(buffers_param())?;
     let _listener = stream
         .add_local_listener_with_user_data(state)
+        .state_changed(move |_, _, _, new| {
+            if matches!(
+                new,
+                pw::stream::StreamState::Error(_) | pw::stream::StreamState::Unconnected
+            ) {
+                ended.store(true, Ordering::Relaxed);
+            }
+        })
         .param_changed(move |stream, state, id, param| {
             on_param_changed(stream, state, id, param, &buffers);
         })

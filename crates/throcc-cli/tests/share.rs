@@ -12,7 +12,7 @@ use throcc_client_core::media::engine::Kind;
 use throcc_client_core::media::reorder::REORDER_WINDOW;
 use throcc_client_core::media::share::{self, ShareSender};
 use throcc_client_core::media::share_audio::audio_to_video;
-use throcc_client_core::media::video::decode::Decoder;
+use throcc_client_core::media::video::decode::{Decoder, MAX_PIXELS};
 use throcc_proto::frame::Flags;
 use throcc_proto::ids::MediaId;
 use throcc_proto::messages::{Codec, Event, MediaState, Request, Response, Share, ShareConfig};
@@ -100,7 +100,7 @@ async fn a_shared_picture_arrives_within_a_few_frames() {
         return;
     };
     let units = watch(&bob, tracks.video).await;
-    let mut picture = share::receive(units, sender.config.codec, None, || {}).unwrap();
+    let mut picture = share::receive(units, sender.config, None, || {}).unwrap();
 
     let mut latencies = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -135,7 +135,7 @@ async fn two_percent_loss_brings_a_refresh_within_a_second() {
         return;
     };
     let mut units = watch(&bob, tracks.video).await;
-    let mut decoder = Decoder::new(sender.config.codec).unwrap();
+    let mut decoder = Decoder::new(sender.config.codec, MAX_PIXELS).unwrap();
 
     let mut keyframes = Vec::new();
     let mut pictures = Vec::new();

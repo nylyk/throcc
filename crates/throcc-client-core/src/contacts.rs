@@ -8,6 +8,8 @@ use throcc_proto::Fingerprint;
 use throcc_proto::ids::UserId;
 use throcc_proto::messages::PublicKey;
 
+use crate::keystore::replace_file;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Contact {
     pub key: PublicKey,
@@ -96,9 +98,7 @@ impl Contacts {
                 format!("{} {key} {}\n", user.0, u8::from(c.verified))
             })
             .collect();
-        let tmp = self.path.with_extension("tmp");
-        fs::write(&tmp, text)?;
-        fs::rename(&tmp, &self.path).with_context(|| format!("writing {}", self.path.display()))
+        replace_file(&self.path, text.as_bytes())
     }
 }
 

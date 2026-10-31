@@ -342,3 +342,11 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 ## 2026-10-31 Leaving a room cannot be refused
 
 - **A disconnect or a removal always takes the user out of their room**, even when the room's epoch can't be bumped (a database write fails or the epoch counter is exhausted). The server logs it, drops the user from the members and the routes, and tells the room. The members then keep the current epoch's sender keys, which the removed user still holds, until the next successful bump; the server forwards them nothing, so this only matters if they get the room's datagrams some other way. The alternative, leaving them listed as a member, would route media to a closed session and show them in the room.
+
+## 2026-10-31 Who gets our sender key
+
+- **Our sender secret is wrapped only to peers whose presence shows them in our room**, so a member the server adds to `RoomState` without a `Presence` never receives it and is never pinned. Presence normally arrives just after `RoomState`, so a joiner is first left out and then added with a fresh secret: one extra `PublishKey` per join.
+- **A `RoomState` or `Placed` that gives two tracks the same media id, ours included, or lists a user twice trusts nobody** until a valid one arrives, and the user sees a notice. The session follows only the peers the key manager trusts, so every track it labels has that peer as its owner.
+- **First-time contacts are shown as a notice** naming the person and pointing at Privacy and keys. It is the simplest visible signal; the people list there already marks them "Not verified".
+- **The encryption key is renewed a week before it expires**: when the keystore opens, before each sign-in, and on an hourly check while connected. A running session swaps the key in place and sends `SetEncKey`; the server bumps the epoch, so peers rewrap to the new key. The previous key stays usable for unwrapping secrets sealed to it in flight. If the server refuses the new key, the session reconnects, which publishes it at sign-in.
+- **The identity key falls back to a file only when no OS keychain exists** (`keyring::Error::NoDefaultStore`). A locked or refusing keychain is an error, so it can't silently enroll a second identity.

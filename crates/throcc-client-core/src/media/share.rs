@@ -6,7 +6,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use throcc_proto::messages::{Codec, Recovery, Share, ShareConfig};
+use throcc_proto::messages::{Recovery, Share, ShareConfig};
 use tokio::sync::{mpsc, watch};
 use tracing::warn;
 
@@ -14,7 +14,7 @@ use super::capture::{Capture, CaptureConfig, CaptureError};
 use super::engine::{Kind, MediaEngine, Outgoing, Received};
 use super::share_audio::{Playout, STEREO_FRAME, ShareAudioEncoder, due_frames};
 use super::video::Picture;
-use super::video::decode::Decoder;
+use super::video::decode::{Decoder, MAX_PIXELS};
 use super::video::encode::{Encoder, EncoderConfig};
 use super::video::frame::{VideoFrame, share_size};
 
@@ -133,6 +133,11 @@ impl ShareSender {
     pub fn recover(&self, kind: Recovery) {
         self.recover.send(kind).ok();
     }
+
+    /// Whether sending stopped on its own, as when the shared window or screen went away.
+    pub fn ended(&self) -> bool {
+        self.thread.as_ref().is_none_or(JoinHandle::is_finished)
+    }
 }
 
 impl Drop for ShareSender {
@@ -164,7 +169,7 @@ impl Sending {
         let mut sound = [0.0f32; STEREO_FRAME];
         let mut count = 0u32;
         let mut pacer = RecoveryPacer::default();
-        while !self.stop.load(Ordering::Relaxed) {
+        while !self.stop.load(Ordering::Relaxed) && !self.capture.ended() {
             while let Ok(kind) = self.recover.try_recv() {
                 pacer.ask(kind);
             }
@@ -240,18 +245,45 @@ pub enum ShareError {
 
 /// Decoded frames held back for the share audio, at most.
 const MAX_HELD: usize = 32;
+/// Bytes of decoded frames held back for the share audio, at most.
+const MAX_HELD_BYTES: usize = 256 << 20;
+/// Room above each announced side for decoders that pad pictures to their alignment.
+const DECODER_PADDING: usize = 64;
+
+/// The most pixels a decoded picture of a share announced as `config` may have.
+fn max_pixels(config: &ShareConfig) -> usize {
+    let side = |announced: u16| usize::from(announced) + DECODER_PADDING;
+    (side(config.width) * side(config.height)).min(MAX_PIXELS)
+}
+
+fn frame_bytes(frame: &VideoFrame) -> usize {
+    frame.y.len() + frame.uv.len()
+}
+
+/// Drops the oldest held frames until one of `incoming` bytes fits both bounds.
+fn make_room(held: &mut VecDeque<Arc<VideoFrame>>, incoming: usize) {
+    let mut bytes: usize = held.iter().map(|f| frame_bytes(f)).sum();
+    while held.len() >= MAX_HELD
+        || (!held.is_empty() && bytes.saturating_add(incoming) > MAX_HELD_BYTES)
+    {
+        if let Some(oldest) = held.pop_front() {
+            bytes -= frame_bytes(&oldest);
+        }
+    }
+}
 
 /// Decodes one remote share and keeps its newest due picture. With `playout`, a frame is
 /// due once the share audio reaching the speakers has caught up with it.
 /// Decodes `units` on a thread of its own. After a unit fails to decode, `ask_idr` is called
 /// once, and again only after a unit has decoded since.
+/// Pictures larger than `config` announces are dropped.
 pub fn receive(
     units: mpsc::Receiver<Received>,
-    codec: Codec,
+    config: ShareConfig,
     playout: Option<Arc<Playout>>,
     ask_idr: impl Fn() + Send + 'static,
 ) -> Result<Picture, String> {
-    let mut decoder = Decoder::new(codec).map_err(|e| e.to_string())?;
+    let mut decoder = Decoder::new(config.codec, max_pixels(&config)).map_err(|e| e.to_string())?;
     let (tx, picture) = watch::channel(None);
     std::thread::Builder::new()
         .name("throcc-decode".into())
@@ -276,9 +308,7 @@ pub fn receive(
                     match decoder.decode(&unit.data, unit.timestamp) {
                         Ok(Some(frame)) => {
                             asked = false;
-                            if held.len() == MAX_HELD {
-                                held.pop_front();
-                            }
+                            make_room(&mut held, frame_bytes(&frame));
                             held.push_back(Arc::new(frame));
                         }
                         Ok(None) => asked = false,
@@ -322,6 +352,54 @@ mod pacer_tests {
         assert_eq!(pacer.due(start + Duration::from_millis(500)), None);
         assert_eq!(pacer.due(start + RECOVERY_SPACING), Some(Recovery::Idr));
         assert_eq!(pacer.due(start + RECOVERY_SPACING * 3), None);
+    }
+}
+
+#[cfg(test)]
+mod receive_tests {
+    use throcc_proto::messages::Codec;
+
+    use super::*;
+
+    fn config(width: u16, height: u16) -> ShareConfig {
+        ShareConfig {
+            audio: false,
+            kbps: 4000,
+            codec: Codec::Vp9,
+            width,
+            height,
+            fps: 30,
+        }
+    }
+
+    #[test]
+    fn decoded_pictures_are_bounded_by_the_announced_size() {
+        assert_eq!(max_pixels(&config(1280, 720)), (1280 + 64) * (720 + 64));
+        assert_eq!(max_pixels(&config(u16::MAX, u16::MAX)), MAX_PIXELS);
+        assert_eq!(max_pixels(&config(0, 0)), 64 * 64);
+    }
+
+    #[test]
+    fn held_frames_stay_within_count_and_bytes() {
+        let mut held = VecDeque::new();
+        let small = Arc::new(VideoFrame::blank(16, 16));
+        for _ in 0..MAX_HELD + 5 {
+            make_room(&mut held, frame_bytes(&small));
+            held.push_back(small.clone());
+        }
+        assert_eq!(held.len(), MAX_HELD);
+
+        let big = Arc::new(VideoFrame::blank(4096, 4096));
+        for _ in 0..MAX_HELD {
+            make_room(&mut held, frame_bytes(&big));
+            held.push_back(big.clone());
+        }
+        let bytes: usize = held.iter().map(|f| frame_bytes(f)).sum();
+        assert!(bytes <= MAX_HELD_BYTES, "{bytes} bytes held");
+        assert_eq!(held.len(), MAX_HELD_BYTES / frame_bytes(&big));
+
+        make_room(&mut held, usize::MAX);
+        assert!(held.is_empty());
     }
 }
 

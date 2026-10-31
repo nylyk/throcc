@@ -86,12 +86,14 @@ impl VideoFrame {
     /// The same picture as BGRA, for renderers that take RGB images.
     pub fn to_bgra(&self) -> Vec<u8> {
         let mut out = vec![0u8; self.width * self.height * 4];
+        let last_pair = self.width.saturating_sub(2) & !1;
+        let chroma = |at: usize| f32::from(self.uv.get(at).copied().unwrap_or(128)) - 128.0;
         for row in 0..self.height {
             for col in 0..self.width {
                 let y = f32::from(self.y[row * self.width + col]);
-                let uv_at = (row / 2) * self.width + (col / 2) * 2;
-                let u = f32::from(self.uv[uv_at]) - 128.0;
-                let v = f32::from(self.uv[uv_at + 1]) - 128.0;
+                let uv_at = (row / 2) * self.width + (col & !1).min(last_pair);
+                let u = chroma(uv_at);
+                let v = chroma(uv_at + 1);
                 let r = y + 1.5748 * v;
                 let g = y - 0.1873 * u - 0.4681 * v;
                 let b = y + 1.8556 * u;
@@ -223,5 +225,24 @@ mod tests {
     fn bgra_has_four_bytes_a_pixel() {
         let frame = VideoFrame::test_pattern(64, 36, 7, 0);
         assert_eq!(frame.to_bgra().len(), 64 * 36 * 4);
+    }
+
+    #[test]
+    fn odd_sizes_convert_to_bgra_with_the_last_chroma_pair() {
+        for (width, height) in [(1, 1), (5, 3), (7, 5), (641, 359)] {
+            let mut frame = VideoFrame::blank(width, height);
+            frame.y.fill(128);
+            for row in frame.uv.chunks_exact_mut(width) {
+                for pair in row.as_chunks_mut::<2>().0 {
+                    *pair = [128, 255];
+                }
+            }
+            let bgra = frame.to_bgra();
+            assert_eq!(bgra.len(), width * height * 4);
+            if width > 1 {
+                let last = bgra.as_chunks::<4>().0.last().unwrap();
+                assert_eq!(*last, [128, 68, 255, 255], "{width}×{height}");
+            }
+        }
     }
 }

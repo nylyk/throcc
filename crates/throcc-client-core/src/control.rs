@@ -212,6 +212,26 @@ async fn write_frame<T: Serialize>(
 struct Pending {
     next_id: u32,
     waiting: HashMap<u32, oneshot::Sender<Response>>,
+    closed: bool,
+}
+
+impl Pending {
+    /// Waits for the reply to the next request id, unless the stream has closed.
+    fn register(&mut self, waiter: oneshot::Sender<Response>) -> Result<u32, LinkError> {
+        if self.closed {
+            return Err(LinkError::Closed);
+        }
+        let id = self.next_id;
+        self.next_id = id.checked_add(1).ok_or(LinkError::IdsExhausted)?;
+        self.waiting.insert(id, waiter);
+        Ok(id)
+    }
+
+    /// Fails every request waiting for a reply, and every later one.
+    fn close(&mut self) {
+        self.closed = true;
+        self.waiting.clear();
+    }
 }
 
 /// Sends requests on the control stream. Cheap to clone; many requests may be in flight.
@@ -225,19 +245,12 @@ pub struct Requester {
 impl Requester {
     pub async fn request(&self, req: Request) -> Result<Response, LinkError> {
         let (tx, rx) = oneshot::channel();
-        let id = {
-            let mut pending = lock(&self.pending);
-            let id = pending.next_id;
-            let Some(next) = id.checked_add(1) else {
-                drop(pending);
-                self.connection
-                    .close(close::PROTOCOL_ERROR.into(), b"request ids exhausted");
-                return Err(LinkError::IdsExhausted);
-            };
-            pending.next_id = next;
-            pending.waiting.insert(id, tx);
-            id
-        };
+        let registered = lock(&self.pending).register(tx);
+        if let Err(LinkError::IdsExhausted) = registered {
+            self.connection
+                .close(close::PROTOCOL_ERROR.into(), b"request ids exhausted");
+        }
+        let id = registered?;
         self.outgoing
             .send(ClientMessage::Request { id, req })
             .await
@@ -255,9 +268,11 @@ fn spawn_link(
     let (events_tx, events) = mpsc::channel(EVENT_QUEUE);
     let pending = Arc::new(Mutex::new(Pending::default()));
 
+    let writer_pending = pending.clone();
     tokio::spawn(async move {
         while let Some(message) = outgoing_rx.recv().await {
             if write_frame(&mut send, &message).await.is_err() {
+                lock(&writer_pending).close();
                 return;
             }
         }
@@ -296,7 +311,7 @@ fn spawn_link(
                 }
             }
         }
-        lock(&reader_pending).waiting.clear();
+        lock(&reader_pending).close();
     });
 
     (
@@ -307,4 +322,34 @@ fn spawn_link(
         },
         events,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_closed_stream_fails_waiting_and_later_requests() {
+        let mut pending = Pending::default();
+        let (tx, mut waiting) = oneshot::channel();
+        pending.register(tx).unwrap();
+        pending.close();
+        assert_eq!(
+            waiting.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        );
+        let (tx, _rx) = oneshot::channel();
+        assert!(matches!(pending.register(tx), Err(LinkError::Closed)));
+    }
+
+    #[test]
+    fn request_ids_never_wrap() {
+        let mut pending = Pending {
+            next_id: u32::MAX,
+            ..Pending::default()
+        };
+        let (tx, _rx) = oneshot::channel();
+        assert!(matches!(pending.register(tx), Err(LinkError::IdsExhausted)));
+        assert!(pending.waiting.is_empty());
+    }
 }

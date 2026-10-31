@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
+use crate::keystore::replace_file;
+
 const NAME_FILE: &str = "profile_name";
 const PICTURE_FILE: &str = "profile_picture";
 
@@ -46,9 +48,7 @@ fn read(path: &Path) -> Result<Option<Vec<u8>>> {
 
 fn write(path: &Path, bytes: Option<&[u8]>) -> Result<()> {
     match bytes {
-        Some(bytes) => {
-            fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))
-        }
+        Some(bytes) => replace_file(path, bytes),
         None => match fs::remove_file(path) {
             Err(e) if e.kind() != ErrorKind::NotFound => {
                 Err(e).with_context(|| format!("removing {}", path.display()))

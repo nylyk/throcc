@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use throcc_crypto::hpke::EncKeyPair;
+use throcc_proto::Fingerprint;
 use throcc_proto::ids::{MediaId, RoomId, UserId};
 use throcc_proto::messages::{Event, Placed, Request, Response, Welcome};
 use tokio::sync::mpsc;
@@ -54,14 +55,30 @@ impl Call {
         );
         let engine = Arc::new(engine);
 
+        {
+            let mut keys = engine.keys();
+            for p in &welcome.presence {
+                keys.keys.set_presence(p.user, p.room);
+            }
+        }
+        let placed_notices = match welcome.placed.room {
+            Some(_) => engine.placed(&welcome.placed),
+            None => Vec::new(),
+        };
+
         let (events_tx, events) = mpsc::channel(EVENTS);
+        for notice in placed_notices {
+            events_tx.try_send(CallEvent::Key(notice)).ok();
+        }
         let pump_engine = engine.clone();
         tokio::spawn(async move {
             while let Some(event) = server_events.recv().await {
-                for notice in pump_engine.event(&event) {
+                let mut notices = pump_engine.event(&event);
+                notices.extend(follow_presence(&pump_engine, &event));
+                events_tx.send(CallEvent::Server(event)).await.ok();
+                for notice in notices {
                     events_tx.send(CallEvent::Key(notice)).await.ok();
                 }
-                events_tx.send(CallEvent::Server(event)).await.ok();
             }
         });
         let pump_requester = requester.clone();
@@ -77,9 +94,6 @@ impl Call {
             }
         });
 
-        if welcome.placed.room.is_some() {
-            engine.placed(&welcome.placed);
-        }
         Ok(Self {
             welcome,
             requester,
@@ -100,6 +114,15 @@ impl Call {
         self.welcome.me
     }
 
+    pub fn server(&self) -> Fingerprint {
+        self.connected.fingerprint
+    }
+
+    /// Applies the current room state again, after a pin changed.
+    pub fn refresh_keys(&self) -> Vec<KeyNotice> {
+        refresh_keys(&self.engine)
+    }
+
     pub async fn request(&self, request: Request) -> Result<Response> {
         Ok(self.requester.request(request).await?)
     }
@@ -114,5 +137,28 @@ impl Call {
             Response::Err { message, .. } => bail!("{message}"),
             other => bail!("unexpected reply {other:?}"),
         }
+    }
+}
+
+/// Tells the key manager where `event` shows a user, and applies the room state again
+/// when that changes who is shown in our room.
+fn follow_presence(engine: &MediaEngine, event: &Event) -> Vec<KeyNotice> {
+    let (user, room) = match event {
+        Event::PresenceChanged(p) => (p.user, p.room),
+        Event::PresenceEnded(user) => (*user, None),
+        _ => return Vec::new(),
+    };
+    if engine.keys().keys.set_presence(user, room) {
+        refresh_keys(engine)
+    } else {
+        Vec::new()
+    }
+}
+
+fn refresh_keys(engine: &MediaEngine) -> Vec<KeyNotice> {
+    let current = engine.keys().keys.current_room_state();
+    match current {
+        Some((room, epoch, peers)) => engine.event(&Event::RoomState { room, epoch, peers }),
+        None => Vec::new(),
     }
 }

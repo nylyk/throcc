@@ -322,3 +322,54 @@ fn only_admins_name_the_server_and_everyone_sees_it() {
         })
     });
 }
+
+#[test]
+fn a_verified_contact_stays_verified_in_the_next_session() {
+    let (address, bootstrap) = server();
+    let (alice, _a) = client(&address, &bootstrap);
+    wait_connected(&alice, "connected");
+    let room = create_room(&alice);
+    let code = invite(&alice);
+    let bob_dir = tempfile::tempdir().unwrap();
+    let bob = client_in(bob_dir.path(), &address, &code);
+    alice.command(Command::Join(Some(room)));
+    bob.command(Command::Join(Some(room)));
+    let alice_id = alice.state().me.unwrap();
+    wait_for(&bob, "a pinned key for alice", |_| {
+        bob.safety_number(alice_id).is_some()
+    });
+    bob.command(Command::SetVerified(alice_id, true));
+    wait_for(&bob, "alice verified", |s| {
+        s.person(alice_id).is_some_and(|p| p.verified)
+    });
+    drop(bob);
+
+    let keystore = Keystore::open_in(bob_dir.path()).unwrap();
+    let options = ClientOptions {
+        audio: false,
+        ..Default::default()
+    };
+    let bob = Client::connect(&address, keystore, None, options).unwrap();
+    wait_for(&bob, "alice still verified", |s| {
+        s.person(alice_id).is_some_and(|p| p.verified)
+    });
+}
+
+#[test]
+fn a_removed_member_stops_reconnecting() {
+    let (address, bootstrap) = server();
+    let (alice, _a) = client(&address, &bootstrap);
+    wait_connected(&alice, "connected");
+    let code = invite(&alice);
+    let (bob, _b) = client(&address, &code);
+    let bob_id = bob.state().me.unwrap();
+    alice.command(Command::RemoveUser {
+        user: bob_id,
+        cascade: false,
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !matches!(bob.state().connection, ConnectionStatus::Failed(_)) {
+        assert!(Instant::now() < deadline, "{:?}", bob.state().connection);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}

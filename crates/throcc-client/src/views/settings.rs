@@ -269,7 +269,7 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let name = app.state.profile_name.clone().unwrap_or_default();
     let picture = match &app.profile_picture_edit {
         Some(edit) => edit.image.clone(),
-        None => app.picture(app.state.profile_picture),
+        None => app.picture(app.state.profile_picture, cx),
     };
     let has_picture = picture.is_some();
     let saving = app.profile_status == Some(ProfileStatus::Saving);

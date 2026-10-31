@@ -428,12 +428,15 @@ fn verify(app: &ThroccApp, user: UserId, cx: &mut Context<ThroccApp>) -> AnyElem
         .flex_col()
         .gap_4()
         .child(title(name.clone()))
-        .child(div().flex().gap_2().child(if verified {
+        .child(div().flex().gap_2().child(if warning.is_some() {
+            chip("Key changed", theme::warn_bg(), theme::warn_text())
+        } else if verified {
             chip("Verified", theme::ok_bg(), theme::ok_text())
         } else {
             chip("Not verified", theme::raised(), theme::text_2())
         }));
     if let Some(warning) = warning {
+        let shown = warning.now.0;
         content = content.child(
             warning_box()
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{name}'s key changed")))
@@ -442,7 +445,7 @@ fn verify(app: &ThroccApp, user: UserId, cx: &mut Context<ThroccApp>) -> AnyElem
                 .child(div().flex().gap_2().child(caption("Now")).child(mono(warning.now.short())))
                 .child(caption("This happens when someone reinstalls, and also when a server swaps keys to listen in."))
                 .child(div().flex().child(primary("accept-key", "Accept new key").on_click(cx.listener(move |app, _, _, cx| {
-                    app.command(Command::AcceptKey(user));
+                    app.command(Command::AcceptKey(user, shown));
                     cx.notify();
                 })))),
         );

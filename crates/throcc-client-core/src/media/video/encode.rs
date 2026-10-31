@@ -571,7 +571,7 @@ mod failed_open {
 
 #[cfg(test)]
 mod vp9 {
-    use super::super::decode::Decoder;
+    use super::super::decode::{Decoder, MAX_PIXELS};
     use super::super::frame::{VideoFrame, luma_psnr};
     use super::*;
 
@@ -590,7 +590,7 @@ mod vp9 {
             eprintln!("this ffmpeg has no libvpx; skipping");
             return;
         };
-        let mut decoder = Decoder::new(Codec::Vp9).unwrap();
+        let mut decoder = Decoder::new(Codec::Vp9, MAX_PIXELS).unwrap();
         let started = std::time::Instant::now();
         let mut shown = Vec::new();
         for n in 0..60u16 {
@@ -620,7 +620,7 @@ mod vp9 {
 
 #[cfg(test)]
 mod round_trip {
-    use super::super::decode::Decoder;
+    use super::super::decode::{Decoder, MAX_PIXELS};
     use super::super::frame::{VideoFrame, luma_psnr};
     use super::*;
 
@@ -635,7 +635,7 @@ mod round_trip {
             kbps: 4000,
         };
         let mut encoder = Encoder::open_with(candidate, config)?;
-        let mut decoder = Decoder::new(codec).unwrap();
+        let mut decoder = Decoder::new(codec, MAX_PIXELS).unwrap();
         let mut shown = Vec::new();
         for n in 0..30u16 {
             let input = VideoFrame::test_pattern(1280, 720, n, u32::from(n) * 3000);

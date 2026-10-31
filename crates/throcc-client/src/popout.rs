@@ -97,7 +97,7 @@ impl Render for PopOut {
             (app.client.clone(), app.state.clone())
         };
         let person = state.person(user).cloned();
-        let sharer_picture = app.update(cx, |app, _| app.picture(person.as_ref()?.avatar));
+        let sharer_picture = app.update(cx, |app, cx| app.picture(person.as_ref()?.avatar, cx));
         let name = person.as_ref().map_or("Someone".into(), |p| p.name.clone());
         let room = state
             .current

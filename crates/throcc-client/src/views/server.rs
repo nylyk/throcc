@@ -68,7 +68,7 @@ fn overview(app: &mut ThroccApp, is_admin: bool, cx: &mut Context<ThroccApp>) ->
     };
     let picture = match &app.server_picture_edit {
         Some(edit) => edit.image.clone(),
-        None => app.picture(server.avatar),
+        None => app.picture(server.avatar, cx),
     };
     let has_picture = picture.is_some();
     let saving = app.server_status == Some(ServerStatus::Saving);
@@ -125,7 +125,7 @@ fn overview(app: &mut ThroccApp, is_admin: bool, cx: &mut Context<ThroccApp>) ->
 }
 
 fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
-    let pictures = app.pictures_of_people();
+    let pictures = app.pictures_of_people(cx);
     let state = app.state.clone();
     let server = state
         .server
@@ -195,7 +195,7 @@ fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
 }
 
 fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
-    let pictures = app.pictures_of_people();
+    let pictures = app.pictures_of_people(cx);
     let is_admin = app.state.role == Some(Role::Admin);
     let invite = app.invite.clone();
     let users = app.users.clone();

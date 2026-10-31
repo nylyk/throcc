@@ -148,7 +148,8 @@ pub struct ThroccApp {
     pub server_picture_edit: Option<PictureEdit>,
     /// One hex field per palette colour, in [`theme::Palette::LABELS`] order.
     pub palette_fields: Vec<Entity<InputState>>,
-    pub pictures: std::collections::HashMap<Hash, Arc<RenderImage>>,
+    /// Pictures by hash, `None` while one decodes in the background or if it can't be shown.
+    pub pictures: std::collections::HashMap<Hash, Option<Arc<RenderImage>>>,
     pub joining: bool,
     /// Whether the join screen shows the form for a new server over the list of known ones.
     pub adding_server: bool,
@@ -380,24 +381,45 @@ impl ThroccApp {
     }
 
     /// The decoded pictures of everyone in the state who has one and has arrived.
-    pub fn pictures_of_people(&mut self) -> std::collections::HashMap<UserId, Arc<RenderImage>> {
+    pub fn pictures_of_people(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> std::collections::HashMap<UserId, Arc<RenderImage>> {
         let state = self.state.clone();
         state
             .people
             .iter()
-            .filter_map(|(user, p)| Some((*user, self.picture(p.avatar)?)))
+            .filter_map(|(user, p)| Some((*user, self.picture(p.avatar, cx)?)))
             .collect()
     }
 
-    /// The decoded profile picture behind `avatar`, once the client has it.
-    pub fn picture(&mut self, avatar: Option<Hash>) -> Option<Arc<RenderImage>> {
+    /// The decoded profile picture behind `avatar`, once the client has it and it has decoded.
+    pub fn picture(
+        &mut self,
+        avatar: Option<Hash>,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<RenderImage>> {
         let hash = avatar?;
         if let Some(picture) = self.pictures.get(&hash) {
-            return Some(picture.clone());
+            return picture.clone();
         }
-        let picture = crate::avatar::decode(&self.client.as_ref()?.avatar(hash)?)?;
-        self.pictures.insert(hash, picture.clone());
-        Some(picture)
+        let bytes = self.client.as_ref()?.avatar(hash)?;
+        self.pictures.insert(hash, None);
+        cx.spawn(async move |this, cx| {
+            let picture = cx
+                .background_executor()
+                .spawn(async move { crate::avatar::decode(&bytes) })
+                .await;
+            if picture.is_some() {
+                this.update(cx, |app, cx| {
+                    app.pictures.insert(hash, picture);
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+        None
     }
 
     /// Switches every window to `palette`, keeps it for next time and shows it in the fields.

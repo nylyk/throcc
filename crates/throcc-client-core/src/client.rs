@@ -63,7 +63,8 @@ pub enum Command {
         user: UserId,
         cascade: bool,
     },
-    AcceptKey(UserId),
+    /// Trusts `user`'s changed identity key, if it is the one we warned about.
+    AcceptKey(UserId, PublicKey),
     SetVerified(UserId, bool),
     Voice(VoiceSettings),
     Devices {
@@ -141,6 +142,7 @@ impl Client {
             .enable_all()
             .build()
             .map_err(|e| SignInError::Store(e.into()))?;
+        keystore.renew_enc_key_if_due()?;
         let link = runtime.block_on(async {
             match invite {
                 Some(code) => account::enroll(&mut keystore, address, code).await,
@@ -391,7 +393,10 @@ impl ClientApi for MockClient {
             Command::ListUsers | Command::SetRole(..) | Command::RemoveUser { .. } => {
                 self.events.send(Event::Users(sample_users())).ok();
             }
-            Command::AcceptKey(user) => self.update(|s| s.key_warnings.retain(|w| w.user != user)),
+            Command::AcceptKey(user, key) => self.update(|s| {
+                s.key_warnings
+                    .retain(|w| !(w.user == user && w.now.0 == key))
+            }),
             Command::SetVerified(user, verified) => self.update(|s| {
                 if let Some(p) = s.people.get_mut(&user) {
                     p.verified = verified;

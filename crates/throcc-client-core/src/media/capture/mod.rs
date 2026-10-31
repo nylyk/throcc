@@ -54,6 +54,11 @@ pub trait Capture: Send {
     fn next_frame(&mut self, into: &mut VideoFrame) -> bool;
     /// Frames the capture callback dropped because the ring was full.
     fn dropped(&self) -> Arc<AtomicU64>;
+    /// Whether capturing stopped for good, as when the shared window closed or the system
+    /// ended the share.
+    fn ended(&self) -> bool {
+        false
+    }
     fn captures_audio(&self) -> bool {
         false
     }

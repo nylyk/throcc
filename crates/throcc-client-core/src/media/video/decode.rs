@@ -15,6 +15,8 @@ pub enum DecodeError {
     NoDecoder(Codec),
     #[error("decoded frames in pixel format {0}, which throcc doesn't present")]
     Format(i32),
+    #[error("a {0}×{1} picture is larger than this share may send")]
+    TooLarge(i32, i32),
     #[error("ffmpeg: {0}")]
     Ffmpeg(#[from] RsmpegError),
 }
@@ -52,19 +54,26 @@ fn devices() -> &'static [ffi::AVHWDeviceType] {
     }
 }
 
+/// The most pixels any decoded picture may have.
+pub const MAX_PIXELS: usize = 4096 * 4096;
+
 /// Decodes one remote share, on the GPU where it can. Shows the newest frame;
 /// presentation time is ignored.
 pub struct Decoder {
     ctx: AVCodecContext,
     codec: Codec,
     hardware: bool,
+    max_pixels: usize,
 }
 
 impl Decoder {
-    pub fn new(codec: Codec) -> Result<Self, DecodeError> {
-        let decoder = match Self::on_hardware(codec) {
+    /// Opens a decoder that refuses pictures of more than `max_pixels`, capped at
+    /// [`MAX_PIXELS`].
+    pub fn new(codec: Codec, max_pixels: usize) -> Result<Self, DecodeError> {
+        let max_pixels = max_pixels.min(MAX_PIXELS);
+        let decoder = match Self::on_hardware(codec, max_pixels) {
             Some(decoder) => decoder,
-            None => Self::in_software(codec)?,
+            None => Self::in_software(codec, max_pixels)?,
         };
         let place = if decoder.hardware {
             "hardware"
@@ -75,7 +84,7 @@ impl Decoder {
         Ok(decoder)
     }
 
-    fn on_hardware(codec: Codec) -> Option<Self> {
+    fn on_hardware(codec: Codec, max_pixels: usize) -> Option<Self> {
         let found = AVCodec::find_decoder_by_name(native(codec))?;
         devices().iter().find_map(|&device_type| {
             let supported = (0..).map_while(|i| found.hw_config(i)).any(|config| {
@@ -88,28 +97,32 @@ impl Decoder {
             let device = AVHWDeviceContext::create(device_type, None, None, 0).ok()?;
             let mut ctx = AVCodecContext::new(&found);
             ctx.set_flags(ctx.flags | ffi::AV_CODEC_FLAG_LOW_DELAY as i32);
+            limit_pixels(&mut ctx, max_pixels);
             ctx.set_hw_device_ctx(device);
             ctx.open(None).ok()?;
             Some(Self {
                 ctx,
                 codec,
                 hardware: true,
+                max_pixels,
             })
         })
     }
 
-    fn in_software(codec: Codec) -> Result<Self, DecodeError> {
+    fn in_software(codec: Codec, max_pixels: usize) -> Result<Self, DecodeError> {
         let found = decoders(codec)
             .iter()
             .find_map(|name| AVCodec::find_decoder_by_name(name))
             .ok_or(DecodeError::NoDecoder(codec))?;
         let mut ctx = AVCodecContext::new(&found);
         ctx.set_flags(ctx.flags | ffi::AV_CODEC_FLAG_LOW_DELAY as i32);
+        limit_pixels(&mut ctx, max_pixels);
         ctx.open(None)?;
         Ok(Self {
             ctx,
             codec,
             hardware: false,
+            max_pixels,
         })
     }
 
@@ -128,7 +141,7 @@ impl Decoder {
         match self.decode_unit(unit, timestamp) {
             Err(e) if self.hardware => {
                 warn!("hardware decoding failed ({e}); decoding in software");
-                *self = Self::in_software(self.codec)?;
+                *self = Self::in_software(self.codec, self.max_pixels)?;
                 self.decode_unit(unit, timestamp)
             }
             result => result,
@@ -153,6 +166,9 @@ impl Decoder {
         let mut newest = None;
         loop {
             match self.ctx.receive_frame() {
+                Ok(frame) if !fits(&frame, self.max_pixels) => {
+                    return Err(DecodeError::TooLarge(frame.width, frame.height));
+                }
                 Ok(frame) if frame.hw_frames_ctx.is_null() => {
                     newest = Some(to_nv12(&frame, timestamp)?);
                 }
@@ -169,6 +185,16 @@ impl Decoder {
         }
         Ok(newest)
     }
+}
+
+fn limit_pixels(ctx: &mut AVCodecContext, max_pixels: usize) {
+    // SAFETY: `ctx` is a live codec context that has not been opened yet.
+    unsafe { (*ctx.as_mut_ptr()).max_pixels = i64::try_from(max_pixels).unwrap_or(i64::MAX) };
+}
+
+fn fits(frame: &AVFrame, max_pixels: usize) -> bool {
+    let side = |v: i32| usize::try_from(v).unwrap_or(usize::MAX);
+    side(frame.width).saturating_mul(side(frame.height)) <= max_pixels
 }
 
 /// Copies a decoded 4:2:0 frame into NV12, cropped to even dimensions.

@@ -55,7 +55,7 @@ fn fullscreen(
     cx: &mut Context<ThroccApp>,
 ) -> impl IntoElement {
     let person = app.state.person(user).cloned();
-    let picture = app.picture(person.as_ref().and_then(|p| p.avatar));
+    let picture = app.picture(person.as_ref().and_then(|p| p.avatar), cx);
     let name = person.as_ref().map_or("Someone".into(), |p| p.name.clone());
     let config = person
         .as_ref()
@@ -103,13 +103,13 @@ fn people_in(state: &State, room: RoomId) -> Vec<(UserId, Person)> {
 }
 
 fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
-    let pictures = app.pictures_of_people();
+    let pictures = app.pictures_of_people(cx);
     let state = app.state.clone();
     let server = state
         .server
         .as_ref()
         .map_or("server".to_owned(), |s| s.title().to_owned());
-    let server_picture = app.picture(state.server.as_ref().and_then(|s| s.avatar));
+    let server_picture = app.picture(state.server.as_ref().and_then(|s| s.avatar), cx);
     let current_room = state.current.as_ref().map(|c| c.room);
     let manages = app.manages_rooms();
     let rooms = state.rooms.iter().map(|room| {
@@ -393,7 +393,7 @@ fn occupant(
 }
 
 fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
-    let pictures = app.pictures_of_people();
+    let pictures = app.pictures_of_people(cx);
     let manages = app.manages_rooms();
     let state = app.state.clone();
     let cards = state.rooms.iter().map(|room| {
@@ -489,7 +489,7 @@ fn room(
     window: &mut Window,
     cx: &mut Context<ThroccApp>,
 ) -> impl IntoElement {
-    let pictures = app.pictures_of_people();
+    let pictures = app.pictures_of_people(cx);
     let state = app.state.clone();
     let name = state.room(room).map_or("Room".into(), |r| r.name.clone());
     let people = people_in(&state, room);
