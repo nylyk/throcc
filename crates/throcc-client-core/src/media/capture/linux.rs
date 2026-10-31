@@ -29,7 +29,7 @@ use pw::spa::pod::serialize::PodSerializer;
 use pw::spa::pod::{ChoiceValue, Object, Pod, Property, Value};
 use pw::spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Direction, Fraction, Rectangle, SpaTypes};
 use pw::stream::{Stream, StreamBox, StreamFlags};
-use throcc_proto::frame::VIDEO_CLOCK_HZ;
+use throcc_proto::frame::{VIDEO_CLOCK_HZ, timestamp_before};
 use tracing::warn;
 
 use super::{Capture, CaptureConfig, CaptureError};
@@ -212,6 +212,7 @@ pub(crate) struct PipeWireCapture {
     pending: VecDeque<f32>,
     /// Timestamp of the first pending sample, in 48 kHz ticks from `zero`.
     pending_at: i64,
+    last_frame: Option<u32>,
 }
 
 impl PipeWireCapture {
@@ -263,6 +264,7 @@ impl PipeWireCapture {
                 zero: None,
                 pending: VecDeque::new(),
                 pending_at: 0,
+                last_frame: None,
             }),
             Ok(Err(e)) => {
                 thread.join().ok();
@@ -286,7 +288,8 @@ impl Capture for PipeWireCapture {
             });
             if let Some((picture, timestamp)) = stamped {
                 convert(&slot.bytes, picture, into);
-                into.timestamp = timestamp;
+                into.timestamp = strictly_after(self.last_frame, timestamp);
+                self.last_frame = Some(into.timestamp);
             }
             if slot.bytes.len() < slot.needed {
                 slot.bytes.resize(slot.needed, 0);
@@ -330,6 +333,25 @@ impl Capture for PipeWireCapture {
         self.pending_at += FRAME as i64;
         Some(timestamp)
     }
+}
+
+/// `timestamp`, or the tick after `last` when it isn't later.
+fn strictly_after(last: Option<u32>, timestamp: u32) -> u32 {
+    match last {
+        Some(last) if !timestamp_before(last, timestamp) => last.wrapping_add(1),
+        _ => timestamp,
+    }
+}
+
+/// CLOCK_MONOTONIC in nanoseconds, the clock PipeWire's audio times are on.
+fn monotonic_nanos() -> i64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime only writes the timespec it is given.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    i64::from(now.tv_sec) * NANOS as i64 + i64::from(now.tv_nsec)
 }
 
 /// Ticks of a `rate` Hz clock from `zero`, which the first frame or audio buffer taken sets,
@@ -532,9 +554,6 @@ fn on_process(stream: &Stream, state: &mut StreamState) {
     let Some(layout) = state.layout else {
         return;
     };
-    let Ok(time) = stream.time() else {
-        return;
-    };
     let Some(mut slot) = state.spare.take().or_else(|| state.free.pop().ok()) else {
         state.dropped.fetch_add(1, Ordering::Relaxed);
         return;
@@ -544,7 +563,7 @@ fn on_process(stream: &Stream, state: &mut StreamState) {
             slot.picture = Some(Picture {
                 layout,
                 planes,
-                at: time.now(),
+                at: monotonic_nanos(),
             });
         }
         Copied::TooSmall => {
@@ -810,6 +829,22 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    #[test]
+    fn frame_timestamps_only_move_forward() {
+        assert_eq!(strictly_after(None, 0), 0);
+        assert_eq!(strictly_after(Some(0), 0), 1);
+        assert_eq!(strictly_after(Some(10), 4), 11);
+        assert_eq!(strictly_after(Some(10), 1500), 1500);
+        assert_eq!(strictly_after(Some(u32::MAX), 3), 3);
+    }
+
+    #[test]
+    fn the_monotonic_clock_advances() {
+        let before = monotonic_nanos();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert!(monotonic_nanos() - before >= 2_000_000);
+    }
 
     fn bgrx_frame(width: usize, height: usize, stride: usize, pixel: [u8; 4]) -> Vec<u8> {
         let mut bytes = vec![0xee; stride * height];
