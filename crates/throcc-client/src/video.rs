@@ -2,13 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, IntoElement, ObjectFit, ParentElement, RenderImage, Styled, StyledImage,
-    Window, div, img,
+    AnyElement, App, IntoElement, ObjectFit, ParentElement, Pixels, RenderImage, Styled,
+    StyledImage, Window, div, img,
 };
 use throcc_client_core::client::ClientApi;
 use throcc_proto::ids::UserId;
 
-use crate::theme;
 use crate::views::common::caption;
 
 /// The last picture uploaded for one share, and which frame it was.
@@ -22,11 +21,13 @@ struct Shown {
 pub struct Feeds(HashMap<UserId, Shown>);
 
 impl Feeds {
-    /// `user`'s share, as large as fits its parent with the aspect ratio kept.
+    /// `user`'s share, as large as fits its parent with the aspect ratio kept, its corners
+    /// rounded by `radius`.
     pub fn surface(
         &mut self,
         client: Option<&Arc<dyn ClientApi>>,
         user: UserId,
+        radius: Pixels,
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
@@ -68,12 +69,13 @@ impl Feeds {
             .size_full()
             .relative()
             .overflow_hidden()
-            .bg(theme::stage())
+            .rounded(radius)
             .children(self.0.get(&user).map(|shown| {
                 img(shown.image.clone())
                     .absolute()
                     .inset_0()
                     .size_full()
+                    .rounded(radius)
                     .object_fit(ObjectFit::Contain)
             }))
             .into_any_element()

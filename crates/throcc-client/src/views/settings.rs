@@ -9,7 +9,7 @@ use throcc_client_core::media::audio::{
     DEFAULT_VAD_THRESHOLD, NoiseSuppressionLevel, Transmit, VoiceSettings,
 };
 
-use super::common::{avatar, caption, card, chip, mono, primary, secondary, section, title};
+use super::common::{avatar, caption, card, chip, ghost_icon, mono, primary, secondary, section};
 use crate::app::{ProfileStatus, Screen, SettingsPage, ThroccApp};
 use crate::theme;
 
@@ -31,7 +31,7 @@ pub fn render(
             cx.notify();
         }))
     };
-    let nav = nav(cx)
+    let links = nav_list()
         .child(item("nav-profile", "Profile", SettingsPage::Profile, cx))
         .child(item("nav-audio", "Audio", SettingsPage::Audio, cx))
         .child(item(
@@ -47,31 +47,18 @@ pub fn render(
         SettingsPage::Appearance => appearance(app, cx),
         SettingsPage::Servers => servers(app),
     };
-    frame(nav, content)
+    let page_title = match page {
+        SettingsPage::Profile => "Profile",
+        SettingsPage::Audio => "Audio",
+        SettingsPage::Appearance => "Appearance",
+        SettingsPage::Servers => "Servers",
+    };
+    frame("Settings", links, page_title, content, cx)
 }
 
-/// The settings sidebar with its Back button, for pages to be added to.
-pub(super) fn nav(cx: &mut Context<ThroccApp>) -> Div {
-    div()
-        .w(theme::SIDEBAR_WIDTH)
-        .h_full()
-        .flex_none()
-        .bg(theme::sidebar())
-        .border_r_1()
-        .border_color(theme::control())
-        .p_3()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(
-            secondary("settings-back", "Back")
-                .w_full()
-                .on_click(cx.listener(|app, _, _, cx| {
-                    app.screen = Screen::Main;
-                    cx.notify();
-                })),
-        )
-        .child(div().h_2())
+/// The column of page links in the settings sidebar.
+pub(super) fn nav_list() -> Div {
+    div().flex_1().p_3().flex().flex_col().gap_1()
 }
 
 pub(super) fn nav_item(id: &'static str, label: &'static str, selected: bool) -> Stateful<Div> {
@@ -88,16 +75,71 @@ pub(super) fn nav_item(id: &'static str, label: &'static str, selected: bool) ->
         .child(label)
 }
 
-/// The settings sidebar beside a scrolling page.
-pub(super) fn frame(nav: Div, content: AnyElement) -> Div {
-    div().size_full().flex().child(nav).child(
+/// A settings screen laid out like the main one: the sidebar under a bar with a back
+/// arrow and `heading`, the page under a bar with its `page_title`.
+pub(super) fn frame(
+    heading: &'static str,
+    links: Div,
+    page_title: &'static str,
+    content: AnyElement,
+    cx: &mut Context<ThroccApp>,
+) -> Div {
+    let top_bar = || {
         div()
-            .id("settings-content")
-            .flex_1()
-            .overflow_y_scroll()
-            .p_8()
-            .child(div().max_w(px(640.)).child(content)),
-    )
+            .flex()
+            .items_center()
+            .h(theme::HEADER_HEIGHT)
+            .flex_none()
+            .border_b_1()
+            .border_color(theme::control())
+    };
+    let sidebar = div()
+        .w(theme::SIDEBAR_WIDTH)
+        .h_full()
+        .flex_none()
+        .flex()
+        .flex_col()
+        .bg(theme::sidebar())
+        .border_r_1()
+        .border_color(theme::control())
+        .child(
+            top_bar()
+                .gap_2()
+                .px_3()
+                .child(
+                    ghost_icon("settings-back", "arrow-left", "Back").on_click(cx.listener(
+                        |app, _, _, cx| {
+                            app.screen = Screen::Main;
+                            cx.notify();
+                        },
+                    )),
+                )
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(heading)),
+        )
+        .child(links);
+    let page = div()
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .flex()
+        .flex_col()
+        .child(
+            top_bar().px_6().child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(16.))
+                    .child(page_title),
+            ),
+        )
+        .child(
+            div()
+                .id("settings-content")
+                .flex_1()
+                .overflow_y_scroll()
+                .p_8()
+                .child(div().max_w(px(640.)).child(content)),
+        );
+    div().size_full().flex().child(sidebar).child(page)
 }
 
 pub(super) trait PageHighlight {
@@ -217,7 +259,6 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .flex()
         .flex_col()
         .gap_6()
-        .child(title("Profile"))
         .child(
             card()
                 .flex()
@@ -302,7 +343,6 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .flex()
         .flex_col()
         .gap_6()
-        .child(title("Audio"))
         .child(
             card()
                 .flex()
@@ -446,7 +486,6 @@ fn servers(app: &mut ThroccApp) -> AnyElement {
         .flex()
         .flex_col()
         .gap_6()
-        .child(title("Servers"))
         .child(
             card()
                 .flex()
@@ -564,7 +603,6 @@ fn appearance(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .flex()
         .flex_col()
         .gap_6()
-        .child(title("Appearance"))
         .child(
             card()
                 .flex()

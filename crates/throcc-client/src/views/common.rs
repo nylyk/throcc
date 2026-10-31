@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    Div, ElementId, FontWeight, Hsla, IntoElement, ObjectFit, ParentElement, Pixels, RenderImage,
-    SharedString, Styled, StyledImage, div, img, px,
+    AnyElement, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement, ObjectFit,
+    ParentElement, Pixels, RenderImage, SharedString, Stateful, Styled, StyledImage, div, img, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Icon, Sizable, Size};
@@ -178,4 +178,63 @@ pub fn ghost_icon(
 /// "2c4e 9a1b": the first two groups of a fingerprint.
 pub fn short_key(key: &[u8; 32]) -> String {
     throcc_proto::Fingerprint(*key).short()
+}
+
+/// How long the controls over a fullscreen stream stay after the pointer last moved.
+pub const CONTROLS_LINGER: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// A stream as a video player shows it: the picture on black, `title` over a shade at the
+/// top and `controls` over a shade at the bottom, both while `shown`.
+pub fn player(picture: AnyElement, title: Div, controls: Div, shown: bool) -> Div {
+    let edge = || {
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .flex()
+            .items_center()
+            .gap_3()
+            .px_6()
+    };
+    div()
+        .size_full()
+        .relative()
+        .bg(theme::player_bg())
+        .text_color(theme::player_text())
+        .child(picture)
+        .children(shown.then(|| {
+            edge()
+                .top_0()
+                .h(px(96.))
+                .pb_8()
+                .bg(theme::player_shade(false))
+                .child(title)
+        }))
+        .children(shown.then(|| {
+            edge()
+                .bottom_0()
+                .h(px(112.))
+                .pt_8()
+                .justify_end()
+                .bg(theme::player_shade(true))
+                .child(controls)
+        }))
+}
+
+/// A round icon button over a fullscreen stream.
+pub fn player_button(id: impl Into<ElementId>, icon_name: &'static str) -> Stateful<Div> {
+    div()
+        .id(id)
+        .size(px(44.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .cursor_pointer()
+        .hover(|s| s.bg(theme::player_hover()))
+        .child(
+            icon(icon_name)
+                .size(px(22.))
+                .text_color(theme::player_text()),
+        )
 }

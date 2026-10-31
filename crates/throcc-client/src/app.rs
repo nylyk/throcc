@@ -132,6 +132,11 @@ pub struct ThroccApp {
     /// Whether our own share's self-view shows in our tile.
     pub preview_self: bool,
     pub popouts: std::collections::HashMap<UserId, WindowHandle<Root>>,
+    /// The share filling the whole window, with the rest of the UI hidden.
+    pub fullscreen: Option<UserId>,
+    /// Until when the controls over the fullscreen share show.
+    pub controls_until: std::time::Instant,
+    pub fullscreen_focus: gpui::FocusHandle,
     events: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -212,6 +217,9 @@ impl ThroccApp {
             focus: None,
             preview_self: false,
             popouts: std::collections::HashMap::new(),
+            fullscreen: None,
+            controls_until: std::time::Instant::now(),
+            fullscreen_focus: cx.focus_handle(),
             events: None,
             _subscriptions: subscriptions,
         };
@@ -276,6 +284,9 @@ impl ThroccApp {
             Event::State(state) => {
                 self.state = state;
                 self.close_unwatched_popouts(cx);
+                if self.fullscreen.is_some_and(|user| !self.shows_stream(user)) {
+                    self.exit_fullscreen(window, cx);
+                }
             }
             Event::Invite { code, expires } => self.invite = Some((code, expires)),
             Event::Users(users) => self.users = users,
@@ -352,6 +363,43 @@ impl ThroccApp {
         let palette = theme::Palette::from_colors(colors);
         theme::set(palette, cx);
         theme::save(palette);
+    }
+
+    /// Whether `user`'s share is watched here, in this window.
+    pub fn shows_stream(&self, user: UserId) -> bool {
+        let sharing = self.state.person(user).is_some_and(|p| p.sharing.is_some());
+        let watched = if Some(user) == self.state.me {
+            self.preview_self
+        } else {
+            self.state
+                .current
+                .as_ref()
+                .is_some_and(|c| c.watching.contains(&user))
+        };
+        sharing && watched && !self.popouts.contains_key(&user)
+    }
+
+    /// Fills the window with `user`'s share and makes the window fullscreen.
+    pub fn enter_fullscreen(&mut self, user: UserId, window: &mut Window, cx: &mut Context<Self>) {
+        self.fullscreen = Some(user);
+        self.show_controls(cx);
+        window.focus(&self.fullscreen_focus, cx);
+        if !window.is_fullscreen() {
+            window.toggle_fullscreen();
+        }
+    }
+
+    pub fn exit_fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.fullscreen = None;
+        if window.is_fullscreen() {
+            window.toggle_fullscreen();
+        }
+        cx.notify();
+    }
+
+    pub fn show_controls(&mut self, cx: &mut Context<Self>) {
+        self.controls_until = std::time::Instant::now() + crate::views::common::CONTROLS_LINGER;
+        cx.notify();
     }
 
     /// Moves a watched share into a window of its own.
@@ -616,7 +664,8 @@ impl ThroccApp {
     }
 
     /// Opens a screen of the mock client by name, for screenshots: join, lobby, room, focus,
-    /// popout, share, settings, appearance, profile, connection, verify, members or keychange.
+    /// fullscreen, popout, share, settings, appearance, profile, connection, verify, members
+    /// or keychange.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         let room = throcc_proto::ids::RoomId(1);
         let joined = |app: &mut Self| {
@@ -634,6 +683,22 @@ impl ThroccApp {
             "focus" => {
                 joined(self);
                 self.focus = Some(UserId(4));
+            }
+            "fullscreen" => {
+                joined(self);
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(300))
+                        .await;
+                    this.update(cx, |app, cx| {
+                        app.fullscreen = Some(UserId(4));
+                        app.controls_until =
+                            std::time::Instant::now() + std::time::Duration::from_secs(60);
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
             }
             "popout" => {
                 joined(self);
@@ -758,7 +823,10 @@ impl ThroccApp {
         }
     }
 
-    fn close_dialog(&mut self, _: &CloseDialog, _: &mut Window, cx: &mut Context<Self>) {
+    fn close_dialog(&mut self, _: &CloseDialog, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog.is_none() && self.fullscreen.is_some() {
+            self.exit_fullscreen(window, cx);
+        }
         self.dialog = None;
         cx.notify();
     }

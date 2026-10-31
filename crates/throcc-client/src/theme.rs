@@ -317,6 +317,26 @@ pub fn stage() -> Hsla {
     let p = palette();
     mixed(p.accent, 0.06, p.bg)
 }
+/// Behind a fullscreen stream, as in any video player, whatever the theme.
+pub fn player_bg() -> Hsla {
+    gpui::black()
+}
+/// Text and icons over a fullscreen stream.
+pub fn player_text() -> Hsla {
+    gpui::white()
+}
+pub fn player_hover() -> Hsla {
+    gpui::white().opacity(0.16)
+}
+/// The shade behind a fullscreen stream's controls, darkest at the edge `toward_top` says.
+pub fn player_shade(toward_top: bool) -> gpui::Background {
+    let angle = if toward_top { 0. } else { 180. };
+    gpui::linear_gradient(
+        angle,
+        gpui::linear_color_stop(gpui::black().opacity(0.0), 0.0),
+        gpui::linear_color_stop(gpui::black().opacity(0.75), 1.0),
+    )
+}
 /// Dims the window behind a dialog.
 pub fn scrim() -> Hsla {
     gpui::black().opacity(0.6)

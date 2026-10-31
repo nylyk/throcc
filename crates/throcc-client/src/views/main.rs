@@ -11,7 +11,8 @@ use throcc_client_core::state::{Person, Preset, State, share_label};
 use throcc_proto::ids::{RoomId, UserId};
 
 use super::common::{
-    avatar, caption, card, control_button, ghost_icon, icon, primary, section, sharing_icon, title,
+    avatar, caption, card, control_button, ghost_icon, icon, player, player_button, primary,
+    section, sharing_icon, title,
 };
 use crate::app::{Dialog, Screen, ServerPage, SettingsPage, ThroccApp};
 use crate::theme;
@@ -21,6 +22,9 @@ pub fn render(
     window: &mut Window,
     cx: &mut Context<ThroccApp>,
 ) -> impl IntoElement {
+    if let Some(user) = app.fullscreen.filter(|user| app.shows_stream(*user)) {
+        return fullscreen(app, user, window, cx).into_any_element();
+    }
     let content = match app.state.current.clone() {
         Some(current) => room(app, current.room, window, cx).into_any_element(),
         None => lobby(app, cx).into_any_element(),
@@ -30,6 +34,76 @@ pub fn render(
         .flex()
         .child(sidebar(app, cx))
         .child(div().flex_1().min_w_0().h_full().child(content))
+        .into_any_element()
+}
+
+/// One share filling the window. Its controls show while the pointer moves.
+fn fullscreen(
+    app: &mut ThroccApp,
+    user: UserId,
+    window: &mut Window,
+    cx: &mut Context<ThroccApp>,
+) -> impl IntoElement {
+    let person = app.state.person(user).cloned();
+    let picture = app.picture(person.as_ref().and_then(|p| p.avatar));
+    let name = person.as_ref().map_or("Someone".into(), |p| p.name.clone());
+    let config = person
+        .as_ref()
+        .and_then(|p| p.sharing)
+        .map(|c| share_label(&c))
+        .unwrap_or_default();
+    let mine = Some(user) == app.state.me;
+    let title = div()
+        .flex()
+        .items_center()
+        .gap_3()
+        .child(avatar(&name, user.0, picture, px(28.), false))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(16.))
+                        .child(format!("{name}'s screen")),
+                )
+                .child(div().text_size(px(12.)).opacity(0.75).child(config)),
+        );
+    let buttons = div()
+        .flex()
+        .gap_2()
+        .child(
+            player_button("fullscreen-stop-watching", "eye-off").on_click(cx.listener(
+                move |app, _, window, cx| {
+                    if mine {
+                        app.preview_self = false;
+                    } else {
+                        app.command(Command::Unwatch(user));
+                    }
+                    app.exit_fullscreen(window, cx);
+                },
+            )),
+        )
+        .child(
+            player_button("exit-fullscreen", "minimize-2")
+                .on_click(cx.listener(|app, _, window, cx| app.exit_fullscreen(window, cx))),
+        );
+    let controls = std::time::Instant::now() < app.controls_until;
+    let stream = app
+        .feeds
+        .surface(app.client.as_ref(), user, px(0.), window, cx);
+    div()
+        .id("fullscreen")
+        .track_focus(&app.fullscreen_focus)
+        .size_full()
+        .on_mouse_move(cx.listener(|app, _, _, cx| app.show_controls(cx)))
+        .on_key_down(cx.listener(|app, event: &gpui::KeyDownEvent, window, cx| {
+            if event.keystroke.key == "escape" {
+                app.exit_fullscreen(window, cx);
+            }
+        }))
+        .child(player(stream, title, buttons, controls))
 }
 
 fn people_in(state: &State, room: RoomId) -> Vec<(UserId, Person)> {
@@ -777,18 +851,22 @@ fn tile(
                     cx.notify();
                 })),
             )
-            .children((layout == Layout::Stage).then(|| {
-                ghost_icon("fullscreen", "maximize-2", "Fullscreen").on_click(cx.listener(
-                    |_, _, window, cx| {
+            .child(
+                ghost_icon(("fullscreen", user.0 as usize), "maximize-2", "Fullscreen").on_click(
+                    cx.listener(move |app, _, window, cx| {
                         cx.stop_propagation();
-                        window.toggle_fullscreen();
-                    },
-                ))
-            }))
+                        app.enter_fullscreen(user, window, cx);
+                    }),
+                ),
+            )
     });
-    let picture = app.feeds.surface(app.client.as_ref(), user, window, cx);
+    let radius = theme::RADIUS_TILE - px(1.);
+    let picture = app
+        .feeds
+        .surface(app.client.as_ref(), user, radius, window, cx);
     frame
         .cursor_pointer()
+        .bg(theme::stage())
         .child(picture)
         .child(label)
         .children(buttons)

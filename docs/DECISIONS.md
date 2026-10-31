@@ -300,3 +300,9 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 ## 2026-10-31 Profile kept on the client
 
 - **Name and picture belong to this computer, not a server,** as the human asked. They live in `profile_name` and `profile_picture` in throcc's data directory, and the session gives them to each server when it connects and after each change. With nothing kept yet, connecting changes nothing, so a picture set on a server before this keeps showing. A server that refuses a change (its one-per-10-seconds limit) leaves the kept profile as it is; the next connect tries again.
+
+## 2026-10-31 Hardware decoding and stream fullscreen
+
+- **Decoding tries the GPU first:** FFmpeg's own decoder for the codec with a hardware device (VideoToolbox on macOS, VA-API then CUDA on Linux, D3D11VA then CUDA on Windows), and the software decoders only when no device opens. FFmpeg's default format choice picks the device's format, and the decoded surface is copied back to NV12. A hardware decoder that fails on a unit is replaced by software, which decodes that same unit, since FFmpeg's own AV1 decoder has no software path. The ffmpeg build enables NVDEC wherever it enables NVENC.
+- **Fullscreen means the share fills the window,** not just a fullscreen window around the normal UI, and looks like a video player rather than the app, as the human asked: black around the picture in every theme, who and what at the top and the buttons at the bottom, each over a dark fade. They show for three seconds after the pointer moves; Escape leaves. Pop-outs do the same. Every stream tile has the button, in the grid too.
+- **Settings screens share the main screen's top bars:** a back arrow and "Settings" or "Server settings" over the page links, and the page's title over the page. Leaving a server stays on the main screen's header only.

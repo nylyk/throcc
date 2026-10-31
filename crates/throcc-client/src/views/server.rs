@@ -6,10 +6,9 @@ use throcc_client_core::client::Command;
 use throcc_proto::ids::Role;
 
 use super::common::{
-    avatar, caption, card, chip, danger, ghost_icon, mono, primary, secondary, section, short_key,
-    title,
+    avatar, caption, card, chip, ghost_icon, mono, primary, secondary, section, short_key,
 };
-use super::settings::{frame, nav, nav_item, segmented};
+use super::settings::{frame, nav_item, nav_list, segmented};
 use crate::app::{Dialog, Screen, ServerPage, ThroccApp};
 use crate::theme;
 
@@ -20,11 +19,6 @@ pub fn render(
     cx: &mut Context<ThroccApp>,
 ) -> impl IntoElement {
     let is_admin = app.state.role == Some(Role::Admin);
-    let address = app
-        .state
-        .server
-        .as_ref()
-        .map_or("This server".to_owned(), |s| s.address.clone());
     let item =
         |id: &'static str, label: &'static str, target: ServerPage, cx: &mut Context<ThroccApp>| {
             nav_item(id, label, page == target).on_click(cx.listener(move |app, _, _, cx| {
@@ -35,41 +29,24 @@ pub fn render(
                 cx.notify();
             }))
         };
-    let nav = nav(cx)
-        .child(
-            div()
-                .px_3()
-                .pb_1()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(avatar(&address, 0, None, px(20.), false))
-                .child(
-                    div()
-                        .flex_1()
-                        .truncate()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(address.clone()),
-                ),
-        )
+    let links = nav_list()
         .child(item("nav-keys", "Privacy and keys", ServerPage::Keys, cx))
         .child(item(
             "nav-members",
             if is_admin { "Members" } else { "Invites" },
             ServerPage::Members,
             cx,
-        ))
-        .child(div().flex_1())
-        .child(
-            danger("leave-this-server", "Leave this server")
-                .w_full()
-                .on_click(cx.listener(|app, _, _, cx| app.leave_server(cx))),
-        );
+        ));
+    let page_title = match page {
+        ServerPage::Keys => "Privacy and keys",
+        ServerPage::Members if is_admin => "Members",
+        ServerPage::Members => "Invites",
+    };
     let content = match page {
         ServerPage::Keys => keys(app, cx),
         ServerPage::Members => members(app, cx),
     };
-    frame(nav, content)
+    frame("Server settings", links, page_title, content, cx)
 }
 
 fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
@@ -84,7 +61,6 @@ fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .flex()
         .flex_col()
         .gap_6()
-        .child(title("Privacy and keys"))
         .children(server.map(|(address, fingerprint)| {
             card()
                 .flex()
@@ -174,12 +150,7 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                     .on_click(cx.listener(|app, _, _, _| app.command(Command::CreateInvite))),
                 ),
         );
-    let mut page = div()
-        .flex()
-        .flex_col()
-        .gap_6()
-        .child(title(if is_admin { "Members" } else { "Invites" }))
-        .child(invite_card);
+    let mut page = div().flex().flex_col().gap_6().child(invite_card);
     if is_admin {
         let my_id = app.state.me;
         page = page.child(
