@@ -68,6 +68,8 @@ Screen sharing needs ffmpeg 8 (`--features ffmpeg`); without it the client still
 - Linux: the packages in `.github/workflows/ci.yml`, plus ffmpeg 8 development files. With clang 21 or newer, generate the ffmpeg bindings with `packaging/ffmpeg/bindings.sh <ffmpeg prefix> binding.rs` (needs `bindgen` 0.72) and build with `FFMPEG_DLL_PATH=<prefix>/lib FFMPEG_BINDING_PATH=binding.rs`.
 - Windows: ffmpeg 8 development files found through `FFMPEG_PKG_CONFIG_PATH` or vcpkg.
 
+With Nix, `nix run github:nylyk/throcc` builds and starts the client with its own LGPL ffmpeg, and `nix run github:nylyk/throcc#server` the server. On macOS this uses the system's Xcode Command Line Tools for the ScreenCaptureKit bridges, so it needs them installed and Nix builds unsandboxed (the default there).
+
 `throcc-cli` is a headless client for scripts and testing (`throcc-cli --help`).
 
 ### Packages

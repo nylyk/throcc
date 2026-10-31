@@ -5,3 +5,4 @@
 ci-run.log
 /.claude/worktrees/
 /deps/
+/result
