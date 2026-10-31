@@ -24,9 +24,10 @@ fn synthetic(index: u32, len: usize) -> Bytes {
     debug_assertions,
     ignore = "a debug build can't encrypt 20 Mbps on CI runners"
 )]
-async fn ten_thousand_units_at_20_mbps_arrive_intact() {
-    const UNITS: u32 = 10_000;
-    const LEN: usize = 2500;
+async fn ten_seconds_of_frames_at_20_mbps_arrive_intact() {
+    const FPS: u32 = 60;
+    const UNITS: u32 = 10 * FPS;
+    const LEN: usize = 20_000_000 / 8 / FPS as usize;
     let server = start_server();
     let (alice, bob, _) = room_with_two(&server).await;
 
@@ -76,21 +77,18 @@ async fn ten_thousand_units_at_20_mbps_arrive_intact() {
     let started = Instant::now();
     let sender = alice.engine.clone();
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_millis(10));
-        for batch in 0..UNITS / 10 {
+        let mut tick = tokio::time::interval(Duration::from_secs(1) / FPS);
+        for index in 0..UNITS {
             tick.tick().await;
-            for i in 0..10 {
-                let index = batch * 10 + i;
-                let unit = Outgoing {
-                    media_id: video_id,
-                    data: synthetic(index, LEN),
-                    timestamp: index * 90,
-                    keyframe: index == 0,
-                    discardable: false,
-                    enqueued: Instant::now(),
-                };
-                sender.send(Kind::Video, unit);
-            }
+            let unit = Outgoing {
+                media_id: video_id,
+                data: synthetic(index, LEN),
+                timestamp: index * (90_000 / FPS),
+                keyframe: index == 0,
+                discardable: false,
+                enqueued: Instant::now(),
+            };
+            sender.send(Kind::Video, unit);
         }
     });
 
