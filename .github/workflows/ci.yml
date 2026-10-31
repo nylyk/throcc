@@ -59,6 +59,27 @@ jobs:
       - run: ./scripts/ci-run.sh cargo test -p throcc-client-core -p throcc-cli --features ffmpeg
         shell: bash
 
+  surface:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libvulkan-dev libfontconfig-dev libfreetype-dev libx11-xcb-dev libxcb1-dev libxcb-randr0-dev \
+            libxcb-shm0-dev libxcb-xfixes0-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev libgbm-dev \
+            libegl-dev libssl-dev libzstd-dev pkg-config mesa-vulkan-drivers sway grim fonts-dejavu-core
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/ci-run.sh tests/surface/run.sh
+        shell: bash
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surface
+          path: target/surface/*.ppm
+          retention-days: 7
+
   netem:
     runs-on: ubuntu-latest
     steps:
