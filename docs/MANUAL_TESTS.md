@@ -81,6 +81,17 @@ cargo test -p throcc-client-core --lib portal_share -- --ignored --nocapture
 
 Pass: the portal's dialog appears once; pick a monitor or a window. Both shares print a size and get at least 10 frames, and the second share starts without a dialog. To ask again, delete `~/.local/share/throcc/screencast-restore-token`.
 
+## Shares drawn as NV12 surfaces on Linux and Windows
+
+Needs a Linux desktop with an AMD GPU and ffmpeg with VA-API (Mesa's `radeonsi` VA driver), a Windows machine with a GPU, and a third machine sharing 2560×1440 at 60 fps with moving content (a video full screen). Run the client built with `--features ffmpeg` and watch the share:
+
+```sh
+RUST_LOG=throcc_client_core=info,gpui_wgpu=info cargo run --release -p throcc-client --features ffmpeg
+```
+
+- **Linux:** the log says `decoding <codec> in hardware` and names the AMD GPU as the wgpu adapter. Pass: the picture is sharp and moves smoothly, colours match the sharer's screen (a red, green and blue test image shows no hue shift, black is black and white is white, not grey), and the tile's rounded corners show the tile behind them, in the grid, the focus view, fullscreen and a pop-out. `top -H -p $(pgrep throcc-client)` shows the main thread's CPU; note it, and compare it with the same share watched in a build from before the NV12 surface (which converted each frame to BGRA on that thread): it should be several times lower.
+- **Windows:** the same checks, with Task Manager's Details tab for the main thread's CPU. Then resize the window quickly and change the share's resolution on the sender: the picture follows without flicker or stale frames. Unplug a monitor or switch GPUs (a device-lost) while watching: the picture comes back.
+
 ## M10: macOS share audio
 
 Needs a Mac with the screen recording permission and speakers.

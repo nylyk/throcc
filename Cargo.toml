@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-exclude = ["fuzz"]
+exclude = ["fuzz", "third_party"]
 
 [workspace.package]
 version = "0.1.0"
@@ -88,3 +88,8 @@ windows = { version = "0.62.2", features = [
 windows-core = "0.62.2"
 zeroize = { version = "1.9.1", features = ["derive"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[patch.crates-io]
+gpui-pre = { path = "third_party/gpui-pre" }
+gpui-pre-wgpu = { path = "third_party/gpui-pre-wgpu" }
+gpui-pre-windows = { path = "third_party/gpui-pre-windows" }
