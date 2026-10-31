@@ -140,7 +140,7 @@ Pass: play music on the sharer, pause it for a few seconds, play again; the watc
 
 Needs a client connected to a server, a mic and speakers.
 
-Pass: on the audio page the meter moves with your voice and turns green above the threshold mark; dragging the threshold above your speaking level stops the speaking ring, and below it brings it back. Input volume at 0 % silences you; output volume changes how loud others and shared audio play. Picking a device in either dropdown switches to it at once.
+Pass: on the audio page the meter moves with your voice and turns green above the threshold mark; dragging the threshold above your speaking level stops the speaking ring, and below it brings it back. Input volume at 0 % silences you; output volume changes how loud others and shared audio play. Picking a device in either dropdown switches to it at once. Switching the output device while watching a share with audio, with one person turned down and the mic test on, keeps the share audio in sync, that person quiet and the mic test running.
 
 ## macOS window chrome
 

@@ -147,6 +147,7 @@ pub(crate) struct Session {
     /// The video track each watched share is decoded from.
     watched_video: HashMap<UserId, MediaId>,
     watched_audio: HashMap<UserId, MediaId>,
+    mic_test: bool,
     /// A picture to put on our profile once the server tells us our name.
     pending_avatar: Option<Option<Hash>>,
     profile: Profile,
@@ -182,6 +183,7 @@ impl Session {
             watching: Vec::new(),
             watched_video: HashMap::new(),
             watched_audio: HashMap::new(),
+            mic_test: false,
             pending_avatar: None,
             profile: Profile::default(),
             #[cfg(feature = "ffmpeg")]
@@ -617,6 +619,7 @@ impl Session {
                 self.options.input_device = input;
                 self.options.output_device = output;
                 self.start_voice();
+                self.voice(VoiceCommand::Loopback(self.mic_test));
                 if self.call.engine.keys().keys.room().is_some() {
                     self.voice(VoiceCommand::SendOn(self.my_tracks.as_ref().map(|t| t.mic)));
                     self.voice(VoiceCommand::Muted(!self.media.mic));
@@ -624,9 +627,20 @@ impl Session {
                     let peers: Vec<RoomPeer> =
                         std::mem::take(&mut self.peers).into_values().collect();
                     self.sync_peers(&peers);
+                    let watched: Vec<UserId> = self.watched_video.keys().copied().collect();
+                    for user in watched {
+                        self.stop_watching(user);
+                    }
+                    self.sync_watching();
+                    for (user, person) in &self.shared.state().people {
+                        self.voice(VoiceCommand::Volume(*user, person.volume));
+                    }
                 }
             }
-            Command::MicTest(on) => self.voice(VoiceCommand::Loopback(on)),
+            Command::MicTest(on) => {
+                self.mic_test = on;
+                self.voice(VoiceCommand::Loopback(on));
+            }
             Command::PushToTalk(down) => self.voice(VoiceCommand::PushToTalk(down)),
             Command::Disconnect => {}
         }
