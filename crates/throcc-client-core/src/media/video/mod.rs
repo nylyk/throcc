@@ -40,7 +40,7 @@ impl PreviewDemand {
 
     pub fn wanted(&self) -> bool {
         let drawn = self.drawn.load(Ordering::Relaxed);
-        drawn != 0 && self.millis() + 1 - drawn < PREVIEW_LINGER.as_millis() as u64
+        drawn != 0 && (self.millis() + 1).saturating_sub(drawn) < PREVIEW_LINGER.as_millis() as u64
     }
 
     fn millis(&self) -> u64 {
