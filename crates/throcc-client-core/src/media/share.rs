@@ -172,9 +172,9 @@ struct Sending {
     unsent: bool,
     self_view: watch::Sender<Option<Arc<VideoFrame>>>,
     preview: Arc<PreviewDemand>,
-    /// Modifiers of frames in GPU memory that failed, `None` for all of them.
+    /// Frames in GPU memory the share no longer takes.
     #[cfg(target_os = "linux")]
-    refused: Vec<Option<u64>>,
+    refused: Vec<Refusal>,
 }
 
 impl Sending {
@@ -218,7 +218,9 @@ impl Sending {
             return false;
         };
         let modifier = frame.modifier;
-        if self.refused.contains(&None) || self.refused.contains(&Some(modifier)) {
+        if self.refused.contains(&Refusal::All)
+            || self.refused.contains(&Refusal::Modifier(modifier))
+        {
             return true;
         }
         *count = count.wrapping_add(1);
@@ -234,12 +236,17 @@ impl Sending {
                     }
                 }
             }
-            Err(e) => {
-                let refused = refusal(&e, modifier);
-                warn!(?refused, "falling back to frames in shared memory: {e}");
-                self.refused.push(refused);
-                self.capture.refuse_dmabuf(refused);
-            }
+            Err(e) => match refusal(&e, modifier) {
+                Some(refused) => {
+                    warn!(?refused, "falling back to frames in shared memory: {e}");
+                    self.refused.push(refused);
+                    self.capture.refuse_dmabuf(match refused {
+                        Refusal::Modifier(modifier) => Some(modifier),
+                        Refusal::All => None,
+                    });
+                }
+                None => warn!("encoding failed: {e}"),
+            },
         }
         true
     }
@@ -272,12 +279,23 @@ fn send_units(engine: &MediaEngine, tracks: &Share, units: Vec<EncodedUnit>) {
     }
 }
 
-/// Which frames in GPU memory to refuse after one failed with `error`: those with its
-/// `modifier` when only importing that layout failed, else all of them.
+/// Frames in GPU memory a share stops taking after one of them failed.
 #[cfg(target_os = "linux")]
-fn refusal(error: &EncodeError, modifier: u64) -> Option<u64> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refusal {
+    /// Those with this modifier, which failed to import.
+    Modifier(u64),
+    /// All of them, since the encoder or the GPU can't process them.
+    All,
+}
+
+/// What to refuse after a frame in GPU memory with `modifier` failed with `error`. `None`
+/// for errors that may pass, which cost only that frame.
+#[cfg(target_os = "linux")]
+fn refusal(error: &EncodeError, modifier: u64) -> Option<Refusal> {
     match error {
-        EncodeError::Import(_) => Some(modifier),
+        EncodeError::Import(_) => Some(Refusal::Modifier(modifier)),
+        EncodeError::NoGpuInput | EncodeError::Gpu(_) => Some(Refusal::All),
         _ => None,
     }
 }
@@ -421,13 +439,24 @@ mod refusal_tests {
     #[test]
     fn a_layout_that_fails_to_import_is_refused_alone() {
         let import = EncodeError::Import(VaError::Format(0));
-        assert_eq!(refusal(&import, 7), Some(7));
+        assert_eq!(refusal(&import, 7), Some(Refusal::Modifier(7)));
+    }
+
+    #[test]
+    fn an_encoder_or_gpu_that_cant_take_them_refuses_all() {
         let processing = EncodeError::Gpu(VaError::Call {
             call: "vaEndPicture",
             status: 1,
         });
-        assert_eq!(refusal(&processing, 7), None);
-        assert_eq!(refusal(&EncodeError::NoGpuInput, 7), None);
+        assert_eq!(refusal(&processing, 7), Some(Refusal::All));
+        assert_eq!(refusal(&EncodeError::NoGpuInput, 7), Some(Refusal::All));
+    }
+
+    #[test]
+    fn a_passing_error_costs_only_the_frame() {
+        assert_eq!(refusal(&EncodeError::NoSurfaces, 7), None);
+        let send = EncodeError::Ffmpeg(rsmpeg::error::RsmpegError::SendFrameAgainError);
+        assert_eq!(refusal(&send, 7), None);
     }
 }
 
