@@ -186,7 +186,7 @@ impl Hub {
             .get(&user)
             .is_some_and(|s| s.conn_id == conn_id)
         {
-            self.place(user, None).ok();
+            self.leave_room(user);
             self.sessions.remove(&user);
             self.rebuild_routes();
         }
@@ -234,7 +234,7 @@ impl Hub {
     }
 
     fn evict(&mut self, user: UserId, reason: &str) {
-        self.place(user, None).ok();
+        self.leave_room(user);
         if let Some(session) = self.sessions.remove(&user) {
             session.link.kick(reason, close::REMOVED);
         }
@@ -402,6 +402,28 @@ impl Hub {
         }
         self.rebuild_routes();
         Ok(self.placed(user))
+    }
+
+    /// Takes `user` out of their room even when the room's epoch can't be bumped.
+    fn leave_room(&mut self, user: UserId) {
+        if !self.sessions.contains_key(&user) {
+            return;
+        }
+        let Err(Refusal(_, message)) = self.place(user, None) else {
+            return;
+        };
+        warn!(user = user.0, "leaving the room cleanly failed: {message}");
+        let Some(room) = self.sessions.get_mut(&user).and_then(|s| s.room.take()) else {
+            return;
+        };
+        if let Some(entry) = self.rooms.get_mut(&room) {
+            entry.members.remove(&user);
+        }
+        if let Some(event) = self.room_state(room) {
+            self.emit_room(room, event, None);
+        }
+        self.announce_presence(user);
+        self.rebuild_routes();
     }
 
     fn placed(&self, user: UserId) -> Placed {

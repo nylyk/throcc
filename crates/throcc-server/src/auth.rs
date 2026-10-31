@@ -185,9 +185,10 @@ impl Enrollment<'_> {
             pake_a,
             pake_b: &pake.pake_b,
         };
+        let confirm = pake.confirm(&transcript);
         let reply = PakeReply {
             pake_b: pake.pake_b.clone(),
-            confirm_b: pake.confirm_b(&transcript),
+            confirm_b: confirm.confirm_b,
         };
         let step: PakeStep = Ok(reply);
         write_frame(&mut stream.send, &step)
@@ -198,7 +199,8 @@ impl Enrollment<'_> {
                 .await
                 .map_err(|_| AuthError::BadInvite)?
                 .map_err(|_| AuthError::BadInvite)?;
-        pake.check_confirm_a(&transcript, &finish.confirm_a)
+        confirm
+            .check_confirm_a(&finish.confirm_a)
             .map_err(|_| AuthError::BadInvite)?;
         identity::verify(&self.pubkey, &transcript.to_bytes(), &finish.signature)
             .map_err(|_| AuthError::BadSignature)

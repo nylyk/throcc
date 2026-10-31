@@ -338,3 +338,7 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 ## 2026-10-31 One Save per profile page
 
 - **The profile and server pages stage the name and picture and send nothing until Save.** Choosing or removing a picture only previews it; Save sends every change in one go (`Command::SetProfile`, `Command::SetServerProfile`) and stays grey while nothing differs or a save is in flight. One save is one `SetProfile`, so the server keeps its single limit of one profile change per 10 s.
+
+## 2026-10-31 Leaving a room cannot be refused
+
+- **A disconnect or a removal always takes the user out of their room**, even when the room's epoch can't be bumped (a database write fails or the epoch counter is exhausted). The server logs it, drops the user from the members and the routes, and tells the room. The members then keep the current epoch's sender keys, which the removed user still holds, until the next successful bump; the server forwards them nothing, so this only matters if they get the room's datagrams some other way. The alternative, leaving them listed as a member, would route media to a closed session and show them in the room.
