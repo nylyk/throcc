@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [framing, header, reassembly]
+        target: [fingerprint, framing, handshake, header, invite, media_open, reassembly]
     steps:
       - uses: actions/checkout@v4
       - run: |

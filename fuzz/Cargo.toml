@@ -11,6 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4.13"
 throcc-proto = { path = "../crates/throcc-proto" }
 throcc-client-core = { path = "../crates/throcc-client-core" }
+throcc-crypto = { path = "../crates/throcc-crypto", features = ["media"] }
 
 [[bin]]
 name = "framing"
@@ -29,6 +30,34 @@ bench = false
 [[bin]]
 name = "reassembly"
 path = "fuzz_targets/reassembly.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fingerprint"
+path = "fuzz_targets/fingerprint.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handshake"
+path = "fuzz_targets/handshake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "invite"
+path = "fuzz_targets/invite.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "media_open"
+path = "fuzz_targets/media_open.rs"
 test = false
 doc = false
 bench = false
