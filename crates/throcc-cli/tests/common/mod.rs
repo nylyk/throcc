@@ -101,8 +101,12 @@ pub async fn invite(by: &TestClient) -> InviteCode {
 }
 
 pub async fn invited(server: &TestServer, by: &TestClient) -> TestClient {
+    invited_at(&server.addr, by).await
+}
+
+pub async fn invited_at(addr: &str, by: &TestClient) -> TestClient {
     let code = invite(by).await;
-    enroll(server, &code).await
+    enroll_at(addr, &code).await
 }
 
 #[track_caller]

@@ -16,8 +16,10 @@ use throcc_proto::transport::close;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::auth::InviteRuns;
 use crate::database::{Database, InviteRow, UserRow};
 use crate::egress::{EgressHandle, TrackKind};
+use crate::limits::Buckets;
 use crate::permissions;
 use crate::sfu::{ForwardingTable, KeyframeAggregator, Route, Sfu};
 
@@ -29,6 +31,17 @@ const MAX_WATCHING: usize = 16;
 /// Clients rotate encryption keys every 30 days; a day of slack covers clock skew.
 const MAX_ENC_KEY_LIFETIME: Duration = Duration::from_secs(31 * 24 * 60 * 60);
 const MAX_WRAPPED_BYTES: usize = 256;
+/// Welcome lists every room, and must stay under the frame cap.
+pub const MAX_ROOMS: usize = 500;
+const REQUEST_BURST: f64 = 100.0;
+const REQUESTS_PER_SECOND: f64 = 20.0;
+const UPLOAD_BURST_BYTES: f64 = 1024.0 * 1024.0;
+/// One full-size avatar every 10 seconds.
+const UPLOAD_BYTES_PER_SECOND: f64 = MAX_AVATAR_BYTES as f64 / 10.0;
+/// Bytes charged for an upload smaller than this.
+const MIN_UPLOAD_COST: usize = 4096;
+/// How long an uploaded picture that nothing refers to is kept.
+const UNUSED_BLOB_GRACE: Duration = Duration::from_secs(10 * 60);
 
 pub struct Refusal(pub ErrorCode, pub String);
 
@@ -100,6 +113,9 @@ pub struct Hub {
     sessions: HashMap<UserId, Session>,
     rooms: BTreeMap<RoomId, RoomEntry>,
     next_conn: u64,
+    requests: Buckets<UserId>,
+    uploads: Buckets<UserId>,
+    pub invite_runs: InviteRuns,
 }
 
 impl Hub {
@@ -118,6 +134,7 @@ impl Hub {
                 )
             })
             .collect();
+        db.delete_unused_blobs(unix_now().saturating_sub(UNUSED_BLOB_GRACE.as_secs()))?;
         Ok(Self {
             db,
             fingerprint,
@@ -126,6 +143,9 @@ impl Hub {
             sessions: HashMap::new(),
             rooms,
             next_conn: 0,
+            requests: Buckets::new(REQUEST_BURST, REQUESTS_PER_SECOND),
+            uploads: Buckets::new(UPLOAD_BURST_BYTES, UPLOAD_BYTES_PER_SECOND),
+            invite_runs: InviteRuns::default(),
         })
     }
 
@@ -137,14 +157,15 @@ impl Hub {
         row: UserRow,
         link: Link,
         want_room: Option<RoomId>,
-    ) -> Option<(u64, Welcome)> {
+    ) -> anyhow::Result<Option<(u64, Welcome)>> {
         let user = row.id;
-        let row = self
+        let Some(row) = self
             .db
-            .user(user)
-            .ok()
-            .flatten()
-            .filter(|current| current.pubkey == row.pubkey)?;
+            .user(user)?
+            .filter(|current| current.pubkey == row.pubkey)
+        else {
+            return Ok(None);
+        };
         self.evict(user, "you signed in from somewhere else");
         self.next_conn += 1;
         let conn_id = self.next_conn;
@@ -177,7 +198,7 @@ impl Hub {
             placed,
             server,
         };
-        Some((conn_id, welcome))
+        Ok(Some((conn_id, welcome)))
     }
 
     pub fn disconnect(&mut self, user: UserId, conn_id: u64) {
@@ -205,10 +226,20 @@ impl Hub {
                 message: "this connection was replaced".into(),
             };
         }
+        let metered = !matches!(
+            request,
+            Request::RequestKeyframe { .. } | Request::GetAvatar(_)
+        );
+        if metered && !self.requests.take(user, 1.0, Instant::now()) {
+            return Response::Err {
+                code: ErrorCode::RateLimited,
+                message: "too many requests; slow down".into(),
+            };
+        }
         let outcome = match request {
             Request::SetRoom(room) => self.place(user, room).map(Response::Placed),
             Request::SetProfile { name, avatar } => self.set_profile(user, name, avatar),
-            Request::SetAvatar(bytes) => self.set_avatar(bytes),
+            Request::SetAvatar(bytes) => self.set_avatar(user, bytes),
             Request::GetAvatar(hash) => self.get_avatar(hash),
             Request::SetEncKey(enc_key) => self.set_enc_key(user, enc_key),
             Request::SetMedia(media) => self.set_media(user, media),
@@ -356,7 +387,8 @@ impl Hub {
         }
         if let Some(room) = target {
             self.room_entry(room)?;
-            if session.row.enc_key.is_none() {
+            let now = unix_now();
+            if session.row.enc_key.is_none_or(|key| key.not_after <= now) {
                 return Err(Refusal::new(
                     ErrorCode::Invalid,
                     "set an encryption key before joining a room",
@@ -422,7 +454,7 @@ impl Hub {
         if let Some(event) = self.room_state(room) {
             self.emit_room(room, event, None);
         }
-        self.announce_presence(user);
+        self.emit_all(Event::PresenceEnded(user));
         self.rebuild_routes();
     }
 
@@ -446,6 +478,10 @@ impl Hub {
             .db
             .allocate_media_ids(TRACKS_PER_MEMBERSHIP)
             .map_err(Refusal::internal)?
+            .ok_or_else(|| {
+                warn!("media ids are exhausted; nobody can join a room any more");
+                Refusal::new(ErrorCode::Internal, "this server has run out of media ids")
+            })?
             .0;
         Ok(Tracks {
             mic: MediaId(first),
@@ -458,6 +494,11 @@ impl Hub {
 
     fn set_profile(&mut self, user: UserId, name: String, avatar: Option<Hash>) -> Outcome {
         let name = valid_name(&name)?;
+        if let Some(hash) = &avatar
+            && self.db.blob(hash).map_err(Refusal::internal)?.is_none()
+        {
+            return Err(Refusal::new(ErrorCode::NotFound, "no such picture"));
+        }
         let session = self.session(user)?;
         if session
             .last_profile
@@ -510,15 +551,28 @@ impl Hub {
         Ok(Response::Ok)
     }
 
-    fn set_avatar(&mut self, bytes: Vec<u8>) -> Outcome {
+    fn set_avatar(&mut self, user: UserId, bytes: Vec<u8>) -> Outcome {
         if bytes.len() > MAX_AVATAR_BYTES {
             return Err(Refusal::new(
                 ErrorCode::TooLarge,
                 "avatars are at most 64 KiB",
             ));
         }
+        let cost = bytes.len().max(MIN_UPLOAD_COST) as f64;
+        if !self.uploads.take(user, cost, Instant::now()) {
+            return Err(Refusal::new(
+                ErrorCode::RateLimited,
+                "too many pictures; try again in a minute",
+            ));
+        }
+        let now = unix_now();
+        self.db
+            .delete_unused_blobs(now.saturating_sub(UNUSED_BLOB_GRACE.as_secs()))
+            .map_err(Refusal::internal)?;
         let hash = Hash(Sha256::digest(&bytes).into());
-        self.db.put_blob(&hash, &bytes).map_err(Refusal::internal)?;
+        self.db
+            .put_blob(&hash, &bytes, now)
+            .map_err(Refusal::internal)?;
         Ok(Response::AvatarHash(hash))
     }
 
@@ -579,6 +633,12 @@ impl Hub {
     fn create_room(&mut self, user: UserId, name: String) -> Outcome {
         self.require(permissions::can_manage_rooms(self.role(user)?))?;
         let name = valid_name(&name)?;
+        if self.rooms.len() >= MAX_ROOMS {
+            return Err(Refusal::new(
+                ErrorCode::TooLarge,
+                format!("a server holds at most {MAX_ROOMS} rooms"),
+            ));
+        }
         let id = self.db.create_room(&name).map_err(Refusal::internal)?;
         self.rooms.insert(
             id,

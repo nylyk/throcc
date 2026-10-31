@@ -14,11 +14,15 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::Shared;
-use crate::auth::{self, Refused};
+use crate::auth::{self, Refused, SourceKey};
 use crate::egress;
 use crate::rooms::{Link, Outgoing};
 
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a connection may wait for a handshake slot, and then how long it has to send
+/// its `Hello`.
+const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+/// Longest a sign-in or enrollment may take after Hello, PAKE included.
+const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(40);
 pub const HANDSHAKE_FRAME_BYTES: usize = 4096;
 const EVENT_QUEUE: usize = 1024;
 /// How long a closing session waits for the client to read its last message.
@@ -89,38 +93,34 @@ pub async fn run(shared: Arc<Shared>, connection: quinn::Connection) {
 }
 
 async fn serve(shared: &Shared, connection: &quinn::Connection) -> Result<(), ReadError> {
-    let (send, recv) = connection.open_bi().await.map_err(|_| ReadError::Closed)?;
-    let mut stream = FrameStream { send, recv };
-    let server_nonce: [u8; 32] = random();
-    write_frame(
-        &mut stream.send,
-        &ServerHello {
-            nonce: server_nonce,
-            protocol: PROTOCOL,
-        },
-    )
-    .await
-    .map_err(|_| ReadError::Closed)?;
-    let Ok(permit) = shared.handshakes.try_acquire() else {
+    let source = SourceKey::of(connection.remote_address().ip());
+    let Ok(permit) = tokio::time::timeout(HELLO_TIMEOUT, shared.handshakes.enter(source)).await
+    else {
         connection.close(
             close::SERVER_BUSY.into(),
             b"too many connections are signing in",
         );
         return Ok(());
     };
-    let hello: Hello = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_handshake(&mut stream.recv))
-        .await
-        .map_err(|_| ReadError::Closed)??;
+    let Ok(greeted) = tokio::time::timeout(HELLO_TIMEOUT, greet(connection)).await else {
+        connection.close(close::PROTOCOL_ERROR.into(), b"no hello in time");
+        return Ok(());
+    };
+    let (mut stream, server_nonce, hello) = greeted?;
 
-    let authenticated =
-        match auth::authenticate(shared, connection, &mut stream, &server_nonce, hello).await {
-            Ok(authenticated) => authenticated,
-            Err(refused) => {
-                info!(peer = %connection.remote_address(), "authentication failed: {refused:?}");
-                refuse(connection, stream, refused).await;
-                return Ok(());
-            }
-        };
+    let signing_in = auth::authenticate(shared, connection, &mut stream, &server_nonce, hello);
+    let authenticated = match tokio::time::timeout(SIGN_IN_TIMEOUT, signing_in).await {
+        Ok(Ok(authenticated)) => authenticated,
+        Ok(Err(refused)) => {
+            info!(peer = %connection.remote_address(), "authentication failed: {refused:?}");
+            refuse(connection, stream, refused).await;
+            return Ok(());
+        }
+        Err(_) => {
+            connection.close(close::PROTOCOL_ERROR.into(), b"signing in took too long");
+            return Ok(());
+        }
+    };
 
     let user = authenticated.row.id;
     let (outgoing, outgoing_rx) = mpsc::channel(EVENT_QUEUE);
@@ -132,9 +132,17 @@ async fn serve(shared: &Shared, connection: &quinn::Connection) -> Result<(), Re
     let connected = shared
         .hub()
         .connect(authenticated.row, link, authenticated.want_room);
-    let Some((conn_id, welcome)) = connected else {
-        refuse(connection, stream, Refused::Hello(AuthError::UnknownKey)).await;
-        return Ok(());
+    let (conn_id, welcome) = match connected {
+        Ok(Some(connected)) => connected,
+        Ok(None) => {
+            refuse(connection, stream, Refused::Hello(AuthError::UnknownKey)).await;
+            return Ok(());
+        }
+        Err(e) => {
+            warn!("registering a connection: {e:#}");
+            refuse(connection, stream, Refused::Internal).await;
+            return Ok(());
+        }
     };
     drop(permit);
     let ingress = tokio::spawn(shared.sfu.clone().ingress(conn_id, connection.clone()));
@@ -151,6 +159,26 @@ async fn serve(shared: &Shared, connection: &quinn::Connection) -> Result<(), Re
     writer.abort();
     ingress.abort();
     result
+}
+
+/// Opens the control stream, sends `ServerHello` and reads the client's `Hello`.
+async fn greet(
+    connection: &quinn::Connection,
+) -> Result<(FrameStream, [u8; 32], Hello), ReadError> {
+    let (send, recv) = connection.open_bi().await.map_err(|_| ReadError::Closed)?;
+    let mut stream = FrameStream { send, recv };
+    let server_nonce: [u8; 32] = random();
+    write_frame(
+        &mut stream.send,
+        &ServerHello {
+            nonce: server_nonce,
+            protocol: PROTOCOL,
+        },
+    )
+    .await
+    .map_err(|_| ReadError::Closed)?;
+    let hello = read_handshake(&mut stream.recv).await?;
+    Ok((stream, server_nonce, hello))
 }
 
 async fn read_loop(
@@ -200,10 +228,20 @@ async fn write_loop(
 /// Sends a refusal and lets the client close first, so the refusal isn't lost to our close.
 async fn refuse(connection: &quinn::Connection, mut stream: FrameStream, refused: Refused) {
     let written = match refused {
-        Refused::Hello(e) => write_frame(&mut stream.send, &AuthResult::Err(e)).await,
-        Refused::Enroll(e) => write_frame(&mut stream.send, &PakeStep::Err(e)).await,
+        Refused::Hello(e) => {
+            let result = AuthResult::Err(e);
+            tokio::time::timeout(HELLO_TIMEOUT, write_frame(&mut stream.send, &result)).await
+        }
+        Refused::Enroll(e) => {
+            let step = PakeStep::Err(e);
+            tokio::time::timeout(HELLO_TIMEOUT, write_frame(&mut stream.send, &step)).await
+        }
+        Refused::Internal => {
+            connection.close(close::SERVER_BUSY.into(), b"internal server error");
+            return;
+        }
     };
-    if written.is_ok() {
+    if matches!(written, Ok(Ok(_))) {
         stream.send.finish().ok();
         tokio::time::timeout(LINGER, connection.closed()).await.ok();
     }

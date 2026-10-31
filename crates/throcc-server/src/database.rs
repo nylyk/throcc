@@ -5,8 +5,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use throcc_proto::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
 use throcc_proto::messages::{PublicKey, Room, ServerProfile, SignedEncKey, User};
 
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS users (
+const USERS_COLUMNS: &str = "(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pubkey BLOB NOT NULL UNIQUE,
     enc_key BLOB,
@@ -17,7 +16,10 @@ CREATE TABLE IF NOT EXISTS users (
     role INTEGER NOT NULL,
     invited_by INTEGER NULL,
     created_at INTEGER NOT NULL
-);
+)";
+const ROOMS_COLUMNS: &str =
+    "(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, epoch INTEGER NOT NULL)";
+const OTHER_TABLES_V1: &str = "
 CREATE TABLE IF NOT EXISTS rooms (id INTEGER PRIMARY KEY, name TEXT NOT NULL, epoch INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS invites (
     code_id TEXT PRIMARY KEY,
@@ -30,6 +32,81 @@ CREATE TABLE IF NOT EXISTS blobs (hash BLOB PRIMARY KEY, bytes BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS server_profile (id INTEGER PRIMARY KEY CHECK (id = 0), name TEXT, avatar_hash BLOB);
 ";
+
+type Migration = fn(&Transaction) -> rusqlite::Result<()>;
+
+/// Migration `i` moves the schema from version `i` to `i + 1`, kept in `PRAGMA user_version`.
+const MIGRATIONS: [Migration; 2] = [to_v1, to_v2];
+
+/// Creates the first versioned schema, or brings an unversioned database up to it.
+fn to_v1(tx: &Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(&format!(
+        "CREATE TABLE IF NOT EXISTS users {USERS_COLUMNS}; {OTHER_TABLES_V1}"
+    ))?;
+    add_missing_column(tx, "users", "enc_key_not_after", "INTEGER")?;
+    add_autoincrement(tx, "users", USERS_COLUMNS)
+}
+
+/// Makes room ids AUTOINCREMENT and records when each blob was uploaded.
+fn to_v2(tx: &Transaction) -> rusqlite::Result<()> {
+    add_autoincrement(tx, "rooms", ROOMS_COLUMNS)?;
+    add_missing_column(tx, "blobs", "uploaded_at", "INTEGER NOT NULL DEFAULT 0")
+}
+
+fn add_missing_column(
+    tx: &Transaction,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> rusqlite::Result<()> {
+    if !column_names(tx, table)?.iter().any(|c| c == column) {
+        tx.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+        ))?;
+    }
+    Ok(())
+}
+
+/// Rebuilds `table` with `columns`, whose primary key is AUTOINCREMENT, keeping its rows.
+fn add_autoincrement(tx: &Transaction, table: &str, columns: &str) -> rusqlite::Result<()> {
+    let sql: String = tx.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [table],
+        |r| r.get(0),
+    )?;
+    if sql.contains("AUTOINCREMENT") {
+        return Ok(());
+    }
+    let kept = column_names(tx, table)?.join(", ");
+    tx.execute_batch(&format!(
+        "CREATE TABLE {table}_new {columns};
+         INSERT INTO {table}_new ({kept}) SELECT {kept} FROM {table};
+         DROP TABLE {table};
+         ALTER TABLE {table}_new RENAME TO {table};"
+    ))
+}
+
+fn column_names(tx: &Transaction, table: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = tx.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = stmt.query_map([], |r| r.get::<_, String>(1))?;
+    names.collect()
+}
+
+fn migrate(conn: &mut Connection) -> Result<()> {
+    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    let current = MIGRATIONS.len() as i64;
+    if version > current {
+        bail!("the database has schema version {version}, newer than this server's {current}");
+    }
+    for (from, migration) in MIGRATIONS.iter().enumerate().skip(version as usize) {
+        let to = from as i64 + 1;
+        let tx = conn.transaction()?;
+        migration(&tx).with_context(|| format!("migrating the database to schema version {to}"))?;
+        tx.pragma_update(None, "user_version", to)?;
+        tx.commit()?;
+    }
+    Ok(())
+}
 
 const NEXT_MEDIA_ID: &str = "next_media_id";
 
@@ -81,23 +158,21 @@ impl Database {
         Self::init(Connection::open_in_memory()?)
     }
 
-    fn init(conn: Connection) -> Result<Self> {
+    fn init(mut conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        conn.execute_batch(SCHEMA)?;
-        if next_media_id(&conn)? as u64 > u64::from(u32::MAX) {
-            bail!("media ids are exhausted; this server cannot allocate tracks any more");
-        }
+        migrate(&mut conn)?;
         Ok(Self { conn })
     }
 
-    /// Reserves `count` consecutive media ids. Ids are never handed out twice, even across restarts.
-    pub fn allocate_media_ids(&mut self, count: u32) -> Result<MediaId> {
+    /// Reserves `count` consecutive media ids, or returns `None` once they are exhausted.
+    /// Ids are never handed out twice, even across restarts.
+    pub fn allocate_media_ids(&mut self, count: u32) -> Result<Option<MediaId>> {
         let tx = self.conn.transaction()?;
         let first = next_media_id(&tx)?;
         let next = first + i64::from(count);
         if next - 1 > i64::from(u32::MAX) {
-            bail!("media ids are exhausted");
+            return Ok(None);
         }
         tx.execute(
             "INSERT INTO counters (name, value) VALUES (?1, ?2)
@@ -105,7 +180,7 @@ impl Database {
             params![NEXT_MEDIA_ID, next],
         )?;
         tx.commit()?;
-        Ok(MediaId(first as u32))
+        Ok(Some(MediaId(first as u32)))
     }
 
     pub fn user_count(&self) -> Result<u64> {
@@ -366,12 +441,23 @@ impl Database {
         Ok(live + enrolled)
     }
 
-    pub fn put_blob(&self, hash: &Hash, bytes: &[u8]) -> Result<()> {
+    pub fn put_blob(&self, hash: &Hash, bytes: &[u8], now: u64) -> Result<()> {
         self.conn.execute(
-            "INSERT OR IGNORE INTO blobs (hash, bytes) VALUES (?1, ?2)",
-            params![hash.0.as_slice(), bytes],
+            "INSERT INTO blobs (hash, bytes, uploaded_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT (hash) DO UPDATE SET uploaded_at = excluded.uploaded_at",
+            params![hash.0.as_slice(), bytes, now as i64],
         )?;
         Ok(())
+    }
+
+    /// Deletes blobs uploaded before `uploaded_before` that no user or server profile uses.
+    pub fn delete_unused_blobs(&self, uploaded_before: u64) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM blobs WHERE uploaded_at < ?1
+             AND hash NOT IN (SELECT avatar_hash FROM users WHERE avatar_hash IS NOT NULL)
+             AND hash NOT IN (SELECT avatar_hash FROM server_profile WHERE avatar_hash IS NOT NULL)",
+            [uploaded_before as i64],
+        )?)
     }
 
     pub fn server_profile(&self) -> Result<ServerProfile> {
@@ -527,26 +613,147 @@ mod tests {
         let first = Database::open(&path)
             .unwrap()
             .allocate_media_ids(3)
+            .unwrap()
             .unwrap();
         let second = Database::open(&path)
             .unwrap()
             .allocate_media_ids(3)
+            .unwrap()
             .unwrap();
         assert_eq!(second.0, first.0 + 3);
     }
 
     #[test]
-    fn exhausted_counter_is_fatal_at_startup() {
+    fn exhausted_media_ids_refuse_allocation_but_not_startup() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db");
-        let db = Database::open(&path).unwrap();
+        let mut db = Database::open(&path).unwrap();
         db.conn
             .execute(
                 "INSERT INTO counters (name, value) VALUES (?1, ?2)",
-                params![NEXT_MEDIA_ID, i64::from(u32::MAX) + 1],
+                params![NEXT_MEDIA_ID, i64::from(u32::MAX) - 1],
             )
             .unwrap();
+        assert_eq!(db.allocate_media_ids(3).unwrap(), None);
+        assert_eq!(
+            db.allocate_media_ids(2).unwrap(),
+            Some(MediaId(u32::MAX - 1))
+        );
         drop(db);
+        let mut db = Database::open(&path).unwrap();
+        assert_eq!(db.allocate_media_ids(1).unwrap(), None);
+    }
+
+    #[test]
+    fn room_ids_are_not_reused_after_deleting_the_last_room() {
+        let db = Database::open_in_memory().unwrap();
+        db.create_room("a").unwrap();
+        let last = db.create_room("b").unwrap();
+        db.delete_room(last).unwrap();
+        assert!(db.create_room("c").unwrap() > last);
+    }
+
+    #[test]
+    fn unused_blobs_are_deleted_after_their_grace() {
+        let mut db = Database::open_in_memory().unwrap();
+        let user = enroll(&mut db, 1, None);
+        let (used, server, unused, fresh) =
+            (Hash([1; 32]), Hash([2; 32]), Hash([3; 32]), Hash([4; 32]));
+        for hash in [used, server, unused] {
+            db.put_blob(&hash, b"png", 100).unwrap();
+        }
+        db.put_blob(&fresh, b"png", 200).unwrap();
+        db.set_profile(user, "a", Some(used)).unwrap();
+        db.set_server_avatar(Some(server)).unwrap();
+        assert_eq!(db.delete_unused_blobs(150).unwrap(), 1);
+        assert!(db.blob(&unused).unwrap().is_none());
+        for kept in [used, server, fresh] {
+            assert!(db.blob(&kept).unwrap().is_some());
+        }
+    }
+
+    /// The schema before versioning: no `enc_key_not_after`, no server profile, and ids
+    /// without AUTOINCREMENT.
+    const UNVERSIONED_SCHEMA: &str = "
+        CREATE TABLE users (
+            id INTEGER PRIMARY KEY,
+            pubkey BLOB NOT NULL UNIQUE,
+            enc_key BLOB,
+            enc_key_sig BLOB,
+            name TEXT NOT NULL,
+            avatar_hash BLOB,
+            role INTEGER NOT NULL,
+            invited_by INTEGER NULL,
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE rooms (id INTEGER PRIMARY KEY, name TEXT NOT NULL, epoch INTEGER NOT NULL);
+        CREATE TABLE invites (
+            code_id TEXT PRIMARY KEY,
+            secret TEXT NOT NULL,
+            minted_by INTEGER NULL,
+            expires_at INTEGER NOT NULL,
+            failures INTEGER NOT NULL
+        );
+        CREATE TABLE blobs (hash BLOB PRIMARY KEY, bytes BLOB NOT NULL);
+        CREATE TABLE counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
+        INSERT INTO users (id, pubkey, name, role, created_at) VALUES (1, x'0101010101010101010101010101010101010101010101010101010101010101', 'Moss', 2, 5);
+        INSERT INTO users (id, pubkey, name, role, invited_by, created_at) VALUES (2, x'0202020202020202020202020202020202020202020202020202020202020202', 'Fern', 0, 1, 6);
+        INSERT INTO rooms (id, name, epoch) VALUES (1, 'General', 4), (2, 'Games', 9);
+        INSERT INTO blobs (hash, bytes) VALUES (x'03', x'00');
+        INSERT INTO counters (name, value) VALUES ('next_media_id', 40);
+    ";
+
+    #[test]
+    fn an_unversioned_database_migrates_and_keeps_its_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(UNVERSIONED_SCHEMA)
+            .unwrap();
+
+        let mut db = Database::open(&path).unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, MIGRATIONS.len() as i64);
+        let fern = db.user_by_pubkey(&[2; 32]).unwrap().unwrap();
+        assert_eq!((fern.id, fern.name.as_str()), (UserId(2), "Fern"));
+        assert_eq!(fern.invited_by, Some(UserId(1)));
+        assert_eq!(db.users().unwrap().len(), 2);
+        let rooms = db.rooms().unwrap();
+        assert_eq!(rooms[1].0.name, "Games");
+        assert_eq!(rooms[1].1, Epoch(9));
+        assert_eq!(db.allocate_media_ids(3).unwrap(), Some(MediaId(40)));
+        assert_eq!(db.server_profile().unwrap(), ServerProfile::default());
+
+        let key = SignedEncKey {
+            key: [7; 32],
+            not_after: 99,
+            sig: [8; 64],
+        };
+        db.set_enc_key(fern.id, &key).unwrap();
+        assert_eq!(db.user(fern.id).unwrap().unwrap().enc_key, Some(key));
+        db.delete_room(RoomId(2)).unwrap();
+        assert_eq!(db.create_room("New").unwrap(), RoomId(3));
+        db.remove_users(&[fern.id]).unwrap();
+        assert_eq!(enroll(&mut db, 9, None), UserId(3));
+        assert_eq!(db.delete_unused_blobs(1).unwrap(), 1);
+
+        drop(db);
+        assert_eq!(Database::open(&path).unwrap().users().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_database_from_a_newer_server_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        drop(Database::open(&path).unwrap());
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", 99)
+            .unwrap();
         assert!(Database::open(&path).is_err());
     }
 

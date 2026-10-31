@@ -6,11 +6,16 @@ use throcc_client_core::account::{self, SignInError};
 use throcc_client_core::connection;
 use throcc_client_core::control::LoginError;
 use throcc_client_core::keystore::Keystore;
-use throcc_crypto::pake::PakeError;
+use throcc_crypto::identity::IdentityKey;
+use throcc_crypto::pake::{ClientPake, PakeError, Transcript};
+use throcc_proto::framing;
 use throcc_proto::ids::Role;
 use throcc_proto::invite::InviteCode;
-use throcc_proto::messages::{AuthError, ErrorCode, Event, Request, Response};
-use throcc_server::{Congestion, tls};
+use throcc_proto::messages::{
+    AuthError, AuthResult, ErrorCode, Event, Hello, PakeFinish, PakeStep, Request, Response,
+    ServerHello,
+};
+use throcc_server::{Congestion, HANDSHAKES, tls};
 
 use common::*;
 
@@ -291,4 +296,90 @@ async fn parallel_runs_from_one_source_are_rate_limited() {
         ));
     }
     assert_eq!(limited, 10);
+}
+
+async fn read_frame(recv: &mut quinn::RecvStream) -> Vec<u8> {
+    let mut header = [0u8; 4];
+    recv.read_exact(&mut header).await.unwrap();
+    let mut body = vec![0u8; framing::body_len(header).unwrap()];
+    recv.read_exact(&mut body).await.unwrap();
+    body
+}
+
+#[tokio::test]
+async fn a_failed_run_does_not_burn_an_invite_while_another_run_is_in_flight() {
+    let server = start_server();
+    let alice = admin(&server).await;
+    let code = invite(&alice).await;
+
+    let connected = connection::connect(&server.addr, None).await.unwrap();
+    let (mut send, mut recv) = connected.connection.accept_bi().await.unwrap();
+    let hello: ServerHello = framing::decode(&read_frame(&mut recv).await).unwrap();
+    let identity = IdentityKey::generate();
+    let pubkey = identity.public();
+    let client_nonce = [7; 32];
+    let (pake, pake_a) = ClientPake::start(&code.id, &code.secret);
+    let enroll = Hello::Enroll {
+        code_id: code.id.clone(),
+        pubkey,
+        client_nonce,
+        pake_a: pake_a.clone(),
+    };
+    send.write_all(&framing::encode(&enroll).unwrap())
+        .await
+        .unwrap();
+    let step: PakeStep = framing::decode(&read_frame(&mut recv).await).unwrap();
+    let reply = step.unwrap();
+
+    let wrong = InviteCode {
+        id: code.id.clone(),
+        secret: "00000".into(),
+    };
+    for _ in 0..2 {
+        try_enroll(&server.addr, &wrong).await.unwrap_err();
+    }
+    assert_eq!(failures(&server, &code), Some(3));
+
+    let transcript = Transcript {
+        server_nonce: &hello.nonce,
+        client_nonce: &client_nonce,
+        code_id: &code.id,
+        pubkey: &pubkey,
+        spki_hash: &connected.fingerprint.0,
+        exporter: &connected.exporter,
+        pake_a: &pake_a,
+        pake_b: &reply.pake_b,
+    };
+    let finish = PakeFinish {
+        confirm_a: pake.finish(&transcript, &reply.confirm_b).unwrap(),
+        signature: identity.sign(&transcript.to_bytes()),
+    };
+    send.write_all(&framing::encode(&finish).unwrap())
+        .await
+        .unwrap();
+    let result: AuthResult = framing::decode(&read_frame(&mut recv).await).unwrap();
+    assert!(matches!(result, AuthResult::Ok(_)), "{result:?}");
+}
+
+#[tokio::test]
+async fn one_source_signs_in_a_few_connections_at_a_time() {
+    let server = start_server();
+    let mut idle = Vec::new();
+    for _ in 0..HANDSHAKES.per_source {
+        idle.push(connection::connect(&server.addr, None).await.unwrap());
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let enrolling = tokio::spawn({
+        let (addr, code) = (server.addr.clone(), server.bootstrap.clone());
+        async move { enroll_at(&addr, &code).await }
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!enrolling.is_finished());
+
+    idle.pop().unwrap().connection.close(0u32.into(), b"");
+    let admin = tokio::time::timeout(Duration::from_secs(3), enrolling)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(admin.link.welcome.role, Role::Admin);
 }

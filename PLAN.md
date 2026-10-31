@@ -279,7 +279,7 @@ A MITM gets one online guess per run, which also uses one of the invite's 3 trie
 - Membership is one value per connection, `Option<RoomId>`, changed only by `SetRoom` in one transaction. `None` is the lobby, and clients start there. There is no default room and no auto-join. A reconnecting client may pass `want_room`.
 - In the lobby a client sees all rooms and everyone in them. It publishes no presence and opens no capture device.
 - Entering a room returns `Placed` in one round trip. Mic and share start off. A failed `SetRoom` leaves the client where it was. Deleting an occupied room moves its occupants to `None`.
-- **Media ids.** Every membership change allocates fresh ids (mic, share video, share audio) from one persisted `u32` counter. Ids are never reused. Exhaustion is a fatal startup error.
+- **Media ids.** Every membership change allocates fresh ids (mic, share video, share audio) from one persisted `u32` counter. Ids are never reused. Once they run out, joins are refused.
 - **Epoch.** Each room has a persisted `u32` epoch, bumped on every membership change. It selects E2EE keys.
 - **Presence.** `PresenceChanged` upserts the whole record and `PresenceEnded` removes it. Both go to every connected client. `RoomState` sends the full peer list to one room. Who is speaking is computed locally from decoded audio and is never sent. The allowlist reaches admins only, via `ListUsers`.
 
@@ -378,7 +378,7 @@ All media is encrypted end to end, with no plaintext mode.
 
 **Contacts.** The client pins each user's identity key per server on first sight, warns loudly when it changes, and supports out-of-band verification with a 60-digit safety number derived from both identity keys (12 groups of 5 digits, Signal-style construction). A member hidden from you never receives your key.
 
-**What the server can still do:** see metadata (who, which room, when, codec, bitrate, packet sizes, frame boundaries); add a member, who is visible to everyone; substitute keys, which is caught by pinning; deny service. Not end-to-end encrypted: profiles, avatars, room names, the allowlist.
+**What the server can still do:** see metadata (who, which room, when, codec, bitrate, packet sizes, frame boundaries); add a member, who is visible to everyone; substitute keys, which is caught by pinning; deny service; and, together with any member of a room, inject media under another member's track, since every member holds every track key. Not end-to-end encrypted: profiles, avatars, room names, the allowlist.
 
 Text chat or rooms well beyond 20 people would justify MLS (`openmls`). Until then, pairwise HPKE with a fresh secret per epoch is enough.
 
@@ -548,13 +548,16 @@ Screens not mocked that you design in the same language: pin mismatch, enrollmen
 ### 5.14 Storage and packaging
 
 ```sql
-users    (id INTEGER PRIMARY KEY, pubkey BLOB UNIQUE, enc_key BLOB, enc_key_sig BLOB,
-          name TEXT, avatar_hash BLOB, role INTEGER, invited_by INTEGER NULL, created_at INTEGER)
-rooms    (id INTEGER PRIMARY KEY, name TEXT, epoch INTEGER)
+users    (id INTEGER PRIMARY KEY AUTOINCREMENT, pubkey BLOB UNIQUE, enc_key BLOB, enc_key_sig BLOB,
+          enc_key_not_after INTEGER, name TEXT, avatar_hash BLOB, role INTEGER,
+          invited_by INTEGER NULL, created_at INTEGER)
+rooms    (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, epoch INTEGER)
 invites  (code_id TEXT PRIMARY KEY, secret TEXT, minted_by INTEGER, expires_at INTEGER, failures INTEGER)
-blobs    (hash BLOB PRIMARY KEY, bytes BLOB)
+blobs    (hash BLOB PRIMARY KEY, bytes BLOB, uploaded_at INTEGER)
 counters (name TEXT PRIMARY KEY, value INTEGER)   -- next media_id
 ```
+
+`PRAGMA user_version` numbers the schema; the server migrates older files at startup and refuses newer ones. Ids are never reused. Blobs no profile references are deleted after ten minutes.
 
 The data directory (`server_key` plus the SQLite file) is the only state to back up.
 

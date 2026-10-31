@@ -9,9 +9,11 @@ use std::time::{Duration, Instant};
 use throcc_client_core::account;
 use throcc_proto::ids::{Epoch, RoomId, UserId};
 use throcc_proto::messages::{
-    ErrorCode, Event, MAX_AVATAR_BYTES, Placed, Presence, Request, Response, Welcome,
+    ErrorCode, Event, MAX_AVATAR_BYTES, Placed, Presence, Request, Response, SignedEncKey, Welcome,
 };
-use throcc_server::{Config, Congestion, Server};
+use throcc_server::database::Database;
+use throcc_server::rooms::{MAX_ROOMS, unix_now};
+use throcc_server::{Config, Congestion, DATABASE_FILE, Server};
 use tokio::net::UdpSocket;
 
 use common::*;
@@ -312,4 +314,144 @@ async fn killed_connection_retracts_presence_within_the_idle_timeout() {
     let elapsed = started.elapsed();
     assert!(elapsed <= Duration::from_secs(31), "took {elapsed:?}");
     drop(bob);
+}
+
+#[tokio::test]
+async fn requests_are_rate_limited_per_user() {
+    let server = start_server();
+    let alice = admin(&server).await;
+    let mut limited = 0;
+    for _ in 0..150 {
+        let res = alice.request(Request::ListUsers).await;
+        if matches!(&res, Response::Err { code, .. } if *code == ErrorCode::RateLimited) {
+            limited += 1;
+        }
+    }
+    assert!(limited > 0);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(matches!(
+        alice.request(Request::ListUsers).await,
+        Response::Users(_)
+    ));
+}
+
+#[tokio::test]
+async fn picture_uploads_are_rate_limited() {
+    let server = start_server();
+    let alice = admin(&server).await;
+    let mut uploaded = 0;
+    let last = loop {
+        let picture = vec![uploaded as u8; MAX_AVATAR_BYTES];
+        match alice.request(Request::SetAvatar(picture)).await {
+            Response::AvatarHash(_) if uploaded < 100 => uploaded += 1,
+            other => break other,
+        }
+    };
+    assert_error(&last, ErrorCode::RateLimited);
+    assert!((16..=17).contains(&uploaded), "{uploaded}");
+}
+
+#[tokio::test]
+async fn an_expired_encryption_key_cannot_enter_a_room() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let general = create_room(&mut alice, "General").await;
+    let me = alice.link.welcome.me;
+    let expired = SignedEncKey {
+        key: [1; 32],
+        not_after: unix_now() - 1,
+        sig: [2; 64],
+    };
+    server.shared.hub().db.set_enc_key(me, &expired).unwrap();
+    alice.link.connected.connection.close(0u32.into(), b"");
+
+    let link = account::sign_in(&alice.keystore, &server.addr, Some(general))
+        .await
+        .unwrap();
+    assert_eq!(link.welcome.placed.room, None);
+}
+
+#[tokio::test]
+async fn exhausted_media_ids_refuse_joins_but_keep_the_server_up() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let general = create_room(&mut alice, "General").await;
+    server
+        .shared
+        .hub()
+        .db
+        .allocate_media_ids(u32::MAX - 1)
+        .unwrap()
+        .unwrap();
+    let res = alice.request(Request::SetRoom(Some(general))).await;
+    assert_error(&res, ErrorCode::Internal);
+    assert!(matches!(
+        alice.request(Request::ListUsers).await,
+        Response::Users(_)
+    ));
+}
+
+#[tokio::test]
+async fn a_leave_that_cannot_bump_the_epoch_still_ends_presence() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = ProcessLikeServer::start(dir.path(), "127.0.0.1:0".parse().unwrap());
+    let addr = first.addr;
+    let mut alice = enroll_at(&addr.to_string(), first.bootstrap.as_ref().unwrap()).await;
+    let general = create_room(&mut alice, "General").await;
+    let bob = invited_at(&addr.to_string(), &alice).await;
+    first.stop();
+    Database::open(&dir.path().join(DATABASE_FILE))
+        .unwrap()
+        .set_epoch(general, Epoch(u32::MAX - 1))
+        .unwrap();
+
+    let second = ProcessLikeServer::start(dir.path(), addr);
+    let alice_link = account::sign_in(&alice.keystore, &addr.to_string(), None)
+        .await
+        .unwrap();
+    let alice_id = alice_link.welcome.me;
+    let link = account::sign_in(&bob.keystore, &addr.to_string(), None)
+        .await
+        .unwrap();
+    let mut bob = TestClient { link, ..bob };
+    let alice = TestClient {
+        link: alice_link,
+        ..alice
+    };
+    assert_eq!(join(&alice, Some(general)).await.epoch, Epoch(u32::MAX));
+    bob.event(|e| matches!(e, Event::PresenceChanged(p) if p.user == alice_id).then_some(()))
+        .await;
+
+    alice.link.connected.connection.close(0u32.into(), b"");
+    bob.event(|e| matches!(e, Event::PresenceEnded(u) if *u == alice_id).then_some(()))
+        .await;
+    second.stop();
+}
+
+#[tokio::test]
+async fn a_server_holds_a_bounded_number_of_rooms() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = ProcessLikeServer::start(dir.path(), "127.0.0.1:0".parse().unwrap());
+    let addr = first.addr;
+    let alice = enroll_at(&addr.to_string(), first.bootstrap.as_ref().unwrap()).await;
+    first.stop();
+    let db = Database::open(&dir.path().join(DATABASE_FILE)).unwrap();
+    for i in 0..MAX_ROOMS {
+        db.create_room(&format!("Room {i}")).unwrap();
+    }
+    drop(db);
+
+    let second = ProcessLikeServer::start(dir.path(), addr);
+    let link = account::sign_in(&alice.keystore, &addr.to_string(), None)
+        .await
+        .unwrap();
+    assert_eq!(link.welcome.rooms.len(), MAX_ROOMS);
+    let alice = TestClient { link, ..alice };
+    let res = alice
+        .request(Request::CreateRoom {
+            name: "One more".into(),
+        })
+        .await;
+    assert_error(&res, ErrorCode::TooLarge);
+    second.stop();
 }

@@ -2,11 +2,12 @@ mod common;
 
 use std::net::SocketAddr;
 use std::path::Path;
+use std::time::Duration;
 
 use throcc_client_core::connection::{self, ConnectError};
 use throcc_proto::frame::DATAGRAM_PAYLOAD_FLOOR;
 use throcc_proto::transport::{DatagramError, close};
-use throcc_server::{Congestion, tls};
+use throcc_server::{CONNECTIONS, Congestion, tls};
 
 use common::{bare_endpoint, bind_server};
 
@@ -120,4 +121,49 @@ async fn payload_floor_matches_quinn_at_1200_bytes() {
         connected.connection.max_datagram_size(),
         Some(DATAGRAM_PAYLOAD_FLOOR)
     );
+}
+
+#[tokio::test]
+async fn clients_cannot_open_streams() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, _) = start_server(dir.path());
+    let connected = connection::connect(&addr.to_string(), None).await.unwrap();
+    let wait = Duration::from_millis(300);
+    assert!(
+        tokio::time::timeout(wait, connected.connection.open_bi())
+            .await
+            .is_err()
+    );
+    assert!(
+        tokio::time::timeout(wait, connected.connection.open_uni())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn a_connection_that_never_says_hello_is_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, _) = start_server(dir.path());
+    let connected = connection::connect(&addr.to_string(), None).await.unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(8), connected.connection.closed())
+        .await
+        .unwrap();
+    match closed {
+        quinn::ConnectionError::ApplicationClosed(frame) => {
+            assert_eq!(frame.error_code, close::PROTOCOL_ERROR.into());
+        }
+        other => panic!("expected an application close, got {other}"),
+    }
+}
+
+#[tokio::test]
+async fn one_source_holds_a_bounded_number_of_connections() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, _) = start_server(dir.path());
+    let mut held = Vec::new();
+    for _ in 0..CONNECTIONS.per_source {
+        held.push(connection::connect(&addr.to_string(), None).await.unwrap());
+    }
+    assert!(connection::connect(&addr.to_string(), None).await.is_err());
 }

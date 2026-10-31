@@ -350,3 +350,10 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 - **First-time contacts are shown as a notice** naming the person and pointing at Privacy and keys. It is the simplest visible signal; the people list there already marks them "Not verified".
 - **The encryption key is renewed a week before it expires**: when the keystore opens, before each sign-in, and on an hourly check while connected. A running session swaps the key in place and sends `SetEncKey`; the server bumps the epoch, so peers rewrap to the new key. The previous key stays usable for unwrapping secrets sealed to it in flight. If the server refuses the new key, the session reconnects, which publishes it at sign-in.
 - **The identity key falls back to a file only when no OS keychain exists** (`keyring::Error::NoDefaultStore`). A locked or refusing keychain is an error, so it can't silently enroll a second identity.
+
+## 2026-10-31 Server limits against abuse
+
+- **Every connection proves its address with a QUIC Retry before the server keeps any state for it.** It costs one round trip per connect and stops spoofed packets from using up another source's slots.
+- **Caps per source (an IPv4 address or IPv6 /64), per network (/24 or /48) and in total**: 32, 128 and 1024 connections; 4, 16 and 128 handshakes at once, where a handshake over the cap waits up to 5 s; 10 enrollment runs per source and 30 per network every 10 minutes. Clients may open no streams of their own, and receive windows are 128 KiB per stream and connection with a 256 KiB datagram buffer, enough for a 20 Mbps share.
+- **Members are limited to 100 requests in a burst and 20 a second**, and to about one new picture every 10 s; at most 500 rooms; 8 MiB of queued video per receiver.
+- **Deferred, needs a wire-format change:** a member who also runs the server, or works with it, can send media under another member's track, because track keys are shared by the room; fixing it needs per-sender authentication of every frame. Invite ids have 3 characters, so a source with many networks can still burn every live invite slowly; a longer id changes the invite format.

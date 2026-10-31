@@ -17,6 +17,7 @@ use crate::session::{FrameStream, read_handshake, write_frame};
 pub const INVITE_TRIES: u32 = 3;
 const PAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const SOURCE_RUNS: usize = 10;
+const NETWORK_RUNS: usize = 30;
 const SOURCE_WINDOW: Duration = Duration::from_secs(10 * 60);
 
 /// A refusal, tagged with the message type the client is waiting for.
@@ -24,6 +25,8 @@ const SOURCE_WINDOW: Duration = Duration::from_secs(10 * 60);
 pub enum Refused {
     Hello(AuthError),
     Enroll(AuthError),
+    /// A failure on the server's side. The connection is closed without an answer.
+    Internal,
 }
 
 pub struct Authenticated {
@@ -53,8 +56,7 @@ pub async fn authenticate(
                 .hub()
                 .db
                 .user_by_pubkey(&pubkey)
-                .ok()
-                .flatten()
+                .map_err(internal)?
                 .ok_or(Refused::Hello(AuthError::UnknownKey))?;
             Ok(Authenticated { row, want_room })
         }
@@ -108,6 +110,7 @@ impl Enrollment<'_> {
 
         let exchanged = self.exchange(stream, &secret, pake_a).await.is_ok();
         let mut hub = self.shared.hub();
+        let last_run = invite.is_some() && hub.invite_runs.finish(&self.code_id);
         if exchanged && invite.is_some() {
             match hub.db.enroll(&self.pubkey, &self.code_id, now) {
                 Ok(Some(row)) => {
@@ -118,10 +121,11 @@ impl Enrollment<'_> {
                     return Ok(row);
                 }
                 Ok(None) => info!(code_id = %self.code_id, "invite was used up during the run"),
-                Err(e) => warn!("enrollment failed: {e:#}"),
+                Err(e) => return Err(internal(e)),
             }
         }
-        if let Some(invite) = &invite
+        if last_run
+            && let Some(invite) = &invite
             && hub
                 .db
                 .invite(&self.code_id)
@@ -146,19 +150,18 @@ impl Enrollment<'_> {
     /// Looks up the invite and uses up one of its tries before any PAKE message is sent,
     /// so a run that is dropped halfway still costs a try.
     fn claim_try(&self, now: u64) -> Result<Option<InviteRow>, Refused> {
-        let hub = self.shared.hub();
+        let mut hub = self.shared.hub();
         let invite = if self.code_id.len() == ID_CHARS {
             hub.db
                 .invite(&self.code_id)
-                .map_err(|_| Refused::Enroll(AuthError::BadInvite))?
+                .map_err(internal)?
                 .filter(|i| i.expires_at > now && i.failures < INVITE_TRIES)
         } else {
             None
         };
         if invite.is_some() {
-            hub.db
-                .consume_invite_try(&self.code_id)
-                .map_err(|_| Refused::Enroll(AuthError::BadInvite))?;
+            hub.db.consume_invite_try(&self.code_id).map_err(internal)?;
+            hub.invite_runs.start(&self.code_id);
         } else {
             let shown: String = self.code_id.chars().take(8).collect();
             warn!(source = ?self.source, code_id = %shown, "enrollment with an unknown invite id");
@@ -207,6 +210,11 @@ impl Enrollment<'_> {
     }
 }
 
+fn internal(e: anyhow::Error) -> Refused {
+    warn!("authentication failed on the server: {e:#}");
+    Refused::Internal
+}
+
 fn exporter(connection: &quinn::Connection) -> Result<[u8; 32], AuthError> {
     let mut out = [0u8; 32];
     connection
@@ -238,35 +246,94 @@ impl SourceKey {
             },
         }
     }
+
+    /// The network around this source: its IPv4 /24, or its IPv6 /48.
+    pub fn network(self) -> Self {
+        match self {
+            Self::V4(v4) => Self::V4(v4 & !0xff),
+            Self::V6(prefix) => Self::V6(prefix & !0xffff),
+        }
+    }
 }
 
-/// Counts enrollment runs per source in a sliding window. Successful runs are forgiven.
+/// Counts enrollment runs per source and per network in a sliding window. Successful runs
+/// are forgiven.
 #[derive(Default)]
 pub struct SourceLimiter {
-    runs: HashMap<SourceKey, VecDeque<Instant>>,
+    sources: RunWindow,
+    networks: RunWindow,
 }
 
 impl SourceLimiter {
-    /// Records the start of a run, or returns false if the source is over its limit.
+    /// Records the start of a run, or returns false if the source or its network is over
+    /// its limit.
     pub fn begin(&mut self, source: SourceKey) -> bool {
-        self.runs.retain(|_, times| {
+        let network = source.network();
+        self.sources.expire();
+        self.networks.expire();
+        if self.sources.count(source) >= SOURCE_RUNS || self.networks.count(network) >= NETWORK_RUNS
+        {
+            return false;
+        }
+        self.sources.record(source);
+        self.networks.record(network);
+        true
+    }
+
+    pub fn forgive(&mut self, source: SourceKey) {
+        self.sources.forgive(source);
+        self.networks.forgive(source.network());
+    }
+}
+
+#[derive(Default)]
+struct RunWindow(HashMap<SourceKey, VecDeque<Instant>>);
+
+impl RunWindow {
+    fn expire(&mut self) {
+        self.0.retain(|_, times| {
             while times.front().is_some_and(|t| t.elapsed() > SOURCE_WINDOW) {
                 times.pop_front();
             }
             !times.is_empty()
         });
-        let times = self.runs.entry(source).or_default();
-        if times.len() >= SOURCE_RUNS {
-            return false;
-        }
-        times.push_back(Instant::now());
-        true
     }
 
-    pub fn forgive(&mut self, source: SourceKey) {
-        if let Some(times) = self.runs.get_mut(&source) {
+    fn count(&self, key: SourceKey) -> usize {
+        self.0.get(&key).map_or(0, VecDeque::len)
+    }
+
+    fn record(&mut self, key: SourceKey) {
+        self.0.entry(key).or_default().push_back(Instant::now());
+    }
+
+    fn forgive(&mut self, key: SourceKey) {
+        if let Some(times) = self.0.get_mut(&key) {
             times.pop_back();
         }
+    }
+}
+
+/// PAKE runs in flight per invite id.
+#[derive(Default)]
+pub struct InviteRuns(HashMap<String, u32>);
+
+impl InviteRuns {
+    pub fn start(&mut self, code_id: &str) {
+        *self.0.entry(code_id.to_owned()).or_default() += 1;
+    }
+
+    /// Ends one run. Returns true if no other run of this invite is in flight.
+    pub fn finish(&mut self, code_id: &str) -> bool {
+        let Some(runs) = self.0.get_mut(code_id) else {
+            return true;
+        };
+        *runs -= 1;
+        if *runs > 0 {
+            return false;
+        }
+        self.0.remove(code_id);
+        true
     }
 }
 
@@ -297,5 +364,31 @@ mod tests {
         limiter.forgive(source);
         assert!(limiter.begin(source));
         assert!(limiter.begin(SourceKey::of("192.0.2.2".parse().unwrap())));
+    }
+
+    #[test]
+    fn limiter_caps_a_network_of_many_sources() {
+        let mut limiter = SourceLimiter::default();
+        let sources = (0..NETWORK_RUNS as u16)
+            .map(|i| SourceKey::of(format!("2001:db8:1:{i:x}::1").parse().unwrap()));
+        for source in sources {
+            assert!(limiter.begin(source));
+        }
+        assert!(!limiter.begin(SourceKey::of("2001:db8:1:ffff::1".parse().unwrap())));
+        assert!(limiter.begin(SourceKey::of("2001:db8:2::1".parse().unwrap())));
+        for last in 0..NETWORK_RUNS as u8 {
+            limiter.begin(SourceKey::of(format!("198.51.100.{last}").parse().unwrap()));
+        }
+        assert!(!limiter.begin(SourceKey::of("198.51.100.200".parse().unwrap())));
+    }
+
+    #[test]
+    fn only_the_last_run_of_an_invite_may_burn_it() {
+        let mut runs = InviteRuns::default();
+        runs.start("K7Q");
+        runs.start("K7Q");
+        assert!(!runs.finish("K7Q"));
+        assert!(runs.finish("K7Q"));
+        assert!(runs.0.is_empty());
     }
 }

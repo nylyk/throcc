@@ -3,10 +3,15 @@ use std::sync::Arc;
 use anyhow::Result;
 use quinn::congestion::{BbrConfig, CubicConfig};
 use quinn::crypto::rustls::QuicServerConfig;
-use quinn::{IdleTimeout, TransportConfig};
+use quinn::{IdleTimeout, TransportConfig, VarInt};
 use throcc_proto::{ALPN, transport};
 
 use crate::identity::ServerIdentity;
+
+/// Flow-control window of the control stream, which the server opens. Clients open none.
+const CONTROL_WINDOW: u32 = 128 * 1024;
+/// About 100 ms of the fastest share (20 Mbps) plus voice.
+const DATAGRAM_RECEIVE_BUFFER: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum Congestion {
@@ -38,6 +43,11 @@ pub fn transport_config(congestion: Congestion) -> Result<TransportConfig> {
     config
         .keep_alive_interval(Some(transport::KEEP_ALIVE))
         .max_idle_timeout(Some(IdleTimeout::try_from(transport::IDLE_TIMEOUT)?))
+        .max_concurrent_bidi_streams(VarInt::from_u32(0))
+        .max_concurrent_uni_streams(VarInt::from_u32(0))
+        .stream_receive_window(VarInt::from_u32(CONTROL_WINDOW))
+        .receive_window(VarInt::from_u32(CONTROL_WINDOW))
+        .datagram_receive_buffer_size(Some(DATAGRAM_RECEIVE_BUFFER))
         .datagram_send_buffer_size(transport::SERVER_DATAGRAM_SEND_BUFFER)
         .packet_threshold(transport::REORDER_PACKETS)
         .time_threshold(transport::REORDER_RTT_FACTOR);
