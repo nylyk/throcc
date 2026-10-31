@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{IdleTimeout, TransportConfig};
@@ -9,6 +9,8 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use throcc_proto::transport::{self, DatagramError, check_datagrams};
 use throcc_proto::{ALPN, DEFAULT_PORT, Fingerprint, SERVER_NAME};
+
+use crate::lock;
 
 const EXPORTER_LABEL: &[u8] = b"throcc/exporter/1";
 
@@ -173,7 +175,7 @@ impl PinVerifier {
     }
 
     pub fn seen(&self) -> Option<Fingerprint> {
-        *self.seen.lock().unwrap_or_else(PoisonError::into_inner)
+        *lock(&self.seen)
     }
 }
 
@@ -190,7 +192,7 @@ impl ServerCertVerifier for PinVerifier {
             rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
         })?;
         let actual = Fingerprint::of_spki(&cert.subject_public_key_info());
-        *self.seen.lock().unwrap_or_else(PoisonError::into_inner) = Some(actual);
+        *lock(&self.seen) = Some(actual);
         match self.expected {
             Some(expected) if expected != actual => Err(rustls::Error::InvalidCertificate(
                 rustls::CertificateError::ApplicationVerificationFailure,

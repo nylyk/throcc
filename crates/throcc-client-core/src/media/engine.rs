@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -17,6 +17,7 @@ use super::fragment::{Reassembler, ReplayWindow, Seen, Unit, fragment};
 use super::reorder::{Output, Reorder};
 use crate::contacts::Contacts;
 use crate::keys::{KeyManager, KeyNotice};
+use crate::lock;
 
 /// How long ciphertext waits for its sender key before it counts as a decrypt failure.
 pub const PENDING_KEY_WAIT: Duration = Duration::from_millis(500);
@@ -50,6 +51,20 @@ pub struct Outgoing {
     pub keyframe: bool,
     pub discardable: bool,
     pub enqueued: Instant,
+}
+
+impl Outgoing {
+    /// A unit that must not be discarded, enqueued now.
+    pub fn new(media_id: MediaId, data: Bytes, timestamp: u32, keyframe: bool) -> Self {
+        Self {
+            media_id,
+            data,
+            timestamp,
+            keyframe,
+            discardable: false,
+            enqueued: Instant::now(),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -214,11 +229,6 @@ impl MediaEngine {
         }
     }
 
-    /// Re-applies the current room state, for example after a key change was accepted.
-    pub fn resend(&self, request: Option<Request>) {
-        self.send_request(request);
-    }
-
     fn send_request(&self, request: Option<Request>) {
         if let Some(request) = request {
             self.requests.send(request).ok();
@@ -296,10 +306,6 @@ impl MediaEngine {
     }
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 async fn receive_loop(
     connection: quinn::Connection,
     sinks: Arc<Mutex<HashMap<MediaId, Sink>>>,
@@ -371,17 +377,14 @@ impl Track {
             }
             let now = Instant::now();
             if let Ok(header) = Header::parse_strict(&datagram) {
-                self.handle(header.epoch, datagram, now);
+                self.handle(header.epoch, datagram, now, now);
             }
         }
     }
 
     fn next_wake(&self) -> Option<Instant> {
         let pending = self.pending.front().map(|_| Instant::now() + TICK);
-        match (pending, self.reorder.deadline()) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        pending.into_iter().chain(self.reorder.deadline()).min()
     }
 
     /// Expires pending datagrams, and retries the rest only if new keys have arrived.
@@ -402,18 +405,14 @@ impl Track {
         if generation != self.tried_generation && !self.pending.is_empty() {
             self.tried_generation = generation;
             for (arrived, epoch, datagram) in std::mem::take(&mut self.pending) {
-                self.handle_at(epoch, datagram, arrived, now);
+                self.handle(epoch, datagram, arrived, now);
             }
         }
         let outputs = self.reorder.poll(now);
         self.emit(outputs);
     }
 
-    fn handle(&mut self, epoch: Epoch, datagram: Bytes, now: Instant) {
-        self.handle_at(epoch, datagram, now, now);
-    }
-
-    fn handle_at(&mut self, epoch: Epoch, datagram: Bytes, arrived: Instant, now: Instant) {
+    fn handle(&mut self, epoch: Epoch, datagram: Bytes, arrived: Instant, now: Instant) {
         let key = lock(&self.keys).keys.recv_key(self.media_id, epoch);
         let Some(key) = key else {
             if self.pending.len() < MAX_PENDING {

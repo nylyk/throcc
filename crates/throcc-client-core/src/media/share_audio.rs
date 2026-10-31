@@ -44,7 +44,6 @@ impl ShareAudioEncoder {
 
 /// Where a share's audio is being heard, as its media timestamp, shared by the audio
 /// worker that plays it and the decoder that holds video back to it.
-#[derive(Default)]
 pub struct Playout(AtomicU64);
 
 impl Playout {

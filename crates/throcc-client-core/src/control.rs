@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -18,6 +18,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 
 use crate::connection::Connected;
+use crate::lock;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 const EVENT_QUEUE: usize = 1024;
@@ -225,7 +226,7 @@ impl Requester {
     pub async fn request(&self, req: Request) -> Result<Response, LinkError> {
         let (tx, rx) = oneshot::channel();
         let id = {
-            let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut pending = lock(&self.pending);
             let id = pending.next_id;
             let Some(next) = id.checked_add(1) else {
                 drop(pending);
@@ -242,10 +243,6 @@ impl Requester {
             .await
             .map_err(|_| LinkError::Closed)?;
         rx.await.map_err(|_| LinkError::Closed)
-    }
-
-    pub fn connection(&self) -> &quinn::Connection {
-        &self.connection
     }
 }
 
@@ -281,11 +278,7 @@ fn spawn_link(
             };
             match message {
                 ServerMessage::Response { id, res } => {
-                    let waiter = reader_pending
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .waiting
-                        .remove(&id);
+                    let waiter = lock(&reader_pending).waiting.remove(&id);
                     match waiter {
                         Some(waiter) => {
                             waiter.send(res).ok();
@@ -303,11 +296,7 @@ fn spawn_link(
                 }
             }
         }
-        reader_pending
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .waiting
-            .clear();
+        lock(&reader_pending).waiting.clear();
     });
 
     (

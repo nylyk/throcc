@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -18,6 +18,7 @@ use crate::call::{Call, CallEvent};
 use crate::client::{Command, Event};
 use crate::keys::KeyNotice;
 use crate::keystore::Keystore;
+use crate::lock;
 use crate::media::audio::VoiceSettings;
 use crate::media::engine::Kind;
 use crate::media::share_audio::Playout;
@@ -66,7 +67,7 @@ impl Shared {
     /// The picture behind `hash` once fetched. True in the second place when nobody has
     /// asked for it yet, so the caller should fetch it.
     pub fn avatar(&self, hash: Hash) -> (Option<Arc<[u8]>>, bool) {
-        let mut avatars = self.avatars.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut avatars = lock(&self.avatars);
         match avatars.get(&hash) {
             Some(AvatarSlot::Ready(bytes)) => (Some(bytes.clone()), false),
             Some(_) => (None, false),
@@ -79,26 +80,18 @@ impl Shared {
 
     fn set_avatar(&self, hash: Hash, slot: AvatarSlot) {
         let ready = matches!(slot, AvatarSlot::Ready(_));
-        self.avatars
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(hash, slot);
+        lock(&self.avatars).insert(hash, slot);
         if ready {
             self.emit(Event::AvatarReady(hash));
         }
     }
 
     pub fn picture(&self, user: UserId) -> Option<Picture> {
-        self.pictures
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&user)
-            .cloned()
+        lock(&self.pictures).get(&user).cloned()
     }
 
-    #[cfg_attr(not(feature = "ffmpeg"), allow(dead_code))]
     fn set_picture(&self, user: UserId, picture: Option<Picture>) {
-        let mut pictures = self.pictures.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut pictures = lock(&self.pictures);
         match picture {
             Some(picture) => pictures.insert(user, picture),
             None => pictures.remove(&user),
@@ -106,14 +99,11 @@ impl Shared {
     }
 
     pub fn state(&self) -> Arc<State> {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        lock(&self.state).clone()
     }
 
     fn update(&self, change: impl FnOnce(&mut State)) {
-        let mut guard = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = lock(&self.state);
         let mut state = (**guard).clone();
         change(&mut state);
         if state != **guard {
@@ -124,6 +114,10 @@ impl Shared {
 
     fn emit(&self, event: Event) {
         self.events.send(event).ok();
+    }
+
+    pub fn notice(&self, text: impl Into<String>) {
+        self.emit(Event::Notice(text.into()));
     }
 }
 
@@ -229,7 +223,7 @@ impl Session {
         if let Err(e) = self.profile.save(self.keystore.dir()) {
             warn!("saving the profile: {e:#}");
             self.shared
-                .emit(Event::Notice(format!("Couldn't keep your profile: {e}")));
+                .notice(format!("Couldn't keep your profile: {e}"));
         }
         self.show_profile();
     }
@@ -262,11 +256,7 @@ impl Session {
 
     fn start_voice(&mut self) {
         self.voice = None;
-        *self
-            .shared
-            .mic_level
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = None;
+        *lock(&self.shared.mic_level) = None;
         if !self.options.audio {
             return;
         }
@@ -279,8 +269,7 @@ impl Session {
             Ok(voice) => self.voice = Some(voice),
             Err(e) => {
                 warn!("no audio: {e:#}");
-                self.shared
-                    .emit(Event::Notice(format!("Audio is unavailable: {e}")));
+                self.shared.notice(format!("Audio is unavailable: {e}"));
             }
         }
     }
@@ -381,13 +370,9 @@ impl Session {
 
     fn reset_room(&mut self) {
         self.stop_share();
-        for (user, video) in std::mem::take(&mut self.watched_video) {
-            self.call.engine.unsubscribe(video);
-            self.shared.set_picture(user, None);
-        }
-        for (user, audio) in std::mem::take(&mut self.watched_audio) {
-            self.call.engine.unsubscribe(audio);
-            self.voice(VoiceCommand::ForgetShare(user));
+        let watched: Vec<UserId> = self.watched_video.keys().copied().collect();
+        for user in watched {
+            self.stop_watching(user);
         }
         self.room = None;
         self.my_tracks = None;
@@ -405,18 +390,17 @@ impl Session {
             .get(&self.address)
             .unwrap_or(Fingerprint([0; 32]));
         let address = self.address.clone();
-        let welcome_copy = welcome.clone();
         self.shared.update(move |s| {
             s.server = Some(ServerView {
                 address,
                 fingerprint,
-                name: welcome_copy.server.name.clone(),
-                avatar: welcome_copy.server.avatar,
+                name: welcome.server.name.clone(),
+                avatar: welcome.server.avatar,
             });
             s.connection = ConnectionStatus::Connected;
-            s.me = Some(welcome_copy.me);
-            s.role = Some(welcome_copy.role);
-            s.rooms = welcome_copy
+            s.me = Some(welcome.me);
+            s.role = Some(welcome.role);
+            s.rooms = welcome
                 .rooms
                 .iter()
                 .map(|r| RoomView {
@@ -426,7 +410,7 @@ impl Session {
                 .collect();
             let volumes: HashMap<UserId, f32> =
                 s.people.iter().map(|(u, p)| (*u, p.volume)).collect();
-            s.people = welcome_copy
+            s.people = welcome
                 .presence
                 .iter()
                 .map(|p| {
@@ -439,7 +423,7 @@ impl Session {
             s.current = None;
         });
         if welcome.placed.room.is_some() {
-            self.after_join(&welcome.placed.clone());
+            self.after_join(&welcome.placed);
         }
     }
 
@@ -526,9 +510,7 @@ impl Session {
                     self.after_join(&placed);
                     self.notices(notices);
                 }
-                Err(e) => self
-                    .shared
-                    .emit(Event::Notice(format!("Couldn't join: {e}"))),
+                Err(e) => self.shared.notice(format!("Couldn't join: {e}")),
             },
             Command::SetMic(on) => {
                 self.media.mic = on;
@@ -635,8 +617,7 @@ impl Session {
                 self.options.input_device = input;
                 self.options.output_device = output;
                 self.start_voice();
-                let placed = self.call.engine.keys().keys.room().map(|_| ());
-                if placed.is_some() {
+                if self.call.engine.keys().keys.room().is_some() {
                     self.voice(VoiceCommand::SendOn(self.my_tracks.as_ref().map(|t| t.mic)));
                     self.voice(VoiceCommand::Muted(!self.media.mic));
                     self.voice(VoiceCommand::Deafened(self.media.deafened));
@@ -732,7 +713,7 @@ impl Session {
     }
 
     fn refused(&self, response: anyhow::Result<Response>) {
-        self.shared.emit(Event::Notice(refusal(response)));
+        self.shared.notice(refusal(response));
     }
 
     async fn push_media(&mut self) {
@@ -788,16 +769,7 @@ impl Session {
             .map(|(user, _)| *user)
             .collect();
         for user in stale {
-            if let Some(video) = self.watched_video.remove(&user) {
-                self.call.engine.unsubscribe(video);
-                self.tracks.remove(&video);
-            }
-            if let Some(audio) = self.watched_audio.remove(&user) {
-                self.call.engine.unsubscribe(audio);
-                self.tracks.remove(&audio);
-                self.voice(VoiceCommand::ForgetShare(user));
-            }
-            self.shared.set_picture(user, None);
+            self.stop_watching(user);
         }
         for (user, (share, config)) in wanted {
             if self.watched_video.contains_key(&user) {
@@ -822,22 +794,32 @@ impl Session {
                 let units = self.call.engine.subscribe(video, Kind::Video, 64);
                 match crate::media::share::receive(units, config.codec, playout) {
                     Ok(picture) => self.shared.set_picture(user, Some(picture)),
-                    Err(e) => self
-                        .shared
-                        .emit(Event::Notice(format!("Can't show this share: {e}"))),
+                    Err(e) => self.shared.notice(format!("Can't show this share: {e}")),
                 }
             }
             #[cfg(not(feature = "ffmpeg"))]
             {
                 drop(playout);
-                self.shared.emit(Event::Notice(
-                    "This build can't show video; it was built without ffmpeg.".into(),
-                ));
+                self.shared
+                    .notice("This build can't show video; it was built without ffmpeg.");
             }
             self.tracks
                 .insert(video, watched(user, "screen", config.kbps));
             self.watched_video.insert(user, video);
         }
+    }
+
+    fn stop_watching(&mut self, user: UserId) {
+        if let Some(video) = self.watched_video.remove(&user) {
+            self.call.engine.unsubscribe(video);
+            self.tracks.remove(&video);
+        }
+        if let Some(audio) = self.watched_audio.remove(&user) {
+            self.call.engine.unsubscribe(audio);
+            self.tracks.remove(&audio);
+            self.voice(VoiceCommand::ForgetShare(user));
+        }
+        self.shared.set_picture(user, None);
     }
 
     #[cfg(feature = "ffmpeg")]
@@ -848,8 +830,7 @@ impl Session {
             .and_then(|t| t.shares.first())
             .copied()
         else {
-            self.shared
-                .emit(Event::Notice("Join a room before sharing.".into()));
+            self.shared.notice("Join a room before sharing.");
             return;
         };
         let engine = self.call.engine.clone();
@@ -868,20 +849,15 @@ impl Session {
                 self.sharing = Some(sender);
                 self.push_media().await;
             }
-            Ok(Err(e)) => self
-                .shared
-                .emit(Event::Notice(format!("Couldn't start sharing: {e}"))),
-            Err(_) => self
-                .shared
-                .emit(Event::Notice("Couldn't start sharing.".into())),
+            Ok(Err(e)) => self.shared.notice(format!("Couldn't start sharing: {e}")),
+            Err(_) => self.shared.notice("Couldn't start sharing."),
         }
     }
 
     #[cfg(not(feature = "ffmpeg"))]
     async fn start_share(&mut self, _wanted: ShareConfig) {
-        self.shared.emit(Event::Notice(
-            "This build can't share video; it was built without ffmpeg.".into(),
-        ));
+        self.shared
+            .notice("This build can't share video; it was built without ffmpeg.");
     }
 
     fn stop_share(&mut self) {
@@ -938,10 +914,10 @@ impl Session {
                     }
                 }),
                 KeyNotice::BadEncKey { user } => {
-                    self.shared.emit(Event::Notice(format!(
+                    self.shared.notice(format!(
                         "User {}'s encryption key failed its check; they can't hear you.",
                         user.0
-                    )));
+                    ));
                 }
                 KeyNotice::NewContact { .. } => {}
             }
@@ -1005,8 +981,7 @@ impl Session {
                     self.reset_room();
                     self.voice(VoiceCommand::ForgetAll);
                     self.voice(VoiceCommand::SendOn(None));
-                    self.shared
-                        .emit(Event::Notice("The room you were in was deleted.".into()));
+                    self.shared.notice("The room you were in was deleted.");
                 }
                 self.shared.update(|s| {
                     s.rooms.retain(|r| r.id != room);
@@ -1032,9 +1007,9 @@ impl Session {
                     self.shared.update(|s| s.role = Some(role));
                 }
             }
-            ServerEvent::InviteBurned { code_id } => self.shared.emit(Event::Notice(format!(
+            ServerEvent::InviteBurned { code_id } => self.shared.notice(format!(
                 "Invite {code_id}-… was used up by three wrong tries and no longer works."
-            ))),
+            )),
             ServerEvent::Kicked { reason } => self.shared.emit(Event::Kicked(reason)),
             ServerEvent::UserAdded(_) | ServerEvent::UserRemoved(_) => self.list_users().await,
             ServerEvent::KeyframeWanted { media_id, kind } => {
@@ -1054,11 +1029,7 @@ impl Session {
     fn refresh_levels(&mut self) {
         let Some(voice) = &self.voice else { return };
         let levels = voice.levels();
-        *self
-            .shared
-            .mic_level
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(levels.mic_dbfs);
+        *lock(&self.shared.mic_level) = Some(levels.mic_dbfs);
         let me = self.call.me();
         let mine = levels.transmitting;
         self.shared.update(|s| {
@@ -1075,18 +1046,17 @@ impl Session {
     fn refresh_health(&mut self) {
         let connection = &self.call.connection;
         let stats = connection.stats();
-        let sent = stats.path.sent_packets;
-        let lost = stats.path.lost_packets;
         let upload_loss = percent(
-            lost - self.last_lost_sent.min(lost),
-            sent - self.last_sent.min(sent),
+            advance(&mut self.last_lost_sent, stats.path.lost_packets),
+            advance(&mut self.last_sent, stats.path.sent_packets),
         );
-        self.last_sent = sent;
-        self.last_lost_sent = lost;
-        let engine_stats = &self.call.engine.stats;
-        let local_drops = engine_stats.send_dropped_units.load(Ordering::Relaxed);
-        let new_local_drops = local_drops - self.last_local_drops.min(local_drops);
-        self.last_local_drops = local_drops;
+        let local_drops = self
+            .call
+            .engine
+            .stats
+            .send_dropped_units
+            .load(Ordering::Relaxed);
+        let new_local_drops = advance(&mut self.last_local_drops, local_drops);
 
         let state = self.shared.state();
         let mut rows = Vec::new();
@@ -1094,13 +1064,9 @@ impl Session {
         for (media_id, track) in self.tracks.iter_mut() {
             let bytes = self.call.engine.received_bytes(*media_id);
             let (received, lost) = self.call.engine.datagrams(*media_id);
-            let new_received = received - track.last_received.min(received);
-            let new_lost = lost - track.last_lost.min(lost);
-            let kbps =
-                ((bytes - track.last_bytes.min(bytes)) * 8 / HEALTH_EVERY.as_secs() / 1000) as u32;
-            track.last_bytes = bytes;
-            track.last_received = received;
-            track.last_lost = lost;
+            let new_bytes = advance(&mut track.last_bytes, bytes);
+            let new_received = advance(&mut track.last_received, received);
+            let new_lost = advance(&mut track.last_lost, lost);
             received_total += new_received;
             lost_total += new_lost;
             let name = state
@@ -1109,7 +1075,7 @@ impl Session {
             rows.push(TrackHealth {
                 label: format!("{name}, {}", track.label),
                 set_kbps: Some(track.set_kbps),
-                arriving_kbps: (new_received > 0).then_some(kbps),
+                arriving_kbps: (new_received > 0).then_some(kbps(new_bytes)),
                 loss: (new_received + new_lost > 0)
                     .then(|| percent(new_lost, new_received + new_lost)),
             });
@@ -1147,15 +1113,11 @@ impl Session {
             .into_iter()
             .map(|(label, media_id, set_kbps, dropped)| {
                 let bytes = self.call.engine.sent_bytes(media_id);
-                let last = self
-                    .last_sent_bytes
-                    .insert(media_id, bytes)
-                    .unwrap_or(bytes);
+                let last = self.last_sent_bytes.entry(media_id).or_insert(bytes);
                 SentTrack {
                     label,
                     set_kbps,
-                    leaving_kbps: ((bytes - last.min(bytes)) * 8 / HEALTH_EVERY.as_secs() / 1000)
-                        as u32,
+                    leaving_kbps: kbps(advance(last, bytes)),
                     dropped,
                 }
             })
@@ -1195,6 +1157,16 @@ fn refusal(response: anyhow::Result<Response>) -> String {
         Ok(other) => format!("unexpected reply {other:?}"),
         Err(e) => e.to_string(),
     }
+}
+
+/// How far `counter` has moved since `last`, which it then replaces.
+fn advance(last: &mut u64, counter: u64) -> u64 {
+    counter.saturating_sub(std::mem::replace(last, counter))
+}
+
+/// The rate of `bytes` sent or received over one health refresh.
+fn kbps(bytes: u64) -> u32 {
+    (bytes * 8 / HEALTH_EVERY.as_secs() / 1000) as u32
 }
 
 fn percent(part: u64, whole: u64) -> f32 {

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::mpsc as std_mpsc;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::Bytes;
 use sonora_common_audio::push_sinc_resampler::PushSincResampler;
@@ -15,6 +15,7 @@ use super::devices::{self, Devices};
 use super::engine::{Kind, MediaEngine, Outgoing, Received};
 use super::jitter::{JitterBuffer, PULL};
 use super::share_audio::Playout;
+use crate::lock;
 
 /// Playback kept queued in the device ring, in 10 ms pulls: enough to ride out
 /// scheduling hiccups, little enough to keep mouth-to-ear delay low.
@@ -98,10 +99,7 @@ impl VoiceEngine {
     }
 
     pub fn levels(&self) -> Levels {
-        self.levels
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        lock(&self.levels).clone()
     }
 }
 
@@ -115,10 +113,6 @@ impl Drop for VoiceEngine {
     }
 }
 
-struct Remote {
-    units: mpsc::Receiver<Received>,
-}
-
 struct ShareAudio {
     units: mpsc::Receiver<Received>,
     jitter: JitterBuffer,
@@ -129,7 +123,7 @@ struct Worker {
     devices: Devices,
     chain: CaptureChain,
     mixer: Mixer,
-    remotes: HashMap<UserId, Remote>,
+    remotes: HashMap<UserId, mpsc::Receiver<Received>>,
     shares: HashMap<UserId, ShareAudio>,
     engine: Arc<MediaEngine>,
     levels: Arc<Mutex<Levels>>,
@@ -243,7 +237,7 @@ impl Worker {
             VoiceCommand::Deafened(deafened) => self.deafened = deafened,
             VoiceCommand::Volume(user, volume) => self.mixer.set_volume(user, volume),
             VoiceCommand::Listen { user, units } => {
-                self.remotes.insert(user, Remote { units });
+                self.remotes.insert(user, units);
             }
             VoiceCommand::Forget(user) => {
                 self.remotes.remove(&user);
@@ -284,8 +278,8 @@ impl Worker {
     }
 
     fn receive(&mut self) {
-        for (user, remote) in &mut self.remotes {
-            while let Ok(unit) = remote.units.try_recv() {
+        for (user, units) in &mut self.remotes {
+            while let Ok(unit) = units.try_recv() {
                 if let Err(e) = self
                     .mixer
                     .insert(*user, unit.timestamp, &unit.data, self.played)
@@ -398,14 +392,8 @@ impl Worker {
         match self.chain.capture(&input, self.push_to_talk) {
             Ok(Some(packet)) => {
                 if let Some(media_id) = self.mic_track {
-                    let unit = Outgoing {
-                        media_id,
-                        data: Bytes::copy_from_slice(packet.data),
-                        timestamp: packet.timestamp,
-                        keyframe: false,
-                        discardable: false,
-                        enqueued: Instant::now(),
-                    };
+                    let data = Bytes::copy_from_slice(packet.data);
+                    let unit = Outgoing::new(media_id, data, packet.timestamp, false);
                     self.engine.send(Kind::Audio, unit);
                 }
             }
@@ -416,7 +404,7 @@ impl Worker {
     }
 
     fn publish_levels(&self) {
-        let mut levels = self.levels.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut levels = lock(&self.levels);
         levels.mic_dbfs = self.chain.level_dbfs;
         levels.transmitting = self.chain.transmitting();
         levels.speaking = self.mixer.speaking().collect();

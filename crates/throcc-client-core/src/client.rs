@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use std::path::PathBuf;
@@ -16,6 +16,7 @@ use crate::account::{self, SignInError};
 use crate::call::Call;
 use crate::contacts::Contacts;
 use crate::keystore::Keystore;
+use crate::lock;
 use crate::media::audio::VoiceSettings;
 use crate::media::video::Picture;
 use crate::media::video::frame::VideoFrame;
@@ -158,12 +159,9 @@ impl Client {
             mic_level: Mutex::default(),
         });
         let (commands, commands_rx) = mpsc::channel(COMMANDS);
-        let call = {
-            let _guard = runtime.enter();
-            Call::start(link, &keystore).map_err(SignInError::Store)?
-        };
         let session = {
             let _guard = runtime.enter();
+            let call = Call::start(link, &keystore).map_err(SignInError::Store)?;
             Session::new(shared.clone(), keystore, address.to_owned(), options, call)
         };
         runtime.spawn(session.run(commands_rx));
@@ -190,10 +188,7 @@ impl Drop for Client {
 impl ClientApi for Client {
     fn command(&self, command: Command) {
         if self.commands.try_send(command).is_err() {
-            self.shared
-                .events
-                .send(Event::Notice("busy; try again".into()))
-                .ok();
+            self.shared.notice("busy; try again");
         }
     }
 
@@ -226,11 +221,7 @@ impl ClientApi for Client {
     }
 
     fn mic_level(&self) -> Option<f32> {
-        *self
-            .shared
-            .mic_level
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        *lock(&self.shared.mic_level)
     }
 }
 
@@ -252,10 +243,7 @@ impl MockClient {
     /// Keeps `bytes` as a picture, as the server would, and returns its hash.
     fn keep_avatar(&self, bytes: Vec<u8>) -> Hash {
         let hash = Hash(<sha2::Sha256 as sha2::Digest>::digest(&bytes).into());
-        self.avatars
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(hash, bytes.into());
+        lock(&self.avatars).insert(hash, bytes.into());
         hash
     }
 
@@ -270,7 +258,7 @@ impl MockClient {
     }
 
     fn update(&self, change: impl FnOnce(&mut State)) {
-        let mut guard = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = lock(&self.state);
         let mut state = (**guard).clone();
         change(&mut state);
         *guard = Arc::new(state);
@@ -400,10 +388,7 @@ impl ClientApi for MockClient {
                     })
                     .ok();
             }
-            Command::ListUsers => {
-                self.events.send(Event::Users(sample_users())).ok();
-            }
-            Command::SetRole(..) | Command::RemoveUser { .. } => {
+            Command::ListUsers | Command::SetRole(..) | Command::RemoveUser { .. } => {
                 self.events.send(Event::Users(sample_users())).ok();
             }
             Command::AcceptKey(user) => self.update(|s| s.key_warnings.retain(|w| w.user != user)),
@@ -425,10 +410,7 @@ impl ClientApi for MockClient {
     }
 
     fn state(&self) -> Arc<State> {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        lock(&self.state).clone()
     }
 
     fn safety_number(&self, _user: UserId) -> Option<String> {
@@ -441,11 +423,7 @@ impl ClientApi for MockClient {
     }
 
     fn avatar(&self, hash: Hash) -> Option<Arc<[u8]>> {
-        self.avatars
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&hash)
-            .cloned()
+        lock(&self.avatars).get(&hash).cloned()
     }
     fn mic_level(&self) -> Option<f32> {
         let wave = Instant::now().duration_since(self.started).as_secs_f32() * 3.0;

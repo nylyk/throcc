@@ -75,20 +75,20 @@ impl ShareSender {
         let capture_config = CaptureConfig::for_share(&wanted);
         let bound = (capture_config.width, capture_config.height);
         let mut frame = VideoFrame::blank(bound.0, bound.1);
-        let mut first = first_frame(capture.as_mut(), &mut frame);
+        let first = first_frame(capture.as_mut(), &mut frame);
         let (width, height) = if first {
             share_size((frame.width, frame.height), bound)
         } else {
             bound
         };
-        let mut encoder = Encoder::open(EncoderConfig {
+        let encoder = Encoder::open(EncoderConfig {
             width,
             height,
             fps: capture_config.fps,
             kbps: wanted.kbps,
         })
         .map_err(|e| ShareError::Encoder(e.to_string()))?;
-        let mut audio_encoder = if wanted.audio && capture.captures_audio() {
+        let audio_encoder = if wanted.audio && capture.captures_audio() {
             Some(ShareAudioEncoder::new().map_err(|e| ShareError::Encoder(e.to_string()))?)
         } else {
             None
@@ -104,66 +104,21 @@ impl ShareSender {
         let stop = Arc::new(AtomicBool::new(false));
         let (recover, recover_rx) = std_mpsc::channel();
         let (self_tx, self_view) = watch::channel(None);
-        let thread_stop = stop.clone();
+        let sending = Sending {
+            stop: stop.clone(),
+            recover: recover_rx,
+            capture,
+            encoder,
+            audio_encoder,
+            engine,
+            tracks,
+            frame,
+            unsent: first,
+            self_view: self_tx,
+        };
         let thread = std::thread::Builder::new()
             .name("throcc-share".into())
-            .spawn(move || {
-                let mut sound = [0.0f32; STEREO_FRAME];
-                let mut count = 0u32;
-                let mut pacer = RecoveryPacer::default();
-                while !thread_stop.load(Ordering::Relaxed) {
-                    while let Ok(kind) = recover_rx.try_recv() {
-                        pacer.ask(kind);
-                    }
-                    if let Some(kind) = pacer.due(Instant::now()) {
-                        encoder.recover(kind);
-                    }
-                    if let Some(audio_encoder) = &mut audio_encoder {
-                        while let Some(timestamp) = capture.next_audio(&mut sound) {
-                            let Some(packet) = audio_encoder.encode(&sound) else {
-                                continue;
-                            };
-                            let unit = Outgoing {
-                                media_id: tracks.audio,
-                                data: Bytes::copy_from_slice(packet),
-                                timestamp,
-                                keyframe: false,
-                                discardable: false,
-                                enqueued: Instant::now(),
-                            };
-                            engine.send(Kind::Audio, unit);
-                        }
-                    }
-                    let fresh = std::mem::take(&mut first) || capture.next_frame(&mut frame);
-                    if !fresh {
-                        std::thread::sleep(IDLE);
-                        continue;
-                    }
-                    count = count.wrapping_add(1);
-                    if count.is_multiple_of(SELF_VIEW_EVERY) {
-                        let factor = frame.width / SELF_VIEW_WIDTH;
-                        self_tx.send_replace(Some(Arc::new(frame.shrunk(factor))));
-                    }
-                    match encoder.encode(&frame) {
-                        Ok(units) => {
-                            for unit in units {
-                                engine.send(
-                                    Kind::Video,
-                                    Outgoing {
-                                        media_id: tracks.video,
-                                        data: unit.data,
-                                        timestamp: unit.timestamp,
-                                        keyframe: unit.keyframe,
-                                        discardable: false,
-                                        enqueued: Instant::now(),
-                                    },
-                                );
-                            }
-                        }
-                        Err(e) => warn!("encoding failed: {e}"),
-                    }
-                }
-            })
+            .spawn(move || sending.run())
             .map_err(|e| ShareError::Encoder(e.to_string()))?;
         Ok(Self {
             stop,
@@ -185,6 +140,77 @@ impl Drop for ShareSender {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
             thread.join().ok();
+        }
+    }
+}
+
+/// The share thread: encodes what the capture delivers and queues it for sending.
+struct Sending {
+    stop: Arc<AtomicBool>,
+    recover: std_mpsc::Receiver<Recovery>,
+    capture: Box<dyn Capture>,
+    encoder: Encoder,
+    audio_encoder: Option<ShareAudioEncoder>,
+    engine: Arc<MediaEngine>,
+    tracks: Share,
+    frame: VideoFrame,
+    /// Whether `frame` holds a captured picture that has not been sent yet.
+    unsent: bool,
+    self_view: watch::Sender<Option<Arc<VideoFrame>>>,
+}
+
+impl Sending {
+    fn run(mut self) {
+        let mut sound = [0.0f32; STEREO_FRAME];
+        let mut count = 0u32;
+        let mut pacer = RecoveryPacer::default();
+        while !self.stop.load(Ordering::Relaxed) {
+            while let Ok(kind) = self.recover.try_recv() {
+                pacer.ask(kind);
+            }
+            if let Some(kind) = pacer.due(Instant::now()) {
+                self.encoder.recover(kind);
+            }
+            self.send_audio(&mut sound);
+            let fresh =
+                std::mem::take(&mut self.unsent) || self.capture.next_frame(&mut self.frame);
+            if !fresh {
+                std::thread::sleep(IDLE);
+                continue;
+            }
+            count = count.wrapping_add(1);
+            if count.is_multiple_of(SELF_VIEW_EVERY) {
+                let factor = self.frame.width / SELF_VIEW_WIDTH;
+                let thumbnail = Arc::new(self.frame.shrunk(factor));
+                self.self_view.send_replace(Some(thumbnail));
+            }
+            self.send_video();
+        }
+    }
+
+    fn send_audio(&mut self, sound: &mut [f32; STEREO_FRAME]) {
+        let Some(audio_encoder) = &mut self.audio_encoder else {
+            return;
+        };
+        while let Some(timestamp) = self.capture.next_audio(sound) {
+            if let Some(packet) = audio_encoder.encode(sound) {
+                let data = Bytes::copy_from_slice(packet);
+                let unit = Outgoing::new(self.tracks.audio, data, timestamp, false);
+                self.engine.send(Kind::Audio, unit);
+            }
+        }
+    }
+
+    fn send_video(&mut self) {
+        match self.encoder.encode(&self.frame) {
+            Ok(units) => {
+                for unit in units {
+                    let outgoing =
+                        Outgoing::new(self.tracks.video, unit.data, unit.timestamp, unit.keyframe);
+                    self.engine.send(Kind::Video, outgoing);
+                }
+            }
+            Err(e) => warn!("encoding failed: {e}"),
         }
     }
 }

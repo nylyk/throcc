@@ -158,11 +158,6 @@ impl CaptureChain {
         self.transmitting
     }
 
-    /// Tells the encoder how much loss to protect against, from measured loss.
-    pub fn set_expected_loss(&mut self, percent: u8) {
-        self.encoder.set_packet_loss_perc(percent.min(100)).ok();
-    }
-
     /// Feeds 10 ms of what the speakers play, the echo canceller's reference.
     pub fn render(&mut self, played: &[f32; PULL]) -> Result<(), AudioError> {
         let mut out = [0.0f32; PULL];
@@ -220,10 +215,6 @@ impl CaptureChain {
     /// The last 10 ms after processing, before the gate.
     pub fn processed(&self) -> &[f32; PULL] {
         &self.processed
-    }
-
-    pub fn stats(&self) -> &sonora::AudioProcessingStats {
-        self.apm.statistics()
     }
 }
 
@@ -327,10 +318,6 @@ impl Mixer {
         self.streams
             .iter()
             .map(|(user, s)| (*user, s.level_dbfs > SPEAKING_DBFS))
-    }
-
-    pub fn buffer_ms(&self, user: UserId) -> Option<f32> {
-        self.streams.get(&user).map(|s| s.jitter.buffer_ms())
     }
 }
 

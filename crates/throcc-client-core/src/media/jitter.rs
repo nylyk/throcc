@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use ropus::{Channels, DecodeMode, Decoder};
+use throcc_proto::frame::timestamp_before;
 
 /// Samples per channel in one Opus frame: 20 ms at 48 kHz.
 pub const FRAME: usize = 960;
@@ -55,7 +56,6 @@ pub struct JitterBuffer {
     jitter: f64,
     last_transit: Option<i64>,
     pulls_since_accelerate: u32,
-    played: Played,
     pub stats: JitterStats,
 }
 
@@ -78,7 +78,6 @@ impl JitterBuffer {
             jitter: 0.0,
             last_transit: None,
             pulls_since_accelerate: 0,
-            played: Played::Silence,
             stats: JitterStats::default(),
         })
     }
@@ -94,14 +93,18 @@ impl JitterBuffer {
         }
         self.last_transit = Some(transit);
 
-        if self.playing && self.next_ts.is_some_and(|next| before(timestamp, next)) {
+        if self.playing
+            && self
+                .next_ts
+                .is_some_and(|next| timestamp_before(timestamp, next))
+        {
             self.stats.late += 1;
             return;
         }
         if !self.playing
             && self
                 .next_ts
-                .is_none_or(|next| self.packets.is_empty() || before(timestamp, next))
+                .is_none_or(|next| self.packets.is_empty() || timestamp_before(timestamp, next))
         {
             self.next_ts = Some(timestamp);
         }
@@ -125,7 +128,7 @@ impl JitterBuffer {
 
     fn buffered(&self) -> u32 {
         let undecoded = match (self.next_ts, self.packets.last_key_value()) {
-            (Some(next), Some((last, _))) if !before(*last, next) => {
+            (Some(next), Some((last, _))) if !timestamp_before(*last, next) => {
                 last.wrapping_sub(next) + FRAME as u32
             }
             _ => 0,
@@ -144,10 +147,6 @@ impl JitterBuffer {
             .then(|| self.frame_ts.wrapping_add(self.frame_pos as u32))
     }
 
-    pub fn last_played(&self) -> Played {
-        self.played
-    }
-
     /// Fills 10 ms of output, channels interleaved: `out` holds `PULL` samples per channel.
     pub fn pull(&mut self, out: &mut [f32]) -> Played {
         let channels = self.channels;
@@ -157,7 +156,6 @@ impl JitterBuffer {
                 self.frame_pos = FRAME;
             } else {
                 out.fill(0.0);
-                self.played = Played::Silence;
                 return Played::Silence;
             }
         }
@@ -173,7 +171,6 @@ impl JitterBuffer {
                     }
                     None => {
                         out[filled * channels..].fill(0.0);
-                        self.played = Played::Silence;
                         return Played::Silence;
                     }
                 }
@@ -186,7 +183,6 @@ impl JitterBuffer {
             filled += take;
         }
         self.accelerate();
-        self.played = played;
         played
     }
 
@@ -224,7 +220,8 @@ impl JitterBuffer {
         self.frame_ts = next;
         self.frame_pos = 0;
         self.next_ts = Some(following);
-        self.packets.retain(|ts, _| !before(*ts, following));
+        self.packets
+            .retain(|ts, _| !timestamp_before(*ts, following));
         Some(kind)
     }
 
@@ -254,11 +251,6 @@ impl JitterBuffer {
             self.pulls_since_accelerate = 0;
         }
     }
-}
-
-/// Serial-number order for 32-bit media timestamps.
-fn before(a: u32, b: u32) -> bool {
-    throcc_proto::frame::timestamp_before(a, b)
 }
 
 #[cfg(test)]
