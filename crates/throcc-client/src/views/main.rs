@@ -5,6 +5,7 @@ use gpui::{
     RenderImage, Size as Area, StatefulInteractiveElement, Styled, Window, div, px, relative, size,
 };
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
+use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::{Disableable, Sizable, Size};
 use throcc_client_core::client::Command;
 use throcc_client_core::state::{Person, State, share_label};
@@ -190,58 +191,72 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
     let deafened = state.current.as_ref().is_some_and(|c| c.deafened);
     let in_room = state.current.is_some();
 
-    let identity = div()
-        .flex()
-        .flex_1()
-        .min_w_0()
-        .items_center()
-        .gap_2()
-        .child(avatar(&server, 0, server_picture, px(28.), false))
+    // The dropdown wraps its trigger in elements that grow to the text, so the name gets an
+    // explicit width: the sidebar minus the lights, paddings, picture, gaps and caret.
+    let server_name_width = app.sidebar_width - TRAFFIC_LIGHTS - px(84.);
+    let this = cx.entity().downgrade();
+    let server_menu = Button::new("server-menu")
+        .ghost()
+        .rounded(theme::RADIUS_ROW)
+        .h(px(40.))
+        .px_2()
+        .dropdown_caret(true)
         .child(
             div()
+                .flex()
                 .flex_1()
-                .truncate()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(server),
-        );
-    let lights_take_the_header = TRAFFIC_LIGHTS > px(0.);
-    let (header_identity, identity_row) = if lights_take_the_header {
-        (
-            None,
-            Some(div().flex().px_3().pt_3().pb_1().child(identity)),
+                .min_w_0()
+                .items_center()
+                .gap_2()
+                .child(avatar(&server, 0, server_picture, px(28.), false))
+                .child(
+                    div()
+                        .max_w(server_name_width)
+                        .truncate()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(server),
+                ),
         )
-    } else {
-        (Some(identity), None)
-    };
+        .dropdown_menu(move |menu, _, _| {
+            let settings = this.clone();
+            let leave = this.clone();
+            menu.min_w(px(200.))
+                .item(
+                    PopupMenuItem::new("Server settings")
+                        .icon(icon("settings-2"))
+                        .on_click(move |_, window, cx| {
+                            settings
+                                .update(cx, |app, cx| {
+                                    app.fill_server(window, cx);
+                                    app.screen = Screen::Server(ServerPage::Overview);
+                                    cx.notify();
+                                })
+                                .ok();
+                        }),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new("Leave server")
+                        .icon(icon("log-out"))
+                        .on_click(move |_, _, cx| {
+                            leave.update(cx, |app, cx| app.leave_server(cx)).ok();
+                        }),
+                )
+        });
 
     sidebar_column(app.sidebar_width)
         .child(
             moves_window(div())
                 .flex()
                 .items_center()
-                .justify_end()
-                .gap_2()
-                .px_3()
+                .px_2()
+                .pl(px(8.) + TRAFFIC_LIGHTS)
                 .h(theme::HEADER_HEIGHT)
                 .flex_none()
                 .border_b_1()
                 .border_color(theme::control())
-                .children(header_identity)
-                .child(
-                    ghost_icon("server-settings", "settings-2", "Server settings").on_click(
-                        cx.listener(|app, _, window, cx| {
-                            app.fill_server(window, cx);
-                            app.screen = Screen::Server(ServerPage::Overview);
-                            cx.notify();
-                        }),
-                    ),
-                )
-                .child(
-                    ghost_icon("leave-server", "log-out", "Leave this server")
-                        .on_click(cx.listener(|app, _, _, cx| app.leave_server(cx))),
-                ),
+                .child(server_menu),
         )
-        .children(identity_row)
         .child(
             div()
                 .id("rooms")
