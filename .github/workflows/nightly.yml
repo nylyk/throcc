@@ -1,0 +1,38 @@
+name: nightly
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'design/**'
+      - '*.md'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  arch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: ./scripts/ci-run.sh tests/arch/run.sh out
+        shell: bash
+      - name: Publish to the nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="Built from $GITHUB_SHA. Install on Arch: curl -LO https://github.com/$GITHUB_REPOSITORY/releases/download/nightly/throcc-x86_64.pkg.tar.zst && sudo pacman -U throcc-x86_64.pkg.tar.zst"
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release edit nightly --notes "$notes"
+          else
+            gh release create nightly --prerelease --title "Nightly" --target "$GITHUB_SHA" --notes "$notes"
+          fi
+          gh release upload nightly out/throcc-x86_64.pkg.tar.zst --clobber
