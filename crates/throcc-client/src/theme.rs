@@ -237,6 +237,22 @@ pub fn bg() -> Hsla {
 pub fn sidebar() -> Hsla {
     hex(palette().panel)
 }
+/// The sidebar over the blurred desktop on macOS, solid elsewhere.
+pub fn sidebar_glass() -> Hsla {
+    if cfg!(target_os = "macos") {
+        sidebar().opacity(0.8)
+    } else {
+        sidebar()
+    }
+}
+/// What shows behind every view: nothing on macOS, where the window blurs the desktop.
+pub fn window_bg() -> Hsla {
+    if cfg!(target_os = "macos") {
+        gpui::transparent_black()
+    } else {
+        bg()
+    }
+}
 pub fn surface() -> Hsla {
     hex(palette().panel)
 }
@@ -372,6 +388,8 @@ pub const RADIUS_CARD: Pixels = px(14.);
 pub const RADIUS_DIALOG: Pixels = px(18.);
 pub const TOUCH: Pixels = px(44.);
 pub const SIDEBAR_WIDTH: Pixels = px(264.);
+pub const SIDEBAR_MIN_WIDTH: Pixels = px(208.);
+pub const SIDEBAR_MAX_WIDTH: Pixels = px(420.);
 
 const FONTS: &[&str] = &[
     "Geist",
@@ -452,7 +470,7 @@ pub fn install(cx: &mut App) {
         theme.radius = RADIUS_BUTTON;
         theme.shadow = false;
         let c = &mut theme.colors;
-        c.background = bg();
+        c.background = window_bg();
         c.foreground = text();
         c.muted = raised();
         c.muted_foreground = text_3();

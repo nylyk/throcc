@@ -140,6 +140,8 @@ pub struct ThroccApp {
     /// Until when the controls over the fullscreen share show.
     pub controls_until: std::time::Instant,
     pub fullscreen_focus: gpui::FocusHandle,
+    pub sidebar_width: gpui::Pixels,
+    pub resizing_sidebar: bool,
     events: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -230,6 +232,8 @@ impl ThroccApp {
             fullscreen: None,
             controls_until: std::time::Instant::now(),
             fullscreen_focus: cx.focus_handle(),
+            sidebar_width: theme::SIDEBAR_WIDTH,
+            resizing_sidebar: false,
             events: None,
             _subscriptions: subscriptions,
         };
@@ -903,8 +907,26 @@ impl Render for ThroccApp {
             }))
             .size_full()
             .relative()
-            .bg(theme::bg())
+            .bg(theme::window_bg())
             .text_color(theme::text())
+            .on_mouse_move(cx.listener(|app, event: &gpui::MouseMoveEvent, _, cx| {
+                if !app.resizing_sidebar {
+                    return;
+                }
+                if event.pressed_button == Some(gpui::MouseButton::Left) {
+                    app.sidebar_width = event
+                        .position
+                        .x
+                        .clamp(theme::SIDEBAR_MIN_WIDTH, theme::SIDEBAR_MAX_WIDTH);
+                } else {
+                    app.resizing_sidebar = false;
+                }
+                cx.notify();
+            }))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|app, _, _, _| app.resizing_sidebar = false),
+            )
             .font_family(theme::font())
             .text_size(gpui::px(14.))
             .child(screen)

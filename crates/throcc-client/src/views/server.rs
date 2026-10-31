@@ -46,7 +46,14 @@ pub fn render(
         ServerPage::Keys => keys(app, cx),
         ServerPage::Members => members(app, cx),
     };
-    frame("Server settings", links, page_title, content, cx)
+    frame(
+        app.sidebar_width,
+        "Server settings",
+        links,
+        page_title,
+        content,
+        cx,
+    )
 }
 
 fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {

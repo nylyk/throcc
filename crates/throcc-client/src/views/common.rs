@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement, ObjectFit,
-    ParentElement, Pixels, RenderImage, SharedString, Stateful, Styled, StyledImage, div, img, px,
+    AnyElement, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton,
+    ObjectFit, ParentElement, Pixels, RenderImage, SharedString, Stateful, Styled, StyledImage,
+    TitlebarOptions, WindowBackgroundAppearance, WindowOptions, div, img, point, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Icon, Sizable, Size};
@@ -178,6 +179,49 @@ pub fn ghost_icon(
 /// "2c4e 9a1b": the first two groups of a fingerprint.
 pub fn short_key(key: &[u8; 32]) -> String {
     throcc_proto::Fingerprint(*key).short()
+}
+
+/// Room the macOS traffic lights take at the left of a window's top bar.
+pub const TRAFFIC_LIGHTS: Pixels = px(if cfg!(target_os = "macos") { 76. } else { 0. });
+
+/// `options` with the titlebar drawn by the app on macOS: the traffic lights sit in our top
+/// bar at `lights_top`, and a `blurred` window shows the desktop behind see-through views.
+pub fn app_titlebar(options: WindowOptions, lights_top: Pixels, blurred: bool) -> WindowOptions {
+    if !cfg!(target_os = "macos") {
+        return options;
+    }
+    WindowOptions {
+        titlebar: Some(TitlebarOptions {
+            title: None,
+            appears_transparent: true,
+            traffic_light_position: Some(point(px(20.), lights_top)),
+        }),
+        app_owns_titlebar_drag: true,
+        window_background: if blurred {
+            WindowBackgroundAppearance::Blurred
+        } else {
+            WindowBackgroundAppearance::Opaque
+        },
+        ..options
+    }
+}
+
+/// Lets a top bar move the window, and zoom it on double-click, on macOS where the app
+/// draws the titlebar. Presses a button inside took are left alone.
+pub fn moves_window<E: InteractiveElement>(element: E) -> E {
+    if !cfg!(target_os = "macos") {
+        return element;
+    }
+    element.on_mouse_down(MouseButton::Left, |event, window, _| {
+        if window.default_prevented() {
+            return;
+        }
+        if event.click_count == 2 {
+            window.titlebar_double_click();
+        } else {
+            window.start_window_move();
+        }
+    })
 }
 
 /// How long the controls over a fullscreen stream stay after the pointer last moved.

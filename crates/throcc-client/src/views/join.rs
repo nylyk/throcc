@@ -9,7 +9,7 @@ use throcc_client_core::connection::ConnectError;
 use throcc_client_core::control::LoginError;
 use throcc_proto::messages::AuthError;
 
-use super::common::{avatar, caption, card, mono, primary, section, title};
+use super::common::{avatar, caption, card, mono, moves_window, primary, section, title};
 use crate::app::ThroccApp;
 use crate::theme;
 
@@ -134,11 +134,21 @@ pub fn render(
 
     div()
         .size_full()
+        .relative()
+        .bg(theme::bg())
         .flex()
         .flex_col()
         .items_center()
         .justify_center()
         .gap_6()
+        .child(
+            moves_window(div())
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .h(theme::HEADER_HEIGHT),
+        )
         .child(
             div()
                 .text_size(px(24.))

@@ -11,9 +11,10 @@ use throcc_client_core::state::{Person, State, share_label};
 use throcc_proto::ids::{RoomId, UserId};
 
 use super::common::{
-    avatar, caption, card, control_button, ghost_icon, icon, player, player_button, primary,
-    section, sharing_icon, title,
+    TRAFFIC_LIGHTS, avatar, caption, card, control_button, ghost_icon, icon, moves_window, player,
+    player_button, primary, section, sharing_icon, title,
 };
+use super::settings::{resize_handle, sidebar_column};
 use crate::app::{Dialog, Screen, ServerPage, SettingsPage, ThroccApp};
 use crate::theme;
 
@@ -33,7 +34,14 @@ pub fn render(
         .size_full()
         .flex()
         .child(sidebar(app, cx))
-        .child(div().flex_1().min_w_0().h_full().child(content))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .bg(theme::bg())
+                .child(content),
+        )
         .into_any_element()
 }
 
@@ -181,21 +189,14 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
     let deafened = state.current.as_ref().is_some_and(|c| c.deafened);
     let in_room = state.current.is_some();
 
-    div()
-        .w(theme::SIDEBAR_WIDTH)
-        .h_full()
-        .flex_none()
-        .flex()
-        .flex_col()
-        .bg(theme::sidebar())
-        .border_r_1()
-        .border_color(theme::control())
+    sidebar_column(app.sidebar_width)
         .child(
-            div()
+            moves_window(div())
                 .flex()
                 .items_center()
                 .gap_2()
                 .px_3()
+                .pl(px(12.) + TRAFFIC_LIGHTS)
                 .h(theme::HEADER_HEIGHT)
                 .flex_none()
                 .border_b_1()
@@ -314,6 +315,7 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                     )),
                 ),
         )
+        .child(resize_handle(cx))
 }
 
 /// A ghost icon that turns red, showing `active_icon`, while `active`.
@@ -502,7 +504,7 @@ fn room(
         .collect();
     let rtt = state.health.rtt_ms;
 
-    let header = div()
+    let header = moves_window(div())
         .flex()
         .items_center()
         .gap_3()
@@ -683,7 +685,7 @@ fn grid(
 ) -> AnyElement {
     let viewport = window.viewport_size();
     let area = size(
-        viewport.width - theme::SIDEBAR_WIDTH - ROOM_PADDING * 2.,
+        viewport.width - app.sidebar_width - ROOM_PADDING * 2.,
         viewport.height - theme::HEADER_HEIGHT - theme::FOOTER_HEIGHT - ROOM_PADDING * 2.,
     );
     let (_, tile_size) = grid_fit(tiles.len(), area, TILE_GAP);
@@ -730,7 +732,7 @@ fn focused(
     };
     let stage_size = fit_aspect(
         size(
-            viewport.width - theme::SIDEBAR_WIDTH - ROOM_PADDING * 2.,
+            viewport.width - app.sidebar_width - ROOM_PADDING * 2.,
             viewport.height
                 - theme::HEADER_HEIGHT
                 - theme::FOOTER_HEIGHT
@@ -742,7 +744,7 @@ fn focused(
     let stage = focused.map(|t| tile(app, t, Layout::Stage, window, cx));
     let strip_tile = size(STRIP_HEIGHT * (16. / 9.), STRIP_HEIGHT);
     let strip_width = (strip_tile.width + TILE_GAP) * others.len() as f32;
-    let room_width = window.viewport_size().width - theme::SIDEBAR_WIDTH - ROOM_PADDING * 2.;
+    let room_width = window.viewport_size().width - app.sidebar_width - ROOM_PADDING * 2.;
     let strip = (!others.is_empty()).then(|| {
         div()
             .id("strip")

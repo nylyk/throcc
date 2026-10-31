@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, AppContext, Context, Div, Entity, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, SharedString, Stateful, StatefulInteractiveElement, Styled, Subscription,
-    Window, div, px, relative,
+    MouseButton, ParentElement, Pixels, SharedString, Stateful, StatefulInteractiveElement, Styled,
+    Subscription, Window, div, px, relative,
 };
 use gpui_component::IndexPath;
 use gpui_component::input::Input;
@@ -15,7 +15,10 @@ use throcc_client_core::media::audio::{
     DEFAULT_GATE_DBFS, NoiseSuppressionLevel, Transmit, VoiceSettings,
 };
 
-use super::common::{avatar, caption, card, chip, ghost_icon, mono, primary, secondary, section};
+use super::common::{
+    TRAFFIC_LIGHTS, avatar, caption, card, chip, ghost_icon, mono, moves_window, primary,
+    secondary, section,
+};
 use crate::app::{ProfileStatus, Screen, SettingsPage, ThroccApp};
 use crate::theme;
 
@@ -59,7 +62,47 @@ pub fn render(
         SettingsPage::Appearance => "Appearance",
         SettingsPage::Servers => "Servers",
     };
-    frame("Settings", links, page_title, content, cx)
+    frame(
+        app.sidebar_width,
+        "Settings",
+        links,
+        page_title,
+        content,
+        cx,
+    )
+}
+
+/// A sidebar `width` wide, see-through to the blurred desktop on macOS.
+pub(super) fn sidebar_column(width: Pixels) -> Div {
+    div()
+        .relative()
+        .w(width)
+        .h_full()
+        .flex_none()
+        .flex()
+        .flex_col()
+        .bg(theme::sidebar_glass())
+        .border_r_1()
+        .border_color(theme::control())
+}
+
+/// The strip along a sidebar's right edge that drags its width.
+pub(super) fn resize_handle(cx: &mut Context<ThroccApp>) -> Stateful<Div> {
+    div()
+        .id("sidebar-resize")
+        .absolute()
+        .top_0()
+        .right_0()
+        .h_full()
+        .w(px(6.))
+        .cursor_col_resize()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|app, _, _, cx| {
+                app.resizing_sidebar = true;
+                cx.stop_propagation();
+            }),
+        )
 }
 
 /// The column of page links in the settings sidebar.
@@ -84,6 +127,7 @@ pub(super) fn nav_item(id: &'static str, label: &'static str, selected: bool) ->
 /// A settings screen laid out like the main one: the sidebar under a bar with a back
 /// arrow and `heading`, the page under a bar with its `page_title`.
 pub(super) fn frame(
+    width: Pixels,
     heading: &'static str,
     links: Div,
     page_title: &'static str,
@@ -91,7 +135,7 @@ pub(super) fn frame(
     cx: &mut Context<ThroccApp>,
 ) -> Div {
     let top_bar = || {
-        div()
+        moves_window(div())
             .flex()
             .items_center()
             .h(theme::HEADER_HEIGHT)
@@ -99,19 +143,12 @@ pub(super) fn frame(
             .border_b_1()
             .border_color(theme::control())
     };
-    let sidebar = div()
-        .w(theme::SIDEBAR_WIDTH)
-        .h_full()
-        .flex_none()
-        .flex()
-        .flex_col()
-        .bg(theme::sidebar())
-        .border_r_1()
-        .border_color(theme::control())
+    let sidebar = sidebar_column(width)
         .child(
             top_bar()
                 .gap_2()
                 .px_3()
+                .pl(px(12.) + TRAFFIC_LIGHTS)
                 .child(
                     ghost_icon("settings-back", "arrow-left", "Back").on_click(cx.listener(
                         |app, _, _, cx| {
@@ -122,8 +159,10 @@ pub(super) fn frame(
                 )
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(heading)),
         )
-        .child(links);
+        .child(links)
+        .child(resize_handle(cx));
     let page = div()
+        .bg(theme::bg())
         .flex_1()
         .min_w_0()
         .h_full()

@@ -12,7 +12,10 @@ use throcc_proto::ids::UserId;
 use crate::app::ThroccApp;
 use crate::theme;
 use crate::video::Feeds;
-use crate::views::common::{CONTROLS_LINGER, avatar, caption, player, player_button};
+use crate::views::common::{
+    CONTROLS_LINGER, TRAFFIC_LIGHTS, app_titlebar, avatar, caption, moves_window, player,
+    player_button,
+};
 
 /// One watched share in a window of its own.
 pub struct PopOut {
@@ -32,11 +35,15 @@ impl PopOut {
         cx: &mut App,
     ) -> Option<WindowHandle<Root>> {
         let bounds = Bounds::centered(None, size(px(960.), px(588.)), cx);
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(320.), px(228.))),
-            ..Default::default()
-        };
+        let options = app_titlebar(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(320.), px(228.))),
+                ..Default::default()
+            },
+            px(25.),
+            false,
+        );
         let opened = cx.open_window(options, |window, cx| {
             window.set_window_title(&title);
             let view = cx.new(|cx| Self {
@@ -121,6 +128,7 @@ impl Render for PopOut {
             .flex()
             .items_center()
             .gap_3()
+            .pl(if fullscreen { px(0.) } else { TRAFFIC_LIGHTS })
             .child(avatar(&name, user.0, picture_of_sharer, px(28.), false))
             .child(
                 div()
@@ -155,8 +163,7 @@ impl Render for PopOut {
                 })),
             );
         let controls = Instant::now() < self.controls_until;
-        div()
-            .id("popout")
+        moves_window(div().id("popout"))
             .track_focus(&self.focus)
             .size_full()
             .bg(theme::bg())
