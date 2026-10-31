@@ -224,16 +224,17 @@ impl Sending {
             return true;
         }
         *count = count.wrapping_add(1);
-        match self.encoder.encode_dmabuf(frame) {
-            Ok(units) => {
-                send_units(&self.engine, &self.tracks, units);
-                if count.is_multiple_of(SELF_VIEW_EVERY) && self.preview.wanted() {
-                    match self.encoder.preview_dmabuf(frame, SELF_VIEW_WIDTH) {
-                        Ok(preview) => {
-                            self.self_view.send_replace(Some(Arc::new(preview)));
-                        }
-                        Err(e) => warn!("no self-view picture: {e}"),
+        let preview = (count.is_multiple_of(SELF_VIEW_EVERY) && self.preview.wanted())
+            .then_some(SELF_VIEW_WIDTH);
+        match self.encoder.encode_dmabuf(frame, preview) {
+            Ok(encoded) => {
+                send_units(&self.engine, &self.tracks, encoded.units);
+                match encoded.preview {
+                    Some(Ok(preview)) => {
+                        self.self_view.send_replace(Some(Arc::new(preview)));
                     }
+                    Some(Err(e)) => warn!("no self-view picture: {e}"),
+                    None => {}
                 }
             }
             Err(e) => match refusal(&e, modifier) {

@@ -216,12 +216,66 @@ pub struct Encoder {
     gpu: Option<GpuInput>,
 }
 
-/// Video processing on a VA-API encoder's device, and the pool previews are drawn into.
+/// Video processing on a VA-API encoder's device, and the previews it draws.
 #[cfg(target_os = "linux")]
 struct GpuInput {
     vpp: Vpp,
+    previews: Previews,
+}
+
+/// What encoding a frame in GPU memory gave.
+#[cfg(target_os = "linux")]
+pub struct GpuEncoded {
+    pub units: Vec<EncodedUnit>,
+    /// The preview asked for, or why there is none.
+    pub preview: Option<Result<VideoFrame, EncodeError>>,
+}
+
+/// Small NV12 copies of frames in GPU memory, drawn on the GPU and downloaded.
+#[cfg(target_os = "linux")]
+struct Previews {
     device: AVHWDeviceContext,
-    previews: Option<((usize, usize), AVHWFramesContext)>,
+    /// Surfaces of the size last drawn.
+    pool: Option<((usize, usize), AVHWFramesContext)>,
+}
+
+#[cfg(target_os = "linux")]
+impl Previews {
+    /// `imported`, the surface of `frame`, scaled to at most `width` wide.
+    fn draw(
+        &mut self,
+        vpp: &Vpp,
+        imported: &vaapi::Surface<'_>,
+        frame: &DmaBuf,
+        width: usize,
+    ) -> Result<VideoFrame, EncodeError> {
+        let source = (frame.width as usize, frame.height as usize);
+        let size = share_size(source, (width, width));
+        if self.pool.as_ref().is_none_or(|(made, _)| *made != size) {
+            let pool = surface_pool(&self.device, size, PREVIEW_SURFACES)?;
+            self.pool = Some((size, pool));
+        }
+        let Some((_, pool)) = self.pool.as_mut() else {
+            return Err(EncodeError::NoSurfaces);
+        };
+        let mut surface = AVFrame::new();
+        pool.get_buffer(&mut surface)?;
+        let whole = rectangle((0, 0, size.0, size.1));
+        vpp.convert(
+            imported,
+            (frame.width, frame.height),
+            surface_id(&surface),
+            whole,
+        )
+        .map_err(EncodeError::Gpu)?;
+        let mut downloaded = AVFrame::new();
+        downloaded.set_format(ffi::AV_PIX_FMT_NV12);
+        downloaded.hwframe_transfer_data(&surface)?;
+        let mut preview = VideoFrame::blank(size.0, size.1);
+        preview.timestamp = frame.timestamp;
+        copy_out(&downloaded, &mut preview);
+        Ok(preview)
+    }
 }
 
 impl Encoder {
@@ -336,14 +390,19 @@ impl Encoder {
     }
 
     /// Encodes a frame in GPU memory, scaled and converted on the GPU into a surface of the
-    /// encoder's pool. Only VA-API encoders take them.
+    /// encoder's pool. With `preview_width`, also draws a preview at most that wide from the
+    /// same import. Only VA-API encoders take them.
     #[cfg(target_os = "linux")]
-    pub fn encode_dmabuf(&mut self, frame: &DmaBuf) -> Result<Vec<EncodedUnit>, EncodeError> {
+    pub fn encode_dmabuf(
+        &mut self,
+        frame: &DmaBuf,
+        preview_width: Option<usize>,
+    ) -> Result<GpuEncoded, EncodeError> {
         let source = (frame.width as usize, frame.height as usize);
         let region = rectangle(fitted(source, (self.width, self.height)));
         self.gpu()?;
         let surface = self.surface()?;
-        let vpp = &self.gpu()?.vpp;
+        let GpuInput { vpp, previews } = self.gpu()?;
         let imported = vpp.import(frame).map_err(EncodeError::Import)?;
         vpp.convert(
             &imported,
@@ -352,48 +411,10 @@ impl Encoder {
             region,
         )
         .map_err(EncodeError::Gpu)?;
+        let preview = preview_width.map(|width| previews.draw(vpp, &imported, frame, width));
         drop(imported);
-        self.submit(surface, frame.timestamp)
-    }
-
-    /// A copy of a frame in GPU memory scaled on the GPU to at most `width` wide, for
-    /// showing the sharer what they send.
-    #[cfg(target_os = "linux")]
-    pub fn preview_dmabuf(
-        &mut self,
-        frame: &DmaBuf,
-        width: usize,
-    ) -> Result<VideoFrame, EncodeError> {
-        let source = (frame.width as usize, frame.height as usize);
-        let size = share_size(source, (width, width));
-        let gpu = self.gpu()?;
-        if gpu.previews.as_ref().is_none_or(|(made, _)| *made != size) {
-            let pool = surface_pool(&gpu.device, size, PREVIEW_SURFACES)?;
-            gpu.previews = Some((size, pool));
-        }
-        let Some((_, pool)) = gpu.previews.as_mut() else {
-            return Err(EncodeError::NoSurfaces);
-        };
-        let mut surface = AVFrame::new();
-        pool.get_buffer(&mut surface)?;
-        let imported = gpu.vpp.import(frame).map_err(EncodeError::Import)?;
-        let whole = rectangle((0, 0, size.0, size.1));
-        gpu.vpp
-            .convert(
-                &imported,
-                (frame.width, frame.height),
-                surface_id(&surface),
-                whole,
-            )
-            .map_err(EncodeError::Gpu)?;
-        drop(imported);
-        let mut downloaded = AVFrame::new();
-        downloaded.set_format(ffi::AV_PIX_FMT_NV12);
-        downloaded.hwframe_transfer_data(&surface)?;
-        let mut preview = VideoFrame::blank(size.0, size.1);
-        preview.timestamp = frame.timestamp;
-        copy_out(&downloaded, &mut preview);
-        Ok(preview)
+        let units = self.submit(surface, frame.timestamp)?;
+        Ok(GpuEncoded { units, preview })
     }
 
     #[cfg(target_os = "linux")]
@@ -405,8 +426,10 @@ impl Encoder {
             let vpp = unsafe { Vpp::new(display(device)) }.map_err(EncodeError::Gpu)?;
             self.gpu = Some(GpuInput {
                 vpp,
-                device: device.clone(),
-                previews: None,
+                previews: Previews {
+                    device: device.clone(),
+                    pool: None,
+                },
             });
         }
         self.gpu.as_mut().ok_or(EncodeError::NoGpuInput)
@@ -985,7 +1008,8 @@ mod gpu_input {
         };
         let mut frame = shared_picture(&encoder, 2560, 1440);
         frame.timestamp = 1234;
-        let preview = encoder.preview_dmabuf(&frame, 960).unwrap();
+        let encoded = encoder.encode_dmabuf(&frame, Some(960)).unwrap();
+        let preview = encoded.preview.unwrap().unwrap();
         assert_eq!(
             (preview.width, preview.height, preview.timestamp),
             (960, 540, 1234)
@@ -1004,7 +1028,7 @@ mod gpu_input {
         let mut last = None;
         for n in 0..10 {
             frame.timestamp = n * 3000;
-            for unit in encoder.encode_dmabuf(&frame).unwrap() {
+            for unit in encoder.encode_dmabuf(&frame, None).unwrap().units {
                 if let Some(output) = decoder.decode(&unit.data, unit.timestamp).unwrap() {
                     last = Some(output);
                 }
@@ -1025,7 +1049,7 @@ mod gpu_input {
             return;
         };
         let frame = shared_picture(&vaapi, 640, 360);
-        assert!(vaapi.encode_dmabuf(&frame).is_ok());
+        assert!(vaapi.encode_dmabuf(&frame, None).is_ok());
         let Some(candidate) = LADDER.iter().find(|c| c.name == c"libvpx-vp9") else {
             return;
         };
@@ -1039,7 +1063,7 @@ mod gpu_input {
             return;
         };
         assert!(matches!(
-            vp9.encode_dmabuf(&frame),
+            vp9.encode_dmabuf(&frame, None),
             Err(EncodeError::NoGpuInput)
         ));
     }
