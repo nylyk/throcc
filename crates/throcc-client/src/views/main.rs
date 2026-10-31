@@ -666,6 +666,15 @@ fn grid_fit(count: usize, area: Area<Pixels>, gap: Pixels) -> (usize, Area<Pixel
         .unwrap_or((1, size(px(0.), px(0.))))
 }
 
+/// The largest size of shape `aspect` (width over height) that fits `area`.
+fn fit_aspect(area: Area<Pixels>, aspect: f32) -> Area<Pixels> {
+    let width = f32::from(area.width)
+        .min(f32::from(area.height) * aspect)
+        .max(0.)
+        .floor();
+    size(px(width), px((width / aspect).floor()))
+}
+
 fn grid(
     app: &mut ThroccApp,
     tiles: &[Tile],
@@ -707,10 +716,30 @@ fn focused(
     cx: &mut Context<ThroccApp>,
 ) -> AnyElement {
     let others: Vec<&Tile> = tiles.iter().filter(|t| t.user != focus).collect();
-    let stage = tiles
-        .iter()
-        .find(|t| t.user == focus)
-        .map(|t| tile(app, t, Layout::Stage, window, cx));
+    let focused = tiles.iter().find(|t| t.user == focus);
+    let aspect = focused
+        .and_then(|t| t.person.sharing)
+        .map(|c| f32::from(c.width) / f32::from(c.height))
+        .filter(|aspect| aspect.is_finite() && *aspect > 0.)
+        .unwrap_or(16. / 9.);
+    let viewport = window.viewport_size();
+    let strip_room = if others.is_empty() {
+        px(0.)
+    } else {
+        STRIP_HEIGHT + TILE_GAP
+    };
+    let stage_size = fit_aspect(
+        size(
+            viewport.width - theme::SIDEBAR_WIDTH - ROOM_PADDING * 2.,
+            viewport.height
+                - theme::HEADER_HEIGHT
+                - theme::FOOTER_HEIGHT
+                - ROOM_PADDING * 2.
+                - strip_room,
+        ),
+        aspect,
+    );
+    let stage = focused.map(|t| tile(app, t, Layout::Stage, window, cx));
     let strip_tile = size(STRIP_HEIGHT * (16. / 9.), STRIP_HEIGHT);
     let strip_width = (strip_tile.width + TILE_GAP) * others.len() as f32;
     let room_width = window.viewport_size().width - theme::SIDEBAR_WIDTH - ROOM_PADDING * 2.;
@@ -738,7 +767,21 @@ fn focused(
         .flex()
         .flex_col()
         .gap(TILE_GAP)
-        .child(div().flex_1().min_h_0().children(stage))
+        .child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .flex_none()
+                        .w(stage_size.width)
+                        .h(stage_size.height)
+                        .children(stage),
+                ),
+        )
         .children(strip)
         .into_any_element()
 }
@@ -984,6 +1027,20 @@ mod tests {
         assert_eq!(fit(1, 1600., 900.), (1, 1600., 900.));
         assert_eq!(fit(1, 800., 900.), (1, 800., 450.));
         assert_eq!(fit(1, 1600., 450.), (1, 800., 450.));
+    }
+
+    #[test]
+    fn the_stage_takes_the_shape_of_the_stream() {
+        let wide = fit_aspect(size(px(1000.), px(500.)), 16. / 9.);
+        assert_eq!(
+            (f32::from(wide.width), f32::from(wide.height)),
+            (888., 499.)
+        );
+        let tall = fit_aspect(size(px(1000.), px(900.)), 16. / 10.);
+        assert_eq!(
+            (f32::from(tall.width), f32::from(tall.height)),
+            (1000., 625.)
+        );
     }
 
     #[test]
