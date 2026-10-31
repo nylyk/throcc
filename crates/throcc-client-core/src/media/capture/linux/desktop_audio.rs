@@ -129,6 +129,7 @@ fn run(
             *pw::keys::MEDIA_TYPE => "Audio",
             *pw::keys::MEDIA_CATEGORY => "Capture",
             *pw::keys::MEDIA_ROLE => "Screen",
+            *pw::keys::NODE_LATENCY => "1024/48000",
         },
     )
     .map_err(failed)?;
