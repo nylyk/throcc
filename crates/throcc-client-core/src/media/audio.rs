@@ -252,6 +252,7 @@ struct Stream {
 /// The result is what the speakers play and the echo canceller's reference.
 pub struct Mixer {
     streams: HashMap<UserId, Stream>,
+    volumes: HashMap<UserId, f32>,
     pull: [f32; PULL],
 }
 
@@ -259,6 +260,7 @@ impl Default for Mixer {
     fn default() -> Self {
         Self {
             streams: HashMap::new(),
+            volumes: HashMap::new(),
             pull: [0.0; PULL],
         }
     }
@@ -277,7 +279,7 @@ impl Mixer {
             std::collections::hash_map::Entry::Vacant(e) => e.insert(Stream {
                 jitter: JitterBuffer::new(Channels::Mono)
                     .map_err(|e| AudioError::Decoder(e.to_string()))?,
-                volume: 1.0,
+                volume: self.volumes.get(&user).copied().unwrap_or(1.0),
                 level_dbfs: f32::NEG_INFINITY,
             }),
         };
@@ -293,9 +295,12 @@ impl Mixer {
         self.streams.clear();
     }
 
+    /// Sets `user`'s volume, kept for streams they start later.
     pub fn set_volume(&mut self, user: UserId, volume: f32) {
+        let volume = volume.clamp(0.0, 2.0);
+        self.volumes.insert(user, volume);
         if let Some(stream) = self.streams.get_mut(&user) {
-            stream.volume = volume.clamp(0.0, 2.0);
+            stream.volume = volume;
         }
     }
 
@@ -583,5 +588,17 @@ pub(crate) mod tests {
         let mut out = [1.0f32; PULL];
         mixer.mix(&mut out);
         assert!(out.iter().all(|s| *s == 0.0));
+    }
+
+    #[test]
+    fn a_volume_applies_to_streams_started_after_it() {
+        let user = UserId(7);
+        let mut mixer = Mixer::default();
+        mixer.set_volume(user, 0.5);
+        mixer.insert(user, 0, &[], 0).unwrap();
+        assert_eq!(mixer.streams[&user].volume, 0.5);
+        mixer.clear();
+        mixer.insert(user, 0, &[], 0).unwrap();
+        assert_eq!(mixer.streams[&user].volume, 0.5);
     }
 }

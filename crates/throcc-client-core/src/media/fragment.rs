@@ -65,6 +65,7 @@ pub struct ReplayWindow {
     bits: [u64; (WINDOW_BITS / 64) as usize],
     first: u32,
     received: u64,
+    skipped_by_restarts: u64,
 }
 
 impl Default for ReplayWindow {
@@ -74,6 +75,7 @@ impl Default for ReplayWindow {
             bits: [0; (WINDOW_BITS / 64) as usize],
             first: 0,
             received: 0,
+            skipped_by_restarts: 0,
         }
     }
 }
@@ -88,6 +90,9 @@ impl ReplayWindow {
             return Seen::New;
         };
         if seq > highest {
+            if seq - highest >= WINDOW_BITS {
+                self.skipped_by_restarts += u64::from(seq - highest - 1);
+            }
             self.shift(seq - highest);
             self.highest = Some(seq);
             self.set(0);
@@ -110,10 +115,11 @@ impl ReplayWindow {
         self.received
     }
 
-    /// Datagrams between the first and the highest `seq` that never arrived.
+    /// Datagrams between the first and the highest `seq` that never arrived, not counting
+    /// forward jumps of a whole window.
     pub fn lost(&self) -> u64 {
         self.highest.map_or(0, |h| {
-            (u64::from(h - self.first) + 1).saturating_sub(self.received)
+            (u64::from(h - self.first) + 1).saturating_sub(self.received + self.skipped_by_restarts)
         })
     }
 
@@ -317,6 +323,20 @@ mod tests {
         assert_eq!(window.lost(), 1);
         window.check(9);
         assert_eq!(window.lost(), 0);
+    }
+
+    #[test]
+    fn a_jump_of_a_whole_window_is_not_loss() {
+        let mut window = ReplayWindow::default();
+        for seq in 1..=10 {
+            window.check(seq);
+        }
+        window.check(10 + WINDOW_BITS + 100);
+        assert_eq!(window.lost(), 0);
+        window.check(12 + WINDOW_BITS + 100);
+        assert_eq!(window.lost(), 1);
+        window.check(12 + 2 * WINDOW_BITS + 100);
+        assert_eq!(window.lost(), 1);
     }
 
     proptest! {

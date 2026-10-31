@@ -301,10 +301,10 @@ impl Worker {
         let mut voices = [0.0f32; PULL];
         let mut stereo = [0.0f32; PULL * 2];
         self.mix_shares(&mut stereo);
+        self.mixer.mix(&mut voices);
         if self.deafened {
             stereo.fill(0.0);
-        } else {
-            self.mixer.mix(&mut voices);
+            voices.fill(0.0);
         }
         if self.loopback {
             for (m, l) in voices.iter_mut().zip(loopback) {

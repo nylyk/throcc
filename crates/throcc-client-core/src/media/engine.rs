@@ -251,7 +251,9 @@ impl MediaEngine {
             requests: self.requests.clone(),
             out,
             pending: VecDeque::new(),
+            next_tick: None,
             tried_generation: 0,
+            last_unit_overflowed: false,
             reassembler: Reassembler::default(),
             reorder: Reorder::default(),
         };
@@ -361,10 +363,12 @@ struct Track {
     requests: mpsc::UnboundedSender<Request>,
     out: mpsc::Sender<Received>,
     pending: VecDeque<(Instant, Epoch, Bytes)>,
+    next_tick: Option<Instant>,
     /// The key generation the pending datagrams were last tried against.
     tried_generation: u64,
     reassembler: Reassembler,
     reorder: Reorder,
+    last_unit_overflowed: bool,
 }
 
 impl Track {
@@ -393,8 +397,10 @@ impl Track {
     }
 
     fn next_wake(&self) -> Option<Instant> {
-        let pending = self.pending.front().map(|_| Instant::now() + TICK);
-        pending.into_iter().chain(self.reorder.deadline()).min()
+        self.next_tick
+            .into_iter()
+            .chain(self.reorder.deadline())
+            .min()
     }
 
     /// Expires pending datagrams, and retries the rest only if new keys have arrived.
@@ -415,6 +421,7 @@ impl Track {
                 self.handle(epoch, datagram, arrived, now);
             }
         }
+        self.next_tick = (!self.pending.is_empty()).then(|| now + TICK);
         let outputs = self.reorder.poll(now);
         self.emit(outputs);
     }
@@ -424,6 +431,7 @@ impl Track {
         let Some(key) = key else {
             if self.pending.len() < MAX_PENDING {
                 self.pending.push_back((arrived, epoch, datagram));
+                self.next_tick.get_or_insert(now + TICK);
             } else {
                 self.stats.decrypt_failures.fetch_add(1, Ordering::Relaxed);
             }
@@ -489,9 +497,23 @@ impl Track {
             .store(self.reorder.late, Ordering::Relaxed);
     }
 
-    fn deliver(&self, received: Received) {
-        if self.out.try_send(received).is_err() {
-            self.stats.track_overflow.fetch_add(1, Ordering::Relaxed);
+    /// Passes a unit to the consumer. The first video unit dropped in a run of full-channel
+    /// drops requests a refresh from the sender.
+    fn deliver(&mut self, received: Received) {
+        match self.out.try_send(received) {
+            Ok(()) => self.last_unit_overflowed = false,
+            Err(e) => {
+                self.stats.track_overflow.fetch_add(1, Ordering::Relaxed);
+                let full = matches!(e, mpsc::error::TrySendError::Full(_));
+                if full && self.kind == Kind::Video && !self.last_unit_overflowed {
+                    let request = Request::RequestKeyframe {
+                        media_id: self.media_id,
+                        kind: Recovery::Refresh,
+                    };
+                    self.requests.send(request).ok();
+                }
+                self.last_unit_overflowed = full;
+            }
         }
     }
 }

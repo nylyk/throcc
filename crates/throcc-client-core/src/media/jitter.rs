@@ -9,7 +9,7 @@ pub const FRAME: usize = 960;
 pub const PULL: usize = 480;
 const MIN_TARGET: u32 = FRAME as u32;
 const MAX_TARGET: u32 = 10 * FRAME as u32;
-/// Concealed frames played before an empty buffer goes quiet and rebuffers.
+/// Concealed frames played before a buffer with no packet within its target rebuffers.
 const MAX_CONCEALED: u32 = 3;
 const MAX_PACKETS: usize = 64;
 /// Pulls between two accelerations, so playout catches up without audible jumps.
@@ -144,7 +144,7 @@ impl JitterBuffer {
 
     /// The media timestamp of the next sample this buffer plays, while it plays.
     pub fn playout_timestamp(&self) -> Option<u32> {
-        (self.playing && self.frame_pos < FRAME)
+        self.playing
             .then(|| self.frame_ts.wrapping_add(self.frame_pos as u32))
     }
 
@@ -207,14 +207,14 @@ impl JitterBuffer {
             self.concealed_in_a_row = 0;
             self.stats.fec += 1;
             Played::Fec
-        } else if self.concealed_in_a_row < MAX_CONCEALED || !self.packets.is_empty() {
+        } else if self.concealed_in_a_row < MAX_CONCEALED || self.first_packet_within_target(next) {
             self.decode(&[], DecodeMode::Normal);
             self.concealed_in_a_row += 1;
             self.stats.concealed += 1;
             Played::Concealed
         } else {
             self.playing = false;
-            self.next_ts = None;
+            self.next_ts = self.packets.keys().next().copied();
             self.stats.rebuffered += 1;
             return None;
         };
@@ -224,6 +224,13 @@ impl JitterBuffer {
         self.packets
             .retain(|ts, _| !timestamp_before(*ts, following));
         Some(kind)
+    }
+
+    fn first_packet_within_target(&self, next: u32) -> bool {
+        self.packets
+            .keys()
+            .next()
+            .is_some_and(|first| first.wrapping_sub(next) <= self.target())
     }
 
     fn decode(&mut self, packet: &[u8], mode: DecodeMode) {
@@ -343,6 +350,50 @@ mod tests {
         jb.pull(&mut out);
         jb.pull(&mut out);
         assert_eq!(jb.playout_timestamp(), Some(5000 + 3 * PULL as u32));
+    }
+
+    #[test]
+    fn playout_timestamp_is_known_after_every_pull() {
+        let mut jb = JitterBuffer::new(Channels::Mono).unwrap();
+        for (i, p) in packets(6).iter().enumerate() {
+            jb.insert(5000 + (i * FRAME) as u32, p, (i * FRAME) as u64);
+        }
+        let mut out = [0.0; PULL];
+        for pulls in 1..=8u32 {
+            jb.pull(&mut out);
+            assert_eq!(
+                jb.playout_timestamp(),
+                Some(5000 + pulls * PULL as u32),
+                "after {pulls} pulls"
+            );
+        }
+    }
+
+    /// Talks for 2 s, leaves the buffer unpulled for 3 s as a deafened listener does,
+    /// then talks for 10 s, which must play.
+    #[test]
+    fn talk_resumes_after_a_frozen_gap() {
+        let mut jb = JitterBuffer::new(Channels::Mono).unwrap();
+        let mut enc = encoder();
+        let mut out = [0.0; PULL];
+        let mut talk = |jb: &mut JitterBuffer, frames: std::ops::Range<usize>| {
+            for frame in frames {
+                let mut packet = vec![0u8; 1500];
+                let n = enc.encode_float(&tone(frame), &mut packet).unwrap();
+                jb.insert((frame * FRAME) as u32, &packet[..n], (frame * FRAME) as u64);
+                jb.pull(&mut out);
+                jb.pull(&mut out);
+            }
+        };
+        talk(&mut jb, 0..100);
+        let before = jb.stats.normal;
+        talk(&mut jb, 250..750);
+        let resumed = jb.stats.normal - before;
+        assert!(
+            resumed >= 495,
+            "{resumed} of 500 frames played: {:?}",
+            jb.stats
+        );
     }
 
     #[test]
