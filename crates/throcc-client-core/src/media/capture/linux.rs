@@ -351,7 +351,7 @@ fn monotonic_nanos() -> i64 {
     };
     // SAFETY: clock_gettime only writes the timespec it is given.
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
-    i64::from(now.tv_sec) * NANOS as i64 + i64::from(now.tv_nsec)
+    now.tv_sec * NANOS as i64 + now.tv_nsec
 }
 
 /// Ticks of a `rate` Hz clock from `zero`, which the first frame or audio buffer taken sets,
