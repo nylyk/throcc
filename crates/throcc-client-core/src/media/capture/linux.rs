@@ -479,7 +479,7 @@ fn run(
             (1 << spa::sys::SPA_DATA_MemPtr) | (1 << spa::sys::SPA_DATA_MemFd),
         ))?,
     };
-    let offers = if cfg!(feature = "ffmpeg") {
+    let offers = if encoder_takes_dmabufs() {
         dmabuf_offers(egl::dmabuf_modifiers)
     } else {
         Vec::new()
@@ -538,6 +538,16 @@ fn run(
     ready.send(Ok(())).ok();
     mainloop.run();
     Ok(())
+}
+
+#[cfg(feature = "ffmpeg")]
+fn encoder_takes_dmabufs() -> bool {
+    crate::media::video::encode::tries_gpu_input_first()
+}
+
+#[cfg(not(feature = "ffmpeg"))]
+fn encoder_takes_dmabufs() -> bool {
+    false
 }
 
 fn renegotiate(

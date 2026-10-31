@@ -518,6 +518,21 @@ impl Encoder {
     }
 }
 
+/// Whether the first encoder [`Encoder::open`] tries here takes frames in GPU memory, so
+/// the capture can offer them before the encoder exists.
+#[cfg(target_os = "linux")]
+pub fn tries_gpu_input_first() -> bool {
+    first_tried(|candidate| {
+        has_driver(candidate) && AVCodec::find_encoder_by_name(candidate.name).is_some()
+    })
+    .is_some_and(|candidate| candidate.vaapi)
+}
+
+#[cfg(target_os = "linux")]
+fn first_tried(available: impl Fn(&Candidate) -> bool) -> Option<&'static Candidate> {
+    LADDER.iter().find(|candidate| available(candidate))
+}
+
 /// Whether the driver an encoder loads is installed. Only NVENC is checked, by its CUDA
 /// library, so machines without NVIDIA's driver skip probing it.
 fn has_driver(candidate: &Candidate) -> bool {
@@ -775,6 +790,28 @@ mod tests {
                 "{source:?}"
             );
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod first_tried {
+    use super::*;
+
+    fn first_of(names: &[&CStr]) -> Option<&'static CStr> {
+        first_tried(|candidate| names.contains(&candidate.name)).map(|candidate| candidate.name)
+    }
+
+    #[test]
+    fn nvenc_comes_before_vaapi_and_vaapi_before_software() {
+        let everything = [c"av1_nvenc", c"av1_vaapi", c"h264_vaapi", c"libvpx-vp9"];
+        assert_eq!(first_of(&everything), Some(c"av1_nvenc"));
+        assert_eq!(first_of(&everything[1..]), Some(c"av1_vaapi"));
+        assert_eq!(
+            first_of(&[c"h264_vaapi", c"libvpx-vp9"]),
+            Some(c"h264_vaapi")
+        );
+        assert_eq!(first_of(&[c"libvpx-vp9"]), Some(c"libvpx-vp9"));
+        assert_eq!(first_of(&[]), None);
     }
 }
 
