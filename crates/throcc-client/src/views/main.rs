@@ -134,9 +134,9 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                 )
                 .child(
                     ghost_icon("server-settings", "settings-2", "Server settings").on_click(
-                        cx.listener(|app, _, window, cx| {
-                            app.fill_profile(window, cx);
-                            app.screen = Screen::Server(ServerPage::Profile);
+                        cx.listener(|app, _, _, cx| {
+                            app.command(Command::ListUsers);
+                            app.screen = Screen::Server(ServerPage::Members);
                             cx.notify();
                         }),
                     ),

@@ -8,5 +8,6 @@ pub mod keys;
 pub mod keystore;
 pub mod known_servers;
 pub mod media;
+pub mod profile;
 pub mod session;
 pub mod state;

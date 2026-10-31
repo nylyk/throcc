@@ -23,6 +23,7 @@ use crate::media::engine::Kind;
 use crate::media::share_audio::Playout;
 use crate::media::video::Picture;
 use crate::media::voice::{VoiceCommand, VoiceEngine};
+use crate::profile::Profile;
 use crate::state::{
     ConnectionStatus, CurrentRoom, Health, KeyWarning, Person, RoomView, ServerView, State,
     TrackHealth,
@@ -150,8 +151,9 @@ pub(crate) struct Session {
     /// The video track each watched share is decoded from.
     watched_video: HashMap<UserId, MediaId>,
     watched_audio: HashMap<UserId, MediaId>,
-    /// A picture chosen before our own profile was known.
+    /// A picture to put on our profile once the server tells us our name.
     pending_avatar: Option<Option<Hash>>,
+    profile: Profile,
     #[cfg(feature = "ffmpeg")]
     sharing: Option<crate::media::share::ShareSender>,
     tracks: HashMap<MediaId, Watched>,
@@ -184,6 +186,7 @@ impl Session {
             watched_video: HashMap::new(),
             watched_audio: HashMap::new(),
             pending_avatar: None,
+            profile: Profile::default(),
             #[cfg(feature = "ffmpeg")]
             sharing: None,
             tracks: HashMap::new(),
@@ -193,10 +196,64 @@ impl Session {
             last_local_drops: 0,
             call,
         };
+        session.profile = Profile::load(session.keystore.dir()).unwrap_or_else(|e| {
+            warn!("no saved profile: {e:#}");
+            Profile::default()
+        });
+        session.show_profile();
         session.start_voice();
         let welcome = session.call.welcome.clone();
         session.apply_welcome(&welcome);
         session
+    }
+
+    fn show_profile(&self) {
+        let picture = self.profile.picture.clone().map(|bytes| {
+            let hash = Hash(Sha256::digest(&bytes).into());
+            self.shared.set_avatar(hash, AvatarSlot::Ready(bytes));
+            hash
+        });
+        let name = self.profile.name.clone();
+        self.shared.update(|s| {
+            s.profile_name = name;
+            s.profile_picture = picture;
+        });
+    }
+
+    fn change_profile(&mut self, change: impl FnOnce(&mut Profile)) {
+        change(&mut self.profile);
+        if let Err(e) = self.profile.save(self.keystore.dir()) {
+            warn!("saving the profile: {e:#}");
+            self.shared
+                .emit(Event::Notice(format!("Couldn't keep your profile: {e}")));
+        }
+        self.show_profile();
+    }
+
+    /// Gives this server our profile, unless it has it already.
+    async fn push_profile(&mut self) {
+        let avatar = match self.profile.picture.clone() {
+            Some(bytes) => match self.call.request(Request::SetAvatar(bytes.to_vec())).await {
+                Ok(Response::AvatarHash(hash)) => Some(hash),
+                other => {
+                    self.shared.emit(Event::ProfileRefused(refusal(other)));
+                    return;
+                }
+            },
+            None => None,
+        };
+        let Some(name) = self.profile.name.clone() else {
+            self.pending_avatar = Some(avatar);
+            self.apply_pending_avatar().await;
+            return;
+        };
+        self.pending_avatar = None;
+        let known = self.my_person();
+        if known.is_some_and(|me| me.name == name && me.avatar == avatar) {
+            self.shared.emit(Event::ProfileSaved);
+        } else {
+            self.save_profile(name, avatar).await;
+        }
     }
 
     fn start_voice(&mut self) {
@@ -226,6 +283,9 @@ impl Session {
     }
 
     pub async fn run(mut self, mut commands: mpsc::Receiver<Command>) {
+        if self.profile != Profile::default() {
+            self.push_profile().await;
+        }
         let mut levels = tokio::time::interval(LEVELS_EVERY);
         let mut health = tokio::time::interval(HEALTH_EVERY);
         loop {
@@ -498,13 +558,13 @@ impl Session {
                 });
             }
             Command::SetName(name) => {
-                let avatar = match self.pending_avatar.take() {
-                    Some(pending) => pending,
-                    None => self.my_person().and_then(|p| p.avatar),
-                };
-                self.save_profile(name, avatar).await;
+                self.change_profile(|p| p.name = Some(name));
+                self.push_profile().await;
             }
-            Command::SetAvatar(picture) => self.set_avatar(picture).await,
+            Command::SetAvatar(picture) => {
+                self.change_profile(|p| p.picture = picture.map(Arc::from));
+                self.push_profile().await;
+            }
             Command::FetchAvatar(hash) => self.fetch_avatar(hash).await,
             Command::CreateRoom(name) => self.simple(Request::CreateRoom { name }).await,
             Command::RenameRoom(room, name) => {
@@ -579,28 +639,6 @@ impl Session {
     fn my_person(&self) -> Option<Person> {
         let state = self.shared.state();
         state.person(state.me?).cloned()
-    }
-
-    async fn set_avatar(&mut self, picture: Option<Vec<u8>>) {
-        let avatar = match picture {
-            Some(bytes) => {
-                let shared: Arc<[u8]> = bytes.clone().into();
-                match self.call.request(Request::SetAvatar(bytes)).await {
-                    Ok(Response::AvatarHash(hash)) => {
-                        self.shared.set_avatar(hash, AvatarSlot::Ready(shared));
-                        Some(hash)
-                    }
-                    other => {
-                        let message = refusal(other);
-                        self.shared.emit(Event::ProfileRefused(message));
-                        return;
-                    }
-                }
-            }
-            None => None,
-        };
-        self.pending_avatar = Some(avatar);
-        self.apply_pending_avatar().await;
     }
 
     /// Sets the chosen picture on our profile once we know our own name, which arrives

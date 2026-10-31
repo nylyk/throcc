@@ -533,7 +533,7 @@ Everything else is mixed in Oklab, like CSS `color-mix(in oklab, …)`: raised f
 | `Verify.dc.html` | Safety number / key changed | 12×5-digit safety number, mark verified. Key-changed warning with old and new fingerprints |
 | `Admin.dc.html` | Members | Invite code with copy and remaining daily count. Members with role, invited-by and key fingerprint. Remove, with optional cascade |
 
-Settings are split in two. The gear opens this computer's settings: Audio, Appearance and the list of known servers. The server header opens the connected server's pages: Profile, Privacy and keys, Members (or Invites), and Leave this server.
+Settings are split in two. The gear opens this computer's settings: Profile, Audio, Appearance and the list of known servers. The profile (name and picture) is kept on this computer and given to every server on connect. The server header opens the connected server's pages: Members (or Invites), Privacy and keys, and Leave this server.
 
 Screens not mocked that you design in the same language: pin mismatch, enrollment errors (wrong code, burned invite, rate-limited), reconnecting banner, empty states, the remove-with-cascade confirm. Keep them consistent with the tokens, and add a mockup request to `docs/DECISIONS.md` if any is non-trivial.
 

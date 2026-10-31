@@ -296,3 +296,7 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 - **A presence update keeps what the room state said.** The server sends a room's state, then the sharer's presence; the presence handler rebuilt the person and dropped the share, so a share started mid-call only showed after rejoining. Presence now keeps sharing, verification, speaking and volume, and one function marks who shares: room peers that say so, and us while we share.
 - **Linux video frames are stamped with CLOCK_MONOTONIC when PipeWire hands them over.** The stream's own time didn't advance for at least one compositor's screencast, so every frame carried the first one's timestamp, and viewers, which redraw on a new timestamp, kept showing the first frame. Desktop audio stays on PipeWire's time, which counts on the same clock. Frame timestamps are also forced to rise, as encoders reject repeats.
 - **Profile changes report back:** the session emits saved or refused for each name or picture change, and the profile page shows a chosen picture at once.
+
+## 2026-10-31 Profile kept on the client
+
+- **Name and picture belong to this computer, not a server,** as the human asked. They live in `profile_name` and `profile_picture` in throcc's data directory, and the session gives them to each server when it connects and after each change. With nothing kept yet, connecting changes nothing, so a picture set on a server before this keeps showing. A server that refuses a change (its one-per-10-seconds limit) leaves the kept profile as it is; the next connect tries again.

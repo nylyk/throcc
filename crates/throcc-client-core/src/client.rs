@@ -308,8 +308,9 @@ impl ClientApi for MockClient {
             Command::SetName(name) => {
                 self.update(|s| {
                     if let Some(p) = s.people.get_mut(&me) {
-                        p.name = name;
+                        p.name = name.clone();
                     }
+                    s.profile_name = Some(name);
                 });
                 self.events.send(Event::ProfileSaved).ok();
             }
@@ -326,6 +327,7 @@ impl ClientApi for MockClient {
                     if let Some(p) = s.people.get_mut(&me) {
                         p.avatar = hash;
                     }
+                    s.profile_picture = hash;
                 });
                 self.events.send(Event::ProfileSaved).ok();
             }
@@ -485,6 +487,8 @@ fn sample_state() -> State {
             ],
             sending: "mic 32 kbps, 0 dropped".into(),
         },
+        profile_name: Some("Felix".into()),
+        profile_picture: None,
     }
 }
 

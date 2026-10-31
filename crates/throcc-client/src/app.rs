@@ -36,6 +36,7 @@ pub fn bind_keys(cx: &mut App) {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsPage {
+    Profile,
     Audio,
     Appearance,
     Servers,
@@ -44,7 +45,6 @@ pub enum SettingsPage {
 /// Pages about the server we are connected to, apart from this machine's settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServerPage {
-    Profile,
     Keys,
     Members,
 }
@@ -468,25 +468,21 @@ impl ThroccApp {
         cx.notify();
     }
 
-    /// What a picture change waits on: the server, or our next room while in the lobby.
+    /// What a picture change waits on: the server, or, without a name kept here, the name
+    /// the server tells us when we next join a room.
     pub fn saving_status(&self) -> ProfileStatus {
-        if self.state.current.is_some() {
+        if self.state.profile_name.is_some() || self.state.current.is_some() {
             ProfileStatus::Saving
         } else {
             ProfileStatus::UntilJoined
         }
     }
 
-    /// Puts our current name in the profile page's name field.
+    /// Puts our kept name in the profile page's name field.
     pub fn fill_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.profile_status = None;
         self.profile_preview = None;
-        let name = self
-            .state
-            .me
-            .and_then(|me| self.state.person(me))
-            .map(|p| p.name.clone())
-            .unwrap_or_default();
+        let name = self.state.profile_name.clone().unwrap_or_default();
         self.name.update(cx, |s, cx| s.set_value(name, window, cx));
     }
 
@@ -621,7 +617,7 @@ impl ThroccApp {
 
     /// Opens a screen of the mock client by name, for screenshots: join, lobby, room, focus,
     /// popout, share, settings, appearance, profile, connection, verify, members or keychange.
-    pub fn show_sample(&mut self, screen: &str, cx: &mut Context<Self>) {
+    pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         let room = throcc_proto::ids::RoomId(1);
         let joined = |app: &mut Self| {
             app.command(Command::Join(Some(room)));
@@ -678,7 +674,7 @@ impl ThroccApp {
                 })
             }
             "profile" => {
-                self.screen = Screen::Server(ServerPage::Profile);
+                self.screen = Screen::Settings(SettingsPage::Profile);
                 joined(self);
                 self.command(Command::SetAvatar(Some(crate::avatar::sample())));
             }
@@ -691,6 +687,9 @@ impl ThroccApp {
         }
         if let Some(client) = &self.client {
             self.state = client.state();
+        }
+        if self.screen == Screen::Settings(SettingsPage::Profile) {
+            self.fill_profile(window, cx);
         }
     }
 

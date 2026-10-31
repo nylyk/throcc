@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use throcc_client_core::account;
@@ -38,15 +39,17 @@ fn server() -> (String, InviteCode) {
 
 fn client(address: &str, invite: &InviteCode) -> (Client, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let keystore = Keystore::open_in(dir.path()).unwrap();
+    (client_in(dir.path(), address, invite), dir)
+}
+
+/// A client keeping its keys and profile in `dir`.
+fn client_in(dir: &Path, address: &str, invite: &InviteCode) -> Client {
+    let keystore = Keystore::open_in(dir).unwrap();
     let options = ClientOptions {
         audio: false,
         ..Default::default()
     };
-    (
-        Client::connect(address, keystore, Some(invite), options).unwrap(),
-        dir,
-    )
+    Client::connect(address, keystore, Some(invite), options).unwrap()
 }
 
 fn wait_for(client: &Client, what: &str, mut ready: impl FnMut(&State) -> bool) {
@@ -202,4 +205,45 @@ fn a_share_started_mid_call_shows_without_rejoining() {
     });
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(alice.state().person(bob_id).unwrap().sharing, Some(share));
+}
+
+#[test]
+fn the_profile_follows_us_to_the_next_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let (first, first_invite) = server();
+    let alice = client_in(dir.path(), &first, &first_invite);
+    wait_for(&alice, "connected", |s| {
+        s.connection == ConnectionStatus::Connected
+    });
+    let picture: Vec<u8> = (0..2000u32).map(|i| (i * 3) as u8).collect();
+    alice.command(Command::SetName("Ilse".into()));
+    wait_for(&alice, "the name kept", |s| {
+        s.profile_name.as_deref() == Some("Ilse")
+    });
+    std::thread::sleep(PROFILE_INTERVAL);
+    alice.command(Command::SetAvatar(Some(picture.clone())));
+    wait_for(&alice, "the picture kept", |s| s.profile_picture.is_some());
+    alice.command(Command::Disconnect);
+
+    let (second, second_invite) = server();
+    let alice = client_in(dir.path(), &second, &second_invite);
+    wait_for(&alice, "connected again", |s| {
+        s.connection == ConnectionStatus::Connected
+    });
+    assert_eq!(alice.state().profile_name.as_deref(), Some("Ilse"));
+    alice.command(Command::CreateRoom("General".into()));
+    wait_for(&alice, "the room", |s| !s.rooms.is_empty());
+    let room = alice.state().rooms[0].id;
+    let code = invite(&alice);
+    let (bob, _b) = client(&second, &code);
+    alice.command(Command::Join(Some(room)));
+    bob.command(Command::Join(Some(room)));
+    let alice_id = alice.state().me.unwrap();
+    wait_for(&bob, "alice's profile on the second server", |s| {
+        s.person(alice_id)
+            .is_some_and(|p| p.name == "Ilse" && p.avatar.is_some())
+    });
+    let hash = bob.state().person(alice_id).unwrap().avatar.unwrap();
+    wait_for(&bob, "alice's picture", |_| bob.avatar(hash).is_some());
+    assert_eq!(&*bob.avatar(hash).unwrap(), picture.as_slice());
 }

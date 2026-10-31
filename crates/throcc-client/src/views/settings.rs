@@ -10,7 +10,7 @@ use throcc_client_core::media::audio::{
 };
 
 use super::common::{avatar, caption, card, chip, mono, primary, secondary, section, title};
-use crate::app::{Screen, SettingsPage, ThroccApp};
+use crate::app::{ProfileStatus, Screen, SettingsPage, ThroccApp};
 use crate::theme;
 
 pub fn render(
@@ -23,12 +23,16 @@ pub fn render(
                 label: &'static str,
                 target: SettingsPage,
                 cx: &mut Context<ThroccApp>| {
-        nav_item(id, label, page == target).on_click(cx.listener(move |app, _, _, cx| {
+        nav_item(id, label, page == target).on_click(cx.listener(move |app, _, window, cx| {
+            if target == SettingsPage::Profile {
+                app.fill_profile(window, cx);
+            }
             app.screen = Screen::Settings(target);
             cx.notify();
         }))
     };
     let nav = nav(cx)
+        .child(item("nav-profile", "Profile", SettingsPage::Profile, cx))
         .child(item("nav-audio", "Audio", SettingsPage::Audio, cx))
         .child(item(
             "nav-appearance",
@@ -38,6 +42,7 @@ pub fn render(
         ))
         .child(item("nav-servers", "Servers", SettingsPage::Servers, cx));
     let content = match page {
+        SettingsPage::Profile => profile(app, cx),
         SettingsPage::Audio => audio(app, cx),
         SettingsPage::Appearance => appearance(app, cx),
         SettingsPage::Servers => servers(app),
@@ -165,6 +170,84 @@ pub(super) fn segmented<T: Copy + PartialEq + 'static>(
 fn set_voice(app: &mut ThroccApp, change: impl FnOnce(&mut VoiceSettings)) {
     change(&mut app.voice);
     app.command(Command::Voice(app.voice));
+}
+
+fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
+    let seed = app.state.me.map_or(0, |me| me.0);
+    let name = app.state.profile_name.clone().unwrap_or_default();
+    let picture = match app.profile_preview.clone() {
+        Some(preview) => preview,
+        None => app.picture(app.state.profile_picture),
+    };
+    let has_picture = picture.is_some();
+    let picture_buttons = div()
+        .flex()
+        .gap_2()
+        .child(
+            secondary("choose-picture", "Choose picture…").on_click(cx.listener(
+                |app, _, _, cx| {
+                    app.profile_status = None;
+                    app.choose_picture(cx);
+                },
+            )),
+        )
+        .children(has_picture.then(|| {
+            secondary("remove-picture", "Remove").on_click(cx.listener(|app, _, _, cx| {
+                app.profile_preview = Some(None);
+                app.profile_status = Some(app.saving_status());
+                app.command(Command::SetAvatar(None));
+                cx.notify();
+            }))
+        }));
+    let name_field = div()
+        .flex()
+        .gap_2()
+        .child(div().flex_1().child(Input::new(&app.name)))
+        .child(
+            primary("save-name", "Save").on_click(cx.listener(|app, _, _, cx| {
+                let name = app.name.read(cx).value().trim().to_owned();
+                if !name.is_empty() {
+                    app.profile_status = Some(ProfileStatus::Saving);
+                    app.command(Command::SetName(name));
+                }
+                cx.notify();
+            })),
+        );
+    div()
+        .flex()
+        .flex_col()
+        .gap_6()
+        .child(title("Profile"))
+        .child(
+            card()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_4()
+                        .child(avatar(&name, seed, picture, px(64.), false))
+                        .child(picture_buttons),
+                )
+                .child(row("Name", name_field))
+                .children(app.profile_status.clone().map(|status| match status {
+                    ProfileStatus::Saving => caption("Saving…"),
+                    ProfileStatus::Saved => caption("Saved.").text_color(theme::ok_text()),
+                    ProfileStatus::UntilJoined => {
+                        caption("Saved here. Others see your picture once you join a room.")
+                    }
+                    ProfileStatus::Failed(reason) => caption(format!(
+                        "Kept on this computer, but this server refused it: {reason}"
+                    ))
+                    .text_color(theme::danger_text()),
+                }))
+                .child(caption(
+                    "This computer keeps your name and picture and gives them to every server you join. A server takes one change every 10 seconds.",
+                )),
+        )
+        .into_any_element()
 }
 
 fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {

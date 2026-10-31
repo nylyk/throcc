@@ -56,7 +56,7 @@ fn main() {
                 window.set_window_title("throcc");
                 let view = cx.new(|cx| app::ThroccApp::new(mock, window, cx));
                 if let Some(screen) = &screen {
-                    view.update(cx, |app, cx| app.show_sample(screen, cx));
+                    view.update(cx, |app, cx| app.show_sample(screen, window, cx));
                 }
                 cx.new(|cx| Root::new(view, window, cx))
             });

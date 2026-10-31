@@ -2,7 +2,6 @@ use gpui::{
     AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
-use gpui_component::input::Input;
 use throcc_client_core::client::Command;
 use throcc_proto::ids::Role;
 
@@ -10,8 +9,8 @@ use super::common::{
     avatar, caption, card, chip, danger, ghost_icon, mono, primary, secondary, section, short_key,
     title,
 };
-use super::settings::{frame, nav, nav_item, row, segmented};
-use crate::app::{Dialog, ProfileStatus, Screen, ServerPage, ThroccApp};
+use super::settings::{frame, nav, nav_item, segmented};
+use crate::app::{Dialog, Screen, ServerPage, ThroccApp};
 use crate::theme;
 
 pub fn render(
@@ -28,12 +27,10 @@ pub fn render(
         .map_or("This server".to_owned(), |s| s.address.clone());
     let item =
         |id: &'static str, label: &'static str, target: ServerPage, cx: &mut Context<ThroccApp>| {
-            nav_item(id, label, page == target).on_click(cx.listener(move |app, _, window, cx| {
+            nav_item(id, label, page == target).on_click(cx.listener(move |app, _, _, cx| {
                 app.screen = Screen::Server(target);
-                match target {
-                    ServerPage::Members => app.command(Command::ListUsers),
-                    ServerPage::Profile => app.fill_profile(window, cx),
-                    ServerPage::Keys => {}
+                if target == ServerPage::Members {
+                    app.command(Command::ListUsers);
                 }
                 cx.notify();
             }))
@@ -55,7 +52,6 @@ pub fn render(
                         .child(address.clone()),
                 ),
         )
-        .child(item("nav-profile", "Profile", ServerPage::Profile, cx))
         .child(item("nav-keys", "Privacy and keys", ServerPage::Keys, cx))
         .child(item(
             "nav-members",
@@ -70,93 +66,10 @@ pub fn render(
                 .on_click(cx.listener(|app, _, _, cx| app.leave_server(cx))),
         );
     let content = match page {
-        ServerPage::Profile => profile(app, cx),
         ServerPage::Keys => keys(app, cx),
         ServerPage::Members => members(app, cx),
     };
     frame(nav, content)
-}
-
-fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
-    let me = app
-        .state
-        .me
-        .and_then(|me| Some((me, app.state.person(me)?.clone())));
-    let (seed, name, avatar_hash) = me.map_or((0, String::new(), None), |(me, person)| {
-        (me.0, person.name, person.avatar)
-    });
-    let picture = match app.profile_preview.clone() {
-        Some(preview) => preview,
-        None => app.picture(avatar_hash),
-    };
-    let has_picture = picture.is_some();
-    let picture_buttons = div()
-        .flex()
-        .gap_2()
-        .child(
-            secondary("choose-picture", "Choose picture…").on_click(cx.listener(
-                |app, _, _, cx| {
-                    app.profile_status = None;
-                    app.choose_picture(cx);
-                },
-            )),
-        )
-        .children(has_picture.then(|| {
-            secondary("remove-picture", "Remove").on_click(cx.listener(|app, _, _, cx| {
-                app.profile_preview = Some(None);
-                app.profile_status = Some(app.saving_status());
-                app.command(Command::SetAvatar(None));
-                cx.notify();
-            }))
-        }));
-    let name_field = div()
-        .flex()
-        .gap_2()
-        .child(div().flex_1().child(Input::new(&app.name)))
-        .child(
-            primary("save-name", "Save").on_click(cx.listener(|app, _, _, cx| {
-                let name = app.name.read(cx).value().trim().to_owned();
-                if !name.is_empty() {
-                    app.profile_status = Some(ProfileStatus::Saving);
-                    app.command(Command::SetName(name));
-                }
-                cx.notify();
-            })),
-        );
-    div()
-        .flex()
-        .flex_col()
-        .gap_6()
-        .child(title("Profile"))
-        .child(
-            card()
-                .flex()
-                .flex_col()
-                .gap_4()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_4()
-                        .child(avatar(&name, seed, picture, px(64.), false))
-                        .child(picture_buttons),
-                )
-                .child(row("Name", name_field))
-                .children(app.profile_status.clone().map(|status| match status {
-                    ProfileStatus::Saving => caption("Saving…"),
-                    ProfileStatus::Saved => caption("Saved.").text_color(theme::ok_text()),
-                    ProfileStatus::UntilJoined => {
-                        caption("Saved here. Others see your picture once you join a room.")
-                    }
-                    ProfileStatus::Failed(reason) => {
-                        caption(format!("Not saved: {reason}")).text_color(theme::danger_text())
-                    }
-                }))
-                .child(caption(
-                    "Everyone on this server sees your name and picture. You can change them once every 10 seconds.",
-                )),
-        )
-        .into_any_element()
 }
 
 fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {

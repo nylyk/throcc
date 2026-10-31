@@ -16,6 +16,10 @@ pub struct State {
     pub current: Option<CurrentRoom>,
     pub key_warnings: Vec<KeyWarning>,
     pub health: Health,
+    /// Our name as kept on this computer, once we have chosen one.
+    pub profile_name: Option<String>,
+    /// Our picture as kept on this computer, readable through the client's avatars.
+    pub profile_picture: Option<Hash>,
 }
 
 impl State {
