@@ -568,29 +568,24 @@ impl Session {
                     }
                 });
             }
-            Command::SetName(name) => {
-                self.change_profile(|p| p.name = Some(name));
-                self.push_profile().await;
-            }
-            Command::SetAvatar(picture) => {
-                self.change_profile(|p| p.picture = picture.map(Arc::from));
+            Command::SetProfile { name, picture } => {
+                self.change_profile(|p| {
+                    if let Some(name) = name {
+                        p.name = Some(name);
+                    }
+                    if let Some(picture) = picture {
+                        p.picture = picture.map(Arc::from);
+                    }
+                });
                 self.push_profile().await;
             }
             Command::FetchAvatar(hash) => self.fetch_avatar(hash).await,
-            Command::SetServerName(name) => {
-                let response = self.call.request(Request::SetServerName(name)).await;
-                self.server_profile_answered(response);
-            }
-            Command::SetServerPicture(picture) => {
-                let avatar = match picture {
-                    Some(bytes) => match self.call.request(Request::SetAvatar(bytes)).await {
-                        Ok(Response::AvatarHash(hash)) => Some(hash),
-                        other => return self.server_profile_answered(other),
-                    },
-                    None => None,
-                };
-                let response = self.call.request(Request::SetServerAvatar(avatar)).await;
-                self.server_profile_answered(response);
+            Command::SetServerProfile { name, picture } => {
+                let response = self.set_server_profile(name, picture).await;
+                self.shared.emit(match response {
+                    Ok(Response::Ok) => Event::ServerProfileSaved,
+                    other => Event::ServerProfileRefused(refusal(other)),
+                });
             }
             Command::CreateRoom(name) => self.simple(Request::CreateRoom { name }).await,
             Command::RenameRoom(room, name) => {
@@ -711,11 +706,29 @@ impl Session {
         }
     }
 
-    fn server_profile_answered(&self, response: anyhow::Result<Response>) {
-        self.shared.emit(match response {
-            Ok(Response::Ok) => Event::ServerProfileSaved,
-            other => Event::ServerProfileRefused(refusal(other)),
-        });
+    /// Sends the changed parts of the server's profile; the answer is the first refusal or `Ok`.
+    async fn set_server_profile(
+        &mut self,
+        name: Option<Option<String>>,
+        picture: Option<Option<Vec<u8>>>,
+    ) -> anyhow::Result<Response> {
+        if let Some(picture) = picture {
+            let avatar = match picture {
+                Some(bytes) => match self.call.request(Request::SetAvatar(bytes)).await? {
+                    Response::AvatarHash(hash) => Some(hash),
+                    other => return Ok(other),
+                },
+                None => None,
+            };
+            let answer = self.call.request(Request::SetServerAvatar(avatar)).await?;
+            if answer != Response::Ok {
+                return Ok(answer);
+            }
+        }
+        match name {
+            Some(name) => self.call.request(Request::SetServerName(name)).await,
+            None => Ok(Response::Ok),
+        }
     }
 
     fn refused(&self, response: anyhow::Result<Response>) {

@@ -40,13 +40,17 @@ pub enum Command {
     Watch(UserId),
     Unwatch(UserId),
     SetVolume(UserId, f32),
-    SetName(String),
-    /// Sets our profile picture, at most 64 KiB, or clears it.
-    SetAvatar(Option<Vec<u8>>),
-    /// Names the server, or clears its name. Admins only.
-    SetServerName(Option<String>),
-    /// Sets the server's picture, at most 64 KiB, or clears it. Admins only.
-    SetServerPicture(Option<Vec<u8>>),
+    /// Changes our name and picture (at most 64 KiB, `Some(None)` clears it) in one save.
+    /// A `None` field keeps what we have.
+    SetProfile {
+        name: Option<String>,
+        picture: Option<Option<Vec<u8>>>,
+    },
+    /// Names the server and sets its picture like [`Command::SetProfile`]. Admins only.
+    SetServerProfile {
+        name: Option<Option<String>>,
+        picture: Option<Option<Vec<u8>>>,
+    },
     FetchAvatar(Hash),
     CreateRoom(String),
     RenameRoom(RoomId, String),
@@ -337,41 +341,37 @@ impl ClientApi for MockClient {
                     p.volume = volume;
                 }
             }),
-            Command::SetName(name) => {
+            Command::SetProfile { name, picture } => {
+                let hash = picture.map(|p| p.map(|bytes| self.keep_avatar(bytes)));
                 self.update(|s| {
-                    if let Some(p) = s.people.get_mut(&me) {
-                        p.name = name.clone();
+                    if let Some(name) = name {
+                        if let Some(p) = s.people.get_mut(&me) {
+                            p.name = name.clone();
+                        }
+                        s.profile_name = Some(name);
                     }
-                    s.profile_name = Some(name);
+                    if let Some(hash) = hash {
+                        if let Some(p) = s.people.get_mut(&me) {
+                            p.avatar = hash;
+                        }
+                        s.profile_picture = hash;
+                    }
                 });
                 self.events.send(Event::ProfileSaved).ok();
             }
-            Command::SetServerName(name) => {
+            Command::SetServerProfile { name, picture } => {
+                let hash = picture.map(|p| p.map(|bytes| self.keep_avatar(bytes)));
                 self.update(|s| {
                     if let Some(server) = s.server.as_mut() {
-                        server.name = name;
+                        if let Some(name) = name {
+                            server.name = name;
+                        }
+                        if let Some(hash) = hash {
+                            server.avatar = hash;
+                        }
                     }
                 });
                 self.events.send(Event::ServerProfileSaved).ok();
-            }
-            Command::SetServerPicture(picture) => {
-                let hash = picture.map(|bytes| self.keep_avatar(bytes));
-                self.update(|s| {
-                    if let Some(server) = s.server.as_mut() {
-                        server.avatar = hash;
-                    }
-                });
-                self.events.send(Event::ServerProfileSaved).ok();
-            }
-            Command::SetAvatar(picture) => {
-                let hash = picture.map(|bytes| self.keep_avatar(bytes));
-                self.update(|s| {
-                    if let Some(p) = s.people.get_mut(&me) {
-                        p.avatar = hash;
-                    }
-                    s.profile_picture = hash;
-                });
-                self.events.send(Event::ProfileSaved).ok();
             }
             Command::FetchAvatar(_) => {}
             Command::CreateRoom(name) => self.update(|s| {

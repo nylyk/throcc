@@ -2,6 +2,7 @@ use gpui::{
     AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
+use gpui_component::Disableable;
 use gpui_component::input::Input;
 use throcc_client_core::client::Command;
 use throcc_proto::ids::Role;
@@ -9,8 +10,8 @@ use throcc_proto::ids::Role;
 use super::common::{
     avatar, caption, card, chip, ghost_icon, mono, primary, secondary, section, short_key,
 };
-use super::settings::{frame, nav_item, nav_list, row, segmented, status_line};
-use crate::app::{Dialog, PictureFor, Screen, ServerPage, ServerStatus, ThroccApp};
+use super::settings::{frame, nav_item, nav_list, row, save_line, segmented};
+use crate::app::{Dialog, PictureEdit, PictureFor, Screen, ServerPage, ServerStatus, ThroccApp};
 use crate::theme;
 
 pub fn render(
@@ -67,7 +68,10 @@ fn overview(app: &mut ThroccApp, is_admin: bool, cx: &mut Context<ThroccApp>) ->
     let Some(server) = app.state.server.clone() else {
         return div().into_any_element();
     };
-    let picture = app.picture(server.avatar);
+    let picture = match &app.server_picture_edit {
+        Some(edit) => edit.image.clone(),
+        None => app.picture(server.avatar),
+    };
     let has_picture = picture.is_some();
     let picture_row = div()
         .flex()
@@ -86,27 +90,15 @@ fn overview(app: &mut ThroccApp, is_admin: bool, cx: &mut Context<ThroccApp>) ->
                 .children(has_picture.then(|| {
                     secondary("remove-server-picture", "Remove").on_click(cx.listener(
                         |app, _, _, cx| {
-                            app.server_status = Some(ServerStatus::Saving);
-                            app.command(Command::SetServerPicture(None));
+                            app.server_status = None;
+                            app.server_picture_edit = Some(PictureEdit::removed());
                             cx.notify();
                         },
                     ))
                 }))
         }));
     let name = if is_admin {
-        div()
-            .flex()
-            .gap_2()
-            .child(div().flex_1().child(Input::new(&app.server_name)))
-            .child(
-                primary("save-server-name", "Save").on_click(cx.listener(|app, _, _, cx| {
-                    let name = app.server_name.read(cx).value().trim().to_owned();
-                    app.server_status = Some(ServerStatus::Saving);
-                    app.command(Command::SetServerName((!name.is_empty()).then_some(name)));
-                    cx.notify();
-                })),
-            )
-            .into_any_element()
+        Input::new(&app.server_name).into_any_element()
     } else {
         div().child(server.title().to_owned()).into_any_element()
     };
@@ -116,14 +108,19 @@ fn overview(app: &mut ThroccApp, is_admin: bool, cx: &mut Context<ThroccApp>) ->
         .gap_4()
         .child(picture_row)
         .child(row("Name", name))
-        .children(app.server_status.clone().map(|status| {
-            status_line(match status {
+        .child(row("Address", mono(server.address.clone())))
+        .children(is_admin.then(|| {
+            let status = app.server_status.clone().map(|status| match status {
                 ServerStatus::Saving => caption("Saving…"),
                 ServerStatus::Saved => caption("Saved.").text_color(theme::ok_text()),
                 ServerStatus::Failed(reason) => caption(reason).text_color(theme::danger_text()),
-            })
+            });
+            let saving = app.server_status == Some(ServerStatus::Saving);
+            let save = primary("save-server", "Save")
+                .disabled(saving || !app.server_changed(cx))
+                .on_click(cx.listener(|app, _, _, cx| app.save_server(cx)));
+            save_line(status, save)
         }))
-        .child(row("Address", mono(server.address.clone())))
         .into_any_element()
 }
 

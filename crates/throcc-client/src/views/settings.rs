@@ -5,11 +5,12 @@ use gpui::{
     MouseButton, ParentElement, Pixels, SharedString, Stateful, StatefulInteractiveElement, Styled,
     Subscription, Window, div, px, relative,
 };
-use gpui_component::IndexPath;
+use gpui_component::button::Button;
 use gpui_component::input::Input;
 use gpui_component::select::{Select, SelectEvent, SelectState};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::switch::Switch;
+use gpui_component::{Disableable, IndexPath};
 use throcc_client_core::client::Command;
 use throcc_client_core::media::audio::{
     DEFAULT_GATE_DBFS, NoiseSuppressionLevel, Transmit, VoiceSettings,
@@ -19,7 +20,7 @@ use super::common::{
     TRAFFIC_LIGHTS, avatar, caption, card, chip, ghost_icon, mono, moves_window, primary,
     secondary, section,
 };
-use crate::app::{PictureFor, ProfileStatus, Screen, SettingsPage, ThroccApp};
+use crate::app::{PictureEdit, PictureFor, ProfileStatus, Screen, SettingsPage, ThroccApp};
 use crate::theme;
 
 pub fn render(
@@ -201,9 +202,15 @@ impl<T: Styled> PageHighlight for T {
     }
 }
 
-/// A card's status message, under the Save button at the right.
-pub(super) fn status_line(message: impl IntoElement) -> Div {
-    div().flex().justify_end().child(message)
+/// A card's Save button at the bottom right, with how the last save went beside it.
+pub(super) fn save_line(status: Option<Div>, save: Button) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_end()
+        .gap_3()
+        .children(status)
+        .child(save)
 }
 
 pub(super) fn row(label: &str, control: impl IntoElement) -> Div {
@@ -267,8 +274,8 @@ fn set_voice(app: &mut ThroccApp, change: impl FnOnce(&mut VoiceSettings)) {
 fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let seed = app.state.me.map_or(0, |me| me.0);
     let name = app.state.profile_name.clone().unwrap_or_default();
-    let picture = match app.profile_preview.clone() {
-        Some(preview) => preview,
+    let picture = match &app.profile_picture_edit {
+        Some(edit) => edit.image.clone(),
         None => app.picture(app.state.profile_picture),
     };
     let has_picture = picture.is_some();
@@ -285,26 +292,26 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         )
         .children(has_picture.then(|| {
             secondary("remove-picture", "Remove").on_click(cx.listener(|app, _, _, cx| {
-                app.profile_preview = Some(None);
-                app.profile_status = Some(app.saving_status());
-                app.command(Command::SetAvatar(None));
+                app.profile_status = None;
+                app.profile_picture_edit = Some(PictureEdit::removed());
                 cx.notify();
             }))
         }));
-    let name_field = div()
-        .flex()
-        .gap_2()
-        .child(div().flex_1().child(Input::new(&app.name)))
-        .child(
-            primary("save-name", "Save").on_click(cx.listener(|app, _, _, cx| {
-                let name = app.name.read(cx).value().trim().to_owned();
-                if !name.is_empty() {
-                    app.profile_status = Some(ProfileStatus::Saving);
-                    app.command(Command::SetName(name));
-                }
-                cx.notify();
-            })),
-        );
+    let status = app.profile_status.clone().map(|status| match status {
+        ProfileStatus::Saving => caption("Saving…"),
+        ProfileStatus::Saved => caption("Saved.").text_color(theme::ok_text()),
+        ProfileStatus::UntilJoined => {
+            caption("Saved here. Others see your picture once you join a room.")
+        }
+        ProfileStatus::Failed(reason) => caption(format!(
+            "Kept on this computer, but this server refused it: {reason}"
+        ))
+        .text_color(theme::danger_text()),
+    });
+    let saving = app.profile_status == Some(ProfileStatus::Saving);
+    let save = primary("save-profile", "Save")
+        .disabled(saving || !app.profile_changed(cx))
+        .on_click(cx.listener(|app, _, _, cx| app.save_profile(cx)));
     div()
         .flex()
         .flex_col()
@@ -322,20 +329,8 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                         .child(avatar(&name, seed, picture, px(64.), false))
                         .child(picture_buttons),
                 )
-                .child(row("Name", name_field))
-                .children(app.profile_status.clone().map(|status| {
-                    status_line(match status {
-                        ProfileStatus::Saving => caption("Saving…"),
-                        ProfileStatus::Saved => caption("Saved.").text_color(theme::ok_text()),
-                        ProfileStatus::UntilJoined => {
-                            caption("Saved here. Others see your picture once you join a room.")
-                        }
-                        ProfileStatus::Failed(reason) => caption(format!(
-                            "Kept on this computer, but this server refused it: {reason}"
-                        ))
-                        .text_color(theme::danger_text()),
-                    })
-                })),
+                .child(row("Name", Input::new(&app.name)))
+                .child(save_line(status, save)),
         )
         .into_any_element()
 }

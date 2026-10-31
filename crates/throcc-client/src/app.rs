@@ -76,7 +76,29 @@ pub enum ProfileStatus {
     Failed(String),
 }
 
-/// How the last change on the server page went.
+/// A picture chosen or removed on a page and not saved yet.
+pub struct PictureEdit {
+    pub bytes: Option<Vec<u8>>,
+    pub image: Option<Arc<RenderImage>>,
+}
+
+impl PictureEdit {
+    pub fn removed() -> Self {
+        Self {
+            bytes: None,
+            image: None,
+        }
+    }
+
+    fn chosen(bytes: Vec<u8>) -> Self {
+        Self {
+            image: crate::avatar::decode(&bytes),
+            bytes: Some(bytes),
+        }
+    }
+}
+
+/// How the last save on the server page went.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServerStatus {
     Saving,
@@ -122,8 +144,8 @@ pub struct ThroccApp {
     pub name: Entity<InputState>,
     pub room_name: Entity<InputState>,
     pub server_name: Entity<InputState>,
-    /// Why the server's new picture couldn't be used.
     pub server_status: Option<ServerStatus>,
+    pub server_picture_edit: Option<PictureEdit>,
     /// One hex field per palette colour, in [`theme::Palette::LABELS`] order.
     pub palette_fields: Vec<Entity<InputState>>,
     pub pictures: std::collections::HashMap<Hash, Arc<RenderImage>>,
@@ -132,9 +154,7 @@ pub struct ThroccApp {
     pub adding_server: bool,
     pub join_error: Option<String>,
     pub profile_status: Option<ProfileStatus>,
-    /// The picture just chosen on the profile page, or `Some(None)` once removed, shown
-    /// until the server has it.
-    pub profile_preview: Option<Option<Arc<RenderImage>>>,
+    pub profile_picture_edit: Option<PictureEdit>,
     pub known_servers: Vec<(String, Fingerprint)>,
     pub users: Vec<User>,
     pub invite: Option<(String, u64)>,
@@ -203,6 +223,8 @@ impl ThroccApp {
             .collect();
         subscriptions.extend([
             cx.subscribe_in(&code, window, Self::on_code_input),
+            cx.subscribe(&name, Self::on_edit),
+            cx.subscribe(&server_name, Self::on_edit),
             cx.subscribe_in(&room_name, window, |app, _, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     match app.dialog {
@@ -230,13 +252,14 @@ impl ThroccApp {
             room_name,
             server_name,
             server_status: None,
+            server_picture_edit: None,
             palette_fields,
             pictures: std::collections::HashMap::new(),
             joining: false,
             adding_server: false,
             join_error: None,
             profile_status: None,
-            profile_preview: None,
+            profile_picture_edit: None,
             known_servers,
             users: Vec::new(),
             invite: None,
@@ -340,12 +363,18 @@ impl ThroccApp {
                 self.join_error = Some(reason);
             }
             Event::AvatarReady(_) => {}
-            Event::ProfileSaved => self.profile_status = Some(ProfileStatus::Saved),
+            Event::ProfileSaved => {
+                self.profile_picture_edit = None;
+                self.profile_status = Some(ProfileStatus::Saved);
+            }
             Event::ProfileRefused(reason) => {
-                self.profile_preview = None;
+                self.profile_picture_edit = None;
                 self.profile_status = Some(ProfileStatus::Failed(reason));
             }
-            Event::ServerProfileSaved => self.server_status = Some(ServerStatus::Saved),
+            Event::ServerProfileSaved => {
+                self.server_picture_edit = None;
+                self.server_status = Some(ServerStatus::Saved);
+            }
             Event::ServerProfileRefused(reason) => {
                 self.server_status = Some(ServerStatus::Failed(reason))
             }
@@ -604,10 +633,74 @@ impl ThroccApp {
         }
     }
 
+    /// The name Save on the profile page would give us, if it differs from the kept one.
+    fn profile_name_change(&self, cx: &App) -> Option<String> {
+        let typed = self.name.read(cx).value().trim().to_owned();
+        (!typed.is_empty() && self.state.profile_name.as_deref() != Some(typed.as_str()))
+            .then_some(typed)
+    }
+
+    pub fn profile_changed(&self, cx: &App) -> bool {
+        self.profile_picture_edit.is_some() || self.profile_name_change(cx).is_some()
+    }
+
+    pub fn save_profile(&mut self, cx: &mut Context<Self>) {
+        let name = self.profile_name_change(cx);
+        let picture = self
+            .profile_picture_edit
+            .as_ref()
+            .map(|edit| edit.bytes.clone());
+        if name.is_none() && picture.is_none() {
+            return;
+        }
+        self.profile_status = Some(if name.is_some() {
+            ProfileStatus::Saving
+        } else {
+            self.saving_status()
+        });
+        if self.profile_status == Some(ProfileStatus::UntilJoined) {
+            self.profile_picture_edit = None;
+        }
+        self.command(Command::SetProfile { name, picture });
+        cx.notify();
+    }
+
+    /// The name Save on the server page would give the server, if it differs.
+    fn server_name_change(&self, cx: &App) -> Option<Option<String>> {
+        let typed = self.server_name.read(cx).value().trim().to_owned();
+        let typed = (!typed.is_empty()).then_some(typed);
+        let current = self.state.server.as_ref().and_then(|s| s.name.clone());
+        (typed != current).then_some(typed)
+    }
+
+    pub fn server_changed(&self, cx: &App) -> bool {
+        self.server_picture_edit.is_some() || self.server_name_change(cx).is_some()
+    }
+
+    pub fn save_server(&mut self, cx: &mut Context<Self>) {
+        let name = self.server_name_change(cx);
+        let picture = self
+            .server_picture_edit
+            .as_ref()
+            .map(|edit| edit.bytes.clone());
+        if name.is_none() && picture.is_none() {
+            return;
+        }
+        self.server_status = Some(ServerStatus::Saving);
+        self.command(Command::SetServerProfile { name, picture });
+        cx.notify();
+    }
+
+    fn on_edit(&mut self, _: Entity<InputState>, event: &InputEvent, cx: &mut Context<Self>) {
+        if matches!(event, InputEvent::Change) {
+            cx.notify();
+        }
+    }
+
     /// Puts our kept name in the profile page's name field.
     pub fn fill_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.profile_status = None;
-        self.profile_preview = None;
+        self.profile_picture_edit = None;
         let name = self.state.profile_name.clone().unwrap_or_default();
         self.name.update(cx, |s, cx| s.set_value(name, window, cx));
     }
@@ -615,6 +708,7 @@ impl ThroccApp {
     /// Puts the server's name in the server page's name field.
     pub fn fill_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.server_status = None;
+        self.server_picture_edit = None;
         let name = self
             .state
             .server
@@ -650,16 +744,13 @@ impl ThroccApp {
             this.update(cx, |app, cx| {
                 match (target, prepared) {
                     (PictureFor::Profile, Ok(bytes)) => {
-                        app.profile_preview = Some(crate::avatar::decode(&bytes));
-                        app.profile_status = Some(app.saving_status());
-                        app.command(Command::SetAvatar(Some(bytes)));
+                        app.profile_picture_edit = Some(PictureEdit::chosen(bytes));
                     }
                     (PictureFor::Profile, Err(message)) => {
                         app.profile_status = Some(ProfileStatus::Failed(message))
                     }
                     (PictureFor::Server, Ok(bytes)) => {
-                        app.server_status = Some(ServerStatus::Saving);
-                        app.command(Command::SetServerPicture(Some(bytes)));
+                        app.server_picture_edit = Some(PictureEdit::chosen(bytes));
                     }
                     (PictureFor::Server, Err(message)) => {
                         app.server_status = Some(ServerStatus::Failed(message))
@@ -838,7 +929,10 @@ impl ThroccApp {
             "profile" => {
                 self.screen = Screen::Settings(SettingsPage::Profile);
                 joined(self);
-                self.command(Command::SetAvatar(Some(crate::avatar::sample())));
+                self.command(Command::SetProfile {
+                    name: None,
+                    picture: Some(Some(crate::avatar::sample())),
+                });
             }
             "server" => {
                 self.screen = Screen::Server(ServerPage::Overview);

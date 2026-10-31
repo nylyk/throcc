@@ -128,7 +128,10 @@ fn a_picture_chosen_in_the_lobby_reaches_others_and_survives_a_rename() {
         s.connection == ConnectionStatus::Connected
     });
     let picture: Vec<u8> = (0..2000u32).map(|i| (i * 7) as u8).collect();
-    alice.command(Command::SetAvatar(Some(picture.clone())));
+    alice.command(Command::SetProfile {
+        name: None,
+        picture: Some(Some(picture.clone())),
+    });
     alice.command(Command::CreateRoom("General".into()));
     wait_for(&alice, "the room", |s| !s.rooms.is_empty());
     let room = alice.state().rooms[0].id;
@@ -147,7 +150,10 @@ fn a_picture_chosen_in_the_lobby_reaches_others_and_survives_a_rename() {
     assert_eq!(&*bob.avatar(hash).unwrap(), picture.as_slice());
 
     std::thread::sleep(PROFILE_INTERVAL);
-    alice.command(Command::SetName("Alice".into()));
+    alice.command(Command::SetProfile {
+        name: Some("Alice".into()),
+        picture: None,
+    });
     wait_for(&bob, "alice's new name", |s| {
         s.person(alice_id).is_some_and(|p| p.name == "Alice")
     });
@@ -216,13 +222,13 @@ fn the_profile_follows_us_to_the_next_server() {
         s.connection == ConnectionStatus::Connected
     });
     let picture: Vec<u8> = (0..2000u32).map(|i| (i * 3) as u8).collect();
-    alice.command(Command::SetName("Ilse".into()));
-    wait_for(&alice, "the name kept", |s| {
-        s.profile_name.as_deref() == Some("Ilse")
+    alice.command(Command::SetProfile {
+        name: Some("Ilse".into()),
+        picture: Some(Some(picture.clone())),
     });
-    std::thread::sleep(PROFILE_INTERVAL);
-    alice.command(Command::SetAvatar(Some(picture.clone())));
-    wait_for(&alice, "the picture kept", |s| s.profile_picture.is_some());
+    wait_for(&alice, "the profile kept", |s| {
+        s.profile_name.as_deref() == Some("Ilse") && s.profile_picture.is_some()
+    });
     alice.command(Command::Disconnect);
 
     let (second, second_invite) = server();
@@ -255,7 +261,10 @@ fn only_admins_name_the_server_and_everyone_sees_it() {
     wait_for(&alice, "connected", |s| {
         s.connection == ConnectionStatus::Connected
     });
-    alice.command(Command::SetServerName(Some("  Moss Co-op ".into())));
+    alice.command(Command::SetServerProfile {
+        name: Some(Some("  Moss Co-op ".into())),
+        picture: None,
+    });
     wait_for(&alice, "the server's name", |s| {
         s.server.as_ref().and_then(|s| s.name.as_deref()) == Some("Moss Co-op")
     });
@@ -265,7 +274,10 @@ fn only_admins_name_the_server_and_everyone_sees_it() {
     assert_eq!(bob.state().server.clone().unwrap().title(), "Moss Co-op");
 
     let picture: Vec<u8> = (0..1500u32).map(|i| (i * 3) as u8).collect();
-    alice.command(Command::SetServerPicture(Some(picture.clone())));
+    alice.command(Command::SetServerProfile {
+        name: None,
+        picture: Some(Some(picture.clone())),
+    });
     wait_for(&bob, "the server's picture", |s| {
         s.server.as_ref().is_some_and(|s| s.avatar.is_some())
     });
@@ -275,7 +287,10 @@ fn only_admins_name_the_server_and_everyone_sees_it() {
     assert_eq!(bob.state().server.clone().unwrap().title(), "Moss Co-op");
 
     let mut events = bob.events();
-    bob.command(Command::SetServerName(Some("Bob's".into())));
+    bob.command(Command::SetServerProfile {
+        name: Some(Some("Bob's".into())),
+        picture: None,
+    });
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Ok(throcc_client_core::client::Event::ServerProfileRefused(_)) = events.try_recv() {
@@ -286,7 +301,10 @@ fn only_admins_name_the_server_and_everyone_sees_it() {
     }
     assert_eq!(alice.state().server.clone().unwrap().title(), "Moss Co-op");
 
-    alice.command(Command::SetServerName(None));
+    alice.command(Command::SetServerProfile {
+        name: Some(None),
+        picture: None,
+    });
     wait_for(&bob, "the name cleared", |s| {
         s.server
             .as_ref()
@@ -294,9 +312,11 @@ fn only_admins_name_the_server_and_everyone_sees_it() {
     });
 
     let other: Vec<u8> = (0..900u32).map(|i| (i * 5) as u8).collect();
-    alice.command(Command::SetServerPicture(Some(other)));
-    alice.command(Command::SetServerName(Some("Fern".into())));
-    wait_for(&bob, "both quick changes", |s| {
+    alice.command(Command::SetServerProfile {
+        name: Some(Some("Fern".into())),
+        picture: Some(Some(other)),
+    });
+    wait_for(&bob, "both changes", |s| {
         s.server.as_ref().is_some_and(|s| {
             s.name.as_deref() == Some("Fern") && s.avatar.is_some_and(|a| a != hash)
         })
