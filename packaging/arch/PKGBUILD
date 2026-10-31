@@ -26,8 +26,15 @@ pkgver() {
 
 build() {
     cd throcc
-    FFMPEG_TARBALL="$srcdir/ffmpeg-$_ffmpeg.tar.xz" packaging/ffmpeg/build.sh "$srcdir/ffmpeg"
-    packaging/ffmpeg/bindings.sh "$srcdir/ffmpeg" "$srcdir/ffmpeg/binding.rs"
+    local recipe
+    recipe=$( { cat packaging/ffmpeg/build.sh packaging/ffmpeg/bindings.sh packaging/ffmpeg/patches/*
+                pkg-config --modversion dav1d vpx libva ffnvcodec; } | sha256sum)
+    if [ "$(cat "$srcdir/ffmpeg/recipe" 2>/dev/null)" != "$recipe" ]; then
+        rm -rf "$srcdir/ffmpeg"
+        FFMPEG_TARBALL="$srcdir/ffmpeg-$_ffmpeg.tar.xz" packaging/ffmpeg/build.sh "$srcdir/ffmpeg"
+        packaging/ffmpeg/bindings.sh "$srcdir/ffmpeg" "$srcdir/ffmpeg/binding.rs"
+        echo "$recipe" >"$srcdir/ffmpeg/recipe"
+    fi
     export FFMPEG_DLL_PATH="$srcdir/ffmpeg/lib"
     export FFMPEG_BINDING_PATH="$srcdir/ffmpeg/binding.rs"
     export RUSTFLAGS="-C link-arg=-Wl,--disable-new-dtags,-rpath,/usr/lib/throcc"
