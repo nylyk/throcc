@@ -144,8 +144,8 @@ pub(crate) struct Session {
     peers: BTreeMap<UserId, RoomPeer>,
     last_room_state: Option<(RoomId, throcc_proto::ids::Epoch, Vec<RoomPeer>)>,
     watching: Vec<UserId>,
-    /// The video track each watched share is decoded from.
-    watched_video: HashMap<UserId, MediaId>,
+    /// The video track each watched share is decoded from, and the config it was set up for.
+    watched_video: HashMap<UserId, (MediaId, ShareConfig)>,
     watched_audio: HashMap<UserId, MediaId>,
     mic_test: bool,
     /// A picture to put on our profile once the server tells us our name.
@@ -480,8 +480,10 @@ impl Session {
                     .engine
                     .subscribe(peer.tracks.mic, Kind::Audio, 256);
                 self.voice(VoiceCommand::Listen { user: *user, units });
-                self.tracks
-                    .insert(peer.tracks.mic, watched(*user, "mic", MIC_KBPS));
+                self.tracks.insert(
+                    peer.tracks.mic,
+                    self.watched(peer.tracks.mic, *user, "mic", MIC_KBPS),
+                );
             }
         }
         self.peers = current;
@@ -779,7 +781,11 @@ impl Session {
         let stale: Vec<UserId> = self
             .watched_video
             .iter()
-            .filter(|(user, video)| wanted.get(user).is_none_or(|(s, _)| s.video != **video))
+            .filter(|(user, (video, old))| {
+                wanted.get(user).is_none_or(|(share, config)| {
+                    share.video != *video || config.codec != old.codec || config.audio != old.audio
+                })
+            })
             .map(|(user, _)| *user)
             .collect();
         for user in stale {
@@ -797,8 +803,10 @@ impl Session {
                     units,
                     playout: playout.clone(),
                 });
-                self.tracks
-                    .insert(share.audio, watched(user, "screen audio", SHARE_AUDIO_KBPS));
+                self.tracks.insert(
+                    share.audio,
+                    self.watched(share.audio, user, "screen audio", SHARE_AUDIO_KBPS),
+                );
                 self.watched_audio.insert(user, share.audio);
                 playout
             });
@@ -818,13 +826,32 @@ impl Session {
                     .notice("This build can't show video; it was built without ffmpeg.");
             }
             self.tracks
-                .insert(video, watched(user, "screen", config.kbps));
-            self.watched_video.insert(user, video);
+                .insert(video, self.watched(video, user, "screen", config.kbps));
+            self.watched_video.insert(user, (video, config));
+        }
+    }
+
+    /// Health bookkeeping for `media_id`, counting from the engine's totals so far.
+    fn watched(
+        &self,
+        media_id: MediaId,
+        user: UserId,
+        label: &'static str,
+        set_kbps: u32,
+    ) -> Watched {
+        let (last_received, last_lost) = self.call.engine.datagrams(media_id);
+        Watched {
+            user,
+            label,
+            set_kbps,
+            last_bytes: self.call.engine.received_bytes(media_id),
+            last_received,
+            last_lost,
         }
     }
 
     fn stop_watching(&mut self, user: UserId) {
-        if let Some(video) = self.watched_video.remove(&user) {
+        if let Some((video, _)) = self.watched_video.remove(&user) {
             self.call.engine.unsubscribe(video);
             self.tracks.remove(&video);
         }
@@ -1136,17 +1163,6 @@ impl Session {
                 }
             })
             .collect()
-    }
-}
-
-fn watched(user: UserId, label: &'static str, set_kbps: u32) -> Watched {
-    Watched {
-        user,
-        label,
-        set_kbps,
-        last_bytes: 0,
-        last_received: 0,
-        last_lost: 0,
     }
 }
 

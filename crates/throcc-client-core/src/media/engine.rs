@@ -74,13 +74,11 @@ pub struct Stats {
     pub unknown_track: AtomicU64,
     pub malformed: AtomicU64,
     pub decrypt_failures: AtomicU64,
-    pub missing_keys: AtomicU64,
     pub track_overflow: AtomicU64,
     pub late_units: AtomicU64,
     pub abandoned_units: AtomicU64,
     pub send_queue_full: AtomicU64,
     pub send_dropped_units: AtomicU64,
-    pub send_no_key: AtomicU64,
     pub sent_datagrams: AtomicU64,
     /// Bytes sealed for sending on each of our tracks, counting each datagram once.
     pub sent_bytes: Mutex<HashMap<MediaId, u64>>,
@@ -396,9 +394,6 @@ impl Track {
             .count();
         self.pending.drain(..expired);
         self.stats
-            .missing_keys
-            .fetch_add(expired as u64, Ordering::Relaxed);
-        self.stats
             .decrypt_failures
             .fetch_add(expired as u64, Ordering::Relaxed);
         let generation = lock(&self.keys).keys.generation();
@@ -599,10 +594,7 @@ fn seal(
     unit: &Outgoing,
     stats: &Stats,
 ) -> Option<Vec<Bytes>> {
-    let Some((epoch, key)) = lock(keys).keys.send_key(unit.media_id) else {
-        stats.send_no_key.fetch_add(1, Ordering::Relaxed);
-        return None;
-    };
+    let (epoch, key) = lock(keys).keys.send_key(unit.media_id)?;
     let datagrams = sealer.seal(unit, epoch, &key);
     let bytes: usize = datagrams.iter().map(Bytes::len).sum();
     *lock(&stats.sent_bytes).entry(unit.media_id).or_default() += bytes as u64;

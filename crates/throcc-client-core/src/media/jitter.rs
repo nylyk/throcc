@@ -122,7 +122,8 @@ impl JitterBuffer {
     }
 
     /// Buffered audio ahead of playout, in milliseconds.
-    pub fn buffer_ms(&self) -> f32 {
+    #[cfg(test)]
+    fn buffer_ms(&self) -> f32 {
         self.buffered() as f32 / 48.0
     }
 
