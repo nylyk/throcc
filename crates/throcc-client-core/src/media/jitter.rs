@@ -12,8 +12,12 @@ const MAX_TARGET: u32 = 10 * FRAME as u32;
 /// Concealed frames played before a buffer with no packet within its target rebuffers.
 const MAX_CONCEALED: u32 = 3;
 const MAX_PACKETS: usize = 64;
-/// Pulls between two accelerations, so playout catches up without audible jumps.
+/// Pulls between two accelerations, so playout catches up without audible jumps. Also the
+/// window whose lowest buffer level decides one, which spans a whole burst of PipeWire's
+/// largest common quantum (8192 samples).
 const ACCELERATE_EVERY: u32 = 20;
+/// Buffered audio that stays above this through a whole window is excess delay.
+const SPARE: u32 = 2 * FRAME as u32;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct JitterStats {
@@ -24,6 +28,8 @@ pub struct JitterStats {
     pub overflow: u64,
     pub accelerated: u64,
     pub rebuffered: u64,
+    /// Concealed frames played while the next packet was late, which add to the delay.
+    pub stretched: u64,
     /// Times playout jumped to a packet off its 20 ms grid.
     pub realigned: u64,
 }
@@ -56,6 +62,8 @@ pub struct JitterBuffer {
     jitter: f64,
     last_transit: Option<i64>,
     pulls_since_accelerate: u32,
+    /// The least audio buffered after a pull since the last acceleration window began.
+    lowest: u32,
     pub stats: JitterStats,
 }
 
@@ -78,6 +86,7 @@ impl JitterBuffer {
             jitter: 0.0,
             last_transit: None,
             pulls_since_accelerate: 0,
+            lowest: u32::MAX,
             stats: JitterStats::default(),
         })
     }
@@ -207,6 +216,13 @@ impl JitterBuffer {
             self.concealed_in_a_row = 0;
             self.stats.fec += 1;
             Played::Fec
+        } else if self.packets.is_empty() && self.concealed_in_a_row < MAX_CONCEALED {
+            self.decode(&[], DecodeMode::Normal);
+            self.concealed_in_a_row += 1;
+            self.stats.stretched += 1;
+            self.frame_ts = next.wrapping_sub(FRAME as u32);
+            self.frame_pos = 0;
+            return Some(Played::Concealed);
         } else if self.concealed_in_a_row < MAX_CONCEALED || self.first_packet_within_target(next) {
             self.decode(&[], DecodeMode::Normal);
             self.concealed_in_a_row += 1;
@@ -243,12 +259,16 @@ impl JitterBuffer {
         }
     }
 
-    /// Skips one frame when the buffer runs well over its target, at most once per 200 ms.
+    /// Skips one frame when the buffer stayed over [`SPARE`] for a whole 200 ms window.
     fn accelerate(&mut self) {
         self.pulls_since_accelerate += 1;
-        if self.pulls_since_accelerate < ACCELERATE_EVERY
-            || self.buffered() <= self.target() + 2 * FRAME as u32
-        {
+        self.lowest = self.lowest.min(self.buffered());
+        if self.pulls_since_accelerate < ACCELERATE_EVERY {
+            return;
+        }
+        let lowest = std::mem::replace(&mut self.lowest, u32::MAX);
+        self.pulls_since_accelerate = 0;
+        if lowest <= SPARE {
             return;
         }
         if let Some(next) = self.next_ts
@@ -256,7 +276,6 @@ impl JitterBuffer {
         {
             self.next_ts = Some(next.wrapping_add(FRAME as u32));
             self.stats.accelerated += 1;
-            self.pulls_since_accelerate = 0;
         }
     }
 }
@@ -491,5 +510,80 @@ mod tests {
             level < 100.0,
             "buffer at {level} ms one second after resuming"
         );
+    }
+
+    /// Plays 30 s of audio captured in bursts of `quantum` samples, as PipeWire delivers
+    /// desktop audio, from a watcher joining at `phase`. Returns the stats after the first
+    /// 2 s and the most delay in the last 10 s, in ms.
+    fn bursts(quantum: u64, phase: u64) -> (JitterStats, f64) {
+        let mut jb = JitterBuffer::new(Channels::Mono).unwrap();
+        let mut enc = encoder();
+        let mut out = [0.0; PULL];
+        let frames = 30 * 50;
+        let sent = |frame: usize| ((frame as u64 + 1) * FRAME as u64).div_ceil(quantum) * quantum;
+        let (mut next, mut clock, mut delay) = (0, 0u64, 0.0f64);
+        let mut warm = JitterStats::default();
+        while next < frames {
+            while next < frames && sent(next) + phase <= clock {
+                let mut packet = vec![0u8; 1500];
+                let n = enc.encode_float(&tone(next), &mut packet).unwrap();
+                jb.insert((next * FRAME) as u32, &packet[..n], clock);
+                next += 1;
+            }
+            jb.pull(&mut out);
+            clock += PULL as u64;
+            if clock == 2 * 48_000 {
+                warm = jb.stats;
+            }
+            if let Some(timestamp) = jb.playout_timestamp().filter(|_| clock > 20 * 48_000) {
+                let behind = clock - phase - u64::from(timestamp);
+                delay = delay.max(behind as f64 / 48.0);
+            }
+        }
+        let stats = jb.stats;
+        let after_warm = JitterStats {
+            concealed: stats.concealed - warm.concealed,
+            stretched: stats.stretched - warm.stretched,
+            late: stats.late - warm.late,
+            accelerated: stats.accelerated - warm.accelerated,
+            ..stats
+        };
+        (after_warm, delay)
+    }
+
+    #[test]
+    fn audio_in_pipewire_bursts_plays_without_gaps_at_the_least_delay() {
+        for quantum in [1024, 2048, 4096, 8192] {
+            for phase in [0, 300, 1500] {
+                let (stats, delay) = bursts(quantum, phase);
+                let gaps = stats.concealed + stats.stretched + stats.late + stats.accelerated;
+                assert_eq!(gaps, 0, "quantum {quantum}, phase {phase}: {stats:?}");
+                let burst_ms = quantum as f64 / 48.0;
+                assert!(
+                    delay < burst_ms + 40.0,
+                    "quantum {quantum}, phase {phase}: {delay:.0} ms behind"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_late_packet_plays_after_a_stretch_instead_of_being_dropped() {
+        let mut jb = JitterBuffer::new(Channels::Mono).unwrap();
+        let all = packets(8);
+        let mut out = [0.0; PULL];
+        for (i, p) in all.iter().enumerate().take(2) {
+            jb.insert((i * FRAME) as u32, p, (i * FRAME) as u64);
+        }
+        drain(&mut jb, 5);
+        for (i, p) in all.iter().enumerate().skip(2) {
+            jb.insert((i * FRAME) as u32, p, 5 * PULL as u64);
+        }
+        for _ in 0..12 {
+            jb.pull(&mut out);
+        }
+        assert_eq!(jb.stats.late, 0, "{:?}", jb.stats);
+        assert_eq!(jb.stats.normal, 8, "{:?}", jb.stats);
+        assert_eq!(jb.stats.stretched, 1, "{:?}", jb.stats);
     }
 }
