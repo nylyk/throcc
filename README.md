@@ -28,10 +28,10 @@ The unit runs the server as a throwaway system user with its data in `/var/lib/p
 
 ### In a container
 
-Every push to `main` publishes `ghcr.io/nylyk/throcc-server:latest` for amd64 and arm64 (and `:<version>` for tags):
+Every push to `main` publishes `ghcr.io/nylyk/throcc:latest` for amd64 and arm64 (and `:<version>` for tags):
 
 ```sh
-docker run -d --name throcc --restart unless-stopped -p 8476:8476/udp -v throcc-data:/data ghcr.io/nylyk/throcc-server:latest
+docker run -d --name throcc --restart unless-stopped -p 8476:8476/udp -v throcc-data:/data ghcr.io/nylyk/throcc:latest
 docker logs throcc | grep 'becomes admin'
 ```
 
