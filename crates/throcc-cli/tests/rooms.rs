@@ -455,3 +455,23 @@ async fn a_server_holds_a_bounded_number_of_rooms() {
     assert_error(&res, ErrorCode::TooLarge);
     second.stop();
 }
+
+#[tokio::test]
+async fn members_leave_on_their_own_but_the_only_admin_cannot() {
+    let server = start_server();
+    let alice = admin(&server).await;
+    let bob = invited(&server, &alice).await;
+    let leave = |user| Request::RemoveUser {
+        user,
+        cascade: false,
+    };
+    let alice_id = alice.link.welcome.me;
+    assert_error(&alice.request(leave(alice_id)).await, ErrorCode::Forbidden);
+
+    let bob_id = bob.link.welcome.me;
+    bob.link.requester.request(leave(bob_id)).await.ok();
+    let Response::Users(users) = alice.request(Request::ListUsers).await else {
+        panic!("no user list");
+    };
+    assert!(users.iter().all(|u| u.id != bob_id));
+}

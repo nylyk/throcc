@@ -37,6 +37,7 @@ pub fn render(app: &mut ThroccApp, dialog: Dialog, cx: &mut Context<ThroccApp>) 
             room,
             confirm_delete,
         } => edit_room(app, room, confirm_delete, cx),
+        Dialog::LeaveServer => leave_server(app, cx),
     };
     div()
         .id("scrim")
@@ -526,6 +527,37 @@ fn remove(user: UserId, name: &str, cascade: bool, cx: &mut Context<ThroccApp>) 
                 .child(danger("confirm-remove", "Remove").on_click(cx.listener(
                     move |app, _, _, cx| {
                         app.command(Command::RemoveUser { user, cascade });
+                        app.dialog = None;
+                        cx.notify();
+                    },
+                ))),
+        )
+        .into_any_element()
+}
+
+fn leave_server(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
+    let server = app
+        .state
+        .server
+        .as_ref()
+        .map_or("this server".to_owned(), |s| s.title().to_owned());
+    div()
+        .flex()
+        .flex_col()
+        .gap_4()
+        .child(title(format!("Leave {server}?")))
+        .child(caption(
+            "You lose your membership and the server leaves your list. Coming back needs a new invite.",
+        ))
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap_2()
+                .child(close_button(cx))
+                .child(danger("confirm-leave", "Leave server").on_click(cx.listener(
+                    |app, _, _, cx| {
+                        app.command(Command::LeaveServer);
                         app.dialog = None;
                         cx.notify();
                     },

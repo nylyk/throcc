@@ -110,6 +110,7 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
         .as_ref()
         .map_or("server".to_owned(), |s| s.title().to_owned());
     let server_picture = app.picture(state.server.as_ref().and_then(|s| s.avatar), cx);
+    let own_picture = app.picture(state.profile_picture, cx);
     let current_room = state.current.as_ref().map(|c| c.room);
     let manages = app.manages_rooms();
     let rooms = state.rooms.iter().map(|room| {
@@ -166,7 +167,9 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
     let me = state.me;
     let my_name = me
         .and_then(|m| state.person(m).map(|p| p.name.clone()))
+        .or_else(|| state.profile_name.clone())
         .unwrap_or_else(|| "You".into());
+    let my_picture = me.and_then(|m| pictures.get(&m).cloned()).or(own_picture);
     let mic = state.current.as_ref().is_some_and(|c| c.mic);
     let deafened = state.current.as_ref().is_some_and(|c| c.deafened);
     let in_room = state.current.is_some();
@@ -216,13 +219,18 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                 )
                 .separator()
                 .item(
-                    PopupMenuItem::new("Leave server")
-                        .icon(icon("log-out"))
-                        .on_click(move |_, window, cx| {
-                            leave
-                                .update(cx, |app, cx| app.leave_server(window, cx))
-                                .ok();
-                        }),
+                    PopupMenuItem::element(|_, _| {
+                        div().text_color(theme::danger_text()).child("Leave server")
+                    })
+                    .icon(icon("log-out").text_color(theme::danger_text()))
+                    .on_click(move |_, _, cx| {
+                        leave
+                            .update(cx, |app, cx| {
+                                app.dialog = Some(Dialog::LeaveServer);
+                                cx.notify();
+                            })
+                            .ok();
+                    }),
                 )
         });
 
@@ -282,7 +290,7 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                 .child(avatar(
                     &my_name,
                     me.map_or(0, |m| m.0),
-                    me.and_then(|m| pictures.get(&m).cloned()),
+                    my_picture,
                     px(28.),
                     me.is_some_and(|m| state.person(m).is_some_and(|p| p.speaking)),
                 ))
@@ -298,38 +306,49 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                                 .font_weight(FontWeight::MEDIUM)
                                 .child(my_name),
                         )
-                        .child(caption(if in_room { "Connected" } else { "In the lobby" })),
-                )
-                .child(
-                    toggle_icon("profile-mic", "mic", "mic-off", !mic, "Mute (⌘⇧M)")
-                        .disabled(!in_room)
-                        .on_click(
-                            cx.listener(move |app, _, _, _| app.command(Command::SetMic(!mic))),
+                        .child(
+                            caption(if in_room { "Connected" } else { "In the lobby" }).truncate(),
                         ),
                 )
                 .child(
-                    toggle_icon(
-                        "profile-deafen",
-                        "headphones",
-                        "headphone-off",
-                        deafened,
-                        "Deafen (⌘⇧D)",
-                    )
-                    .disabled(!in_room)
-                    .on_click(
-                        cx.listener(move |app, _, _, _| {
-                            app.command(Command::SetDeafened(!deafened))
-                        }),
-                    ),
-                )
-                .child(
-                    ghost_icon("profile-settings", "settings", "Settings").on_click(cx.listener(
-                        |app, _, window, cx| {
-                            app.fill_profile(window, cx);
-                            app.screen = Screen::Settings(SettingsPage::Profile);
-                            cx.notify();
-                        },
-                    )),
+                    div()
+                        .flex()
+                        .items_center()
+                        .child(
+                            toggle_icon("profile-mic", "mic", "mic-off", !mic, "Mute (⌘⇧M)")
+                                .disabled(!in_room)
+                                .on_click(cx.listener(move |app, _, _, _| {
+                                    app.command(Command::SetMic(!mic))
+                                })),
+                        )
+                        .child(
+                            toggle_icon(
+                                "profile-deafen",
+                                "headphones",
+                                "headphone-off",
+                                deafened,
+                                "Deafen (⌘⇧D)",
+                            )
+                            .disabled(!in_room)
+                            .on_click(cx.listener(
+                                move |app, _, _, _| app.command(Command::SetDeafened(!deafened)),
+                            )),
+                        )
+                        .child(
+                            ghost_icon("switch-server", "arrow-left-right", "Switch server")
+                                .on_click(
+                                    cx.listener(|app, _, window, cx| app.switch_server(window, cx)),
+                                ),
+                        )
+                        .child(
+                            ghost_icon("profile-settings", "settings", "Settings").on_click(
+                                cx.listener(|app, _, window, cx| {
+                                    app.fill_profile(window, cx);
+                                    app.screen = Screen::Settings(SettingsPage::Profile);
+                                    cx.notify();
+                                }),
+                            ),
+                        ),
                 ),
         )
         .child(resize_handle(cx))

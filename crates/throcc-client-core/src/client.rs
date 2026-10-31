@@ -74,6 +74,8 @@ pub enum Command {
     /// Plays your processed mic back to you.
     MicTest(bool),
     PushToTalk(bool),
+    /// Ends our membership of this server and forgets it, then disconnects.
+    LeaveServer,
     Disconnect,
 }
 
@@ -98,6 +100,8 @@ pub enum Event {
     ServerProfileSaved,
     /// The server refused the server's new name or picture, for this reason.
     ServerProfileRefused(String),
+    /// We left the server for good, and it is forgotten.
+    LeftServer,
 }
 
 /// The UI's view of a client. Implemented by the real client and by [`MockClient`].
@@ -406,6 +410,10 @@ impl ClientApi for MockClient {
             | Command::Devices { .. }
             | Command::MicTest(_)
             | Command::PushToTalk(_) => {}
+            Command::LeaveServer => {
+                self.update(|s| s.connection = ConnectionStatus::Disconnected);
+                self.events.send(Event::LeftServer).ok();
+            }
             Command::Disconnect => self.update(|s| s.connection = ConnectionStatus::Disconnected),
         }
     }

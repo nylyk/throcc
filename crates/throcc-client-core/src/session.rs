@@ -305,6 +305,11 @@ impl Session {
                         self.shared.update(|s| s.connection = ConnectionStatus::Disconnected);
                         return;
                     }
+                    Some(Command::LeaveServer) => {
+                        if self.leave_server().await {
+                            return;
+                        }
+                    }
                     Some(command) => self.command(command).await,
                 },
                 event = self.call.events.recv() => match event {
@@ -314,7 +319,13 @@ impl Session {
                             return;
                         };
                         for command in queued {
-                            self.command(command).await;
+                            if matches!(command, Command::LeaveServer) {
+                                if self.leave_server().await {
+                                    return;
+                                }
+                            } else {
+                                self.command(command).await;
+                            }
                         }
                     }
                 },
@@ -327,6 +338,41 @@ impl Session {
                 Some(_) = self.call.recovery.recv() => self.recover_share(Recovery::Idr),
             }
         }
+    }
+
+    /// Ends our membership and forgets the server. True once the server took us off; the
+    /// server closes the connection as it does, which may lose its reply.
+    async fn leave_server(&mut self) -> bool {
+        let request = Request::RemoveUser {
+            user: self.call.me(),
+            cascade: false,
+        };
+        let removed = match self.call.request(request).await {
+            Ok(Response::Ok) => true,
+            Ok(Response::Err { message, .. }) => {
+                self.shared
+                    .notice(format!("Couldn't leave this server: {message}"));
+                return false;
+            }
+            Ok(_) | Err(_) => matches!(
+                self.call.connection.close_reason(),
+                Some(quinn::ConnectionError::ApplicationClosed(c))
+                    if c.error_code == quinn::VarInt::from_u32(close::REMOVED)
+            ),
+        };
+        if !removed {
+            self.shared
+                .notice("Couldn't leave this server: the connection dropped. Try again.");
+            return false;
+        }
+        if let Err(e) = self.keystore.known_servers.forget(&self.address) {
+            warn!("forgetting the server: {e:#}");
+        }
+        self.call.close().await;
+        self.shared
+            .update(|s| s.connection = ConnectionStatus::Disconnected);
+        self.shared.emit(Event::LeftServer);
+        true
     }
 
     /// Reconnects with backoff, back into the same room. Returns the commands that arrived
@@ -698,7 +744,7 @@ impl Session {
                 self.voice(VoiceCommand::Loopback(on));
             }
             Command::PushToTalk(down) => self.voice(VoiceCommand::PushToTalk(down)),
-            Command::Disconnect => {}
+            Command::LeaveServer | Command::Disconnect => {}
         }
     }
 

@@ -756,6 +756,13 @@ impl Hub {
 
     fn remove_user(&mut self, user: UserId, target: UserId, cascade: bool) -> Outcome {
         let actor = self.role(user)?;
+        let leaving = target == user && !cascade;
+        if leaving && actor == Role::Admin && self.admins()? == 1 {
+            return Err(Refusal::new(
+                ErrorCode::Forbidden,
+                "you are the only admin; make someone else admin first",
+            ));
+        }
         let removed = if cascade {
             self.db.invite_tree(target).map_err(Refusal::internal)?
         } else {
@@ -767,7 +774,7 @@ impl Hub {
                 .user(*id)
                 .map_err(Refusal::internal)?
                 .ok_or_else(|| Refusal::new(ErrorCode::NotFound, "no such user"))?;
-            self.require(permissions::can_remove(actor, row.role))?;
+            self.require(leaving || permissions::can_remove(actor, row.role))?;
         }
         self.db.remove_users(&removed).map_err(Refusal::internal)?;
         for id in &removed {
@@ -776,6 +783,11 @@ impl Hub {
         }
         info!(?removed, "removed users");
         Ok(Response::Ok)
+    }
+
+    fn admins(&self) -> Result<usize, Refusal> {
+        let users = self.db.users().map_err(Refusal::internal)?;
+        Ok(users.iter().filter(|u| u.role == Role::Admin).count())
     }
 
     fn set_watching(&mut self, user: UserId, ids: Vec<MediaId>) -> Outcome {

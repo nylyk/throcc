@@ -126,6 +126,7 @@ pub enum Dialog {
         room: RoomId,
         confirm_delete: bool,
     },
+    LeaveServer,
 }
 
 fn known_servers() -> Vec<(String, Fingerprint)> {
@@ -375,6 +376,11 @@ impl ThroccApp {
             }
             Event::ServerProfileRefused(reason) => {
                 self.server_status = Some(ServerStatus::Failed(reason))
+            }
+            Event::LeftServer => {
+                self.end_session(window, cx);
+                self.events = None;
+                self.known_servers = known_servers();
             }
         }
         cx.notify();
@@ -867,7 +873,8 @@ impl ThroccApp {
         }
     }
 
-    pub fn leave_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Disconnects and goes back to the server list, keeping our membership.
+    pub fn switch_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.command(Command::Disconnect);
         self.end_session(window, cx);
         self.events = None;
