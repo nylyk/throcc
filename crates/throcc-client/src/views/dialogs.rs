@@ -1,11 +1,12 @@
 use gpui::{
-    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement,
-    StatefulInteractiveElement, Styled, Window, div, px,
+    AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, MouseButton,
+    ParentElement, StatefulInteractiveElement, Styled, Window, div, px,
 };
 use gpui_component::input::Input;
+use gpui_component::slider::Slider;
 use gpui_component::switch::Switch;
 use throcc_client_core::client::Command;
-use throcc_client_core::state::Preset;
+use throcc_client_core::state::{FRAME_RATES, Resolution};
 use throcc_proto::ids::RoomId;
 use throcc_proto::messages::Codec;
 
@@ -21,7 +22,7 @@ pub fn render(
     cx: &mut Context<ThroccApp>,
 ) -> AnyElement {
     let body = match dialog {
-        Dialog::Share { preset, audio } => share(preset, audio, cx),
+        Dialog::Share => share(app, cx),
         Dialog::Connection => connection(app, cx),
         Dialog::Verify(user) => verify(app, user, cx),
         Dialog::Remove {
@@ -179,59 +180,121 @@ fn close_button(cx: &mut Context<ThroccApp>) -> impl IntoElement {
     }))
 }
 
-fn share(preset: Preset, audio: bool, cx: &mut Context<ThroccApp>) -> AnyElement {
-    let presets = Preset::ALL.iter().map(|p| {
-        let p = *p;
-        let config = p.config(Codec::Av1, audio);
-        let selected = p == preset;
-        div()
-            .id(("preset", p as usize))
-            .p_3()
-            .rounded(theme::RADIUS_BUTTON)
-            .border_1()
-            .border_color(if selected {
-                theme::accent()
-            } else {
-                theme::control()
-            })
-            .bg(if selected {
-                theme::raised()
-            } else {
-                theme::surface()
-            })
-            .cursor_pointer()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(div().font_weight(FontWeight::MEDIUM).child(p.label()))
-            .child(caption(format!(
-                "{}p{} · {} Mbps",
-                config.height,
-                config.fps,
-                config.kbps as f32 / 1000.0
-            )))
-            .on_click(cx.listener(move |app, _, _, cx| {
-                app.dialog = Some(Dialog::Share { preset: p, audio });
-                cx.notify();
-            }))
-    });
+/// A row of mutually exclusive choices.
+fn choices<T: Copy + PartialEq + 'static>(
+    id: &'static str,
+    options: impl IntoIterator<Item = (T, String)>,
+    selected: T,
+    cx: &mut Context<ThroccApp>,
+    on_pick: impl Fn(&mut ThroccApp, T, &mut Context<ThroccApp>) + Clone + 'static,
+) -> Div {
+    div()
+        .flex()
+        .gap_1()
+        .p_1()
+        .rounded(theme::RADIUS_BUTTON)
+        .bg(theme::raised())
+        .children(options.into_iter().enumerate().map(|(i, (value, label))| {
+            let on_pick = on_pick.clone();
+            let picked = value == selected;
+            div()
+                .id((id, i))
+                .flex_1()
+                .flex()
+                .justify_center()
+                .py_1()
+                .rounded(theme::RADIUS_ROW)
+                .cursor_pointer()
+                .when_picked(picked)
+                .text_color(if picked {
+                    theme::text()
+                } else {
+                    theme::text_3()
+                })
+                .child(label)
+                .on_click(cx.listener(move |app, _, _, cx| on_pick(app, value, cx)))
+        }))
+}
+
+trait Picked {
+    fn when_picked(self, picked: bool) -> Self;
+}
+
+impl<T: Styled> Picked for T {
+    fn when_picked(self, picked: bool) -> Self {
+        if picked {
+            self.bg(theme::surface())
+        } else {
+            self
+        }
+    }
+}
+
+fn mbps(kbps: u32) -> String {
+    format!("{} Mbps", kbps as f32 / 1000.0)
+}
+
+fn share(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
+    let choice = app.share_choice;
+    let audio = app.share_audio;
+    let offered = choice.bitrates();
+    let resolutions = choices(
+        "resolution",
+        Resolution::ALL.map(|r| (r, r.label().to_owned())),
+        choice.resolution,
+        cx,
+        |app, resolution, cx| {
+            app.set_share_choice(app.share_choice.with_resolution(resolution), cx)
+        },
+    );
+    let frame_rates = choices(
+        "fps",
+        FRAME_RATES.map(|fps| (fps, format!("{fps} fps"))),
+        choice.fps,
+        cx,
+        |app, fps, cx| app.set_share_choice(app.share_choice.with_fps(fps), cx),
+    );
+    let bitrate = div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .flex()
+                .justify_between()
+                .child(section("Bitrate"))
+                .child(mono(mbps(choice.kbps)).font_weight(FontWeight::SEMIBOLD)),
+        )
+        .child(Slider::new(&app.bitrate))
+        .child(
+            div()
+                .flex()
+                .justify_between()
+                .child(caption(mbps(offered.first().copied().unwrap_or(0))))
+                .child(caption(mbps(choice.max_kbps()))),
+        );
     div()
         .flex()
         .flex_col()
         .gap_4()
         .child(title("Share your screen"))
-        .child(section("Source"))
         .child(caption(
             "Your system's own picker opens when you start sharing, so you choose a display or window there.",
         ))
-        .child(section("Quality"))
-        .child(div().grid().grid_cols(2).gap_2().children(presets))
+        .child(section("Resolution"))
+        .child(resolutions)
+        .child(caption(
+            "The most lines sent. The picture keeps your screen's own shape, and a smaller screen is sent at its own size.",
+        ))
+        .child(section("Frame rate"))
+        .child(frame_rates)
+        .child(bitrate)
         .child(
             Switch::new("share-audio")
                 .checked(audio)
                 .label("Share audio: everything except throcc itself")
-                .on_click(cx.listener(move |app, checked: &bool, _, cx| {
-                    app.dialog = Some(Dialog::Share { preset, audio: *checked });
+                .on_click(cx.listener(|app, checked: &bool, _, cx| {
+                    app.share_audio = *checked;
                     cx.notify();
                 })),
         )
@@ -242,8 +305,9 @@ fn share(preset: Preset, audio: bool, cx: &mut Context<ThroccApp>) -> AnyElement
                 .justify_end()
                 .gap_2()
                 .child(close_button(cx))
-                .child(primary("start-share", "Start sharing").on_click(cx.listener(move |app, _, _, cx| {
-                    app.command(Command::StartShare(preset.config(Codec::Av1, audio)));
+                .child(primary("start-share", "Start sharing").on_click(cx.listener(|app, _, _, cx| {
+                    let config = app.share_choice.config(Codec::Av1, app.share_audio);
+                    app.command(Command::StartShare(config));
                     app.dialog = None;
                     cx.notify();
                 }))),

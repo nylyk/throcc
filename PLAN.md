@@ -421,12 +421,15 @@ The fallbacks are `webrtc-audio-processing` and `opus` bindings.
 - Recovery: intra refresh with an unbounded GOP where supported. Otherwise a 4 s GOP cap plus IDR on request.
 - No hardware encoder: OpenH264 at up to 1080p30, or sharing disabled.
 
-| Preset | Resolution | fps | Bitrate |
+The sharer picks a resolution (720p, 1080p or 1440p), a frame rate (15, 30 or 60 fps) and a bitrate in fixed steps from 1 to 25 Mbps, capped by resolution and frame rate:
+
+| Resolution | 15 fps | 30 fps | 60 fps |
 | --- | --- | --- | --- |
-| Low | 1280×720 | 30 | 2.5 Mbps |
-| Default | 1920×1080 | 60 | 6 Mbps |
-| High | 2560×1440 | 60 | 10 Mbps |
-| Extreme | 2560×1440 | 60 | 18 Mbps |
+| 720p | 3 Mbps | 5 Mbps | 8 Mbps |
+| 1080p | 5 Mbps | 10 Mbps | 15 Mbps |
+| 1440p | 8 Mbps | 15 Mbps | 25 Mbps |
+
+The resolution is a 16:9 box. The share is sent at the screen's own aspect ratio, as large as fits in the box and never larger than the screen, and `ShareConfig` announces that size. Default: 1080p, 60 fps, 6 Mbps.
 
 **Receive:**
 
@@ -526,7 +529,7 @@ Everything else is mixed in Oklab, like CSS `color-mix(in oklab, …)`: raised f
 | `Main.dc.html` | Lobby | Sidebar: rooms with occupants, a red monitor icon beside sharers, mute and deafen icons, speaking rings, profile bar. Main: room cards with Join |
 | `Room.dc.html` | In room | Header: room name, head count and RTT (opens Connection); media is always end-to-end encrypted, so no badge says so. A grid of 16:9 tiles, one per person: avatar and name; a sharer's tile adds **Watch stream**; a watched share fills its tile with the picture, scaled to fit with the aspect kept, plus pop-out and stop-watching. Clicking a share switches to focus: that share large, everyone else in a strip below; clicking it again returns to the grid. Control bar: mic, deafen, share, settings, leave |
 | `PoppedOut.dc.html` | Popped-out share | A watched share in its own window: header with the sharer, room, resolution and codec, return-to-main and fullscreen. Its tile in the room offers **Bring back** |
-| `Share.dc.html` | Share dialog | Source picker (uses the OS picker where the OS requires one: `SCContentSharingPicker`, the portal). Preset, share-audio switch, encoder line |
+| `Share.dc.html` | Share dialog | Source picker (uses the OS picker where the OS requires one: `SCContentSharingPicker`, the portal). Resolution, frame rate, bitrate slider, share-audio switch, encoder line |
 | `Appearance.dc.html` | Appearance | Preset themes as swatch strips, then the eight colours with a swatch and a hex field each. Applies at once and is remembered |
 | `Settings.dc.html` | Audio settings | Devices, voice activity or push-to-talk with a live level meter and threshold, PTT key, AEC, noise suppression level, AGC, mic test |
 | `Connection.dc.html` | Connection | RTT, loss each way, frames dropped for you, one plain-language verdict, per-track table, sending status |

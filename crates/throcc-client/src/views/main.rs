@@ -7,7 +7,7 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_component::{Disableable, Sizable, Size};
 use throcc_client_core::client::Command;
-use throcc_client_core::state::{Person, Preset, State, share_label};
+use throcc_client_core::state::{Person, State, share_label};
 use throcc_proto::ids::{RoomId, UserId};
 
 use super::common::{
@@ -575,10 +575,7 @@ fn room(
                     if sharing {
                         app.command(Command::StopShare);
                     } else {
-                        app.dialog = Some(Dialog::Share {
-                            preset: Preset::Default,
-                            audio: true,
-                        });
+                        app.dialog = Some(Dialog::Share);
                     }
                     cx.notify();
                 })),

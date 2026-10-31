@@ -7,13 +7,14 @@ use gpui::{
 };
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::notification::Notification;
+use gpui_component::slider::{SliderEvent, SliderState};
 use gpui_component::{Root, WindowExt};
 use throcc_client_core::account::SignInError;
 use throcc_client_core::client::{Client, ClientApi, ClientOptions, Command, Event, MockClient};
 use throcc_client_core::keystore::Keystore;
 use throcc_client_core::media::audio::VoiceSettings;
 use throcc_client_core::media::devices;
-use throcc_client_core::state::{Preset, State};
+use throcc_client_core::state::{ShareChoice, State};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
 use throcc_proto::invite::{self, InviteCode};
@@ -69,10 +70,7 @@ pub enum ProfileStatus {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Dialog {
-    Share {
-        preset: Preset,
-        audio: bool,
-    },
+    Share,
     Connection,
     Verify(UserId),
     Remove {
@@ -127,6 +125,12 @@ pub struct ThroccApp {
     pub mic_test: bool,
     push_to_talk: Option<(crate::hotkey::PushToTalkKey, Task<()>)>,
     pub feeds: crate::video::Feeds,
+    /// What the share dialog asks for, kept between shares.
+    pub share_choice: ShareChoice,
+    pub share_audio: bool,
+    /// The share dialog's bitrate slider, over the indices of the offered bitrates.
+    pub bitrate: Entity<SliderState>,
+    _bitrate_changes: Subscription,
     /// The watched share shown large, with everyone else in a strip below it.
     pub focus: Option<UserId>,
     /// Whether our own share's self-view shows in our tile.
@@ -187,6 +191,8 @@ impl ThroccApp {
             }),
         ]);
         let known_servers = if mock { Vec::new() } else { known_servers() };
+        let share_choice = ShareChoice::default();
+        let (bitrate, bitrate_changes) = Self::bitrate_slider(share_choice, cx);
         let (inputs, outputs) = devices::list();
         let mut app = Self {
             client: None,
@@ -214,6 +220,10 @@ impl ThroccApp {
             mic_test: false,
             push_to_talk: None,
             feeds: crate::video::Feeds::default(),
+            share_choice,
+            share_audio: true,
+            bitrate,
+            _bitrate_changes: bitrate_changes,
             focus: None,
             preview_self: false,
             popouts: std::collections::HashMap::new(),
@@ -400,6 +410,40 @@ impl ThroccApp {
     pub fn show_controls(&mut self, cx: &mut Context<Self>) {
         self.controls_until = std::time::Instant::now() + crate::views::common::CONTROLS_LINGER;
         cx.notify();
+    }
+
+    /// Changes the share dialog's choice and fits its bitrate slider to the bitrates offered.
+    pub fn set_share_choice(&mut self, choice: ShareChoice, cx: &mut Context<Self>) {
+        let offered_before = self.share_choice.bitrates();
+        self.share_choice = choice;
+        if choice.bitrates() != offered_before {
+            (self.bitrate, self._bitrate_changes) = Self::bitrate_slider(choice, cx);
+        }
+        cx.notify();
+    }
+
+    fn bitrate_slider(
+        choice: ShareChoice,
+        cx: &mut Context<Self>,
+    ) -> (Entity<SliderState>, Subscription) {
+        let offered = choice.bitrates();
+        let at = offered.iter().position(|k| *k == choice.kbps).unwrap_or(0);
+        let slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.)
+                .max(offered.len().saturating_sub(1) as f32)
+                .step(1.)
+                .default_value(at as f32)
+        });
+        let changes = cx.subscribe(&slider, move |app, _, event: &SliderEvent, cx| {
+            let (SliderEvent::Change(value) | SliderEvent::Release(value)) = event;
+            let at = value.start().round().max(0.) as usize;
+            if let Some(kbps) = offered.get(at) {
+                app.share_choice.kbps = *kbps;
+                cx.notify();
+            }
+        });
+        (slider, changes)
     }
 
     /// Moves a watched share into a window of its own.
@@ -712,10 +756,7 @@ impl ThroccApp {
             }
             "share" => {
                 joined(self);
-                self.dialog = Some(Dialog::Share {
-                    preset: Preset::Default,
-                    audio: true,
-                });
+                self.dialog = Some(Dialog::Share);
             }
             "connection" => {
                 joined(self);

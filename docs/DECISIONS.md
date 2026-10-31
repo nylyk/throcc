@@ -310,3 +310,8 @@ Netem results after the fixes: all checks pass. With 40 ± 30 ms jitter on the s
 ## 2026-10-31 No slow-sender verdict
 
 - **The connection verdict no longer blames the sender's upload when a share arrives below its set bitrate,** as the human asked. A still desktop encodes far below the set rate and fills up again when something moves, so the gap alone was a false alarm. The per-track table still shows set and arriving rates side by side.
+
+## 2026-10-31 Shares keep their screen's shape; no presets
+
+- **A share is encoded at its screen's aspect ratio,** as the human asked, so a 16:10 MacBook no longer arrives with black bars baked in. The chosen resolution is a 16:9 box; the sender fits the screen's shape in it and never goes above the screen's own size. macOS asks ScreenCaptureKit for that shape using the picker's content size, Windows sizes its GPU scaler from the capture item, and Linux already delivers the native size. The sender waits up to 2 s for the first frame and opens the encoder at its fitted size, falling back to the box. `ShareConfig` already carried width and height, so the wire format is unchanged. A window that changes shape mid-share is still fitted with bars into the first size.
+- **Presets gave way to resolution, frame rate and a stepped bitrate,** as the human asked. The bitrate cap per resolution and frame rate is a judgement call: past it, screen content shows no visible gain. The slider runs over the offered steps' indices and is rebuilt when the cap changes, because gpui-component's slider can't change its range.

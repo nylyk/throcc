@@ -113,41 +113,108 @@ pub struct TrackHealth {
     pub loss: Option<f32>,
 }
 
-/// A share preset from PLAN §5.9.
+/// The most lines a share is sent with; its width follows the screen's shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Preset {
-    Low,
-    Default,
-    High,
-    Extreme,
+pub enum Resolution {
+    P720,
+    P1080,
+    P1440,
 }
 
-impl Preset {
-    pub const ALL: [Preset; 4] = [Preset::Low, Preset::Default, Preset::High, Preset::Extreme];
+impl Resolution {
+    pub const ALL: [Resolution; 3] = [Resolution::P720, Resolution::P1080, Resolution::P1440];
 
-    pub fn config(self, codec: Codec, audio: bool) -> ShareConfig {
-        let (width, height, fps, kbps) = match self {
-            Preset::Low => (1280, 720, 30, 2_500),
-            Preset::Default => (1920, 1080, 60, 6_000),
-            Preset::High => (2560, 1440, 60, 10_000),
-            Preset::Extreme => (2560, 1440, 60, 18_000),
-        };
-        ShareConfig {
-            audio,
-            kbps,
-            codec,
-            width,
-            height,
-            fps,
+    pub fn height(self) -> u16 {
+        match self {
+            Resolution::P720 => 720,
+            Resolution::P1080 => 1080,
+            Resolution::P1440 => 1440,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Preset::Low => "Low",
-            Preset::Default => "Default",
-            Preset::High => "High",
-            Preset::Extreme => "Extreme",
+            Resolution::P720 => "720p",
+            Resolution::P1080 => "1080p",
+            Resolution::P1440 => "1440p",
+        }
+    }
+}
+
+pub const FRAME_RATES: [u8; 3] = [15, 30, 60];
+
+/// The bitrates a share can be set to, in kbps.
+pub const BITRATES: [u32; 14] = [
+    1_000, 1_500, 2_000, 3_000, 4_000, 5_000, 6_000, 8_000, 10_000, 12_000, 15_000, 18_000, 20_000,
+    25_000,
+];
+
+/// What a share asks for before the screen is known.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShareChoice {
+    pub resolution: Resolution,
+    pub fps: u8,
+    pub kbps: u32,
+}
+
+impl Default for ShareChoice {
+    fn default() -> Self {
+        Self {
+            resolution: Resolution::P1080,
+            fps: 60,
+            kbps: 6_000,
+        }
+    }
+}
+
+impl ShareChoice {
+    /// The highest bitrate offered at this resolution and frame rate; more than this buys
+    /// nothing visible for screen content.
+    pub fn max_kbps(self) -> u32 {
+        match (self.resolution, self.fps) {
+            (Resolution::P720, ..=15) => 3_000,
+            (Resolution::P720, ..=30) => 5_000,
+            (Resolution::P720, _) => 8_000,
+            (Resolution::P1080, ..=15) => 5_000,
+            (Resolution::P1080, ..=30) => 10_000,
+            (Resolution::P1080, _) => 15_000,
+            (Resolution::P1440, ..=15) => 8_000,
+            (Resolution::P1440, ..=30) => 15_000,
+            (Resolution::P1440, _) => 25_000,
+        }
+    }
+
+    /// The bitrates offered at this resolution and frame rate, lowest first.
+    pub fn bitrates(self) -> Vec<u32> {
+        let max = self.max_kbps();
+        BITRATES.into_iter().filter(|k| *k <= max).collect()
+    }
+
+    pub fn with_resolution(self, resolution: Resolution) -> Self {
+        Self { resolution, ..self }.clamped()
+    }
+
+    pub fn with_fps(self, fps: u8) -> Self {
+        Self { fps, ..self }.clamped()
+    }
+
+    fn clamped(self) -> Self {
+        Self {
+            kbps: self.kbps.min(self.max_kbps()),
+            ..self
+        }
+    }
+
+    /// The share to ask for. Its size is a 16:9 box the sender fits the screen's shape in.
+    pub fn config(self, codec: Codec, audio: bool) -> ShareConfig {
+        let height = self.resolution.height();
+        ShareConfig {
+            audio,
+            kbps: self.kbps,
+            codec,
+            width: height / 9 * 16,
+            height,
+            fps: self.fps,
         }
     }
 }
@@ -161,4 +228,41 @@ pub fn share_label(config: &ShareConfig) -> String {
         Codec::Vp9 => "VP9",
     };
     format!("{}p{} · {codec}", config.height, config.fps)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bitrates_stop_at_the_cap_and_a_lower_choice_lowers_the_bitrate() {
+        let top = ShareChoice {
+            resolution: Resolution::P1440,
+            fps: 60,
+            kbps: 25_000,
+        };
+        assert_eq!(top.bitrates().last(), Some(&25_000));
+        let lower = top.with_resolution(Resolution::P720).with_fps(15);
+        assert_eq!(lower.kbps, 3_000);
+        assert_eq!(lower.bitrates(), [1_000, 1_500, 2_000, 3_000]);
+        assert!(
+            ShareChoice::default()
+                .bitrates()
+                .contains(&ShareChoice::default().kbps)
+        );
+    }
+
+    #[test]
+    fn every_choice_has_a_bitrate_and_a_sixteen_by_nine_box() {
+        for resolution in Resolution::ALL {
+            for fps in FRAME_RATES {
+                let choice = ShareChoice::default()
+                    .with_resolution(resolution)
+                    .with_fps(fps);
+                assert!(choice.bitrates().contains(&choice.max_kbps()), "{choice:?}");
+                let config = choice.config(Codec::Av1, false);
+                assert_eq!(u32::from(config.width) * 9, u32::from(config.height) * 16);
+            }
+        }
+    }
 }
