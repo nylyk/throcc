@@ -2,6 +2,8 @@
 mod clock;
 #[cfg(target_os = "linux")]
 pub(crate) mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::{DmaBuf, DmaBufPlane};
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
 #[cfg(windows)]
@@ -52,6 +54,16 @@ impl CaptureConfig {
 pub trait Capture: Send {
     /// The oldest captured frame not yet taken, copied out as NV12. Never blocks.
     fn next_frame(&mut self, into: &mut VideoFrame) -> bool;
+    /// The oldest captured frame not yet taken, when it is still in GPU memory. It stays
+    /// valid until the next call to this or [`Capture::next_frame`]. Never blocks.
+    #[cfg(target_os = "linux")]
+    fn next_dmabuf(&mut self) -> Option<&DmaBuf> {
+        None
+    }
+    /// Asks for no more frames in GPU memory with `modifier`, or none at all without one.
+    /// Frames already captured still arrive.
+    #[cfg(target_os = "linux")]
+    fn refuse_dmabuf(&mut self, _modifier: Option<u64>) {}
     /// Frames the capture callback dropped because the ring was full.
     fn dropped(&self) -> Arc<AtomicU64>;
     /// Whether capturing stopped for good, as when the shared window closed or the system

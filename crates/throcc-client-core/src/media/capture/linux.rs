@@ -6,10 +6,14 @@
 )]
 
 mod desktop_audio;
+mod egl;
 
+use std::cell::{Cell, RefCell};
 use std::io::Cursor;
-use std::os::fd::OwnedFd;
+use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
+use std::ptr::NonNull;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -20,13 +24,15 @@ use ashpd::desktop::{PersistMode, ResponseError, Session};
 use pipewire as pw;
 use pw::properties::properties;
 use pw::spa;
-use pw::spa::buffer::{ChunkFlags, Data};
+use pw::spa::buffer::{ChunkFlags, Data, DataType};
 use pw::spa::param::ParamType;
 use pw::spa::param::format::{FormatProperties, MediaSubtype, MediaType};
 use pw::spa::param::video::{VideoFormat, VideoInfoRaw};
 use pw::spa::pod::serialize::PodSerializer;
-use pw::spa::pod::{ChoiceValue, Object, Pod, Property, Value};
-use pw::spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Direction, Fraction, Rectangle, SpaTypes};
+use pw::spa::pod::{ChoiceValue, Object, Pod, Property, PropertyFlags, Value};
+use pw::spa::utils::{
+    Choice, ChoiceEnum, ChoiceFlags, Direction, Fraction, Id, Rectangle, SpaTypes,
+};
 use pw::stream::{Stream, StreamBox, StreamFlags};
 use throcc_proto::frame::{VIDEO_CLOCK_HZ, timestamp_before};
 use tracing::warn;
@@ -40,6 +46,23 @@ use desktop_audio::DesktopAudio;
 
 /// Frame buffers shared by the PipeWire thread and the share thread.
 const POOL: usize = 4;
+/// PipeWire buffers the share thread may hold at once: the ring's, the one it reads, and
+/// one on its way back.
+const LENT: usize = POOL + 2;
+const MAX_PLANES: usize = 4;
+/// Formats offered in GPU memory, with their DRM fourccs.
+const DMABUF_FORMATS: [(VideoFormat, u32); 4] = [
+    (VideoFormat::BGRx, fourcc(b"XR24")),
+    (VideoFormat::BGRA, fourcc(b"AR24")),
+    (VideoFormat::RGBx, fourcc(b"XB24")),
+    (VideoFormat::RGBA, fourcc(b"AB24")),
+];
+const DMABUF_FOURCCS: [u32; 4] = [
+    DMABUF_FORMATS[0].1,
+    DMABUF_FORMATS[1].1,
+    DMABUF_FORMATS[2].1,
+    DMABUF_FORMATS[3].1,
+];
 const MAX_SIDE: u32 = 8192;
 const NANOS: i128 = 1_000_000_000;
 
@@ -73,6 +96,14 @@ pub fn start(config: CaptureConfig) -> Result<LinuxCapture, CaptureError> {
 impl Capture for LinuxCapture {
     fn next_frame(&mut self, into: &mut VideoFrame) -> bool {
         self.stream.next_frame(into)
+    }
+
+    fn next_dmabuf(&mut self) -> Option<&DmaBuf> {
+        self.stream.next_dmabuf()
+    }
+
+    fn refuse_dmabuf(&mut self, modifier: Option<u64>) {
+        self.stream.refuse_dmabuf(modifier);
     }
 
     fn dropped(&self) -> Arc<AtomicU64> {
@@ -205,8 +236,10 @@ pub(crate) struct PipeWireCapture {
     free: rtrb::Producer<Slot>,
     dropped: Arc<AtomicU64>,
     ended: Arc<AtomicBool>,
-    quit: pw::channel::Sender<()>,
+    control: pw::channel::Sender<Control>,
     thread: Option<JoinHandle<()>>,
+    /// The frame in GPU memory last handed out, held until the next one is asked for.
+    current: Option<HeldDmaBuf>,
     audio: Option<DesktopAudio>,
     /// PipeWire time, in nanoseconds, that both media clocks count from.
     zero: ShareZero,
@@ -227,21 +260,23 @@ impl PipeWireCapture {
             free.push(Slot::new(config.width * config.height * 4)).ok();
         }
         let dropped = Arc::new(AtomicU64::new(0));
-        let state = StreamState {
-            layout: None,
-            free: free_rx,
-            filled: filled_tx,
-            spare: None,
-            dropped: dropped.clone(),
-        };
+        let counted = dropped.clone();
         let ended = Arc::new(AtomicBool::new(false));
         let stopped = ended.clone();
-        let (quit, quit_rx) = pw::channel::channel();
+        let (control, control_rx) = pw::channel::channel();
         let (ready_tx, ready) = mpsc::sync_channel(1);
         let thread = std::thread::Builder::new()
             .name("throcc-pipewire".into())
             .spawn(move || {
-                if let Err(e) = run(node, fd, config, state, stopped, quit_rx, &ready_tx) {
+                let state = StreamState {
+                    layout: None,
+                    free: free_rx,
+                    filled: filled_tx,
+                    spare: None,
+                    dropped: counted,
+                    lent: Rc::default(),
+                };
+                if let Err(e) = run(node, fd, config, state, stopped, control_rx, &ready_tx) {
                     ready_tx.send(Err(e)).ok();
                 }
             })
@@ -260,8 +295,9 @@ impl PipeWireCapture {
                 free,
                 dropped,
                 ended,
-                quit,
+                control,
                 thread: Some(thread),
+                current: None,
                 audio,
                 zero: ShareZero::new(NANOS as i64),
                 chunker: AudioChunker::default(),
@@ -279,9 +315,52 @@ impl PipeWireCapture {
     }
 }
 
+impl PipeWireCapture {
+    /// Hands the frame in GPU memory last given out back to the PipeWire thread.
+    fn give_back(&mut self) {
+        if let Some(held) = self.current.take() {
+            self.control.send(Control::Return(held.lease)).ok();
+        }
+    }
+
+    fn next_is_dmabuf(&self) -> bool {
+        self.filled.peek().is_ok_and(|slot| slot.dmabuf.is_some())
+    }
+}
+
 impl Capture for PipeWireCapture {
+    fn next_dmabuf(&mut self) -> Option<&DmaBuf> {
+        self.give_back();
+        while self.next_is_dmabuf() {
+            let Ok(mut slot) = self.filled.pop() else {
+                break;
+            };
+            let held = slot.dmabuf.take();
+            self.free.push(slot).ok();
+            let Some(mut held) = held else {
+                continue;
+            };
+            let ticks = self.zero.ticks(held.at, VIDEO_CLOCK_HZ);
+            if ticks < 0 {
+                self.control.send(Control::Return(held.lease)).ok();
+                continue;
+            }
+            held.frame.timestamp = strictly_after(self.last_frame, ticks as u32);
+            self.last_frame = Some(held.frame.timestamp);
+            return Some(&self.current.insert(held).frame);
+        }
+        None
+    }
+
+    fn refuse_dmabuf(&mut self, modifier: Option<u64>) {
+        self.control.send(Control::Refuse(modifier)).ok();
+    }
+
     fn next_frame(&mut self, into: &mut VideoFrame) -> bool {
-        while let Ok(mut slot) = self.filled.pop() {
+        self.give_back();
+        while !self.next_is_dmabuf()
+            && let Ok(mut slot) = self.filled.pop()
+        {
             let picture = slot.picture.take();
             let stamped = picture.as_ref().and_then(|picture| {
                 let ticks = self.zero.ticks(picture.at, VIDEO_CLOCK_HZ);
@@ -351,11 +430,20 @@ fn monotonic_nanos() -> i64 {
 
 impl Drop for PipeWireCapture {
     fn drop(&mut self) {
-        self.quit.send(()).ok();
+        self.control.send(Control::Quit).ok();
         if let Some(thread) = self.thread.take() {
             thread.join().ok();
         }
     }
+}
+
+/// Messages from the share thread to the PipeWire thread.
+enum Control {
+    Quit,
+    /// The share thread is done with a lent buffer.
+    Return(Lease),
+    /// Stops offering one modifier, or all of them, and renegotiates.
+    Refuse(Option<u64>),
 }
 
 fn run(
@@ -364,7 +452,7 @@ fn run(
     config: CaptureConfig,
     state: StreamState,
     ended: Arc<AtomicBool>,
-    quit: pw::channel::Receiver<()>,
+    control: pw::channel::Receiver<Control>,
     ready: &mpsc::SyncSender<Result<(), CaptureError>>,
 ) -> Result<(), CaptureError> {
     pw::init();
@@ -385,7 +473,18 @@ fn run(
         },
     )
     .map_err(failed)?;
-    let buffers = serialize(buffers_param())?;
+    let buffers = Buffers {
+        dmabuf: serialize(buffers_param(1 << spa::sys::SPA_DATA_DmaBuf))?,
+        shared: serialize(buffers_param(
+            (1 << spa::sys::SPA_DATA_MemPtr) | (1 << spa::sys::SPA_DATA_MemFd),
+        ))?,
+    };
+    let offers = if cfg!(feature = "ffmpeg") {
+        dmabuf_offers(egl::dmabuf_modifiers)
+    } else {
+        Vec::new()
+    };
+    let lent = state.lent.clone();
     let _listener = stream
         .add_local_listener_with_user_data(state)
         .state_changed(move |_, _, _, new| {
@@ -400,30 +499,160 @@ fn run(
             on_param_changed(stream, state, id, param, &buffers);
         })
         .process(on_process)
+        .remove_buffer(|_, state, buffer| state.lent.forget(buffer))
         .register()
         .map_err(failed)?;
-    let format = serialize(format_param(config))?;
-    let format = Pod::from_bytes(&format)
-        .ok_or_else(|| CaptureError::Failed("bad format parameters".into()))?;
+    let formats = format_params(config, &offers)?;
     stream
         .connect(
             Direction::Input,
             Some(node),
             StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
-            &mut [format],
+            &mut pods(&formats)?,
         )
         .map_err(failed)?;
-    let _quit = quit.attach(mainloop.loop_(), {
+    let raw = NonNull::from(&*stream);
+    let offers = RefCell::new(offers);
+    let _control = control.attach(mainloop.loop_(), {
         let mainloop = mainloop.clone();
-        move |()| mainloop.quit()
+        move |message| {
+            // SAFETY: this handler is detached when `_control` drops, before `stream`.
+            let stream = unsafe { raw.as_ref() };
+            match message {
+                Control::Quit => mainloop.quit(),
+                Control::Return(lease) => {
+                    if let Some(buffer) = lent.take_back(lease) {
+                        // SAFETY: the lease was live, so the buffer is still the stream's
+                        // and dequeued.
+                        unsafe { stream.queue_raw_buffer(buffer.as_ptr()) };
+                    }
+                }
+                Control::Refuse(modifier) => {
+                    if let Ok(mut offers) = offers.try_borrow_mut() {
+                        renegotiate(stream, config, &mut offers, modifier);
+                    }
+                }
+            }
+        }
     });
     ready.send(Ok(())).ok();
     mainloop.run();
     Ok(())
 }
 
-/// Offers NV12 first, then the packed RGB formats, at the configured size, capped at its fps.
-fn format_param(config: CaptureConfig) -> Object {
+fn renegotiate(
+    stream: &Stream,
+    config: CaptureConfig,
+    offers: &mut Vec<Offer>,
+    modifier: Option<u64>,
+) {
+    refuse(offers, modifier);
+    warn!(
+        ?modifier,
+        "capturing in GPU memory failed; {} formats left there",
+        offers.len()
+    );
+    let updated = format_params(config, offers)
+        .and_then(|formats| stream.update_params(&mut pods(&formats)?).map_err(failed));
+    if let Err(e) = updated {
+        warn!("couldn't renegotiate the screen capture: {e}");
+    }
+}
+
+/// A format offered in GPU memory and the modifiers it is offered with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Offer {
+    format: VideoFormat,
+    modifiers: Vec<u64>,
+}
+
+/// One offer per format in GPU memory that `modifiers_of` gives modifiers for.
+fn dmabuf_offers(modifiers_of: impl Fn(u32) -> Vec<u64>) -> Vec<Offer> {
+    DMABUF_FORMATS
+        .iter()
+        .map(|&(format, fourcc)| Offer {
+            format,
+            modifiers: modifiers_of(fourcc),
+        })
+        .filter(|offer| !offer.modifiers.is_empty())
+        .collect()
+}
+
+/// Drops `modifier` from every offer, or every offer without one.
+fn refuse(offers: &mut Vec<Offer>, modifier: Option<u64>) {
+    match modifier {
+        Some(modifier) => {
+            for offer in offers.iter_mut() {
+                offer.modifiers.retain(|offered| *offered != modifier);
+            }
+            offers.retain(|offer| !offer.modifiers.is_empty());
+        }
+        None => offers.clear(),
+    }
+}
+
+/// The formats to offer: each one in GPU memory first, then all of them in shared memory.
+fn format_params(config: CaptureConfig, offers: &[Offer]) -> Result<Vec<Vec<u8>>, CaptureError> {
+    offers
+        .iter()
+        .map(|offer| {
+            let format = spa::pod::property!(FormatProperties::VideoFormat, Id, offer.format);
+            format_param(config, format, Some(modifier_property(&offer.modifiers)))
+        })
+        .chain(std::iter::once(format_param(
+            config,
+            shared_formats(),
+            None,
+        )))
+        .map(serialize)
+        .collect()
+}
+
+fn pods(params: &[Vec<u8>]) -> Result<Vec<&Pod>, CaptureError> {
+    params
+        .iter()
+        .map(|bytes| {
+            Pod::from_bytes(bytes)
+                .ok_or_else(|| CaptureError::Failed("bad format parameters".into()))
+        })
+        .collect()
+}
+
+/// NV12 first, then the packed RGB formats.
+fn shared_formats() -> Property {
+    spa::pod::property!(
+        FormatProperties::VideoFormat,
+        Choice,
+        Enum,
+        Id,
+        VideoFormat::NV12,
+        VideoFormat::NV12,
+        VideoFormat::BGRx,
+        VideoFormat::BGRA,
+        VideoFormat::RGBx,
+        VideoFormat::RGBA,
+    )
+}
+
+/// The modifiers as a choice the producer must pick from and fixate itself.
+fn modifier_property(modifiers: &[u64]) -> Property {
+    let modifiers: Vec<i64> = modifiers.iter().map(|m| *m as i64).collect();
+    Property {
+        key: spa::sys::SPA_FORMAT_VIDEO_modifier,
+        flags: PropertyFlags::MANDATORY
+            | PropertyFlags::from_bits_retain(spa::sys::SPA_POD_PROP_FLAG_DONT_FIXATE),
+        value: Value::Choice(ChoiceValue::Long(Choice(
+            ChoiceFlags::empty(),
+            ChoiceEnum::Enum {
+                default: modifiers.first().copied().unwrap_or_default(),
+                alternatives: modifiers,
+            },
+        ))),
+    }
+}
+
+/// `format`, and `modifier` if given, at the configured size, capped at its fps.
+fn format_param(config: CaptureConfig, format: Property, modifier: Option<Property>) -> Object {
     let size = Rectangle {
         width: u32::try_from(config.width).unwrap_or(MAX_SIDE),
         height: u32::try_from(config.height).unwrap_or(MAX_SIDE),
@@ -432,23 +661,10 @@ fn format_param(config: CaptureConfig) -> Object {
         num: config.fps.max(1),
         denom: 1,
     };
-    spa::pod::object!(
-        SpaTypes::ObjectParamFormat,
-        ParamType::EnumFormat,
+    let mut properties = vec![
         spa::pod::property!(FormatProperties::MediaType, Id, MediaType::Video),
         spa::pod::property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
-        spa::pod::property!(
-            FormatProperties::VideoFormat,
-            Choice,
-            Enum,
-            Id,
-            VideoFormat::NV12,
-            VideoFormat::NV12,
-            VideoFormat::BGRx,
-            VideoFormat::BGRA,
-            VideoFormat::RGBx,
-            VideoFormat::RGBA,
-        ),
+        format,
         spa::pod::property!(
             FormatProperties::VideoSize,
             Choice,
@@ -485,12 +701,17 @@ fn format_param(config: CaptureConfig) -> Object {
             Fraction { num: 1, denom: 1 },
             fps
         ),
-    )
+    ];
+    properties.extend(modifier);
+    Object {
+        type_: SpaTypes::ObjectParamFormat.as_raw(),
+        id: ParamType::EnumFormat.as_raw(),
+        properties,
+    }
 }
 
-/// Asks for buffers in shared memory the stream can map.
-fn buffers_param() -> Object {
-    let types = (1 << spa::sys::SPA_DATA_MemPtr) | (1 << spa::sys::SPA_DATA_MemFd);
+/// Asks for buffers of the given data types.
+fn buffers_param(types: i32) -> Object {
     spa::pod::object!(
         SpaTypes::ObjectParamBuffers,
         ParamType::Buffers,
@@ -515,12 +736,168 @@ fn serialize(object: Object) -> Result<Vec<u8>, CaptureError> {
         .map_err(|e| CaptureError::Failed(format!("PipeWire parameters: {e:?}")))
 }
 
+/// The Buffers parameter for each kind of negotiated format, serialized ahead of time.
+struct Buffers {
+    dmabuf: Vec<u8>,
+    shared: Vec<u8>,
+}
+
 struct StreamState {
     layout: Option<Layout>,
     free: rtrb::Consumer<Slot>,
     filled: rtrb::Producer<Slot>,
     spare: Option<Slot>,
     dropped: Arc<AtomicU64>,
+    lent: Rc<Lent>,
+}
+
+impl StreamState {
+    /// Copies or lends out the dequeued `buffer`. True when it was lent, so it must not be
+    /// queued back yet.
+    fn take(&mut self, buffer: NonNull<pw::sys::pw_buffer>) -> bool {
+        let Some(layout) = self.layout else {
+            return false;
+        };
+        // SAFETY: the buffer is dequeued, so its data is ours until it is queued back.
+        let datas = unsafe { datas(buffer) };
+        let Some(mut slot) = self.spare.take().or_else(|| self.free.pop().ok()) else {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            return false;
+        };
+        let at = monotonic_nanos();
+        let in_gpu_memory = datas.first().is_some_and(|d| d.type_() == DataType::DmaBuf);
+        let lent = match layout.drm {
+            Some(drm) if in_gpu_memory => {
+                let frame = dmabuf_of(datas, layout, drm);
+                let Some((frame, lease)) = frame.zip(self.lent.lend(buffer)) else {
+                    self.dropped.fetch_add(1, Ordering::Relaxed);
+                    self.spare = Some(slot);
+                    return false;
+                };
+                slot.dmabuf = Some(HeldDmaBuf { lease, frame, at });
+                true
+            }
+            _ => {
+                match copy_buffer(datas, layout, &mut slot) {
+                    Copied::Planes(planes) => {
+                        slot.picture = Some(Picture { layout, planes, at });
+                    }
+                    Copied::TooSmall => {
+                        slot.picture = None;
+                        self.dropped.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Copied::Nothing => {
+                        self.spare = Some(slot);
+                        return false;
+                    }
+                }
+                false
+            }
+        };
+        if let Err(rtrb::PushError::Full(mut slot)) = self.filled.push(slot) {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            if let Some(held) = slot.dmabuf.take() {
+                self.lent.take_back(held.lease);
+            }
+            self.spare = Some(slot);
+            return false;
+        }
+        lent
+    }
+}
+
+/// # Safety
+/// `buffer` must be dequeued from a stream and not queued back while the slice lives.
+unsafe fn datas<'a>(buffer: NonNull<pw::sys::pw_buffer>) -> &'a mut [Data] {
+    // SAFETY: a dequeued pw_buffer points at a spa_buffer with `n_datas` datas, and Data
+    // is a transparent spa_data.
+    unsafe {
+        let buffer = buffer.as_ref().buffer;
+        if buffer.is_null() || (*buffer).datas.is_null() {
+            return &mut [];
+        }
+        std::slice::from_raw_parts_mut((*buffer).datas.cast::<Data>(), (*buffer).n_datas as usize)
+    }
+}
+
+/// The planes of a buffer in GPU memory, with their file descriptors duplicated so they
+/// outlive the buffer's removal from the stream.
+fn dmabuf_of(datas: &[Data], layout: Layout, drm: Drm) -> Option<DmaBuf> {
+    let mut planes = [const { None }; MAX_PLANES];
+    let dmabufs = datas.iter().filter(|d| d.type_() == DataType::DmaBuf);
+    for (data, plane) in dmabufs.zip(&mut planes) {
+        let chunk = data.chunk();
+        if chunk.flags().contains(ChunkFlags::CORRUPTED) {
+            return None;
+        }
+        *plane = Some(DmaBufPlane {
+            fd: duplicate(data.fd())?,
+            offset: chunk.offset(),
+            stride: u32::try_from(chunk.stride()).ok()?,
+        });
+    }
+    planes.first()?.as_ref()?;
+    Some(DmaBuf {
+        width: u32::try_from(layout.width).ok()?,
+        height: u32::try_from(layout.height).ok()?,
+        fourcc: drm.fourcc,
+        modifier: drm.modifier,
+        planes,
+        timestamp: 0,
+    })
+}
+
+fn duplicate(fd: RawFd) -> Option<OwnedFd> {
+    // SAFETY: F_DUPFD_CLOEXEC only reads `fd`; a non-negative result is a new descriptor
+    // nothing else owns.
+    let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+    // SAFETY: see above.
+    (copy >= 0).then(|| unsafe { OwnedFd::from_raw_fd(copy) })
+}
+
+/// PipeWire buffers lent to the share thread, so that only ones still in the stream are
+/// queued back.
+#[derive(Default)]
+struct Lent {
+    buffers: [Cell<Option<LentBuffer>>; LENT],
+    next: Cell<u64>,
+}
+
+type LentBuffer = (NonNull<pw::sys::pw_buffer>, Lease);
+
+/// Names one lending of a buffer, never reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Lease(u64);
+
+impl Lent {
+    /// Lends `buffer` out, unless as many as can be tracked already are.
+    fn lend(&self, buffer: NonNull<pw::sys::pw_buffer>) -> Option<Lease> {
+        let free = self.buffers.iter().find(|entry| entry.get().is_none())?;
+        let lease = Lease(self.next.get());
+        self.next.set(lease.0.wrapping_add(1));
+        free.set(Some((buffer, lease)));
+        Some(lease)
+    }
+
+    /// The buffer behind `lease`, if the stream still has it.
+    fn take_back(&self, lease: Lease) -> Option<NonNull<pw::sys::pw_buffer>> {
+        self.buffers.iter().find_map(|entry| match entry.get() {
+            Some((buffer, lent)) if lent == lease => {
+                entry.set(None);
+                Some(buffer)
+            }
+            _ => None,
+        })
+    }
+
+    /// Forgets `buffer`, which the stream removed.
+    fn forget(&self, buffer: *mut pw::sys::pw_buffer) {
+        for entry in &self.buffers {
+            if entry.get().is_some_and(|(lent, _)| lent.as_ptr() == buffer) {
+                entry.set(None);
+            }
+        }
+    }
 }
 
 fn on_param_changed(
@@ -528,7 +905,7 @@ fn on_param_changed(
     state: &mut StreamState,
     id: u32,
     param: Option<&Pod>,
-    buffers: &[u8],
+    buffers: &Buffers,
 ) {
     if id != ParamType::Format.as_raw() {
         return;
@@ -536,45 +913,37 @@ fn on_param_changed(
     let mut info = VideoInfoRaw::new();
     state.layout = param
         .filter(|param| info.parse(param).is_ok())
-        .and_then(|_| Layout::of(&info));
-    if state.layout.is_some()
-        && let Some(buffers) = Pod::from_bytes(buffers)
-    {
+        .and_then(|param| Layout::of(&info, has_modifier(param)));
+    let Some(layout) = state.layout else {
+        return;
+    };
+    let chosen = match layout.drm {
+        Some(_) => &buffers.dmabuf,
+        None => &buffers.shared,
+    };
+    if let Some(buffers) = Pod::from_bytes(chosen) {
         stream.update_params(&mut [buffers]).ok();
     }
 }
 
+/// Whether a negotiated format carries a modifier, which makes its buffers DMA-BUFs.
+fn has_modifier(format: &Pod) -> bool {
+    format.as_object().is_ok_and(|object| {
+        object
+            .find_prop(Id(spa::sys::SPA_FORMAT_VIDEO_modifier))
+            .is_some()
+    })
+}
+
 fn on_process(stream: &Stream, state: &mut StreamState) {
-    let Some(mut buffer) = stream.dequeue_buffer() else {
+    // SAFETY: the buffer is queued back below unless it was lent; a lent one is queued back
+    // when the share thread returns it.
+    let Some(buffer) = NonNull::new(unsafe { stream.dequeue_raw_buffer() }) else {
         return;
     };
-    let Some(layout) = state.layout else {
-        return;
-    };
-    let Some(mut slot) = state.spare.take().or_else(|| state.free.pop().ok()) else {
-        state.dropped.fetch_add(1, Ordering::Relaxed);
-        return;
-    };
-    match copy_buffer(buffer.datas_mut(), layout, &mut slot) {
-        Copied::Planes(planes) => {
-            slot.picture = Some(Picture {
-                layout,
-                planes,
-                at: monotonic_nanos(),
-            });
-        }
-        Copied::TooSmall => {
-            slot.picture = None;
-            state.dropped.fetch_add(1, Ordering::Relaxed);
-        }
-        Copied::Nothing => {
-            state.spare = Some(slot);
-            return;
-        }
-    }
-    if let Err(rtrb::PushError::Full(slot)) = state.filled.push(slot) {
-        state.dropped.fetch_add(1, Ordering::Relaxed);
-        state.spare = Some(slot);
+    if !state.take(buffer) {
+        // SAFETY: the buffer came from this stream and is not lent.
+        unsafe { stream.queue_raw_buffer(buffer.as_ptr()) };
     }
 }
 
@@ -649,6 +1018,7 @@ struct Slot {
     bytes: Vec<u8>,
     picture: Option<Picture>,
     needed: usize,
+    dmabuf: Option<HeldDmaBuf>,
 }
 
 impl Slot {
@@ -657,8 +1027,54 @@ impl Slot {
             bytes: vec![0; len],
             picture: None,
             needed: 0,
+            dmabuf: None,
         }
     }
+}
+
+/// A captured picture still in GPU memory, as DRM PRIME planes.
+#[derive(Debug)]
+pub struct DmaBuf {
+    pub width: u32,
+    pub height: u32,
+    pub fourcc: u32,
+    pub modifier: u64,
+    pub planes: [Option<DmaBufPlane>; MAX_PLANES],
+    /// Media timestamp, 90 kHz.
+    pub timestamp: u32,
+}
+
+impl DmaBuf {
+    pub fn planes(&self) -> impl Iterator<Item = &DmaBufPlane> {
+        self.planes.iter().flatten()
+    }
+}
+
+#[derive(Debug)]
+pub struct DmaBufPlane {
+    pub fd: OwnedFd,
+    pub offset: u32,
+    pub stride: u32,
+}
+
+/// A frame in GPU memory and the PipeWire buffer it lives in, lent to the share thread.
+#[derive(Debug)]
+struct HeldDmaBuf {
+    lease: Lease,
+    frame: DmaBuf,
+    /// PipeWire time of the graph cycle that delivered the picture, in nanoseconds.
+    at: i64,
+}
+
+/// The DRM format of a negotiated stream in GPU memory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Drm {
+    fourcc: u32,
+    modifier: u64,
+}
+
+const fn fourcc(code: &[u8; 4]) -> u32 {
+    u32::from_le_bytes(*code)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -680,21 +1096,35 @@ struct Layout {
     format: Format,
     width: usize,
     height: usize,
+    /// Set when the buffers are DMA-BUFs.
+    drm: Option<Drm>,
 }
 
 impl Layout {
-    fn of(info: &VideoInfoRaw) -> Option<Self> {
+    fn of(info: &VideoInfoRaw, has_modifier: bool) -> Option<Self> {
         let format = match info.format() {
             VideoFormat::NV12 => Format::Nv12,
             VideoFormat::BGRx | VideoFormat::BGRA => Format::Bgr,
             VideoFormat::RGBx | VideoFormat::RGBA => Format::Rgb,
             _ => return None,
         };
+        let drm = if has_modifier {
+            let (_, fourcc) = DMABUF_FORMATS
+                .iter()
+                .find(|(offered, _)| *offered == info.format())?;
+            Some(Drm {
+                fourcc: *fourcc,
+                modifier: info.modifier(),
+            })
+        } else {
+            None
+        };
         let size = info.size();
         Some(Self {
             format,
             width: usize::try_from(size.width).ok().filter(|w| *w > 0)?,
             height: usize::try_from(size.height).ok().filter(|h| *h > 0)?,
+            drm,
         })
     }
 
@@ -720,6 +1150,7 @@ fn convert(bytes: &[u8], picture: &Picture, into: &mut VideoFrame) {
         format,
         width,
         height,
+        ..
     } = picture.layout;
     if into.width != width || into.height != height {
         *into = VideoFrame::blank(width, height);
@@ -822,7 +1253,12 @@ fn chroma_row(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
 mod tests {
     use std::time::{Duration, Instant};
 
@@ -860,6 +1296,7 @@ mod tests {
                 format,
                 width,
                 height,
+                drm: None,
             },
             planes,
             at: 7,
@@ -947,6 +1384,170 @@ mod tests {
             convert(&bytes, &picture(Format::Bgr, 7, 5, [plane; 2]), &mut frame);
             convert(&bytes, &picture(Format::Nv12, 7, 5, [plane; 2]), &mut frame);
         }
+    }
+
+    const CONFIG: CaptureConfig = CaptureConfig {
+        width: 1920,
+        height: 1080,
+        fps: 60,
+        audio: false,
+    };
+    const TILED: u64 = 0x0200_0000_0000_0b01;
+
+    fn object(bytes: &[u8]) -> Object {
+        match spa::pod::deserialize::PodDeserializer::deserialize_any_from(bytes) {
+            Ok((_, Value::Object(object))) => object,
+            other => panic!("not an object: {other:?}"),
+        }
+    }
+
+    fn modifier_of(object: &Object) -> Option<&Property> {
+        object
+            .properties
+            .iter()
+            .find(|p| p.key == spa::sys::SPA_FORMAT_VIDEO_modifier)
+    }
+
+    #[test]
+    fn gpu_memory_is_offered_first_and_left_to_the_producer_to_fixate() {
+        let offers = dmabuf_offers(|fourcc| match &fourcc.to_le_bytes() {
+            b"XR24" => vec![0, TILED],
+            b"AR24" => vec![TILED],
+            _ => Vec::new(),
+        });
+        assert_eq!(
+            offers,
+            [
+                Offer {
+                    format: VideoFormat::BGRx,
+                    modifiers: vec![0, TILED]
+                },
+                Offer {
+                    format: VideoFormat::BGRA,
+                    modifiers: vec![TILED]
+                },
+            ]
+        );
+        let params: Vec<Object> = format_params(CONFIG, &offers)
+            .unwrap()
+            .iter()
+            .map(|bytes| object(bytes))
+            .collect();
+        assert_eq!(params.len(), 3);
+        let modifier = modifier_of(&params[0]).expect("a modifier on the first format");
+        assert!(modifier.flags.contains(PropertyFlags::MANDATORY));
+        assert!(modifier.flags.bits() & spa::sys::SPA_POD_PROP_FLAG_DONT_FIXATE != 0);
+        match &modifier.value {
+            Value::Choice(ChoiceValue::Long(Choice(_, ChoiceEnum::Enum { alternatives, .. }))) => {
+                assert_eq!(alternatives, &[0, TILED as i64]);
+            }
+            other => panic!("modifiers as {other:?}"),
+        }
+        assert!(modifier_of(&params[1]).is_some());
+        assert!(
+            modifier_of(&params[2]).is_none(),
+            "the shared memory fallback"
+        );
+    }
+
+    #[test]
+    fn a_refused_modifier_is_offered_no_more() {
+        let mut offers = vec![
+            Offer {
+                format: VideoFormat::BGRx,
+                modifiers: vec![0, TILED],
+            },
+            Offer {
+                format: VideoFormat::BGRA,
+                modifiers: vec![TILED],
+            },
+        ];
+        refuse(&mut offers, Some(TILED));
+        assert_eq!(
+            offers,
+            [Offer {
+                format: VideoFormat::BGRx,
+                modifiers: vec![0]
+            }]
+        );
+        refuse(&mut offers, None);
+        assert!(offers.is_empty());
+        let params = format_params(CONFIG, &offers).unwrap();
+        assert_eq!(params.len(), 1);
+        assert!(modifier_of(&object(&params[0])).is_none());
+    }
+
+    fn negotiated(modifier: Option<u64>) -> Option<Layout> {
+        let mut properties = vec![
+            spa::pod::property!(FormatProperties::MediaType, Id, MediaType::Video),
+            spa::pod::property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
+            spa::pod::property!(FormatProperties::VideoFormat, Id, VideoFormat::BGRx),
+            spa::pod::property!(
+                FormatProperties::VideoSize,
+                Rectangle,
+                Rectangle {
+                    width: 2560,
+                    height: 1440
+                }
+            ),
+        ];
+        properties.extend(modifier.map(|modifier| {
+            Property::new(
+                spa::sys::SPA_FORMAT_VIDEO_modifier,
+                Value::Long(modifier as i64),
+            )
+        }));
+        let bytes = serialize(Object {
+            type_: SpaTypes::ObjectParamFormat.as_raw(),
+            id: ParamType::Format.as_raw(),
+            properties,
+        })
+        .unwrap();
+        let pod = Pod::from_bytes(&bytes).unwrap();
+        let mut info = VideoInfoRaw::new();
+        info.parse(pod).unwrap();
+        Layout::of(&info, has_modifier(pod))
+    }
+
+    #[test]
+    fn a_format_with_a_modifier_means_dmabufs() {
+        let layout = negotiated(Some(TILED)).unwrap();
+        assert_eq!(
+            layout.drm,
+            Some(Drm {
+                fourcc: fourcc(b"XR24"),
+                modifier: TILED
+            })
+        );
+        assert_eq!((layout.width, layout.height), (2560, 1440));
+        assert_eq!(
+            negotiated(Some(0)).unwrap().drm.map(|d| d.modifier),
+            Some(0)
+        );
+        assert_eq!(negotiated(None).unwrap().drm, None);
+    }
+
+    #[test]
+    fn only_buffers_still_lent_are_given_back() {
+        let buffer = |n: usize| NonNull::new(std::ptr::without_provenance_mut(n * 64)).unwrap();
+        let lent = Lent::default();
+        let leases: Vec<Lease> = (1..=LENT).map(|n| lent.lend(buffer(n)).unwrap()).collect();
+        assert_eq!(lent.lend(buffer(99)), None, "more than can be tracked");
+
+        assert_eq!(lent.take_back(leases[0]), Some(buffer(1)));
+        assert_eq!(lent.take_back(leases[0]), None, "already given back");
+
+        lent.forget(buffer(2).as_ptr());
+        assert_eq!(lent.take_back(leases[1]), None, "removed by the stream");
+
+        let again = lent.lend(buffer(2)).unwrap();
+        assert_ne!(again, leases[1]);
+        assert_eq!(
+            lent.take_back(leases[1]),
+            None,
+            "an old lease of a reused buffer"
+        );
+        assert_eq!(lent.take_back(again), Some(buffer(2)));
     }
 
     /// A PipeWire video source that sends solid BGRx frames of one colour.

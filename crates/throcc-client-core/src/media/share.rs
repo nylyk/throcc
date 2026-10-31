@@ -77,10 +77,10 @@ impl ShareSender {
         let bound = (capture_config.width, capture_config.height);
         let mut frame = VideoFrame::blank(bound.0, bound.1);
         let first = first_frame(capture.as_mut(), &mut frame);
-        let (width, height) = if first {
-            share_size((frame.width, frame.height), bound)
-        } else {
-            bound
+        let (width, height) = match first {
+            Some(First::Copied) => share_size((frame.width, frame.height), bound),
+            Some(First::InGpuMemory(size)) => share_size(size, bound),
+            None => bound,
         };
         let encoder = Encoder::open(EncoderConfig {
             width,
@@ -115,7 +115,7 @@ impl ShareSender {
             engine,
             tracks,
             frame,
-            unsent: first,
+            unsent: first == Some(First::Copied),
             self_view: self_tx,
             preview: preview.clone(),
         };
@@ -182,6 +182,11 @@ impl Sending {
                 self.encoder.recover(kind);
             }
             self.send_audio(&mut sound);
+            #[cfg(target_os = "linux")]
+            if self.capture.next_dmabuf().is_some() {
+                self.capture.refuse_dmabuf(None);
+                continue;
+            }
             let fresh =
                 std::mem::take(&mut self.unsent) || self.capture.next_frame(&mut self.frame);
             if !fresh {
@@ -228,16 +233,30 @@ impl Sending {
 /// How long a share waits for its first frame to learn the screen's size.
 const FIRST_FRAME_WAIT: Duration = Duration::from_secs(2);
 
+/// The capture's first frame: copied out, or left in GPU memory with only its size kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum First {
+    Copied,
+    InGpuMemory((usize, usize)),
+}
+
 /// Waits for the capture's first frame, which tells the size of what is shared.
-fn first_frame(capture: &mut dyn Capture, into: &mut VideoFrame) -> bool {
+fn first_frame(capture: &mut dyn Capture, into: &mut VideoFrame) -> Option<First> {
     let deadline = Instant::now() + FIRST_FRAME_WAIT;
     while Instant::now() < deadline {
+        #[cfg(target_os = "linux")]
+        if let Some(frame) = capture.next_dmabuf() {
+            return Some(First::InGpuMemory((
+                frame.width as usize,
+                frame.height as usize,
+            )));
+        }
         if capture.next_frame(into) {
-            return true;
+            return Some(First::Copied);
         }
         std::thread::sleep(IDLE);
     }
-    false
+    None
 }
 
 #[derive(Debug, thiserror::Error)]
