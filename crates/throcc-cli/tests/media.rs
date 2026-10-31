@@ -19,7 +19,7 @@ fn synthetic(index: u32, len: usize) -> Bytes {
     Bytes::from(data)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[cfg_attr(
     debug_assertions,
     ignore = "a debug build can't encrypt 20 Mbps on CI runners"
