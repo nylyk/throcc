@@ -9,8 +9,8 @@ use throcc_proto::ids::Role;
 use super::common::{
     avatar, caption, card, chip, ghost_icon, mono, primary, secondary, section, short_key,
 };
-use super::settings::{frame, nav_item, nav_list, row, segmented};
-use crate::app::{Dialog, PictureFor, Screen, ServerPage, ThroccApp};
+use super::settings::{frame, nav_item, nav_list, row, segmented, status_line};
+use crate::app::{Dialog, PictureFor, Screen, ServerPage, ServerStatus, ThroccApp};
 use crate::theme;
 
 pub fn render(
@@ -86,6 +86,7 @@ fn overview(app: &mut ThroccApp, is_admin: bool, cx: &mut Context<ThroccApp>) ->
                 .children(has_picture.then(|| {
                     secondary("remove-server-picture", "Remove").on_click(cx.listener(
                         |app, _, _, cx| {
+                            app.server_status = Some(ServerStatus::Saving);
                             app.command(Command::SetServerPicture(None));
                             cx.notify();
                         },
@@ -100,6 +101,7 @@ fn overview(app: &mut ThroccApp, is_admin: bool, cx: &mut Context<ThroccApp>) ->
             .child(
                 primary("save-server-name", "Save").on_click(cx.listener(|app, _, _, cx| {
                     let name = app.server_name.read(cx).value().trim().to_owned();
+                    app.server_status = Some(ServerStatus::Saving);
                     app.command(Command::SetServerName((!name.is_empty()).then_some(name)));
                     cx.notify();
                 })),
@@ -113,12 +115,14 @@ fn overview(app: &mut ThroccApp, is_admin: bool, cx: &mut Context<ThroccApp>) ->
         .flex_col()
         .gap_4()
         .child(picture_row)
-        .children(
-            app.server_picture_error
-                .clone()
-                .map(|error| caption(error).text_color(theme::danger_text())),
-        )
         .child(row("Name", name))
+        .children(app.server_status.clone().map(|status| {
+            status_line(match status {
+                ServerStatus::Saving => caption("Saving…"),
+                ServerStatus::Saved => caption("Saved.").text_color(theme::ok_text()),
+                ServerStatus::Failed(reason) => caption(reason).text_color(theme::danger_text()),
+            })
+        }))
         .child(row("Address", mono(server.address.clone())))
         .into_any_element()
 }

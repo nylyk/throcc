@@ -577,16 +577,20 @@ impl Session {
                 self.push_profile().await;
             }
             Command::FetchAvatar(hash) => self.fetch_avatar(hash).await,
-            Command::SetServerName(name) => self.simple(Request::SetServerName(name)).await,
+            Command::SetServerName(name) => {
+                let response = self.call.request(Request::SetServerName(name)).await;
+                self.server_profile_answered(response);
+            }
             Command::SetServerPicture(picture) => {
                 let avatar = match picture {
                     Some(bytes) => match self.call.request(Request::SetAvatar(bytes)).await {
                         Ok(Response::AvatarHash(hash)) => Some(hash),
-                        other => return self.refused(other),
+                        other => return self.server_profile_answered(other),
                     },
                     None => None,
                 };
-                self.simple(Request::SetServerAvatar(avatar)).await;
+                let response = self.call.request(Request::SetServerAvatar(avatar)).await;
+                self.server_profile_answered(response);
             }
             Command::CreateRoom(name) => self.simple(Request::CreateRoom { name }).await,
             Command::RenameRoom(room, name) => {
@@ -705,6 +709,13 @@ impl Session {
             Ok(Response::Ok) => {}
             other => self.refused(other),
         }
+    }
+
+    fn server_profile_answered(&self, response: anyhow::Result<Response>) {
+        self.shared.emit(match response {
+            Ok(Response::Ok) => Event::ServerProfileSaved,
+            other => Event::ServerProfileRefused(refusal(other)),
+        });
     }
 
     fn refused(&self, response: anyhow::Result<Response>) {

@@ -76,6 +76,14 @@ pub enum ProfileStatus {
     Failed(String),
 }
 
+/// How the last change on the server page went.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ServerStatus {
+    Saving,
+    Saved,
+    Failed(String),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Dialog {
     Share,
@@ -115,7 +123,7 @@ pub struct ThroccApp {
     pub room_name: Entity<InputState>,
     pub server_name: Entity<InputState>,
     /// Why the server's new picture couldn't be used.
-    pub server_picture_error: Option<String>,
+    pub server_status: Option<ServerStatus>,
     /// One hex field per palette colour, in [`theme::Palette::LABELS`] order.
     pub palette_fields: Vec<Entity<InputState>>,
     pub pictures: std::collections::HashMap<Hash, Arc<RenderImage>>,
@@ -221,7 +229,7 @@ impl ThroccApp {
             name,
             room_name,
             server_name,
-            server_picture_error: None,
+            server_status: None,
             palette_fields,
             pictures: std::collections::HashMap::new(),
             joining: false,
@@ -336,6 +344,10 @@ impl ThroccApp {
             Event::ProfileRefused(reason) => {
                 self.profile_preview = None;
                 self.profile_status = Some(ProfileStatus::Failed(reason));
+            }
+            Event::ServerProfileSaved => self.server_status = Some(ServerStatus::Saved),
+            Event::ServerProfileRefused(reason) => {
+                self.server_status = Some(ServerStatus::Failed(reason))
             }
         }
         cx.notify();
@@ -602,7 +614,7 @@ impl ThroccApp {
 
     /// Puts the server's name in the server page's name field.
     pub fn fill_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.server_picture_error = None;
+        self.server_status = None;
         let name = self
             .state
             .server
@@ -646,10 +658,12 @@ impl ThroccApp {
                         app.profile_status = Some(ProfileStatus::Failed(message))
                     }
                     (PictureFor::Server, Ok(bytes)) => {
-                        app.server_picture_error = None;
+                        app.server_status = Some(ServerStatus::Saving);
                         app.command(Command::SetServerPicture(Some(bytes)));
                     }
-                    (PictureFor::Server, Err(message)) => app.server_picture_error = Some(message),
+                    (PictureFor::Server, Err(message)) => {
+                        app.server_status = Some(ServerStatus::Failed(message))
+                    }
                 }
                 cx.notify();
             })

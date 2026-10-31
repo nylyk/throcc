@@ -273,7 +273,7 @@ fn only_admins_name_the_server_and_everyone_sees_it() {
     bob.command(Command::SetServerName(Some("Bob's".into())));
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if let Ok(throcc_client_core::client::Event::Notice(_)) = events.try_recv() {
+        if let Ok(throcc_client_core::client::Event::ServerProfileRefused(_)) = events.try_recv() {
             break;
         }
         assert!(Instant::now() < deadline, "bob's rename wasn't refused");

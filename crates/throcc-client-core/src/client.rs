@@ -88,6 +88,10 @@ pub enum Event {
     ProfileSaved,
     /// The server refused our new name or picture, for this reason.
     ProfileRefused(String),
+    /// The server took the server's new name or picture.
+    ServerProfileSaved,
+    /// The server refused the server's new name or picture, for this reason.
+    ServerProfileRefused(String),
 }
 
 /// The UI's view of a client. Implemented by the real client and by [`MockClient`].
@@ -342,11 +346,14 @@ impl ClientApi for MockClient {
                 });
                 self.events.send(Event::ProfileSaved).ok();
             }
-            Command::SetServerName(name) => self.update(|s| {
-                if let Some(server) = s.server.as_mut() {
-                    server.name = name;
-                }
-            }),
+            Command::SetServerName(name) => {
+                self.update(|s| {
+                    if let Some(server) = s.server.as_mut() {
+                        server.name = name;
+                    }
+                });
+                self.events.send(Event::ServerProfileSaved).ok();
+            }
             Command::SetServerPicture(picture) => {
                 let hash = picture.map(|bytes| self.keep_avatar(bytes));
                 self.update(|s| {
@@ -354,6 +361,7 @@ impl ClientApi for MockClient {
                         server.avatar = hash;
                     }
                 });
+                self.events.send(Event::ServerProfileSaved).ok();
             }
             Command::SetAvatar(picture) => {
                 let hash = picture.map(|bytes| self.keep_avatar(bytes));

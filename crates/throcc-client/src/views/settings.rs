@@ -201,6 +201,11 @@ impl<T: Styled> PageHighlight for T {
     }
 }
 
+/// A card's status message, under the Save button at the right.
+pub(super) fn status_line(message: impl IntoElement) -> Div {
+    div().flex().justify_end().child(message)
+}
+
 pub(super) fn row(label: &str, control: impl IntoElement) -> Div {
     div()
         .flex()
@@ -319,7 +324,7 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 )
                 .child(row("Name", name_field))
                 .children(app.profile_status.clone().map(|status| {
-                    match status {
+                    status_line(match status {
                         ProfileStatus::Saving => caption("Saving…"),
                         ProfileStatus::Saved => caption("Saved.").text_color(theme::ok_text()),
                         ProfileStatus::UntilJoined => {
@@ -329,7 +334,7 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                             "Kept on this computer, but this server refused it: {reason}"
                         ))
                         .text_color(theme::danger_text()),
-                    }
+                    })
                 })),
         )
         .into_any_element()
