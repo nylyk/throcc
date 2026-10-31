@@ -7,7 +7,6 @@
 
 mod desktop_audio;
 
-use std::collections::VecDeque;
 use std::io::Cursor;
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
@@ -32,9 +31,9 @@ use pw::stream::{Stream, StreamBox, StreamFlags};
 use throcc_proto::frame::{VIDEO_CLOCK_HZ, timestamp_before};
 use tracing::warn;
 
+use super::clock::{AudioChunker, ShareZero};
 use super::{Capture, CaptureConfig, CaptureError};
 use crate::media::audio::SAMPLE_RATE;
-use crate::media::jitter::FRAME;
 use crate::media::share_audio::STEREO_FRAME;
 use crate::media::video::frame::VideoFrame;
 use desktop_audio::DesktopAudio;
@@ -42,8 +41,6 @@ use desktop_audio::DesktopAudio;
 /// Frame buffers shared by the PipeWire thread and the share thread.
 const POOL: usize = 4;
 const MAX_SIDE: u32 = 8192;
-/// An audio buffer further than this from where the previous one ended starts afresh.
-const AUDIO_SLIP: i64 = FRAME as i64 / 2;
 const NANOS: i128 = 1_000_000_000;
 
 /// A portal screen cast: the session the person picked and the PipeWire stream reading it.
@@ -207,11 +204,8 @@ pub(crate) struct PipeWireCapture {
     thread: Option<JoinHandle<()>>,
     audio: Option<DesktopAudio>,
     /// PipeWire time, in nanoseconds, that both media clocks count from.
-    zero: Option<i64>,
-    /// Captured audio not yet taken, left and right interleaved.
-    pending: VecDeque<f32>,
-    /// Timestamp of the first pending sample, in 48 kHz ticks from `zero`.
-    pending_at: i64,
+    zero: ShareZero,
+    chunker: AudioChunker,
     last_frame: Option<u32>,
 }
 
@@ -261,9 +255,8 @@ impl PipeWireCapture {
                 quit,
                 thread: Some(thread),
                 audio,
-                zero: None,
-                pending: VecDeque::new(),
-                pending_at: 0,
+                zero: ShareZero::new(NANOS as i64),
+                chunker: AudioChunker::default(),
                 last_frame: None,
             }),
             Ok(Err(e)) => {
@@ -283,7 +276,7 @@ impl Capture for PipeWireCapture {
         while let Ok(mut slot) = self.filled.pop() {
             let picture = slot.picture.take();
             let stamped = picture.as_ref().and_then(|picture| {
-                let ticks = since_zero(&mut self.zero, picture.at, VIDEO_CLOCK_HZ);
+                let ticks = self.zero.ticks(picture.at, VIDEO_CLOCK_HZ);
                 Some((picture, u32::try_from(ticks).ok()?))
             });
             if let Some((picture, timestamp)) = stamped {
@@ -311,27 +304,17 @@ impl Capture for PipeWireCapture {
     }
 
     fn next_audio(&mut self, into: &mut [f32; STEREO_FRAME]) -> Option<u32> {
-        while self.pending.len() < STEREO_FRAME {
-            let (at, samples) = self.audio.as_mut()?.pop()?;
-            let ticks = since_zero(&mut self.zero, at, SAMPLE_RATE);
-            let expected = self.pending_at + (self.pending.len() / 2) as i64;
-            if self.pending.is_empty() || (ticks - expected).abs() > AUDIO_SLIP {
-                self.pending.clear();
-                self.pending_at = ticks;
+        let audio = self.audio.as_mut()?;
+        loop {
+            while self.chunker.needs_more() {
+                let (at, samples) = audio.pop()?;
+                let ticks = self.zero.ticks(at, SAMPLE_RATE);
+                self.chunker.push(ticks, samples);
             }
-            self.pending.extend(samples);
+            if let Some(timestamp) = self.chunker.take(into) {
+                return Some(timestamp);
+            }
         }
-        if self.pending_at < 0 {
-            self.pending.drain(..STEREO_FRAME);
-            self.pending_at += FRAME as i64;
-            return None;
-        }
-        for (slot, sample) in into.iter_mut().zip(self.pending.drain(..STEREO_FRAME)) {
-            *slot = sample;
-        }
-        let timestamp = self.pending_at as u32;
-        self.pending_at += FRAME as i64;
-        Some(timestamp)
     }
 }
 
@@ -352,13 +335,6 @@ fn monotonic_nanos() -> i64 {
     // SAFETY: clock_gettime only writes the timespec it is given.
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
     now.tv_sec * NANOS as i64 + now.tv_nsec
-}
-
-/// Ticks of a `rate` Hz clock from `zero`, which the first frame or audio buffer taken sets,
-/// to `at`, both in nanoseconds of PipeWire time.
-fn since_zero(zero: &mut Option<i64>, at: i64, rate: u32) -> i64 {
-    let zero = *zero.get_or_insert(at);
-    (i128::from(at - zero) * i128::from(rate) / NANOS) as i64
 }
 
 impl Drop for PipeWireCapture {

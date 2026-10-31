@@ -23,6 +23,8 @@ pub struct JitterStats {
     pub overflow: u64,
     pub accelerated: u64,
     pub rebuffered: u64,
+    /// Times playout jumped to a packet off its 20 ms grid.
+    pub realigned: u64,
 }
 
 /// What filled the last pull.
@@ -189,7 +191,14 @@ impl JitterBuffer {
     }
 
     fn decode_next(&mut self) -> Option<Played> {
-        let next = self.next_ts?;
+        let mut next = self.next_ts?;
+        if !self.packets.contains_key(&next)
+            && let Some(&first) = self.packets.keys().next()
+            && first.wrapping_sub(next) % FRAME as u32 != 0
+        {
+            next = first;
+            self.stats.realigned += 1;
+        }
         let following = next.wrapping_add(FRAME as u32);
         let kind = if let Some(packet) = self.packets.remove(&next) {
             self.decode(&packet, DecodeMode::Normal);
@@ -368,6 +377,20 @@ mod tests {
         }
         assert!(energy[0] > 100.0 * energy[1].max(1e-6), "{energy:?}");
         assert_eq!(jb.playout_timestamp(), Some(7 * PULL as u32));
+    }
+
+    #[test]
+    fn packets_off_the_grid_play_after_one_realignment() {
+        let mut jb = JitterBuffer::new(Channels::Mono).unwrap();
+        let all = packets(12);
+        for (i, p) in all.iter().enumerate() {
+            let shift = if i < 4 { 0 } else { 333 };
+            jb.insert((i * FRAME + shift) as u32, p, (i * FRAME) as u64);
+        }
+        let played = drain(&mut jb, 24);
+        assert_eq!(jb.stats.realigned, 1);
+        assert_eq!(jb.stats.normal, 12, "{played:?}");
+        assert_eq!(jb.stats.concealed, 0);
     }
 
     #[test]

@@ -333,7 +333,7 @@ impl Capture for WinCapture {
             while self.chunker.needs_more() {
                 let packet = audio.packets.pop().ok()?;
                 let ticks = self.zero.ticks(packet.at, SAMPLE_RATE);
-                self.chunker.push(ticks, packet.samples());
+                self.chunker.push(ticks, packet.samples().iter().copied());
             }
             if let Some(timestamp) = self.chunker.take(into) {
                 return Some(timestamp);
