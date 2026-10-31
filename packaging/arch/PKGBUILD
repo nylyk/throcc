@@ -12,7 +12,7 @@ makedepends=('clang' 'ffnvcodec-headers' 'git' 'nasm' 'pkgconf' 'rust-bindgen' '
 optdepends=('mesa: VA-API video encoding on AMD GPUs'
             'intel-media-driver: VA-API video encoding on Intel GPUs'
             'nvidia-utils: NVENC video encoding on NVIDIA GPUs')
-options=('!lto')
+options=('!lto' '!debug')
 _ffmpeg=8.1.3
 source=("throcc::git+${THROCC_GIT:-https://github.com/nylyk/throcc.git}"
         "https://ffmpeg.org/releases/ffmpeg-$_ffmpeg.tar.xz")
