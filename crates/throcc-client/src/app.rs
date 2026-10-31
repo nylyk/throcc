@@ -120,6 +120,8 @@ pub struct ThroccApp {
     pub palette_fields: Vec<Entity<InputState>>,
     pub pictures: std::collections::HashMap<Hash, Arc<RenderImage>>,
     pub joining: bool,
+    /// Whether the join screen shows the form for a new server over the list of known ones.
+    pub adding_server: bool,
     pub join_error: Option<String>,
     pub profile_status: Option<ProfileStatus>,
     /// The picture just chosen on the profile page, or `Some(None)` once removed, shown
@@ -223,6 +225,7 @@ impl ThroccApp {
             palette_fields,
             pictures: std::collections::HashMap::new(),
             joining: false,
+            adding_server: false,
             join_error: None,
             profile_status: None,
             profile_preview: None,
@@ -287,6 +290,7 @@ impl ThroccApp {
         self.client = Some(client);
         self.screen = Screen::Main;
         self.joining = false;
+        self.adding_server = false;
         self.join_error = None;
         let window_handle = window.window_handle();
         self.events = Some(cx.spawn(async move |this, cx| {

@@ -9,7 +9,9 @@ use throcc_client_core::connection::ConnectError;
 use throcc_client_core::control::LoginError;
 use throcc_proto::messages::AuthError;
 
-use super::common::{avatar, caption, card, mono, moves_window, primary, section, title};
+use super::common::{
+    avatar, caption, card, icon, mono, moves_window, primary, secondary, section, title,
+};
 use crate::app::ThroccApp;
 use crate::theme;
 
@@ -42,6 +44,17 @@ pub fn render(
     cx: &mut Context<ThroccApp>,
 ) -> impl IntoElement {
     let servers = app.known_servers.clone();
+    let error_box = |error: String| {
+        div()
+            .p_3()
+            .rounded(theme::RADIUS_ROW)
+            .bg(theme::warn_bg())
+            .border_1()
+            .border_color(theme::warn_border())
+            .text_color(theme::warn_text())
+            .text_size(px(13.))
+            .child(error)
+    };
     let form = card()
         .w(px(420.))
         .flex()
@@ -65,26 +78,30 @@ pub fn render(
                 .child(Input::new(&app.code).font_family(theme::mono_font()))
                 .child(caption("The code also proves you reached the real server. Leave it empty for a server you've joined before.")),
         )
-        .children(app.join_error.clone().map(|error| {
-            div()
-                .p_3()
-                .rounded(theme::RADIUS_ROW)
-                .bg(theme::warn_bg())
-                .border_1()
-                .border_color(theme::warn_border())
-                .text_color(theme::warn_text())
-                .text_size(px(13.))
-                .child(error)
-        }))
+        .children(app.join_error.clone().map(error_box))
         .child(
-            primary("join", if app.joining { "Joining…" } else { "Join" })
-                .w_full()
-                .h(theme::TOUCH)
-                .disabled(app.joining)
-                .on_click(cx.listener(|app, _, window, cx| {
-                    app.join(window, cx);
-                    cx.notify();
-                })),
+            div()
+                .flex()
+                .gap_2()
+                .children((!servers.is_empty()).then(|| {
+                    secondary("back-to-servers", "Back")
+                        .h(theme::TOUCH)
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.adding_server = false;
+                            app.join_error = None;
+                            cx.notify();
+                        }))
+                }))
+                .child(
+                    primary("join", if app.joining { "Joining…" } else { "Join" })
+                        .flex_1()
+                        .h(theme::TOUCH)
+                        .disabled(app.joining)
+                        .on_click(cx.listener(|app, _, window, cx| {
+                            app.join(window, cx);
+                            cx.notify();
+                        })),
+                ),
         );
 
     let known = card()
@@ -130,7 +147,42 @@ pub fn render(
                             cx.notify();
                         }))
                 }),
-        );
+        )
+        .child(
+            div()
+                .id("add-server")
+                .flex()
+                .items_center()
+                .gap_3()
+                .p_2()
+                .min_h(theme::TOUCH)
+                .rounded(theme::RADIUS_ROW)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme::raised()))
+                .text_color(theme::text_2())
+                .child(
+                    div()
+                        .size(px(28.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icon("plus").size(px(16.))),
+                )
+                .child(div().font_weight(FontWeight::MEDIUM).child("Add server"))
+                .on_click(cx.listener(|app, _, window, cx| {
+                    app.adding_server = true;
+                    app.join_error = None;
+                    app.address.update(cx, |s, cx| {
+                        s.set_value("", window, cx);
+                        s.focus(window, cx);
+                    });
+                    app.code.update(cx, |s, cx| s.set_value("", window, cx));
+                    cx.notify();
+                })),
+        )
+        .children(app.joining.then(|| caption("Joining…")))
+        .children(app.join_error.clone().map(error_box));
+    let adding = servers.is_empty() || app.adding_server;
 
     div()
         .size_full()
@@ -155,6 +207,9 @@ pub fn render(
                 .font_weight(FontWeight::SEMIBOLD)
                 .child("throcc"),
         )
-        .child(form)
-        .children((!servers.is_empty()).then_some(known))
+        .child(if adding {
+            form.into_any_element()
+        } else {
+            known.into_any_element()
+        })
 }
