@@ -37,17 +37,7 @@ async fn share_pattern(
     wanted: ShareConfig,
     epoch: Instant,
 ) -> Option<(Arc<ShareSender>, Share, Arc<Mutex<Vec<Instant>>>)> {
-    wait_for("bob to learn alice's tracks", || {
-        bob.engine.keys().keys.peer_tracks(alice.me()).is_some()
-    })
-    .await;
-    let tracks = bob
-        .engine
-        .keys()
-        .keys
-        .peer_tracks(alice.me())
-        .unwrap()
-        .shares[0];
+    let tracks = first_share(bob, alice).await;
     let capture = Box::new(TestPattern::new(CaptureConfig::for_share(&wanted), epoch));
     let sender = match ShareSender::start(alice.engine.clone(), tracks, wanted, capture) {
         Ok(sender) => Arc::new(sender),
@@ -251,17 +241,7 @@ async fn share_audio_and_video_arrive_on_one_clock() {
 async fn a_sixteen_by_ten_screen_is_sent_at_its_own_shape() {
     let server = start_server();
     let (alice, bob, _) = room_with_two(&server).await;
-    wait_for("bob to learn alice's tracks", || {
-        bob.engine.keys().keys.peer_tracks(alice.me()).is_some()
-    })
-    .await;
-    let tracks = bob
-        .engine
-        .keys()
-        .keys
-        .peer_tracks(alice.me())
-        .unwrap()
-        .shares[0];
+    let tracks = first_share(&bob, &alice).await;
     let screen = CaptureConfig {
         width: 2880,
         height: 1800,

@@ -16,21 +16,6 @@ use tokio::net::UdpSocket;
 
 use common::*;
 
-async fn create_room(client: &mut TestClient, name: &str) -> RoomId {
-    assert_eq!(
-        client
-            .request(Request::CreateRoom { name: name.into() })
-            .await,
-        Response::Ok
-    );
-    client
-        .event(|e| match e {
-            Event::RoomCreated(room) if room.name == name => Some(room.id),
-            _ => None,
-        })
-        .await
-}
-
 async fn join(client: &TestClient, room: Option<RoomId>) -> Placed {
     match client.request(Request::SetRoom(room)).await {
         Response::Placed(placed) => placed,
@@ -143,13 +128,7 @@ async fn failed_set_room_leaves_the_client_in_place() {
     let bob = invited(&server, &alice).await;
     let placed = join(&bob, Some(general)).await;
     let missing = bob.request(Request::SetRoom(Some(RoomId(999)))).await;
-    assert!(matches!(
-        missing,
-        Response::Err {
-            code: ErrorCode::NotFound,
-            ..
-        }
-    ));
+    assert_error(&missing, ErrorCode::NotFound);
     let again = join(&bob, Some(general)).await;
     assert_eq!(again.tracks, placed.tracks);
 }
@@ -183,31 +162,13 @@ async fn profile_changes_are_rate_limited_and_avatars_capped() {
     };
     assert_eq!(alice.request(profile("Alice")).await, Response::Ok);
     let second = alice.request(profile("Alicia")).await;
-    assert!(matches!(
-        second,
-        Response::Err {
-            code: ErrorCode::RateLimited,
-            ..
-        }
-    ));
+    assert_error(&second, ErrorCode::RateLimited);
     let big = alice
         .request(Request::SetAvatar(vec![0; MAX_AVATAR_BYTES + 1]))
         .await;
-    assert!(matches!(
-        big,
-        Response::Err {
-            code: ErrorCode::TooLarge,
-            ..
-        }
-    ));
+    assert_error(&big, ErrorCode::TooLarge);
     let empty_name = alice.request(profile("   ")).await;
-    assert!(matches!(
-        empty_name,
-        Response::Err {
-            code: ErrorCode::Invalid,
-            ..
-        }
-    ));
+    assert_error(&empty_name, ErrorCode::Invalid);
 }
 
 /// Runs a server on its own runtime, so stopping it drops everything like a process exit.
@@ -264,20 +225,14 @@ async fn media_ids_never_repeat_across_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     let first = ProcessLikeServer::start(dir.path(), "127.0.0.1:0".parse().unwrap());
     let addr = first.addr;
-    let server = TestServer {
-        addr: addr.to_string(),
-        bootstrap: first.bootstrap.clone().unwrap(),
-        shared: None,
-        dir: tempfile::tempdir().unwrap(),
-    };
-    let mut alice = admin(&server).await;
+    let mut alice = enroll_at(&addr.to_string(), first.bootstrap.as_ref().unwrap()).await;
     let general = create_room(&mut alice, "General").await;
     let before = join(&alice, Some(general)).await.tracks.unwrap();
     first.stop();
 
     let second = ProcessLikeServer::start(dir.path(), addr);
     assert!(second.bootstrap.is_none());
-    let link = account::sign_in(&alice.keystore, &server.addr, Some(general))
+    let link = account::sign_in(&alice.keystore, &addr.to_string(), Some(general))
         .await
         .unwrap();
     let after = link.welcome.placed.tracks.unwrap();
@@ -334,13 +289,7 @@ async fn killed_connection_retracts_presence_within_the_idle_timeout() {
     let code = invite(&alice).await;
 
     let (relay, cut) = start_cuttable_relay(server.addr.parse().unwrap()).await;
-    let relayed = TestServer {
-        addr: relay.to_string(),
-        bootstrap: code.clone(),
-        shared: None,
-        dir: tempfile::tempdir().unwrap(),
-    };
-    let bob = enroll(&relayed, &code).await;
+    let bob = enroll_at(&relay.to_string(), &code).await;
     let bob_id = bob.link.welcome.me;
     join(&bob, Some(general)).await;
     alice

@@ -47,19 +47,15 @@ async fn ten_thousand_units_at_20_mbps_arrive_intact() {
         alice.request(Request::SetMedia(share)).await.unwrap(),
         Response::Ok
     );
-    let alice_video = {
-        let keys = alice.engine.keys();
-        let epoch = keys.keys.epoch();
-        let tracks = bob
-            .engine
-            .keys()
-            .keys
-            .peer_tracks(alice.me())
-            .cloned()
-            .unwrap();
-        (tracks.shares[0].video, epoch)
-    };
-    let (video_id, epoch) = alice_video;
+    let epoch = alice.engine.keys().keys.epoch();
+    let video_id = bob
+        .engine
+        .keys()
+        .keys
+        .peer_tracks(alice.me())
+        .unwrap()
+        .shares[0]
+        .video;
 
     let mut units = bob.engine.subscribe(video_id, Kind::Video, UNITS as usize);
     assert_eq!(
@@ -240,18 +236,7 @@ async fn keyframes_arrive_whole_through_two_percent_loss() {
         alice.request(Request::SetMedia(share)).await.unwrap(),
         Response::Ok
     );
-    wait_for("bob to learn alice's tracks", || {
-        bob.engine.keys().keys.peer_tracks(alice.me()).is_some()
-    })
-    .await;
-    let video_id = bob
-        .engine
-        .keys()
-        .keys
-        .peer_tracks(alice.me())
-        .unwrap()
-        .shares[0]
-        .video;
+    let video_id = first_share(&bob, &alice).await.video;
     let mut units = bob
         .engine
         .subscribe(video_id, Kind::Video, KEYFRAMES as usize);

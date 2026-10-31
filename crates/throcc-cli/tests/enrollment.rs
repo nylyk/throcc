@@ -10,7 +10,6 @@ use throcc_crypto::pake::PakeError;
 use throcc_proto::ids::Role;
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{AuthError, ErrorCode, Event, Request, Response};
-use throcc_server::identity::ServerIdentity;
 use throcc_server::{Congestion, tls};
 
 use common::*;
@@ -25,7 +24,7 @@ async fn try_enroll(server_addr: &str, code: &InviteCode) -> Result<(), SignInEr
 
 fn failures(server: &TestServer, code: &InviteCode) -> Option<u32> {
     server
-        .shared()
+        .shared
         .hub()
         .db
         .invite(&code.id)
@@ -36,10 +35,10 @@ fn failures(server: &TestServer, code: &InviteCode) -> Option<u32> {
 /// Terminates the client's TLS with its own key and relays the control stream to `upstream`.
 async fn start_mitm(upstream: String) -> String {
     let dir = tempfile::tempdir().unwrap();
-    let identity = ServerIdentity::load_or_create(dir.path()).unwrap();
-    let config =
-        tls::server_config(&identity, tls::transport_config(Congestion::Cubic).unwrap()).unwrap();
-    let endpoint = quinn::Endpoint::server(config, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let endpoint = bare_endpoint(
+        dir.path(),
+        tls::transport_config(Congestion::Cubic).unwrap(),
+    );
     let addr = endpoint.local_addr().unwrap().to_string();
     tokio::spawn(async move {
         let _dir = dir;
@@ -159,16 +158,7 @@ async fn users_get_three_invites_a_day() {
         invite(&bob).await;
     }
     let fourth = bob.request(Request::CreateInvite).await;
-    assert!(
-        matches!(
-            fourth,
-            Response::Err {
-                code: ErrorCode::RateLimited,
-                ..
-            }
-        ),
-        "{fourth:?}"
-    );
+    assert_error(&fourth, ErrorCode::RateLimited);
     for _ in 0..5 {
         invite(&alice).await;
     }
@@ -183,16 +173,7 @@ async fn enrolled_users_count_against_the_daily_cap() {
         invited(&server, &bob).await;
     }
     let fourth = bob.request(Request::CreateInvite).await;
-    assert!(
-        matches!(
-            fourth,
-            Response::Err {
-                code: ErrorCode::RateLimited,
-                ..
-            }
-        ),
-        "{fourth:?}"
-    );
+    assert_error(&fourth, ErrorCode::RateLimited);
 }
 
 #[tokio::test]
@@ -221,16 +202,7 @@ async fn manager_cannot_remove_an_admin() {
                 cascade: false,
             })
             .await;
-        assert!(
-            matches!(
-                res,
-                Response::Err {
-                    code: ErrorCode::Forbidden,
-                    ..
-                }
-            ),
-            "{res:?}"
-        );
+        assert_error(&res, ErrorCode::Forbidden);
     }
     let res = alice
         .request(Request::SetRole {
@@ -238,16 +210,7 @@ async fn manager_cannot_remove_an_admin() {
             role: Role::Admin,
         })
         .await;
-    assert!(
-        matches!(
-            res,
-            Response::Err {
-                code: ErrorCode::Forbidden,
-                ..
-            }
-        ),
-        "{res:?}"
-    );
+    assert_error(&res, ErrorCode::Forbidden);
 }
 
 #[tokio::test]

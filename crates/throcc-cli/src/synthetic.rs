@@ -10,11 +10,28 @@ use throcc_proto::messages::{Codec, Event, MediaState, Presence, Request, Respon
 
 const AUDIO_FRAME: Duration = Duration::from_millis(20);
 const AUDIO_BYTES: usize = 80;
+const QUEUE_UNITS: usize = 4096;
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 pub enum Track {
     Mic,
     Video,
+}
+
+impl Track {
+    fn kind(self) -> Kind {
+        match self {
+            Track::Mic => Kind::Audio,
+            Track::Video => Kind::Video,
+        }
+    }
+
+    fn pick(self, (mic, video): (MediaId, MediaId)) -> MediaId {
+        match self {
+            Track::Mic => mic,
+            Track::Video => video,
+        }
+    }
 }
 
 pub struct SendOptions {
@@ -55,12 +72,13 @@ pub async fn send(call: &mut Call, room: RoomId, options: SendOptions) -> Result
         count,
         with_audio,
     } = options;
+    if with_audio && matches!(track, Track::Mic) {
+        bail!("--with-audio needs --track video");
+    }
     let (placed, _) = call.join(Some(room)).await?;
     let tracks = placed.tracks.context("joined without tracks")?;
-    let (media_id, kind) = match track {
-        Track::Mic => (tracks.mic, Kind::Audio),
-        Track::Video => (tracks.shares[0].video, Kind::Video),
-    };
+    let media_id = track.pick((tracks.mic, tracks.shares[0].video));
+    let kind = track.kind();
     let share = matches!(track, Track::Video).then(|| ShareConfig {
         audio: false,
         kbps: (size as u64 * 8 * u64::from(rate) / 1000) as u32,
@@ -86,7 +104,7 @@ pub async fn send(call: &mut Call, room: RoomId, options: SendOptions) -> Result
     let mut next_audio = tokio::time::Instant::now();
     let (mut sent, mut audio_sent) = (0u32, 0u32);
     let mut last_keyframe: Option<Instant> = None;
-    let mut min_keyframe_gap_ms = u128::MAX;
+    let mut min_keyframe_gap: Option<Duration> = None;
     let finish = tokio::time::Instant::now() + unit_interval * count + Duration::from_millis(500);
     while tokio::time::Instant::now() < finish {
         tokio::select! {
@@ -96,7 +114,7 @@ pub async fn send(call: &mut Call, room: RoomId, options: SendOptions) -> Result
                 next_unit += unit_interval;
             }
             _ = tokio::time::sleep_until(next_audio), if with_audio && sent < count => {
-                call.engine.send(Kind::Audio, outgoing(tracks.mic, audio_sent, AUDIO_BYTES, audio_sent * 960));
+                call.engine.send(Kind::Audio, outgoing(tracks.mic, audio_sent, AUDIO_BYTES, audio_sent.wrapping_mul(960)));
                 audio_sent += 1;
                 next_audio += AUDIO_FRAME;
             }
@@ -104,7 +122,8 @@ pub async fn send(call: &mut Call, room: RoomId, options: SendOptions) -> Result
                 Some(CallEvent::Server(Event::KeyframeWanted { media_id: wanted, .. })) if wanted == media_id => {
                     let now = Instant::now();
                     if let Some(last) = last_keyframe {
-                        min_keyframe_gap_ms = min_keyframe_gap_ms.min(now.duration_since(last).as_millis());
+                        let gap = now.duration_since(last);
+                        min_keyframe_gap = Some(min_keyframe_gap.map_or(gap, |min| min.min(gap)));
                     }
                     last_keyframe = Some(now);
                 }
@@ -121,11 +140,7 @@ pub async fn send(call: &mut Call, room: RoomId, options: SendOptions) -> Result
         stats.sent_datagrams.load(Ordering::Relaxed),
         stats.send_dropped_units.load(Ordering::Relaxed),
         stats.send_queue_full.load(Ordering::Relaxed),
-        if min_keyframe_gap_ms == u128::MAX {
-            "none".to_owned()
-        } else {
-            min_keyframe_gap_ms.to_string()
-        },
+        min_keyframe_gap.map_or("none".to_owned(), |gap| gap.as_millis().to_string()),
     );
     Ok(())
 }
@@ -147,6 +162,9 @@ pub async fn recv(call: &mut Call, room: RoomId, options: RecvOptions<'_>) -> Re
         with_audio,
         idle,
     } = options;
+    if with_audio && matches!(track, Track::Mic) {
+        bail!("--with-audio needs --track video");
+    }
     call.join(Some(room)).await?;
     let mut presence: Vec<Presence> = call.welcome.presence.clone();
     let sender = loop {
@@ -160,14 +178,10 @@ pub async fn recv(call: &mut Call, room: RoomId, options: RecvOptions<'_>) -> Re
         }
     };
     let (mut mic, video) = wait_for_tracks(call, sender).await?;
-    let pick = |mic: MediaId, video: MediaId| match track {
-        Track::Mic => (mic, Kind::Audio),
-        Track::Video => (video, Kind::Video),
-    };
-    let (mut media_id, kind) = pick(mic, video);
-    let mut units = subscribe(call, media_id, kind, track).await?;
-    let mut audio =
-        (with_audio && media_id != mic).then(|| call.engine.subscribe(mic, Kind::Audio, 4096));
+    let mut media_id = track.pick((mic, video));
+    let mut units = subscribe(call, media_id, track).await?;
+    let mut audio = (with_audio && media_id != mic)
+        .then(|| call.engine.subscribe(mic, Kind::Audio, QUEUE_UNITS));
     println!("receiving track {} from user {}", media_id.0, sender.0);
 
     let (mut intact, mut corrupt, mut bytes, mut audio_frames) = (0u32, 0u32, 0usize, 0u32);
@@ -180,7 +194,7 @@ pub async fn recv(call: &mut Call, room: RoomId, options: RecvOptions<'_>) -> Re
                 let Some(received) = received else { break };
                 started.get_or_insert_with(Instant::now);
                 last = tokio::time::Instant::now();
-                let index = received.data.get(..4).map_or(u32::MAX, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+                let index = received.data.first_chunk().map_or(u32::MAX, |b| u32::from_be_bytes(*b));
                 if received.data == unit(index, received.data.len()) {
                     intact += 1;
                 } else {
@@ -195,16 +209,18 @@ pub async fn recv(call: &mut Call, room: RoomId, options: RecvOptions<'_>) -> Re
             }
             event = call.events.recv() => match event {
                 Some(CallEvent::Server(Event::RoomState { .. })) => {
-                    let current = call.engine.keys().keys.peer_tracks(sender).map(|t| (t.mic, t.shares[0].video));
-                    if let Some((new_mic, new_video)) = current
-                        && pick(new_mic, new_video).0 != media_id
+                    if let Some(current) = peer_tracks(call, sender)
+                        && track.pick(current) != media_id
                     {
                         call.engine.unsubscribe(media_id);
-                        mic = new_mic;
-                        media_id = pick(new_mic, new_video).0;
-                        units = subscribe(call, media_id, kind, track).await?;
+                        if audio.take().is_some() {
+                            call.engine.unsubscribe(mic);
+                        }
+                        mic = current.0;
+                        media_id = track.pick(current);
+                        units = subscribe(call, media_id, track).await?;
                         if with_audio && media_id != mic {
-                            audio = Some(call.engine.subscribe(mic, Kind::Audio, 4096));
+                            audio = Some(call.engine.subscribe(mic, Kind::Audio, QUEUE_UNITS));
                         }
                         println!("the sender rejoined; now receiving track {}", media_id.0);
                     }
@@ -246,10 +262,9 @@ pub async fn recv(call: &mut Call, room: RoomId, options: RecvOptions<'_>) -> Re
 async fn subscribe(
     call: &Call,
     media_id: MediaId,
-    kind: Kind,
     track: Track,
 ) -> Result<tokio::sync::mpsc::Receiver<throcc_client_core::media::engine::Received>> {
-    let units = call.engine.subscribe(media_id, kind, 4096);
+    let units = call.engine.subscribe(media_id, track.kind(), QUEUE_UNITS);
     if let Track::Video = track {
         expect_ok(call.request(Request::SetWatching(vec![media_id])).await?)?;
     }
@@ -263,10 +278,17 @@ fn find_user(presence: &[Presence], query: &str) -> Option<UserId> {
         .map(|p| p.user)
 }
 
+/// The mic and first video track of `user`, once this call trusts them.
+fn peer_tracks(call: &Call, user: UserId) -> Option<(MediaId, MediaId)> {
+    let keys = call.engine.keys();
+    let tracks = keys.keys.peer_tracks(user)?;
+    Some((tracks.mic, tracks.shares[0].video))
+}
+
 async fn wait_for_tracks(call: &Call, user: UserId) -> Result<(MediaId, MediaId)> {
     for _ in 0..500 {
-        if let Some(tracks) = call.engine.keys().keys.peer_tracks(user) {
-            return Ok((tracks.mic, tracks.shares[0].video));
+        if let Some(tracks) = peer_tracks(call, user) {
+            return Ok(tracks);
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }

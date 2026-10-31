@@ -1,19 +1,17 @@
+mod common;
+
 use std::net::SocketAddr;
 use std::path::Path;
 
 use throcc_client_core::connection::{self, ConnectError};
 use throcc_proto::frame::DATAGRAM_PAYLOAD_FLOOR;
 use throcc_proto::transport::{DatagramError, close};
-use throcc_server::identity::ServerIdentity;
-use throcc_server::{Config, Congestion, Server, tls};
+use throcc_server::{Congestion, tls};
+
+use common::{bare_endpoint, bind_server};
 
 fn start_server(data_dir: &Path) -> (SocketAddr, throcc_proto::Fingerprint) {
-    let server = Server::bind(&Config {
-        data_dir: data_dir.to_owned(),
-        listen: "127.0.0.1:0".parse().unwrap(),
-        congestion: Congestion::Cubic,
-    })
-    .unwrap();
+    let server = bind_server(data_dir);
     let addr = server.local_addr().unwrap();
     let fingerprint = server.fingerprint();
     tokio::spawn(server.run());
@@ -84,11 +82,9 @@ async fn server_refuses_client_without_datagrams() {
 #[tokio::test]
 async fn client_refuses_server_without_datagrams() {
     let dir = tempfile::tempdir().unwrap();
-    let identity = ServerIdentity::load_or_create(dir.path()).unwrap();
     let mut transport = tls::transport_config(Congestion::Cubic).unwrap();
     transport.datagram_receive_buffer_size(None);
-    let config = tls::server_config(&identity, transport).unwrap();
-    let endpoint = quinn::Endpoint::server(config, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let endpoint = bare_endpoint(dir.path(), transport);
     let addr = endpoint.local_addr().unwrap();
     tokio::spawn(async move {
         let connection = endpoint.accept().await.unwrap().await.unwrap();

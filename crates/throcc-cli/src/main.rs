@@ -172,9 +172,7 @@ async fn main() -> Result<()> {
             count,
             with_audio,
         } => {
-            let link = sign_in(&keystore, &address).await?;
-            let room = find_room(&link.welcome.rooms, &room)?;
-            let mut call = Call::start(link, &keystore)?;
+            let (mut call, room) = start_call(&keystore, &address, &room).await?;
             let options = synthetic::SendOptions {
                 track,
                 size,
@@ -182,8 +180,9 @@ async fn main() -> Result<()> {
                 count,
                 with_audio,
             };
-            synthetic::send(&mut call, room, options).await?;
+            let sent = synthetic::send(&mut call, room, options).await;
             call.close().await;
+            sent?;
         }
         Command::Recv {
             address,
@@ -194,19 +193,17 @@ async fn main() -> Result<()> {
             with_audio,
             idle,
         } => {
-            let link = sign_in(&keystore, &address).await?;
-            let room = find_room(&link.welcome.rooms, &room)?;
-            let mut call = Call::start(link, &keystore)?;
-            let idle = std::time::Duration::from_secs(idle);
+            let (mut call, room) = start_call(&keystore, &address, &room).await?;
             let options = synthetic::RecvOptions {
                 from: &from,
                 track,
                 count,
                 with_audio,
-                idle,
+                idle: std::time::Duration::from_secs(idle),
             };
-            synthetic::recv(&mut call, room, options).await?;
+            let received = synthetic::recv(&mut call, room, options).await;
             call.close().await;
+            received?;
         }
     }
     Ok(())
@@ -259,10 +256,8 @@ fn voice_call(
                     .map(|p| p.name.clone())
                     .collect();
                 if now != speaking {
-                    println!(
-                        "speaking: {}",
-                        now.iter().cloned().collect::<Vec<_>>().join(", ")
-                    );
+                    let names: Vec<&str> = now.iter().map(String::as_str).collect();
+                    println!("speaking: {}", names.join(", "));
                     speaking = now;
                 }
             }
@@ -276,18 +271,23 @@ fn voice_call(
 }
 
 async fn sign_in(keystore: &Keystore, address: &str) -> Result<Link> {
-    match account::sign_in(keystore, address, None).await {
-        Ok(link) => Ok(link),
-        Err(e) => {
+    let link = account::sign_in(keystore, address, None)
+        .await
+        .inspect_err(|e| {
             if let Some((expected, actual)) = e.pin_mismatch() {
                 eprintln!(
                     "The server's key changed.\n  you trusted  {expected}\n  it now has   {actual}"
                 );
                 eprintln!("Re-enroll with a fresh invite code to trust the new key.");
             }
-            Err(e.into())
-        }
-    }
+        })?;
+    Ok(link)
+}
+
+async fn start_call(keystore: &Keystore, address: &str, room: &str) -> Result<(Call, RoomId)> {
+    let link = sign_in(keystore, address).await?;
+    let room = find_room(&link.welcome.rooms, room)?;
+    Ok((Call::start(link, keystore)?, room))
 }
 
 async fn one_shot(keystore: &Keystore, address: &str, command: &str) -> Result<()> {

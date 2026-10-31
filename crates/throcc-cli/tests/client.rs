@@ -1,14 +1,18 @@
+mod common;
+
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use throcc_client_core::account;
 use throcc_client_core::call::Call;
-use throcc_client_core::client::{Client, ClientApi, ClientOptions, Command};
+use throcc_client_core::client::{Client, ClientApi, ClientOptions, Command, Event};
 use throcc_client_core::keystore::Keystore;
 use throcc_client_core::state::{ConnectionStatus, State};
+use throcc_proto::ids::RoomId;
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{Codec, MediaState, Request, Response, ShareConfig};
-use throcc_server::{Config, Congestion, Server};
+
+use common::bind_server;
 
 /// The server takes one profile change per 10 s.
 const PROFILE_INTERVAL: Duration = Duration::from_millis(10_500);
@@ -20,12 +24,7 @@ fn server() -> (String, InviteCode) {
         let dir = tempfile::tempdir().unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let server = Server::bind(&Config {
-                data_dir: dir.path().to_owned(),
-                listen: "127.0.0.1:0".parse().unwrap(),
-                congestion: Congestion::Cubic,
-            })
-            .unwrap();
+            let server = bind_server(dir.path());
             tx.send((
                 server.local_addr().unwrap().to_string(),
                 server.bootstrap_invite().unwrap().clone(),
@@ -64,29 +63,52 @@ fn wait_for(client: &Client, what: &str, mut ready: impl FnMut(&State) -> bool) 
     }
 }
 
-fn invite(client: &Client) -> InviteCode {
+fn wait_connected(client: &Client, what: &str) {
+    wait_for(client, what, |s| {
+        s.connection == ConnectionStatus::Connected
+    });
+}
+
+/// Sends `command`, then waits for the first event that `pick` accepts.
+fn command_then<T>(
+    client: &Client,
+    command: Command,
+    what: &str,
+    mut pick: impl FnMut(Event) -> Option<T>,
+) -> T {
     let mut events = client.events();
-    client.command(Command::CreateInvite);
+    client.command(command);
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if let Ok(throcc_client_core::client::Event::Invite { code, .. }) = events.try_recv() {
-            return code.parse().unwrap();
+        if let Ok(event) = events.try_recv()
+            && let Some(found) = pick(event)
+        {
+            return found;
         }
-        assert!(Instant::now() < deadline, "no invite");
+        assert!(Instant::now() < deadline, "{what}");
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn invite(client: &Client) -> InviteCode {
+    command_then(client, Command::CreateInvite, "no invite", |e| match e {
+        Event::Invite { code, .. } => Some(code.parse().unwrap()),
+        _ => None,
+    })
+}
+
+fn create_room(client: &Client) -> RoomId {
+    client.command(Command::CreateRoom("General".into()));
+    wait_for(client, "the room", |s| !s.rooms.is_empty());
+    client.state().rooms[0].id
 }
 
 #[test]
 fn two_clients_see_each_other_join_and_unmute() {
     let (address, bootstrap) = server();
     let (alice, _a) = client(&address, &bootstrap);
-    wait_for(&alice, "connected", |s| {
-        s.connection == ConnectionStatus::Connected
-    });
-    alice.command(Command::CreateRoom("General".into()));
-    wait_for(&alice, "the room", |s| !s.rooms.is_empty());
-    let room = alice.state().rooms[0].id;
+    wait_connected(&alice, "connected");
+    let room = create_room(&alice);
 
     let code = invite(&alice);
     let (bob, _b) = client(&address, &code);
@@ -124,17 +146,13 @@ fn two_clients_see_each_other_join_and_unmute() {
 fn a_picture_chosen_in_the_lobby_reaches_others_and_survives_a_rename() {
     let (address, bootstrap) = server();
     let (alice, _a) = client(&address, &bootstrap);
-    wait_for(&alice, "connected", |s| {
-        s.connection == ConnectionStatus::Connected
-    });
+    wait_connected(&alice, "connected");
     let picture: Vec<u8> = (0..2000u32).map(|i| (i * 7) as u8).collect();
     alice.command(Command::SetProfile {
         name: None,
         picture: Some(Some(picture.clone())),
     });
-    alice.command(Command::CreateRoom("General".into()));
-    wait_for(&alice, "the room", |s| !s.rooms.is_empty());
-    let room = alice.state().rooms[0].id;
+    let room = create_room(&alice);
     let code = invite(&alice);
     let (bob, _b) = client(&address, &code);
     alice.command(Command::Join(Some(room)));
@@ -164,12 +182,8 @@ fn a_picture_chosen_in_the_lobby_reaches_others_and_survives_a_rename() {
 fn a_share_started_mid_call_shows_without_rejoining() {
     let (address, bootstrap) = server();
     let (alice, _a) = client(&address, &bootstrap);
-    wait_for(&alice, "connected", |s| {
-        s.connection == ConnectionStatus::Connected
-    });
-    alice.command(Command::CreateRoom("General".into()));
-    wait_for(&alice, "the room", |s| !s.rooms.is_empty());
-    let room = alice.state().rooms[0].id;
+    wait_connected(&alice, "connected");
+    let room = create_room(&alice);
     alice.command(Command::Join(Some(room)));
     wait_for(&alice, "alice in the room", |s| s.current.is_some());
 
@@ -218,9 +232,7 @@ fn the_profile_follows_us_to_the_next_server() {
     let dir = tempfile::tempdir().unwrap();
     let (first, first_invite) = server();
     let alice = client_in(dir.path(), &first, &first_invite);
-    wait_for(&alice, "connected", |s| {
-        s.connection == ConnectionStatus::Connected
-    });
+    wait_connected(&alice, "connected");
     let picture: Vec<u8> = (0..2000u32).map(|i| (i * 3) as u8).collect();
     alice.command(Command::SetProfile {
         name: Some("Ilse".into()),
@@ -233,13 +245,9 @@ fn the_profile_follows_us_to_the_next_server() {
 
     let (second, second_invite) = server();
     let alice = client_in(dir.path(), &second, &second_invite);
-    wait_for(&alice, "connected again", |s| {
-        s.connection == ConnectionStatus::Connected
-    });
+    wait_connected(&alice, "connected again");
     assert_eq!(alice.state().profile_name.as_deref(), Some("Ilse"));
-    alice.command(Command::CreateRoom("General".into()));
-    wait_for(&alice, "the room", |s| !s.rooms.is_empty());
-    let room = alice.state().rooms[0].id;
+    let room = create_room(&alice);
     let code = invite(&alice);
     let (bob, _b) = client(&second, &code);
     alice.command(Command::Join(Some(room)));
@@ -258,9 +266,7 @@ fn the_profile_follows_us_to_the_next_server() {
 fn only_admins_name_the_server_and_everyone_sees_it() {
     let (address, bootstrap) = server();
     let (alice, _a) = client(&address, &bootstrap);
-    wait_for(&alice, "connected", |s| {
-        s.connection == ConnectionStatus::Connected
-    });
+    wait_connected(&alice, "connected");
     alice.command(Command::SetServerProfile {
         name: Some(Some("  Moss Co-op ".into())),
         picture: None,
@@ -286,19 +292,13 @@ fn only_admins_name_the_server_and_everyone_sees_it() {
     assert_eq!(&*bob.avatar(hash).unwrap(), picture.as_slice());
     assert_eq!(bob.state().server.clone().unwrap().title(), "Moss Co-op");
 
-    let mut events = bob.events();
-    bob.command(Command::SetServerProfile {
+    let rename = Command::SetServerProfile {
         name: Some(Some("Bob's".into())),
         picture: None,
+    };
+    command_then(&bob, rename, "bob's rename wasn't refused", |e| {
+        matches!(e, Event::ServerProfileRefused(_)).then_some(())
     });
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Ok(throcc_client_core::client::Event::ServerProfileRefused(_)) = events.try_recv() {
-            break;
-        }
-        assert!(Instant::now() < deadline, "bob's rename wasn't refused");
-        std::thread::sleep(Duration::from_millis(10));
-    }
     assert_eq!(alice.state().server.clone().unwrap().title(), "Moss Co-op");
 
     alice.command(Command::SetServerProfile {
