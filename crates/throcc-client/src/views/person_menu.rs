@@ -2,14 +2,15 @@ use gpui::{
     AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, MouseButton,
     ParentElement, Stateful, StatefulInteractiveElement, Styled, anchored, div, px,
 };
+use gpui_component::Icon;
 use gpui_component::slider::Slider;
 use throcc_client_core::client::Command;
-use throcc_client_core::state::Sound;
-use throcc_proto::ids::UserId;
+use throcc_client_core::state::{Person, Sound};
+use throcc_proto::ids::{Role, UserId};
 
 use super::common::{gain_to_loudness, icon, mono, section};
 use super::main::toggle_icon;
-use crate::app::{PlaybackControl, ThroccApp};
+use crate::app::{Dialog, PlaybackControl, ThroccApp};
 use crate::theme;
 
 /// The person menu at the pointer, over a backdrop that closes it.
@@ -62,7 +63,8 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .sharing
                 .is_some()
                 .then(|| stream_actions(app, user, mine, cx)),
-        );
+        )
+        .children(moderation(app, user, &person, cx));
     div()
         .id("person-menu-backdrop")
         .absolute()
@@ -200,7 +202,65 @@ fn stream_actions(app: &ThroccApp, user: UserId, mine: bool, cx: &mut Context<Th
     )
 }
 
+/// Kicking `user` from the room and removing them from the server, where our rank allows.
+fn moderation(
+    app: &ThroccApp,
+    user: UserId,
+    person: &Person,
+    cx: &mut Context<ThroccApp>,
+) -> Option<Div> {
+    let me = app.state.role?;
+    let outranked = Some(user) != app.state.me && person.role < me;
+    let kick_room = person.room.filter(|_| outranked && me >= Role::Manager);
+    let kick = kick_room.is_some();
+    let remove = outranked && me == Role::Admin;
+    if !kick && !remove {
+        return None;
+    }
+    let name = person.name.clone();
+    Some(
+        div()
+            .flex()
+            .flex_col()
+            .pt_1()
+            .mt_1()
+            .border_t_1()
+            .border_color(theme::control())
+            .children(kick.then(|| {
+                danger_action("person-menu-kick", "door-open", "Kick from room").on_click(
+                    cx.listener(move |app, _, _, cx| {
+                        app.close_person_menu(cx);
+                        if let Some(room) = kick_room {
+                            app.command(Command::KickFromRoom { user, room });
+                        }
+                    }),
+                )
+            }))
+            .children(remove.then(|| {
+                danger_action("person-menu-remove", "user-x", "Remove from server").on_click(
+                    cx.listener(move |app, _, _, cx| {
+                        app.close_person_menu(cx);
+                        app.dialog = Some(Dialog::Remove {
+                            user,
+                            name: name.clone(),
+                            cascade: false,
+                        });
+                    }),
+                )
+            })),
+    )
+}
+
 fn action(id: &'static str, icon_name: &'static str, label: &'static str) -> Stateful<Div> {
+    row(id, icon(icon_name).text_color(theme::text_2()), label)
+}
+
+fn danger_action(id: &'static str, icon_name: &'static str, label: &'static str) -> Stateful<Div> {
+    row(id, icon(icon_name).text_color(theme::danger_text()), label)
+        .text_color(theme::danger_text())
+}
+
+fn row(id: &'static str, icon: Icon, label: &'static str) -> Stateful<Div> {
     div()
         .id(id)
         .flex()
@@ -211,6 +271,6 @@ fn action(id: &'static str, icon_name: &'static str, label: &'static str) -> Sta
         .rounded(theme::RADIUS_ROW)
         .cursor_pointer()
         .hover(|s| s.bg(theme::raised()))
-        .child(icon(icon_name).size(px(16.)).text_color(theme::text_2()))
+        .child(icon.size(px(16.)))
         .child(label)
 }

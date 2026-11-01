@@ -568,6 +568,19 @@ impl Session {
         None
     }
 
+    /// Leaves our room here after the server took us out of it.
+    fn put_out_of_room(&mut self) {
+        self.call.engine.placed(&Placed {
+            room: None,
+            epoch: throcc_proto::ids::Epoch(0),
+            tracks: None,
+            peers: vec![],
+        });
+        self.reset_room();
+        self.voice(VoiceCommand::ForgetAll);
+        self.voice(VoiceCommand::SendOn(None));
+    }
+
     fn reset_room(&mut self) {
         self.stop_share();
         let watched: Vec<UserId> = self.watched_video.keys().copied().collect();
@@ -823,6 +836,9 @@ impl Session {
                     .await
             }
             Command::DeleteRoom(room) => self.simple(Request::DeleteRoom(room)).await,
+            Command::KickFromRoom { user, room } => {
+                self.simple(Request::KickFromRoom { user, room }).await
+            }
             Command::CreateInvite => match self.call.request(Request::CreateInvite).await {
                 Ok(Response::Invite { code, expires }) => {
                     self.shared.emit(Event::Invite { code, expires })
@@ -1378,15 +1394,7 @@ impl Session {
             }),
             ServerEvent::RoomDeleted(room) => {
                 if self.room == Some(room) {
-                    self.call.engine.placed(&Placed {
-                        room: None,
-                        epoch: throcc_proto::ids::Epoch(0),
-                        tracks: None,
-                        peers: vec![],
-                    });
-                    self.reset_room();
-                    self.voice(VoiceCommand::ForgetAll);
-                    self.voice(VoiceCommand::SendOn(None));
+                    self.put_out_of_room();
                     self.shared.notice("The room you were in was deleted.");
                 }
                 self.shared.update(|s| {
@@ -1415,6 +1423,15 @@ impl Session {
                 "Invite {code_id}-… was used up by three wrong tries and no longer works."
             )),
             ServerEvent::Kicked { reason } => self.shared.emit(Event::Kicked(reason)),
+            ServerEvent::KickedFromRoom { by, room } if self.room == Some(room) => {
+                self.put_out_of_room();
+                let state = self.shared.state();
+                let by = state.person(by).map_or("Someone", |p| p.name.as_str());
+                let room = state.room(room).map_or("the room", |r| r.name.as_str());
+                self.shared.notice(format!("{by} moved you out of {room}."));
+                self.shared.update(|s| s.current = None);
+            }
+            ServerEvent::KickedFromRoom { .. } => {}
             ServerEvent::UserAdded(_) | ServerEvent::UserRemoved(_) => self.list_users().await,
             ServerEvent::KeyframeWanted { media_id, kind } => {
                 if self
@@ -1556,6 +1573,7 @@ fn person(p: &Presence, saved: &SavedPlayback) -> Person {
         voice: saved.get(p.user, Sound::Voice),
         share_audio: saved.get(p.user, Sound::Share),
         verified: false,
+        role: p.role,
     }
 }
 

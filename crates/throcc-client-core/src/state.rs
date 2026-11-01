@@ -90,6 +90,7 @@ pub struct Person {
     pub voice: Playback,
     pub share_audio: Playback,
     pub verified: bool,
+    pub role: Role,
 }
 
 impl Person {

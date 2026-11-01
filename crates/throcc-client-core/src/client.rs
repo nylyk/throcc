@@ -65,6 +65,11 @@ pub enum Command {
     CreateInvite,
     ListUsers,
     SetRole(UserId, Role),
+    /// Moves someone from `room` to the lobby.
+    KickFromRoom {
+        user: UserId,
+        room: RoomId,
+    },
     RemoveUser {
         user: UserId,
         cascade: bool,
@@ -406,6 +411,12 @@ impl ClientApi for MockClient {
                     r.locked = password.is_some();
                 }
             }),
+            Command::KickFromRoom { user, room } => self.update(|s| {
+                if let Some(p) = s.people.get_mut(&user).filter(|p| p.room == Some(room)) {
+                    p.room = None;
+                    p.sharing = None;
+                }
+            }),
             Command::DeleteRoom(room) => self.update(|s| {
                 s.rooms.retain(|r| r.id != room);
                 for p in s.people.values_mut().filter(|p| p.room == Some(room)) {
@@ -493,6 +504,7 @@ fn person(name: &str, room: Option<u64>) -> Person {
         voice: Playback::default(),
         share_audio: Playback::default(),
         verified: false,
+        role: Role::User,
     }
 }
 
@@ -517,8 +529,12 @@ fn sample_state() -> State {
     ] {
         people.insert(UserId(id), person(name, room));
     }
+    if let Some(p) = people.get_mut(&UserId(1)) {
+        p.role = Role::Admin;
+    }
     if let Some(p) = people.get_mut(&UserId(2)) {
         p.speaking = true;
+        p.role = Role::Manager;
     }
     if let Some(p) = people.get_mut(&UserId(3)) {
         p.mic = false;
