@@ -896,10 +896,19 @@ fn tile(
                 app.open_person_menu(user, event.position, cx)
             }),
         );
+    let speaking_ring = t.person.speaking.then(|| {
+        div()
+            .absolute()
+            .inset_0()
+            .rounded(theme::RADIUS_TILE - px(1.))
+            .border_1()
+            .border_color(theme::speaking())
+    });
     if !t.shows_stream {
         return frame
             .bg(theme::surface())
             .child(person_card(t, height, compact, cx))
+            .children(speaking_ring)
             .into_any_element();
     }
     let config = t
@@ -924,7 +933,7 @@ fn tile(
             user.0,
             t.picture.clone(),
             px(18.),
-            t.person.speaking,
+            false,
         ))
         .child(
             div()
@@ -985,6 +994,7 @@ fn tile(
         .cursor_pointer()
         .bg(theme::surface())
         .child(picture)
+        .children(speaking_ring)
         .children(overlay.then_some(label))
         .children(buttons.filter(|_| overlay))
         .on_hover(cx.listener(move |app, hovered: &bool, _, cx| app.hover_tile(user, *hovered, cx)))
@@ -995,8 +1005,6 @@ fn tile(
         .into_any_element()
 }
 
-/// A tile for someone whose share isn't shown here: their picture and name, and a way to
-/// watch it when they share.
 /// Whether a person card `height` tall is compact, and how large its picture is, so that it
 /// fits whole.
 fn card_fit(height: Pixels, sharing: bool, compact: bool) -> (bool, Pixels) {
@@ -1011,6 +1019,8 @@ fn card_fit(height: Pixels, sharing: bool, compact: bool) -> (bool, Pixels) {
     )
 }
 
+/// A tile for someone whose share isn't shown here: their picture and name, and a way to
+/// watch it when they share.
 fn person_card(t: &Tile, height: Pixels, compact: bool, cx: &mut Context<ThroccApp>) -> Div {
     let user = t.user;
     let person = &t.person;
@@ -1065,7 +1075,7 @@ fn person_card(t: &Tile, height: Pixels, compact: bool, cx: &mut Context<ThroccA
             user.0,
             t.picture.clone(),
             picture_size,
-            person.speaking,
+            false,
         ))
         .child(
             div()
