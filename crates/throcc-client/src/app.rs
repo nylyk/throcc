@@ -30,12 +30,21 @@ use crate::views::common::{Typeset, gain_to_loudness, loudness_to_gain};
 
 actions!(throcc, [ToggleMic, ToggleDeafen, CloseDialog]);
 
+const MUTE_KEY: &str = if cfg!(target_os = "macos") {
+    "cmd-shift-m"
+} else {
+    "ctrl-shift-m"
+};
+const DEAFEN_KEY: &str = if cfg!(target_os = "macos") {
+    "cmd-shift-d"
+} else {
+    "ctrl-shift-d"
+};
+
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("cmd-shift-m", ToggleMic, None),
-        KeyBinding::new("ctrl-shift-m", ToggleMic, None),
-        KeyBinding::new("cmd-shift-d", ToggleDeafen, None),
-        KeyBinding::new("ctrl-shift-d", ToggleDeafen, None),
+        KeyBinding::new(MUTE_KEY, ToggleMic, None),
+        KeyBinding::new(DEAFEN_KEY, ToggleDeafen, None),
         KeyBinding::new("escape", CloseDialog, None),
     ]);
 }

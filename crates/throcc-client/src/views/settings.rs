@@ -619,7 +619,7 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                         let key = if cfg!(target_os = "macos") {
                             "⌥ Space"
                         } else {
-                            "Alt + Space"
+                            "Alt+Space"
                         };
                         [key_cap(key), caption("anywhere, or")]
                     });

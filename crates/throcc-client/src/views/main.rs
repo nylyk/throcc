@@ -18,7 +18,7 @@ use super::common::{
     player_title, primary, rate, section, sharing_icon,
 };
 use super::settings::{resize_handle, sidebar_column};
-use crate::app::{Dialog, Screen, ServerPage, ThroccApp};
+use crate::app::{Dialog, Screen, ServerPage, ThroccApp, ToggleDeafen, ToggleMic};
 use crate::theme;
 
 pub fn render(
@@ -316,7 +316,8 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                         .flex()
                         .items_center()
                         .child(
-                            toggle_icon("profile-mic", "mic", "mic-off", !mic, "Mute (⌘⇧M)")
+                            toggle_icon("profile-mic", "mic", "mic-off", !mic, "Mute")
+                                .tooltip_with_action("Mute", &ToggleMic, None)
                                 .on_click(cx.listener(move |app, _, _, _| {
                                     app.command(Command::SetMic(!mic))
                                 })),
@@ -327,8 +328,9 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                                 "headphones",
                                 "headphone-off",
                                 deafened,
-                                "Deafen (⌘⇧D)",
+                                "Deafen",
                             )
+                            .tooltip_with_action("Deafen", &ToggleDeafen, None)
                             .on_click(cx.listener(
                                 move |app, _, _, _| app.command(Command::SetDeafened(!deafened)),
                             )),
