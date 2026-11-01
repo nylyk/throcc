@@ -19,7 +19,9 @@ use throcc_client_core::media::cues::Cue;
 use throcc_client_core::media::devices;
 use throcc_client_core::server_look::ServerLook;
 use throcc_client_core::settings::Settings;
-use throcc_client_core::state::{MAX_VOLUME, Playback, ServerView, ShareChoice, Sound, State};
+use throcc_client_core::state::{
+    ConnectionStatus, MAX_VOLUME, Playback, ServerView, ShareChoice, Sound, State,
+};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
 use throcc_proto::invite::{self, InviteCode};
@@ -248,6 +250,8 @@ pub struct ThroccApp {
     pub joining: bool,
     /// The mascot on the join screen once a server is known.
     pub greeter: &'static str,
+    /// The mascot beside a failed join or a lost connection.
+    pub upset: &'static str,
     /// Counts joins started, so a join that was overtaken by a newer one is ignored.
     join_attempt: u64,
     pub join_error: Option<String>,
@@ -388,7 +392,8 @@ impl ThroccApp {
             custom_palette: !theme::PRESETS.iter().any(|(_, p)| *p == theme::palette()),
             pictures: std::collections::HashMap::new(),
             joining: false,
-            greeter: views::join::random_greeter(),
+            greeter: views::join::pick(views::join::GREETERS),
+            upset: views::join::pick(views::join::UPSET),
             join_attempt: 0,
             join_error: None,
             profile_status: None,
@@ -1292,7 +1297,8 @@ impl ThroccApp {
         }
     }
 
-    /// Opens a screen of the mock client by name, for screenshots: welcome, join, lobby, room, focus,
+    /// Opens a screen of the mock client by name, for screenshots: welcome, join, joinfailed, lost,
+    /// lobby, room, focus,
     /// fullscreen, popout, share, settings, sounds, appearance, profile, connection, verify,
     /// members, keychange, addserver, removeserver or personmenu.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1311,6 +1317,31 @@ impl ThroccApp {
             "join" => {
                 self.client = None;
                 self.screen = Screen::Join;
+            }
+            "joinfailed" => {
+                self.client = None;
+                self.screen = Screen::Join;
+                self.join_error = Some(
+                    "Couldn’t reach the server. Check the address, and that UDP port 8476 is open."
+                        .into(),
+                );
+            }
+            "lost" => {
+                joined(self);
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(300))
+                        .await;
+                    this.update(cx, |app, cx| {
+                        Arc::make_mut(&mut app.state).connection = ConnectionStatus::Reconnecting {
+                            attempt: 3,
+                            reason: "timed out".into(),
+                        };
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
             }
             "personmenu" => {
                 joined(self);
@@ -1507,7 +1538,10 @@ impl Render for ThroccApp {
         self.sidebar_width = self.sidebar_width.min(widest_sidebar(window));
         let screen = match self.screen {
             Screen::Join => views::join::render(self, cx).into_any_element(),
-            Screen::Main => views::main::render(self, window, cx).into_any_element(),
+            Screen::Main => match views::join::render_lost(self) {
+                Some(lost) => lost.into_any_element(),
+                None => views::main::render(self, window, cx).into_any_element(),
+            },
             Screen::Settings(page) => views::settings::render(self, page, cx).into_any_element(),
             Screen::Server(page) => views::server::render(self, page, cx).into_any_element(),
         };

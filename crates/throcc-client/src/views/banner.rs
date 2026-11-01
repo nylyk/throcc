@@ -6,9 +6,9 @@ use super::common::Typeset;
 use crate::app::{Screen, ThroccApp};
 use crate::theme;
 
-/// The reconnecting or failed strip across the top of the window.
+/// The reconnecting or failed strip across the top of settings and server pages.
 pub fn render(app: &ThroccApp) -> Option<Div> {
-    if app.screen == Screen::Join {
+    if matches!(app.screen, Screen::Join | Screen::Main) {
         return None;
     }
     let (text, warn) = match &app.state.connection {

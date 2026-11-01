@@ -5,6 +5,7 @@ use gpui::{Context, Div, IntoElement, ParentElement, Styled, div, px, svg};
 use throcc_client_core::account::SignInError;
 use throcc_client_core::connection::ConnectError;
 use throcc_client_core::control::LoginError;
+use throcc_client_core::state::ConnectionStatus;
 use throcc_proto::messages::AuthError;
 
 use super::common::{Typeset, description, moves_window, primary};
@@ -47,7 +48,7 @@ pub(super) fn error_box(error: String) -> Div {
         .child(error)
 }
 
-const GREETERS: [&str; 5] = [
+pub const GREETERS: &[&str] = &[
     "mascot/cool.svg",
     "mascot/happy.svg",
     "mascot/love.svg",
@@ -55,16 +56,23 @@ const GREETERS: [&str; 5] = [
     "mascot/thinking.svg",
 ];
 
-/// One of the mascots that greet someone back, picked at random.
-pub fn random_greeter() -> &'static str {
+pub const UPSET: &[&str] = &["mascot/angry.svg", "mascot/dizzy.svg", "mascot/glitch.svg"];
+
+pub fn pick(mascots: &[&'static str]) -> &'static str {
     let random = RandomState::new().build_hasher().finish();
-    GREETERS[random as usize % GREETERS.len()]
+    mascots[random as usize % mascots.len()]
 }
 
 /// The window with no server connected: how a join is going, or what to do next.
 pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
     let first_run = app.known_servers.is_empty();
-    let mascot = if first_run {
+    let error = app
+        .join_error
+        .clone()
+        .filter(|_| app.dialog != Some(Dialog::AddServer));
+    let mascot = if error.is_some() {
+        app.upset
+    } else if first_run {
         "mascot/happy.svg"
     } else {
         app.greeter
@@ -73,13 +81,44 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
         "Joining…"
     } else if first_run {
         "Add a server with its address and an invite code."
+    } else if error.is_some() {
+        "Try again, or pick another server on the left."
     } else {
         "Join a server on the left, or add a new one."
     };
-    let error = app
-        .join_error
-        .clone()
-        .filter(|_| app.dialog != Some(Dialog::AddServer));
+    frame(mascot)
+        .children(first_run.then(|| div().typeset(theme::LARGE_TITLE).child("Welcome to throcc")))
+        .child(description(hint))
+        .children(error.map(|e| div().w(px(420.)).child(error_box(e))))
+        .children((first_run && !app.joining).then(|| {
+            primary("add-first-server", "Add Server")
+                .h_10()
+                .px_4()
+                .on_click(cx.listener(|app, _, window, cx| app.open_add_server(window, cx)))
+        }))
+}
+
+/// The window in place of the room while the connection is lost, or `None` while it holds.
+pub fn render_lost(app: &ThroccApp) -> Option<Div> {
+    let (hint, error) = match &app.state.connection {
+        ConnectionStatus::Reconnecting { attempt, reason } => (
+            format!("Reconnecting, attempt {attempt}. You’ll be put back in your room."),
+            format!("Lost the connection: {reason}."),
+        ),
+        ConnectionStatus::Failed(reason) => (
+            "Pick the server on the left to try again.".to_owned(),
+            reason.clone(),
+        ),
+        _ => return None,
+    };
+    Some(
+        frame(app.upset)
+            .child(description(hint))
+            .child(div().w(px(420.)).child(error_box(error))),
+    )
+}
+
+fn frame(mascot: &'static str) -> Div {
     div()
         .size_full()
         .relative()
@@ -103,13 +142,4 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
                 .size(px(180.))
                 .text_color(theme::text_3()),
         )
-        .children(first_run.then(|| div().typeset(theme::LARGE_TITLE).child("Welcome to throcc")))
-        .child(description(hint))
-        .children(error.map(|e| div().w(px(420.)).child(error_box(e))))
-        .children((first_run && !app.joining).then(|| {
-            primary("add-first-server", "Add Server")
-                .h_10()
-                .px_4()
-                .on_click(cx.listener(|app, _, window, cx| app.open_add_server(window, cx)))
-        }))
 }

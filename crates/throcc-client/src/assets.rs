@@ -8,8 +8,20 @@ pub struct Assets;
 
 const MASCOTS: &[(&str, &[u8])] = &[
     (
+        "mascot/angry.svg",
+        include_bytes!("../assets/mascot/angry.svg"),
+    ),
+    (
         "mascot/cool.svg",
         include_bytes!("../assets/mascot/cool.svg"),
+    ),
+    (
+        "mascot/dizzy.svg",
+        include_bytes!("../assets/mascot/dizzy.svg"),
+    ),
+    (
+        "mascot/glitch.svg",
+        include_bytes!("../assets/mascot/glitch.svg"),
     ),
     (
         "mascot/happy.svg",
