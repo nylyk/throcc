@@ -90,6 +90,12 @@ fn fullscreen(
         .track_focus(&app.fullscreen_focus)
         .size_full()
         .on_mouse_move(cx.listener(|app, _, _, cx| app.show_controls(cx)))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |app, event: &MouseDownEvent, window, cx| {
+                app.open_person_menu(user, event.position, window, cx)
+            }),
+        )
         .on_key_down(cx.listener(|app, event: &gpui::KeyDownEvent, window, cx| {
             if event.keystroke.key == "escape" {
                 app.exit_fullscreen(window, cx);
@@ -418,6 +424,12 @@ fn occupant(
         .pl(px(24.))
         .pr_2()
         .min_h(px(36.))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |app, event: &MouseDownEvent, window, cx| {
+                app.open_person_menu(user, event.position, window, cx)
+            }),
+        )
         .child(avatar(
             &person.name,
             user.0,
@@ -888,8 +900,8 @@ fn tile(
         })
         .on_mouse_down(
             MouseButton::Right,
-            cx.listener(move |app, event: &MouseDownEvent, _, cx| {
-                app.open_person_menu(user, event.position, cx)
+            cx.listener(move |app, event: &MouseDownEvent, window, cx| {
+                app.open_person_menu(user, event.position, window, cx)
             }),
         );
     let speaking_ring = t.person.speaking.then(|| {

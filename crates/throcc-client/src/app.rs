@@ -118,6 +118,8 @@ impl PictureEdit {
 /// The menu of someone's sound and stream, open where it was asked for.
 pub struct PersonMenu {
     pub user: UserId,
+    /// The window the menu opened in, the only one that shows it.
+    pub window: gpui::AnyWindowHandle,
     pub position: gpui::Point<gpui::Pixels>,
     pub voice: PlaybackControl,
     pub share: PlaybackControl,
@@ -671,11 +673,12 @@ impl ThroccApp {
         cx.notify();
     }
 
-    /// Opens the person menu for `user` at `position`, unless it would be empty.
+    /// Opens the person menu for `user` at `position` in `window`, unless it would be empty.
     pub fn open_person_menu(
         &mut self,
         user: UserId,
         position: gpui::Point<gpui::Pixels>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
         let Some(person) = self.state.person(user).cloned() else {
@@ -686,6 +689,7 @@ impl ThroccApp {
         }
         self.person_menu = Some(PersonMenu {
             user,
+            window: window.window_handle(),
             position,
             voice: Self::playback_control(Sound::Voice, person.voice, cx),
             share: Self::playback_control(Sound::Share, person.share_audio, cx),
@@ -1358,7 +1362,12 @@ impl ThroccApp {
             }
             "personmenu" => {
                 joined(self);
-                self.open_person_menu(UserId(4), gpui::point(gpui::px(900.), gpui::px(420.)), cx);
+                self.open_person_menu(
+                    UserId(4),
+                    gpui::point(gpui::px(900.), gpui::px(420.)),
+                    window,
+                    cx,
+                );
             }
             "addserver" => {
                 self.client = None;
@@ -1642,10 +1651,6 @@ impl Render for ThroccApp {
                     .clone()
                     .map(|dialog| views::dialogs::render(self, dialog, cx)),
             )
-            .children(
-                self.person_menu
-                    .is_some()
-                    .then(|| views::person_menu::render(self, cx)),
-            )
+            .children(views::person_menu::render(self, window, cx))
     }
 }

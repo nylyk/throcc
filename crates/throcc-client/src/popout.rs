@@ -2,8 +2,9 @@ use std::time::Instant;
 
 use gpui::{
     App, AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
-    ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window,
-    WindowBounds, WindowHandle, WindowOptions, div, point, px, size,
+    MouseButton, MouseDownEvent, ParentElement, Render, StatefulInteractiveElement, Styled,
+    Subscription, WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions, div, point, px,
+    size,
 };
 use gpui_component::Root;
 use throcc_client_core::state::share_label;
@@ -157,11 +158,24 @@ impl Render for PopOut {
             .font_family(theme::font())
             .typeset(theme::BODY)
             .on_mouse_move(cx.listener(|this, _, _, cx| this.show_controls(cx)))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.app
+                        .update(cx, |app, cx| {
+                            app.open_person_menu(user, event.position, window, cx)
+                        })
+                        .ok();
+                }),
+            )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
                     this.set_fullscreen(false, window, cx);
                 }
             }))
             .child(player(picture, title, buttons, controls))
+            .children(app.update(cx, |app, cx| {
+                crate::views::person_menu::render(app, window, cx)
+            }))
     }
 }

@@ -1,6 +1,6 @@
 use gpui::{
     AnyElement, Context, Div, InteractiveElement, IntoElement, MouseButton, ParentElement,
-    Stateful, StatefulInteractiveElement, Styled, anchored, div, px,
+    Stateful, StatefulInteractiveElement, Styled, Window, anchored, div, px,
 };
 use gpui_component::Icon;
 use gpui_component::slider::Slider;
@@ -13,16 +13,19 @@ use super::main::toggle_icon;
 use crate::app::{Dialog, PlaybackControl, ThroccApp};
 use crate::theme;
 
-/// The person menu at the pointer, over a backdrop that closes it.
-pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
-    let Some(menu) = &app.person_menu else {
-        return div().into_any_element();
-    };
+/// The person menu at the pointer, over a backdrop that closes it, if it is open in `window`.
+pub fn render(
+    app: &mut ThroccApp,
+    window: &Window,
+    cx: &mut Context<ThroccApp>,
+) -> Option<AnyElement> {
+    let menu = app
+        .person_menu
+        .as_ref()
+        .filter(|menu| menu.window == window.window_handle())?;
     let user = menu.user;
     let position = menu.position;
-    let Some(person) = app.state.person(user).cloned() else {
-        return div().into_any_element();
-    };
+    let person = app.state.person(user).cloned()?;
     let mine = Some(user) == app.state.me;
     let streams_audio = person.sharing.is_some_and(|c| c.audio);
     let panel = div()
@@ -65,7 +68,7 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .then(|| stream_actions(app, user, mine, cx)),
         )
         .children(moderation(app, user, &person, cx));
-    div()
+    let menu = div()
         .id("person-menu-backdrop")
         .absolute()
         .inset_0()
@@ -84,7 +87,8 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .snap_to_window_with_margin(px(8.))
                 .child(panel),
         )
-        .into_any_element()
+        .into_any_element();
+    Some(menu)
 }
 
 /// A sound's mute toggle and volume slider.
