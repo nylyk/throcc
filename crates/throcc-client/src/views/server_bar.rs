@@ -1,12 +1,13 @@
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Context, Div, ElementId, InteractiveElement, IntoElement, ParentElement, SharedString,
-    Stateful, StatefulInteractiveElement, Styled, div, px,
+    AnyElement, Context, Div, ElementId, InteractiveElement, IntoElement, ParentElement,
+    SharedString, Stateful, StatefulInteractiveElement, Styled, div, px,
 };
+use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::tooltip::Tooltip;
 
 use super::common::{avatar, icon, moves_window, server_label};
-use crate::app::{Screen, SettingsPage, ThroccApp};
+use crate::app::{Dialog, Screen, SettingsPage, ThroccApp};
 use crate::theme;
 
 /// The column of known servers along the window's left edge, under the traffic lights on
@@ -14,29 +15,31 @@ use crate::theme;
 pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
     let connected = app.connected_server().cloned();
     let connected_picture = app.picture(connected.as_ref().and_then(|s| s.avatar), cx);
-    let servers = app
-        .known_servers
-        .iter()
-        .enumerate()
-        .map(|(i, (address, _))| {
-            let here = connected.as_ref().is_some_and(|s| &s.address == address);
-            let name = app.server_name(address);
-            let picture = if here {
-                connected_picture.clone()
-            } else {
-                app.server_looks
-                    .get(address)
-                    .and_then(|look| look.picture.clone())
-            };
-            let tooltip = server_label(name.as_deref(), address).into();
-            let initials_from = name.unwrap_or_else(|| address.clone());
-            let address = address.clone();
-            item(("server", i), tooltip, here)
-                .child(avatar(&initials_from, i as u64, picture, px(36.), false))
-                .on_click(cx.listener(move |app, _, window, cx| {
-                    app.open_server(address.clone(), window, cx)
-                }))
-        });
+    let servers =
+        app.known_servers
+            .iter()
+            .enumerate()
+            .map(|(i, (address, _))| {
+                let here = connected.as_ref().is_some_and(|s| &s.address == address);
+                let name = app.server_name(address);
+                let picture = if here {
+                    connected_picture.clone()
+                } else {
+                    app.server_looks
+                        .get(address)
+                        .and_then(|look| look.picture.clone())
+                };
+                let tooltip = server_label(name.as_deref(), address).into();
+                let initials_from = name.unwrap_or_else(|| address.clone());
+                let address = address.clone();
+                let open = address.clone();
+                let server = item(("server", i), tooltip, here)
+                    .child(avatar(&initials_from, i as u64, picture, px(36.), false))
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        app.open_server(open.clone(), window, cx)
+                    }));
+                with_server_menu(server, address, here, cx)
+            });
     let in_settings = matches!(app.screen, Screen::Settings(_));
     let top = if cfg!(target_os = "macos") {
         theme::HEADER_HEIGHT
@@ -90,6 +93,45 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
                         })),
                 ),
         )
+}
+
+/// `element` with a right-click menu to leave the server we are on, or to take any other
+/// off the list.
+fn with_server_menu(
+    element: Stateful<Div>,
+    address: String,
+    here: bool,
+    cx: &Context<ThroccApp>,
+) -> AnyElement {
+    let this = cx.entity().downgrade();
+    let (label, icon_name) = if here {
+        ("Leave Server", "log-out")
+    } else {
+        ("Remove from List", "trash")
+    };
+    element
+        .context_menu(move |menu, _, _| {
+            let this = this.clone();
+            let address = address.clone();
+            menu.item(
+                PopupMenuItem::element(move |_, _| {
+                    div().text_color(theme::danger_text()).child(label)
+                })
+                .icon(icon(icon_name).text_color(theme::danger_text()))
+                .on_click(move |_, _, cx| {
+                    this.update(cx, |app, cx| {
+                        app.dialog = Some(if here {
+                            Dialog::LeaveServer
+                        } else {
+                            Dialog::RemoveServer(address.clone())
+                        });
+                        cx.notify();
+                    })
+                    .ok();
+                }),
+            )
+        })
+        .into_any_element()
 }
 
 fn item(id: impl Into<ElementId>, tooltip: SharedString, selected: bool) -> Stateful<Div> {

@@ -43,6 +43,7 @@ pub fn render(app: &mut ThroccApp, dialog: Dialog, cx: &mut Context<ThroccApp>) 
         Dialog::RoomPassword { room, error } => room_password(app, room, error, cx),
         Dialog::LeaveServer => leave_server(app, cx),
         Dialog::AddServer => add_server(app, cx),
+        Dialog::RemoveServer(address) => remove_server(app, address, cx),
     };
     div()
         .id("scrim")
@@ -682,6 +683,29 @@ fn leave_server(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                         app.dialog = None;
                         cx.notify();
                     },
+                ))),
+        )
+        .into_any_element()
+}
+
+fn remove_server(app: &ThroccApp, address: String, cx: &mut Context<ThroccApp>) -> AnyElement {
+    let server = app.server_name(&address).unwrap_or_else(|| address.clone());
+    div()
+        .flex()
+        .flex_col()
+        .gap_4()
+        .child(title(format!("Remove “{server}”?")))
+        .child(description(
+            "It leaves your list, but you stay a member. Add it again with its address, no invite needed. To end your membership, connect and choose Leave Server.",
+        ))
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap_2()
+                .child(close_button("Cancel", cx))
+                .child(danger("confirm-remove-server", "Remove").on_click(cx.listener(
+                    move |app, _, _, cx| app.remove_server(&address, cx),
                 ))),
         )
         .into_any_element()

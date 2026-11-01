@@ -160,6 +160,8 @@ pub enum Dialog {
     LeaveServer,
     AddServer,
     DeleteRoom(RoomId),
+    /// Takes the server at this address off our list, keeping our membership.
+    RemoveServer(String),
 }
 
 /// The widest the sidebar may be in `window` and still leave the room its minimum width.
@@ -1173,6 +1175,9 @@ impl ThroccApp {
             cx.update_window(window_handle, |_, window, cx| {
                 this.update(cx, |app, cx| {
                     if app.join_attempt != attempt {
+                        if result.is_ok() {
+                            app.reload_known_servers();
+                        }
                         return;
                     }
                     match result {
@@ -1243,6 +1248,20 @@ impl ThroccApp {
         self.server_looks = cached_looks(&self.known_servers);
     }
 
+    /// Takes the server at `address` off our list without leaving it, abandoning a join to it.
+    pub fn remove_server(&mut self, address: &str, cx: &mut Context<Self>) {
+        if self.joining && self.address.read(cx).value() == address {
+            self.joining = false;
+            self.join_attempt += 1;
+        }
+        if let Err(e) = Keystore::default_known_servers().and_then(|mut k| k.forget(address)) {
+            tracing::warn!("forgetting {address}: {e:#}");
+        }
+        self.reload_known_servers();
+        self.dialog = None;
+        cx.notify();
+    }
+
     fn reload_known_servers(&mut self) {
         self.known_servers = known_servers();
         self.server_looks = cached_looks(&self.known_servers);
@@ -1259,7 +1278,7 @@ impl ThroccApp {
 
     /// Opens a screen of the mock client by name, for screenshots: join, lobby, room, focus,
     /// fullscreen, popout, share, settings, sounds, appearance, profile, connection, verify,
-    /// members, keychange, addserver or personmenu.
+    /// members, keychange, addserver, removeserver or personmenu.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         let room = RoomId(1);
         let joined = |app: &mut Self| {
@@ -1280,6 +1299,11 @@ impl ThroccApp {
                 self.client = None;
                 self.screen = Screen::Join;
                 self.dialog = Some(Dialog::AddServer);
+            }
+            "removeserver" => {
+                self.client = None;
+                self.screen = Screen::Join;
+                self.dialog = Some(Dialog::RemoveServer("lan.example.org".into()));
             }
             "room" => joined(self),
             "focus" => {
