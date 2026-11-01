@@ -188,15 +188,45 @@ pub fn palette() -> Palette {
     PALETTE.with(Cell::get)
 }
 
-/// The palette chosen last time, if one was saved.
+pub const CUSTOM: &str = "Custom";
+
+/// The palette of the theme picked last time, if one was saved.
 pub fn saved() -> Option<Palette> {
-    let dir = throcc_client_core::keystore::config_dir().ok()?;
-    Palette::from_hex(&Settings::load(&dir).ok()?.palette?)
+    picked(&saved_settings()?)
 }
 
-pub fn save(palette: Palette) {
-    let saved = throcc_client_core::keystore::config_dir()
-        .and_then(|dir| Settings::update(&dir, |s| s.palette = Some(palette.to_hex())));
+fn picked(settings: &Settings) -> Option<Palette> {
+    match settings.theme.as_deref() {
+        None | Some(CUSTOM) => Palette::from_hex(settings.palette.as_ref()?),
+        Some(name) => PRESETS.iter().find(|(n, _)| *n == name).map(|(_, p)| *p),
+    }
+}
+
+/// The Custom theme's colours, if they were ever saved.
+pub fn saved_custom() -> Option<Palette> {
+    Palette::from_hex(&saved_settings()?.palette?)
+}
+
+fn saved_settings() -> Option<Settings> {
+    Settings::load(&throcc_client_core::keystore::config_dir().ok()?).ok()
+}
+
+/// Keeps the preset called `name` as the picked theme.
+pub fn save_preset(name: &str) {
+    save(|s| s.theme = Some(name.into()));
+}
+
+/// Keeps Custom as the picked theme, with `palette` as its colours.
+pub fn save_custom(palette: Palette) {
+    save(|s| {
+        s.theme = Some(CUSTOM.into());
+        s.palette = Some(palette.to_hex());
+    });
+}
+
+fn save(change: impl FnOnce(&mut Settings)) {
+    let saved =
+        throcc_client_core::keystore::config_dir().and_then(|dir| Settings::update(&dir, change));
     if let Err(e) = saved {
         tracing::warn!("could not save the theme: {e:#}");
     }
@@ -598,6 +628,23 @@ mod tests {
             Palette::from_hex(&["#000000".into(), "#FFFFFF".into()]),
             None
         );
+    }
+
+    #[test]
+    fn the_picked_theme_is_found_by_name() {
+        let custom = PRESETS[2].1;
+        let mut settings = Settings {
+            theme: Some("Paper".into()),
+            palette: Some(custom.to_hex()),
+            ..Settings::default()
+        };
+        assert_eq!(picked(&settings), Some(PRESETS[5].1));
+        settings.theme = Some(CUSTOM.into());
+        assert_eq!(picked(&settings), Some(custom));
+        settings.theme = None;
+        assert_eq!(picked(&settings), Some(custom));
+        settings.theme = Some("Gone".into());
+        assert_eq!(picked(&settings), None);
     }
 
     #[test]

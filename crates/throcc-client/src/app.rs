@@ -245,6 +245,8 @@ pub struct ThroccApp {
     pub palette_fields: Vec<Entity<InputState>>,
     /// Whether the Custom theme is picked, which unlocks the colour fields.
     pub custom_palette: bool,
+    /// The Custom theme's colours, kept while a preset is picked.
+    pub custom_colors: theme::Palette,
     /// Pictures by hash, `None` while one decodes in the background or if it can't be shown.
     pub pictures: std::collections::HashMap<Hash, Option<Arc<RenderImage>>>,
     pub joining: bool,
@@ -318,7 +320,9 @@ impl ThroccApp {
                 .placeholder("Password")
         });
         let server_name = cx.new(|cx| InputState::new(window, cx).placeholder("Server name"));
-        let palette_fields: Vec<Entity<InputState>> = theme::palette()
+        let custom_colors =
+            if mock { None } else { theme::saved_custom() }.unwrap_or_else(theme::palette);
+        let palette_fields: Vec<Entity<InputState>> = custom_colors
             .colors()
             .iter()
             .map(|color| {
@@ -396,6 +400,7 @@ impl ThroccApp {
             server_picture_edit: None,
             palette_fields,
             custom_palette: !theme::PRESETS.iter().any(|(_, p)| *p == theme::palette()),
+            custom_colors,
             pictures: std::collections::HashMap::new(),
             joining: false,
             greeter: views::mascot::pick(views::mascot::GREETERS),
@@ -601,35 +606,34 @@ impl ThroccApp {
         None
     }
 
-    /// Switches every window to `palette`, keeps it for next time and shows it in the fields.
-    pub fn use_palette(
-        &mut self,
-        palette: theme::Palette,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Switches every window to the preset `name` and keeps it for next time.
+    pub fn use_preset(&mut self, name: &str, palette: theme::Palette, cx: &mut Context<Self>) {
+        self.custom_palette = false;
         theme::set(palette, cx);
-        theme::save(palette);
-        for (field, color) in self.palette_fields.iter().zip(palette.colors()) {
-            field.update(cx, |field, cx| {
-                field.set_value(theme::format_hex(color), window, cx)
-            });
-        }
+        theme::save_preset(name);
     }
 
-    /// Takes a typed hex colour into the palette once it parses.
+    /// Switches every window to the Custom theme and keeps it for next time.
+    pub fn use_custom(&mut self, cx: &mut Context<Self>) {
+        self.custom_palette = true;
+        theme::set(self.custom_colors, cx);
+        theme::save_custom(self.custom_colors);
+    }
+
+    /// Takes a typed hex colour into the Custom theme once it parses.
     fn set_palette_color(&mut self, index: usize, typed: &str, cx: &mut Context<Self>) {
         let Some(color) = theme::parse_hex(typed) else {
             return;
         };
-        let mut colors = theme::palette().colors();
+        let mut colors = self.custom_colors.colors();
         if colors[index] == color {
             return;
         }
         colors[index] = color;
-        let palette = theme::Palette::from_colors(colors);
-        theme::set(palette, cx);
-        theme::save(palette);
+        self.custom_colors = theme::Palette::from_colors(colors);
+        if self.custom_palette {
+            self.use_custom(cx);
+        }
     }
 
     /// The share filling the whole window, while it is still shown here.

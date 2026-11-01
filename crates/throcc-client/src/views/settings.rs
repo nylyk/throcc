@@ -762,21 +762,21 @@ fn appearance(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .map(|(i, (name, palette))| {
             let palette = *palette;
             theme_option(("preset", i), name, palette, !custom && palette == current).on_click(
-                cx.listener(move |app, _, window, cx| {
-                    app.custom_palette = false;
-                    app.use_palette(palette, window, cx);
+                cx.listener(move |app, _, _, cx| {
+                    app.use_preset(name, palette, cx);
                     cx.notify();
                 }),
             )
         });
-    let custom_option =
-        theme_option("custom", "Custom", current, custom).on_click(cx.listener(|app, _, _, cx| {
-            app.custom_palette = true;
+    let custom_option = theme_option("custom", theme::CUSTOM, app.custom_colors, custom).on_click(
+        cx.listener(|app, _, _, cx| {
+            app.use_custom(cx);
             cx.notify();
-        }));
+        }),
+    );
     let colors = theme::Palette::LABELS
         .iter()
-        .zip(current.colors())
+        .zip(app.custom_colors.colors())
         .zip(app.palette_fields.iter())
         .map(|((label, color), field)| {
             div()

@@ -11,7 +11,9 @@ const FILE: &str = "settings.json";
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// The eight palette colours, as `#RRGGBB`.
+    /// The picked theme's name: a preset's, or `Custom`.
+    pub theme: Option<String>,
+    /// The Custom theme's eight colours, as `#RRGGBB`.
     pub palette: Option<Vec<String>>,
     /// The gain on cues, where 1 plays them as recorded.
     pub cue_volume: f32,
@@ -23,6 +25,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            theme: None,
             palette: None,
             cue_volume: 1.0,
             profile_name: None,
