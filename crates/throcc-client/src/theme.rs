@@ -196,9 +196,9 @@ pub fn saved() -> Option<(&'static str, Palette)> {
 }
 
 fn picked(settings: &Settings) -> Option<(&'static str, Palette)> {
-    match settings.theme.as_deref() {
-        None | Some(CUSTOM) => Some((CUSTOM, Palette::from_hex(settings.palette.as_ref()?)?)),
-        Some(name) => preset(name),
+    match settings.theme.as_deref()? {
+        CUSTOM => Some((CUSTOM, Palette::from_hex(settings.palette.as_ref()?)?)),
+        name => preset(name),
     }
 }
 
@@ -650,7 +650,7 @@ mod tests {
         settings.theme = Some(CUSTOM.into());
         assert_eq!(picked(&settings), Some((CUSTOM, custom)));
         settings.theme = None;
-        assert_eq!(picked(&settings), Some((CUSTOM, custom)));
+        assert_eq!(picked(&settings), None);
         settings.theme = Some("Gone".into());
         assert_eq!(picked(&settings), None);
     }
