@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, Context, Div, InteractiveElement, IntoElement, MouseButton, ParentElement,
-    Stateful, StatefulInteractiveElement, Styled, Window, anchored, div, px,
+    AnyElement, AnyWindowHandle, Context, Div, InteractiveElement, IntoElement, MouseButton,
+    ParentElement, Stateful, StatefulInteractiveElement, Styled, Window, anchored, div, px,
 };
 use gpui_component::Icon;
 use gpui_component::slider::Slider;
@@ -175,8 +175,11 @@ fn stream_actions(app: &ThroccApp, user: UserId, mine: bool, cx: &mut Context<Th
     }
     rows.children((!mine).then(|| {
         action("person-menu-pop-out", "picture-in-picture-2", "Pop Out").on_click(cx.listener(
-            move |app, _, _, cx| {
+            move |app, _, window, cx| {
                 app.close_person_menu(cx);
+                if app.fullscreen_stream() == Some(user) {
+                    app.exit_fullscreen(window, cx);
+                }
                 app.pop_out(user, cx);
             },
         ))
@@ -199,14 +202,18 @@ fn stream_actions(app: &ThroccApp, user: UserId, mine: bool, cx: &mut Context<Th
                 "Stop Watching"
             },
         )
-        .on_click(cx.listener(move |app, _, _, cx| {
+        .on_click(cx.listener(move |app, _, window, cx| {
             app.close_person_menu(cx);
+            if app.fullscreen_stream() == Some(user) {
+                app.exit_fullscreen(window, cx);
+            }
             app.stop_watching(user);
         })),
     )
 }
 
-/// Kicking `user` from the room and removing them from the server, where our rank allows.
+/// Kicking `user` from the room, and removing them from the server outside pop-outs, where
+/// our rank allows.
 fn moderation(
     app: &ThroccApp,
     user: UserId,
@@ -217,7 +224,12 @@ fn moderation(
     let outranked = Some(user) != app.state.me && person.role < me;
     let kick_room = person.room.filter(|_| outranked && me >= Role::Manager);
     let kick = kick_room.is_some();
-    let remove = outranked && me == Role::Admin;
+    let in_popout = app.person_menu.as_ref().is_some_and(|menu| {
+        app.popouts
+            .values()
+            .any(|popout| AnyWindowHandle::from(*popout) == menu.window)
+    });
+    let remove = outranked && me == Role::Admin && !in_popout;
     if !kick && !remove {
         return None;
     }

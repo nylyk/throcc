@@ -744,6 +744,18 @@ impl ThroccApp {
         cx.notify();
     }
 
+    /// Closes the person menu if it is open in `window`, and says whether it was.
+    pub fn close_person_menu_in(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        let closed = self
+            .person_menu
+            .take_if(|menu| menu.window == window.window_handle())
+            .is_some();
+        if closed {
+            cx.notify();
+        }
+        closed
+    }
+
     pub fn shows_overlay(&self, user: UserId) -> bool {
         self.overlay.is_some_and(|(shown, until)| {
             shown == user && until.is_none_or(|until| std::time::Instant::now() < until)
@@ -1560,8 +1572,7 @@ impl ThroccApp {
     }
 
     fn close_dialog(&mut self, _: &CloseDialog, window: &mut Window, cx: &mut Context<Self>) {
-        if self.person_menu.take().is_some() {
-            cx.notify();
+        if self.close_person_menu_in(window, cx) {
             return;
         }
         if self.dialog.is_none() && self.fullscreen.is_some() {

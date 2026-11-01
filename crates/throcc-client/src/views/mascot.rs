@@ -17,7 +17,7 @@ pub const GREETERS: &[&str] = &[
     "mascot/thinking.svg",
 ];
 
-/// In a lobby with no rooms.
+/// In the lobby.
 pub const IDLE: &[&str] = &[
     "mascot/asleep.svg",
     "mascot/cool.svg",

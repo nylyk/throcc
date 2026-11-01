@@ -50,6 +50,7 @@ impl PopOut {
         );
         let opened = cx.open_window(options, |window, cx| {
             window.set_window_title(&title);
+            let handle = window.window_handle();
             let view = cx.new(|cx| Self {
                 app,
                 user,
@@ -62,6 +63,7 @@ impl PopOut {
                     cx.defer(move |cx| {
                         app.update(cx, |app, cx| {
                             app.popouts.remove(&user);
+                            app.person_menu.take_if(|menu| menu.window == handle);
                             cx.notify();
                         })
                         .ok();
@@ -178,7 +180,13 @@ impl Render for PopOut {
             )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
-                    this.set_fullscreen(false, window, cx);
+                    let closed_menu = this
+                        .app
+                        .update(cx, |app, cx| app.close_person_menu_in(window, cx))
+                        .unwrap_or(false);
+                    if !closed_menu {
+                        this.set_fullscreen(false, window, cx);
+                    }
                 }
             }))
             .child(player(picture, title, buttons, controls))
