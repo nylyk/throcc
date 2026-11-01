@@ -856,17 +856,82 @@ fn theme_option(
         .when(selected, |s| s.bg(theme::selected()))
         .cursor_pointer()
         .hover(|s| s.border_color(theme::border_strong()))
+        .child(theme_preview(palette))
+        .child(div().font_weight(FontWeight::MEDIUM).child(name))
+}
+
+/// A tiny sketch of the app drawn in `palette`: sidebar, room tiles and status dots.
+fn theme_preview(palette: theme::Palette) -> Div {
+    let color = theme::swatch;
+    let bar = |width: f32, height: f32, fill: u32| {
+        div()
+            .w(relative(width))
+            .h(px(height))
+            .rounded(px(height / 2.))
+            .bg(color(fill))
+    };
+    let dot = |fill: u32| div().size(px(5.)).rounded_full().bg(color(fill));
+    let tile = |avatar: u32| {
+        div()
+            .flex_1()
+            .rounded(px(3.))
+            .bg(color(palette.panel))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(div().size(px(10.)).rounded_full().bg(color(avatar)))
+    };
+    div()
+        .flex()
+        .h(px(64.))
+        .rounded(px(6.))
+        .overflow_hidden()
+        .border_1()
+        .border_color(theme::control())
+        .bg(color(palette.bg))
         .child(
             div()
+                .w(px(36.))
+                .h_full()
+                .p(px(5.))
                 .flex()
-                .h(px(24.))
-                .rounded(px(6.))
-                .overflow_hidden()
-                .children(
-                    palette
-                        .colors()
-                        .map(|color| div().flex_1().h_full().bg(theme::swatch(color))),
+                .flex_col()
+                .gap(px(4.))
+                .bg(color(palette.panel))
+                .child(bar(1., 6., palette.accent))
+                .child(bar(0.8, 4., palette.text))
+                .child(bar(0.6, 4., palette.muted))
+                .child(bar(0.7, 4., palette.muted)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .p(px(5.))
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(bar(0.4, 4., palette.text))
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(2.))
+                                .child(dot(palette.good))
+                                .child(dot(palette.warning))
+                                .child(dot(palette.bad)),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .gap(px(4.))
+                        .child(tile(palette.accent))
+                        .child(tile(palette.muted)),
                 ),
         )
-        .child(div().font_weight(FontWeight::MEDIUM).child(name))
 }
