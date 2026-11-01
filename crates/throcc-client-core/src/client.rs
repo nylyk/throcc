@@ -34,6 +34,7 @@ const EVENTS: usize = 256;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     Join(Option<RoomId>),
+    JoinWithPassword(RoomId, String),
     SetMic(bool),
     SetDeafened(bool),
     StartShare(ShareConfig),
@@ -55,6 +56,8 @@ pub enum Command {
     FetchAvatar(Hash),
     CreateRoom(String),
     RenameRoom(RoomId, String),
+    /// Locks the room behind a password, or unlocks it with `None`.
+    SetRoomPassword(RoomId, Option<String>),
     DeleteRoom(RoomId),
     CreateInvite,
     ListUsers,
@@ -100,6 +103,8 @@ pub enum Event {
     ServerProfileSaved,
     /// The server refused the server's new name or picture, for this reason.
     ServerProfileRefused(String),
+    /// The server refused the password we joined a locked room with, for this reason.
+    PasswordRefused(String),
     /// We left the server for good, and it is forgotten.
     LeftServer,
 }
@@ -289,30 +294,31 @@ impl ClientApi for MockClient {
         let me = self.me();
         match command {
             Command::Join(room) => self.update(|s| {
+                let (mic, deafened) = (s.mic, s.deafened);
                 if let Some(person) = s.people.get_mut(&me) {
                     person.room = room;
-                    person.mic = false;
+                    person.mic = mic;
+                    person.deafened = deafened;
                     person.sharing = None;
                 }
                 s.current = room.map(|room| CurrentRoom {
                     room,
-                    mic: false,
-                    deafened: false,
                     sharing: None,
                     watching: vec![],
                 });
             }),
+            Command::JoinWithPassword(room, _) => self.command(Command::Join(Some(room))),
             Command::SetMic(on) => self.update(|s| {
-                set_mine(s, me, |c, p| {
-                    c.mic = on;
+                s.mic = on;
+                if let Some(p) = s.people.get_mut(&me) {
                     p.mic = on;
-                })
+                }
             }),
             Command::SetDeafened(on) => self.update(|s| {
-                set_mine(s, me, |c, p| {
-                    c.deafened = on;
+                s.deafened = on;
+                if let Some(p) = s.people.get_mut(&me) {
                     p.deafened = on;
-                })
+                }
             }),
             Command::StartShare(config) => self.update(|s| {
                 set_mine(s, me, |c, p| {
@@ -378,11 +384,20 @@ impl ClientApi for MockClient {
             Command::FetchAvatar(_) => {}
             Command::CreateRoom(name) => self.update(|s| {
                 let id = RoomId(s.rooms.iter().map(|r| r.id.0).max().unwrap_or(0) + 1);
-                s.rooms.push(RoomView { id, name });
+                s.rooms.push(RoomView {
+                    id,
+                    name,
+                    locked: false,
+                });
             }),
             Command::RenameRoom(room, name) => self.update(|s| {
                 if let Some(r) = s.rooms.iter_mut().find(|r| r.id == room) {
                     r.name = name;
+                }
+            }),
+            Command::SetRoomPassword(room, password) => self.update(|s| {
+                if let Some(r) = s.rooms.iter_mut().find(|r| r.id == room) {
+                    r.locked = password.is_some();
                 }
             }),
             Command::DeleteRoom(room) => self.update(|s| {
@@ -519,10 +534,13 @@ fn sample_state() -> State {
             .map(|(i, name)| RoomView {
                 id: RoomId(i as u64 + 1),
                 name: (*name).into(),
+                locked: *name == "Work",
             })
             .collect(),
         people,
         current: None,
+        mic: true,
+        deafened: false,
         key_warnings: vec![KeyWarning {
             user: UserId(3),
             pinned: Fingerprint([0x7c; 32]),
@@ -608,8 +626,8 @@ mod tests {
             panic!("no state")
         };
         assert_eq!(state.current.as_ref().map(|c| c.room), Some(RoomId(1)));
-        client.command(Command::SetMic(true));
-        assert!(client.state().current.as_ref().is_some_and(|c| c.mic));
+        client.command(Command::SetMic(false));
+        assert!(!client.state().mic);
         client.command(Command::Watch(UserId(4)));
         assert_eq!(
             client.state().current.as_ref().map(|c| c.watching.clone()),

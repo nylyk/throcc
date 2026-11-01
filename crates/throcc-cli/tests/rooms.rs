@@ -21,10 +21,25 @@ use tokio::net::UdpSocket;
 use common::*;
 
 async fn join(client: &TestClient, room: Option<RoomId>) -> Placed {
-    match client.request(Request::SetRoom(room)).await {
+    match client
+        .request(Request::SetRoom {
+            room,
+            password: None,
+        })
+        .await
+    {
         Response::Placed(placed) => placed,
         other => panic!("expected Placed, got {other:?}"),
     }
+}
+
+async fn enter(client: &TestClient, room: RoomId, password: Option<&str>) -> Response {
+    client
+        .request(Request::SetRoom {
+            room: Some(room),
+            password: password.map(str::to_owned),
+        })
+        .await
 }
 
 /// Presence as one client sees it, built from its welcome and events.
@@ -125,13 +140,69 @@ async fn three_clients_see_consistent_presence() {
 }
 
 #[tokio::test]
+async fn a_locked_room_needs_its_password_from_members_on_every_join() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let general = create_room(&mut alice, "General").await;
+    let mut bob = invited(&server, &alice).await;
+    let lock = |password: &str| Request::SetRoomPassword {
+        room: general,
+        password: Some(password.to_owned()),
+    };
+
+    assert_error(&bob.request(lock("mine")).await, ErrorCode::Forbidden);
+    assert_eq!(alice.request(lock("hunter2")).await, Response::Ok);
+    bob.event(|e| {
+        matches!(e, Event::RoomLocked { room, locked: true } if *room == general).then_some(())
+    })
+    .await;
+    assert_error(&enter(&bob, general, None).await, ErrorCode::WrongPassword);
+    assert_error(
+        &enter(&bob, general, Some("hunter3")).await,
+        ErrorCode::WrongPassword,
+    );
+    let placed = enter(&bob, general, Some("hunter2")).await;
+    assert!(matches!(placed, Response::Placed(p) if p.room == Some(general)));
+    let placed = enter(&alice, general, None).await;
+    assert!(matches!(placed, Response::Placed(p) if p.room == Some(general)));
+
+    bob.link.connected.connection.close(0u32.into(), b"");
+    let link = account::sign_in(&bob.keystore, &server.addr, Some(general))
+        .await
+        .unwrap();
+    assert_eq!(link.welcome.placed.room, Some(general));
+    assert!(
+        link.welcome
+            .rooms
+            .iter()
+            .any(|r| r.id == general && r.locked)
+    );
+
+    let lobby = Request::SetRoom {
+        room: None,
+        password: None,
+    };
+    link.requester.request(lobby).await.unwrap();
+    link.connected.connection.close(0u32.into(), b"");
+    let link = account::sign_in(&bob.keystore, &server.addr, Some(general))
+        .await
+        .unwrap();
+    assert_eq!(link.welcome.placed.room, None);
+}
+
+#[tokio::test]
 async fn failed_set_room_leaves_the_client_in_place() {
     let server = start_server();
     let mut alice = admin(&server).await;
     let general = create_room(&mut alice, "General").await;
     let bob = invited(&server, &alice).await;
     let placed = join(&bob, Some(general)).await;
-    let missing = bob.request(Request::SetRoom(Some(RoomId(999)))).await;
+    let missing = bob
+        .request(Request::SetRoom {
+            room: Some(RoomId(999)),
+            password: None,
+        })
+        .await;
     assert_error(&missing, ErrorCode::NotFound);
     let again = join(&bob, Some(general)).await;
     assert_eq!(again.tracks, placed.tracks);
@@ -385,7 +456,12 @@ async fn exhausted_media_ids_refuse_joins_but_keep_the_server_up() {
         .allocate_media_ids(u32::MAX - 1)
         .unwrap()
         .unwrap();
-    let res = alice.request(Request::SetRoom(Some(general))).await;
+    let res = alice
+        .request(Request::SetRoom {
+            room: Some(general),
+            password: None,
+        })
+        .await;
     assert_error(&res, ErrorCode::Internal);
     assert!(matches!(
         alice.request(Request::ListUsers).await,

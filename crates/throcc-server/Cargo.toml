@@ -12,6 +12,7 @@ workspace = true
 throcc-proto.workspace = true
 throcc-crypto.workspace = true
 anyhow.workspace = true
+argon2.workspace = true
 clap.workspace = true
 quinn.workspace = true
 rcgen.workspace = true

@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
 
-pub const PROTOCOL: u16 = 2;
+pub const PROTOCOL: u16 = 3;
 pub const MAX_AVATAR_BYTES: usize = 64 * 1024;
 pub const MAX_NAME_CHARS: usize = 32;
+pub const MAX_PASSWORD_CHARS: usize = 128;
 
 pub type PublicKey = [u8; 32];
 pub type Signature = [u8; 64];
@@ -100,7 +101,11 @@ pub enum ServerMessage {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Request {
-    SetRoom(Option<RoomId>),
+    /// Moves us to `room`. A locked room needs its `password` unless we manage rooms.
+    SetRoom {
+        room: Option<RoomId>,
+        password: Option<String>,
+    },
     SetProfile {
         name: String,
         avatar: Option<Hash>,
@@ -126,6 +131,11 @@ pub enum Request {
         name: String,
     },
     DeleteRoom(RoomId),
+    /// Locks `room` behind `password`, or unlocks it with `None`.
+    SetRoomPassword {
+        room: RoomId,
+        password: Option<String>,
+    },
     CreateInvite,
     ListUsers,
     SetRole {
@@ -160,6 +170,7 @@ pub enum ErrorCode {
     TooLarge,
     StaleEpoch,
     Internal,
+    WrongPassword,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +183,10 @@ pub enum Event {
         name: String,
     },
     RoomDeleted(RoomId),
+    RoomLocked {
+        room: RoomId,
+        locked: bool,
+    },
     RoomState {
         room: RoomId,
         epoch: Epoch,
@@ -208,6 +223,8 @@ pub enum Event {
 pub struct Room {
     pub id: RoomId,
     pub name: String,
+    /// Whether joining needs a password.
+    pub locked: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

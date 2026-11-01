@@ -14,6 +14,9 @@ pub struct State {
     pub rooms: Vec<RoomView>,
     pub people: BTreeMap<UserId, Person>,
     pub current: Option<CurrentRoom>,
+    /// Our mic and deafen switches, which stay as set across rooms.
+    pub mic: bool,
+    pub deafened: bool,
     pub key_warnings: Vec<KeyWarning>,
     pub health: Health,
     /// Our name as kept on this computer, once we have chosen one.
@@ -71,6 +74,8 @@ pub enum ConnectionStatus {
 pub struct RoomView {
     pub id: RoomId,
     pub name: String,
+    /// Whether joining needs a password.
+    pub locked: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -89,8 +94,6 @@ pub struct Person {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CurrentRoom {
     pub room: RoomId,
-    pub mic: bool,
-    pub deafened: bool,
     pub sharing: Option<ShareConfig>,
     /// Whose shares we receive.
     pub watching: Vec<UserId>,

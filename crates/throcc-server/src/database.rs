@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use throcc_proto::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
-use throcc_proto::messages::{PublicKey, Room, ServerProfile, SignedEncKey, User};
+use throcc_proto::messages::{PublicKey, ServerProfile, SignedEncKey, User};
 
 const USERS_COLUMNS: &str = "(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS server_profile (id INTEGER PRIMARY KEY CHECK (id = 0)
 type Migration = fn(&Transaction) -> rusqlite::Result<()>;
 
 /// Migration `i` moves the schema from version `i` to `i + 1`, kept in `PRAGMA user_version`.
-const MIGRATIONS: [Migration; 2] = [to_v1, to_v2];
+const MIGRATIONS: [Migration; 3] = [to_v1, to_v2, to_v3];
 
 /// Creates the first versioned schema, or brings an unversioned database up to it.
 fn to_v1(tx: &Transaction) -> rusqlite::Result<()> {
@@ -51,6 +51,11 @@ fn to_v1(tx: &Transaction) -> rusqlite::Result<()> {
 fn to_v2(tx: &Transaction) -> rusqlite::Result<()> {
     add_autoincrement(tx, "rooms", ROOMS_COLUMNS)?;
     add_missing_column(tx, "blobs", "uploaded_at", "INTEGER NOT NULL DEFAULT 0")
+}
+
+/// Lets rooms keep a password hash.
+fn to_v3(tx: &Transaction) -> rusqlite::Result<()> {
+    add_missing_column(tx, "rooms", "password_hash", "TEXT")
 }
 
 fn add_missing_column(
@@ -109,6 +114,14 @@ fn migrate(conn: &mut Connection) -> Result<()> {
 }
 
 const NEXT_MEDIA_ID: &str = "next_media_id";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomRow {
+    pub id: RoomId,
+    pub name: String,
+    pub epoch: Epoch,
+    pub password_hash: Option<String>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UserRow {
@@ -323,18 +336,17 @@ impl Database {
         Ok(())
     }
 
-    pub fn rooms(&self) -> Result<Vec<(Room, Epoch)>> {
+    pub fn rooms(&self) -> Result<Vec<RoomRow>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, name, epoch FROM rooms ORDER BY id")?;
+            .prepare("SELECT id, name, epoch, password_hash FROM rooms ORDER BY id")?;
         let rows = stmt.query_map([], |r| {
-            Ok((
-                Room {
-                    id: RoomId(r.get::<_, i64>(0)? as u64),
-                    name: r.get(1)?,
-                },
-                Epoch(r.get::<_, i64>(2)? as u32),
-            ))
+            Ok(RoomRow {
+                id: RoomId(r.get::<_, i64>(0)? as u64),
+                name: r.get(1)?,
+                epoch: Epoch(r.get::<_, i64>(2)? as u32),
+                password_hash: r.get(3)?,
+            })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -349,6 +361,13 @@ impl Database {
         Ok(self.conn.execute(
             "UPDATE rooms SET name = ?1 WHERE id = ?2",
             params![name, room.0 as i64],
+        )? == 1)
+    }
+
+    pub fn set_room_password_hash(&self, room: RoomId, hash: Option<&str>) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE rooms SET password_hash = ?1 WHERE id = ?2",
+            params![hash, room.0 as i64],
         )? == 1)
     }
 
@@ -723,8 +742,9 @@ mod tests {
         assert_eq!(fern.invited_by, Some(UserId(1)));
         assert_eq!(db.users().unwrap().len(), 2);
         let rooms = db.rooms().unwrap();
-        assert_eq!(rooms[1].0.name, "Games");
-        assert_eq!(rooms[1].1, Epoch(9));
+        assert_eq!(rooms[1].name, "Games");
+        assert_eq!(rooms[1].epoch, Epoch(9));
+        assert_eq!(rooms[1].password_hash, None);
         assert_eq!(db.allocate_media_ids(3).unwrap(), Some(MediaId(40)));
         assert_eq!(db.server_profile().unwrap(), ServerProfile::default());
 

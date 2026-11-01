@@ -4,6 +4,7 @@ pub mod egress;
 pub mod identity;
 pub mod limits;
 pub mod permissions;
+pub mod room_password;
 pub mod rooms;
 pub mod session;
 pub mod sfu;

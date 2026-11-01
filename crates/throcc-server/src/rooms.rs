@@ -8,9 +8,9 @@ use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
-    ErrorCode, Event, MAX_AVATAR_BYTES, MAX_NAME_CHARS, MediaState, Placed, Presence, Recovery,
-    Request, Response, Room, RoomPeer, ServerMessage, ServerProfile, Share, SignedEncKey, Tracks,
-    Welcome,
+    ErrorCode, Event, MAX_AVATAR_BYTES, MAX_NAME_CHARS, MAX_PASSWORD_CHARS, MediaState, Placed,
+    Presence, Recovery, Request, Response, Room, RoomPeer, ServerMessage, ServerProfile, Share,
+    SignedEncKey, Tracks, Welcome,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
@@ -21,6 +21,7 @@ use crate::database::{Database, InviteRow, UserRow};
 use crate::egress::{EgressHandle, TrackKind};
 use crate::limits::Buckets;
 use crate::permissions;
+use crate::room_password;
 use crate::sfu::{ForwardingTable, KeyframeAggregator, Route, Sfu};
 
 pub const INVITE_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
@@ -42,6 +43,9 @@ const UPLOAD_BYTES_PER_SECOND: f64 = MAX_AVATAR_BYTES as f64 / 10.0;
 const MIN_UPLOAD_COST: usize = 4096;
 /// How long an uploaded picture that nothing refers to is kept.
 const UNUSED_BLOB_GRACE: Duration = Duration::from_secs(10 * 60);
+const PASSWORD_BURST: f64 = 5.0;
+/// One password guess every 5 seconds, which also bounds the Argon2 work a user can cause.
+const PASSWORDS_PER_SECOND: f64 = 0.2;
 
 pub struct Refusal(pub ErrorCode, pub String);
 
@@ -110,6 +114,7 @@ struct Session {
 struct RoomEntry {
     name: String,
     epoch: Epoch,
+    password_hash: Option<String>,
     members: BTreeSet<UserId>,
 }
 
@@ -124,6 +129,10 @@ pub struct Hub {
     next_conn: u64,
     requests: Buckets<UserId>,
     uploads: Buckets<UserId>,
+    password_tries: Buckets<UserId>,
+    /// The room each user last moved into themselves, which a reconnect may return them to
+    /// without its password.
+    last_joined: HashMap<UserId, RoomId>,
     pub invite_runs: InviteRuns,
 }
 
@@ -132,12 +141,13 @@ impl Hub {
         let rooms = db
             .rooms()?
             .into_iter()
-            .map(|(room, epoch)| {
+            .map(|room| {
                 (
                     room.id,
                     RoomEntry {
                         name: room.name,
-                        epoch,
+                        epoch: room.epoch,
+                        password_hash: room.password_hash,
                         members: BTreeSet::new(),
                     },
                 )
@@ -154,6 +164,8 @@ impl Hub {
             next_conn: 0,
             requests: Buckets::new(REQUEST_BURST, REQUESTS_PER_SECOND),
             uploads: Buckets::new(UPLOAD_BURST_BYTES, UPLOAD_BYTES_PER_SECOND),
+            password_tries: Buckets::new(PASSWORD_BURST, PASSWORDS_PER_SECOND),
+            last_joined: HashMap::new(),
             invite_runs: InviteRuns::default(),
         })
     }
@@ -193,6 +205,7 @@ impl Hub {
             },
         );
         let placed = want_room
+            .filter(|room| self.may_rejoin(user, *room))
             .and_then(|room| self.place(user, Some(room)).ok())
             .unwrap_or_else(lobby);
         let server = self.db.server_profile().unwrap_or_else(|e| {
@@ -246,7 +259,7 @@ impl Hub {
             };
         }
         let outcome = match request {
-            Request::SetRoom(room) => self.place(user, room).map(Response::Placed),
+            Request::SetRoom { room, password } => self.join(user, room, password.as_deref()),
             Request::SetProfile { name, avatar } => self.set_profile(user, name, avatar),
             Request::SetAvatar(bytes) => self.set_avatar(user, bytes),
             Request::GetAvatar(hash) => self.get_avatar(hash),
@@ -255,6 +268,9 @@ impl Hub {
             Request::CreateRoom { name } => self.create_room(user, name),
             Request::RenameRoom { room, name } => self.rename_room(user, room, name),
             Request::DeleteRoom(room) => self.delete_room(user, room),
+            Request::SetRoomPassword { room, password } => {
+                self.set_room_password(user, room, password)
+            }
             Request::CreateInvite => self.create_invite(user),
             Request::ListUsers => self.list_users(user),
             Request::SetRole { user: target, role } => self.set_role(user, target, role),
@@ -347,6 +363,7 @@ impl Hub {
             .map(|(id, entry)| Room {
                 id: *id,
                 name: entry.name.clone(),
+                locked: entry.password_hash.is_some(),
             })
             .collect()
     }
@@ -387,6 +404,63 @@ impl Hub {
         })
     }
 
+    fn join(&mut self, user: UserId, target: Option<RoomId>, password: Option<&str>) -> Outcome {
+        if let Some(room) = target {
+            self.check_password(user, room, password)?;
+        }
+        let placed = self.place(user, target)?;
+        match target {
+            Some(room) => self.last_joined.insert(user, room),
+            None => self.last_joined.remove(&user),
+        };
+        Ok(Response::Placed(placed))
+    }
+
+    /// Refuses `user` entry to a locked `room` without its password. Members already in it
+    /// and those who manage rooms pass without one.
+    fn check_password(
+        &mut self,
+        user: UserId,
+        room: RoomId,
+        password: Option<&str>,
+    ) -> Result<(), Refusal> {
+        let Some(hash) = self.room_entry(room)?.password_hash.clone() else {
+            return Ok(());
+        };
+        if self.session(user)?.room == Some(room) || permissions::can_manage_rooms(self.role(user)?)
+        {
+            return Ok(());
+        }
+        let Some(password) = password else {
+            return Err(Refusal::new(
+                ErrorCode::WrongPassword,
+                "this room needs a password",
+            ));
+        };
+        if !self.password_tries.take(user, 1.0, Instant::now()) {
+            return Err(Refusal::new(
+                ErrorCode::RateLimited,
+                "too many password attempts; wait a few seconds",
+            ));
+        }
+        if !room_password::matches(password, &hash) {
+            return Err(Refusal::new(ErrorCode::WrongPassword, "wrong password"));
+        }
+        Ok(())
+    }
+
+    /// Whether a reconnect may put `user` back into `room` without its password.
+    fn may_rejoin(&self, user: UserId, room: RoomId) -> bool {
+        self.rooms
+            .get(&room)
+            .is_some_and(|entry| entry.password_hash.is_none())
+            || self
+                .sessions
+                .get(&user)
+                .is_some_and(|s| permissions::can_manage_rooms(s.row.role))
+            || self.last_joined.get(&user) == Some(&room)
+    }
+
     /// Moves `user` to `target` in one step. On failure the user stays where they were.
     fn place(&mut self, user: UserId, target: Option<RoomId>) -> Result<Placed, Refusal> {
         let session = self.session(user)?;
@@ -420,7 +494,7 @@ impl Hub {
         }
         let session = self.session_mut(user)?;
         session.room = target;
-        session.media = MediaState::default();
+        session.media.share = None;
         session.watching.clear();
         let old_tracks = std::mem::replace(&mut session.tracks, tracks);
         for share in old_tracks.iter().flat_map(|t| &t.shares) {
@@ -654,10 +728,15 @@ impl Hub {
             RoomEntry {
                 name: name.clone(),
                 epoch: Epoch(0),
+                password_hash: None,
                 members: BTreeSet::new(),
             },
         );
-        self.emit_all(Event::RoomCreated(Room { id, name }));
+        self.emit_all(Event::RoomCreated(Room {
+            id,
+            name,
+            locked: false,
+        }));
         Ok(Response::Ok)
     }
 
@@ -676,6 +755,36 @@ impl Hub {
         Ok(Response::Ok)
     }
 
+    fn set_room_password(
+        &mut self,
+        user: UserId,
+        room: RoomId,
+        password: Option<String>,
+    ) -> Outcome {
+        self.require(permissions::can_manage_rooms(self.role(user)?))?;
+        self.room_entry(room)?;
+        let hash = match password {
+            Some(password) => {
+                Some(room_password::hash(valid_password(&password)?).map_err(Refusal::internal)?)
+            }
+            None => None,
+        };
+        self.db
+            .set_room_password_hash(room, hash.as_deref())
+            .map_err(Refusal::internal)?;
+        let locked = hash.is_some();
+        let entry = self
+            .rooms
+            .get_mut(&room)
+            .ok_or_else(|| Refusal::new(ErrorCode::NotFound, "no such room"))?;
+        entry.password_hash = hash;
+        let members = &entry.members;
+        self.last_joined
+            .retain(|user, joined| *joined != room || members.contains(user));
+        self.emit_all(Event::RoomLocked { room, locked });
+        Ok(Response::Ok)
+    }
+
     fn delete_room(&mut self, user: UserId, room: RoomId) -> Outcome {
         self.require(permissions::can_manage_rooms(self.role(user)?))?;
         for member in self.room_entry(room)?.members.clone() {
@@ -683,6 +792,7 @@ impl Hub {
         }
         self.db.delete_room(room).map_err(Refusal::internal)?;
         self.rooms.remove(&room);
+        self.last_joined.retain(|_, joined| *joined != room);
         self.emit_all(Event::RoomDeleted(room));
         Ok(Response::Ok)
     }
@@ -1024,6 +1134,17 @@ fn valid_name(name: &str) -> Result<String, Refusal> {
         ));
     }
     Ok(name.to_owned())
+}
+
+fn valid_password(password: &str) -> Result<&str, Refusal> {
+    let chars = password.chars().count();
+    if chars == 0 || chars > MAX_PASSWORD_CHARS {
+        return Err(Refusal::new(
+            ErrorCode::Invalid,
+            format!("passwords are 1 to {MAX_PASSWORD_CHARS} characters"),
+        ));
+    }
+    Ok(password)
 }
 
 pub fn unix_now() -> u64 {

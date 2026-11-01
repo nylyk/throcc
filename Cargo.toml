@@ -56,6 +56,7 @@ rustls-webpki = { version = "0.103.16", default-features = false, features = ["r
 sonora = "0.2.0"
 sonora-common-audio = "0.2.0"
 spake2 = "0.4.0"
+argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "password-hash"] }
 subtle = "2.6.1"
 screencapturekit = { version = "=11.0.0", features = ["macos_14_0"] }
 smallvec = "1.16.4"

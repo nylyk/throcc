@@ -159,8 +159,8 @@ pub async fn room_with_two_at(server: &TestServer, bob_addr: &str) -> (Call, Cal
     let bob = enroll_at(bob_addr, &code).await;
     let alice = Call::start(alice.link, &alice.keystore).unwrap();
     let bob = Call::start(bob.link, &bob.keystore).unwrap();
-    alice.join(Some(room)).await.unwrap();
-    bob.join(Some(room)).await.unwrap();
+    alice.join(Some(room), None).await.unwrap();
+    bob.join(Some(room), None).await.unwrap();
     (alice, bob, room)
 }
 

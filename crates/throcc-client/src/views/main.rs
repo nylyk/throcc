@@ -8,7 +8,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_component::{Disableable, Icon, Sizable, Size};
+use gpui_component::{Icon, Sizable, Size};
 use throcc_client_core::client::Command;
 use throcc_client_core::state::{Person, State, share_label};
 use throcc_proto::ids::{RoomId, UserId};
@@ -134,17 +134,7 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                     .cursor_pointer()
                     .when(selected, |s| s.bg(theme::selected()))
                     .hover(|s| s.bg(theme::raised()))
-                    .child(
-                        div()
-                            .size(px(6.))
-                            .flex_none()
-                            .rounded_full()
-                            .bg(if selected {
-                                theme::accent()
-                            } else {
-                                theme::text_3()
-                            }),
-                    )
+                    .child(room_marker(room.locked, selected))
                     .child(
                         div()
                             .min_w_0()
@@ -163,11 +153,7 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                                 app.open_edit_room(id, window, cx);
                             }))
                     }))
-                    .on_click(cx.listener(move |app, _, _, _| {
-                        if app.state.current.as_ref().is_none_or(|c| c.room != id) {
-                            app.command(Command::Join(Some(id)));
-                        }
-                    })),
+                    .on_click(cx.listener(move |app, _, window, cx| app.join_room(id, window, cx))),
             )
             .children(
                 people
@@ -182,8 +168,7 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
         .or_else(|| state.profile_name.clone())
         .unwrap_or_else(|| "You".into());
     let my_picture = me.and_then(|m| pictures.get(&m).cloned()).or(own_picture);
-    let mic = state.current.as_ref().is_some_and(|c| c.mic);
-    let deafened = state.current.as_ref().is_some_and(|c| c.deafened);
+    let (mic, deafened) = (state.mic, state.deafened);
     let in_room = state.current.is_some();
 
     // The dropdown wraps its trigger in elements that grow to the text, so the name gets an
@@ -377,7 +362,6 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                         .items_center()
                         .child(
                             toggle_icon("profile-mic", "mic", "mic-off", !mic, "Mute (⌘⇧M)")
-                                .disabled(!in_room)
                                 .on_click(cx.listener(move |app, _, _, _| {
                                     app.command(Command::SetMic(!mic))
                                 })),
@@ -390,7 +374,6 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                                 deafened,
                                 "Deafen (⌘⇧D)",
                             )
-                            .disabled(!in_room)
                             .on_click(cx.listener(
                                 move |app, _, _, _| app.command(Command::SetDeafened(!deafened)),
                             )),
@@ -489,6 +472,10 @@ fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
                     .flex()
                     .items_center()
                     .gap_2()
+                    .children(
+                        room.locked
+                            .then(|| icon("lock").size(px(14.)).text_color(theme::text_3())),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -525,9 +512,7 @@ fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
             .child(
                 primary(("join-room", id.0 as usize), "Join")
                     .w_full()
-                    .on_click(
-                        cx.listener(move |app, _, _, _| app.command(Command::Join(Some(id)))),
-                    ),
+                    .on_click(cx.listener(move |app, _, window, cx| app.join_room(id, window, cx))),
             )
     });
     let header = moves_window(div())
@@ -686,6 +671,28 @@ fn room(
         .child(header)
         .child(body)
         .child(controls)
+}
+
+/// The dot before a room's name in the sidebar, or a lock when it needs a password.
+fn room_marker(locked: bool, selected: bool) -> AnyElement {
+    let color = if selected {
+        theme::accent()
+    } else {
+        theme::text_3()
+    };
+    if locked {
+        return icon("lock")
+            .size(px(12.))
+            .flex_none()
+            .text_color(color)
+            .into_any_element();
+    }
+    div()
+        .size(px(6.))
+        .flex_none()
+        .rounded_full()
+        .bg(color)
+        .into_any_element()
 }
 
 /// One person in the room, and what their tile shows.

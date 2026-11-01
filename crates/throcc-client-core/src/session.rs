@@ -202,7 +202,10 @@ impl Session {
             voice: None,
             room: None,
             my_tracks: None,
-            media: MediaState::default(),
+            media: MediaState {
+                mic: true,
+                ..MediaState::default()
+            },
             peers: BTreeMap::new(),
             watching: Vec::new(),
             watched_video: HashMap::new(),
@@ -474,6 +477,7 @@ impl Session {
                     self.start_voice();
                     let welcome = self.call.welcome.clone();
                     self.apply_welcome(&welcome);
+                    self.push_media().await;
                     return Some(queued);
                 }
                 Err(e) => warn!("reconnect: {e:#}"),
@@ -503,7 +507,10 @@ impl Session {
             .get(&self.address)
             .unwrap_or(Fingerprint([0; 32]));
         let address = self.address.clone();
+        let media = self.media;
         self.shared.update(move |s| {
+            s.mic = media.mic;
+            s.deafened = media.deafened;
             s.server = Some(ServerView {
                 address,
                 fingerprint,
@@ -519,6 +526,7 @@ impl Session {
                 .map(|r| RoomView {
                     id: r.id,
                     name: r.name.clone(),
+                    locked: r.locked,
                 })
                 .collect();
             let volumes: HashMap<UserId, f32> =
@@ -541,22 +549,26 @@ impl Session {
         }
     }
 
+    async fn joined(&mut self, placed: &Placed, notices: Vec<KeyNotice>) {
+        self.after_join(placed);
+        self.notices(notices);
+        self.push_media().await;
+    }
+
     fn after_join(&mut self, placed: &Placed) {
         self.reset_room();
         self.room = placed.room;
         self.my_tracks = placed.tracks.clone();
-        self.media = MediaState::default();
+        self.media.share = None;
         self.voice(VoiceCommand::ForgetAll);
-        self.voice(VoiceCommand::Muted(true));
-        self.voice(VoiceCommand::Deafened(false));
+        self.voice(VoiceCommand::Muted(!self.media.mic));
+        self.voice(VoiceCommand::Deafened(self.media.deafened));
         self.voice(VoiceCommand::SendOn(placed.tracks.as_ref().map(|t| t.mic)));
         self.sync_peers();
         let room = placed.room;
         self.shared.update(|s| {
             s.current = room.map(|room| CurrentRoom {
                 room,
-                mic: false,
-                deafened: false,
                 sharing: None,
                 watching: vec![],
             });
@@ -646,13 +658,16 @@ impl Session {
 
     async fn command(&mut self, command: Command) {
         match command {
-            Command::Join(room) => match self.call.join(room).await {
-                Ok((placed, notices)) => {
-                    self.after_join(&placed);
-                    self.notices(notices);
-                }
+            Command::Join(room) => match self.call.join(room, None).await {
+                Ok((placed, notices)) => self.joined(&placed, notices).await,
                 Err(e) => self.shared.notice(format!("Couldn't join: {e}")),
             },
+            Command::JoinWithPassword(room, password) => {
+                match self.call.join(Some(room), Some(password)).await {
+                    Ok((placed, notices)) => self.joined(&placed, notices).await,
+                    Err(e) => self.shared.emit(Event::PasswordRefused(e.to_string())),
+                }
+            }
             Command::SetMic(on) => {
                 self.media.mic = on;
                 if on {
@@ -710,6 +725,10 @@ impl Session {
             Command::CreateRoom(name) => self.simple(Request::CreateRoom { name }).await,
             Command::RenameRoom(room, name) => {
                 self.simple(Request::RenameRoom { room, name }).await
+            }
+            Command::SetRoomPassword(room, password) => {
+                self.simple(Request::SetRoomPassword { room, password })
+                    .await
             }
             Command::DeleteRoom(room) => self.simple(Request::DeleteRoom(room)).await,
             Command::CreateInvite => match self.call.request(Request::CreateInvite).await {
@@ -867,19 +886,19 @@ impl Session {
     }
 
     async fn push_media(&mut self) {
+        let media = self.media;
+        self.shared.update(|s| {
+            s.mic = media.mic;
+            s.deafened = media.deafened;
+            if let Some(c) = s.current.as_mut() {
+                c.sharing = media.share;
+            }
+        });
         if self.room.is_none() {
             return;
         }
         self.voice(VoiceCommand::Muted(!self.media.mic));
         self.voice(VoiceCommand::Deafened(self.media.deafened));
-        let media = self.media;
-        self.shared.update(|s| {
-            if let Some(c) = s.current.as_mut() {
-                c.mic = media.mic;
-                c.deafened = media.deafened;
-                c.sharing = media.share;
-            }
-        });
         self.show_shares();
         self.simple(Request::SetMedia(media)).await;
     }
@@ -1235,7 +1254,13 @@ impl Session {
                 s.rooms.push(RoomView {
                     id: room.id,
                     name: room.name,
+                    locked: room.locked,
                 });
+            }),
+            ServerEvent::RoomLocked { room, locked } => self.shared.update(|s| {
+                if let Some(r) = s.rooms.iter_mut().find(|r| r.id == room) {
+                    r.locked = locked;
+                }
             }),
             ServerEvent::RoomRenamed { room, name } => self.shared.update(|s| {
                 if let Some(r) = s.rooms.iter_mut().find(|r| r.id == room) {

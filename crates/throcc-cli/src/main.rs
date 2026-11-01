@@ -237,6 +237,7 @@ fn voice_call(
             .map(|r| Room {
                 id: r.id,
                 name: r.name.clone(),
+                locked: r.locked,
             })
             .collect::<Vec<_>>(),
         room,
@@ -338,8 +339,14 @@ async fn run_command(requester: &Requester, welcome: &Welcome, line: &str) -> Re
             print_rooms(&welcome.rooms, &welcome.presence);
             return Ok(());
         }
-        "join" => Request::SetRoom(Some(find_room(&welcome.rooms, rest)?)),
-        "leave" => Request::SetRoom(None),
+        "join" => Request::SetRoom {
+            room: Some(find_room(&welcome.rooms, rest)?),
+            password: None,
+        },
+        "leave" => Request::SetRoom {
+            room: None,
+            password: None,
+        },
         "invite" => Request::CreateInvite,
         "users" => Request::ListUsers,
         "create-room" => Request::CreateRoom {
@@ -420,6 +427,7 @@ fn print_event(event: &Event) {
         Event::RoomCreated(room) => println!("* room {} created: {}", room.id.0, room.name),
         Event::RoomRenamed { room, name } => println!("* room {} renamed to {name}", room.0),
         Event::RoomDeleted(room) => println!("* room {} deleted", room.0),
+        Event::RoomLocked { room, locked } => println!("* room {} locked: {locked}", room.0),
         Event::RoomState { room, epoch, peers } => {
             println!(
                 "* room {} is at epoch {} with {} peers",

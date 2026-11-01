@@ -126,6 +126,10 @@ pub enum Dialog {
         room: RoomId,
         confirm_delete: bool,
     },
+    RoomPassword {
+        room: RoomId,
+        error: Option<String>,
+    },
     LeaveServer,
 }
 
@@ -144,6 +148,7 @@ pub struct ThroccApp {
     pub code: Entity<InputState>,
     pub name: Entity<InputState>,
     pub room_name: Entity<InputState>,
+    pub room_password: Entity<InputState>,
     pub server_name: Entity<InputState>,
     pub server_status: Option<ServerStatus>,
     pub server_picture_edit: Option<PictureEdit>,
@@ -199,6 +204,11 @@ impl ThroccApp {
         let code = cx.new(|cx| InputState::new(window, cx).placeholder("K7Q-M2XPD"));
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Your name"));
         let room_name = cx.new(|cx| InputState::new(window, cx).placeholder("Room name"));
+        let room_password = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder("Password")
+        });
         let server_name = cx.new(|cx| InputState::new(window, cx).placeholder("Server name"));
         let palette_fields: Vec<Entity<InputState>> = theme::palette()
             .colors()
@@ -232,15 +242,8 @@ impl ThroccApp {
             cx.on_focus_lost(window, |app, window, cx| window.focus(&app.root_focus, cx)),
             cx.subscribe(&name, Self::on_edit),
             cx.subscribe(&server_name, Self::on_edit),
-            cx.subscribe_in(&room_name, window, |app, _, event: &InputEvent, _, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    match app.dialog {
-                        Some(Dialog::NewRoom) => app.create_room(cx),
-                        Some(Dialog::EditRoom { .. }) => app.rename_room(cx),
-                        _ => {}
-                    }
-                }
-            }),
+            cx.subscribe_in(&room_name, window, Self::on_room_field),
+            cx.subscribe_in(&room_password, window, Self::on_room_field),
         ]);
         let known_servers = if mock { Vec::new() } else { known_servers() };
         let share_choice = ShareChoice::default();
@@ -257,6 +260,7 @@ impl ThroccApp {
             code,
             name,
             room_name,
+            room_password,
             server_name,
             server_status: None,
             server_picture_edit: None,
@@ -358,6 +362,11 @@ impl ThroccApp {
         match event {
             Event::State(state) => {
                 self.state = state;
+                if let Some(Dialog::RoomPassword { room, .. }) = self.dialog
+                    && self.state.current.as_ref().is_some_and(|c| c.room == room)
+                {
+                    self.dialog = None;
+                }
                 self.close_unwatched_popouts(cx);
                 if self.fullscreen.is_some_and(|user| !self.shows_stream(user)) {
                     self.exit_fullscreen(window, cx);
@@ -385,6 +394,11 @@ impl ThroccApp {
             }
             Event::ServerProfileRefused(reason) => {
                 self.server_status = Some(ServerStatus::Failed(reason))
+            }
+            Event::PasswordRefused(reason) => {
+                if let Some(Dialog::RoomPassword { error, .. }) = &mut self.dialog {
+                    *error = Some(reason);
+                }
             }
             Event::LeftServer => {
                 self.end_session(window, cx);
@@ -615,6 +629,55 @@ impl ThroccApp {
         matches!(self.state.role, Some(Role::Admin | Role::Manager))
     }
 
+    fn on_room_field(
+        &mut self,
+        _: &Entity<InputState>,
+        event: &InputEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(event, InputEvent::PressEnter { .. }) {
+            match self.dialog {
+                Some(Dialog::NewRoom) => self.create_room(cx),
+                Some(Dialog::EditRoom { .. }) => self.save_room(cx),
+                Some(Dialog::RoomPassword { .. }) => self.join_with_password(cx),
+                _ => {}
+            }
+        }
+    }
+
+    /// Joins `room`, asking for its password first when it is locked and we don't manage
+    /// rooms.
+    pub fn join_room(&mut self, room: RoomId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.current.as_ref().is_some_and(|c| c.room == room) {
+            return;
+        }
+        if self.state.room(room).is_some_and(|r| r.locked) && !self.manages_rooms() {
+            self.clear_room_password(window, cx);
+            self.dialog = Some(Dialog::RoomPassword { room, error: None });
+            cx.notify();
+            return;
+        }
+        self.command(Command::Join(Some(room)));
+    }
+
+    pub fn join_with_password(&mut self, cx: &mut Context<Self>) {
+        let Some(Dialog::RoomPassword { room, .. }) = self.dialog else {
+            return;
+        };
+        let password = self.room_password.read(cx).value().to_string();
+        if !password.is_empty() {
+            self.command(Command::JoinWithPassword(room, password));
+        }
+    }
+
+    fn clear_room_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.room_password.update(cx, |s, cx| {
+            s.set_value("", window, cx);
+            s.focus(window, cx);
+        });
+    }
+
     pub fn open_new_room(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.room_name.update(cx, |s, cx| {
             s.set_value("", window, cx);
@@ -640,6 +703,7 @@ impl ThroccApp {
             .room(room)
             .map(|r| r.name.clone())
             .unwrap_or_default();
+        self.clear_room_password(window, cx);
         self.room_name.update(cx, |s, cx| {
             s.set_value(name, window, cx);
             s.focus(window, cx);
@@ -651,7 +715,8 @@ impl ThroccApp {
         cx.notify();
     }
 
-    pub fn rename_room(&mut self, cx: &mut Context<Self>) {
+    /// Renames the edited room, and locks it with the typed password if there is one.
+    pub fn save_room(&mut self, cx: &mut Context<Self>) {
         let Some(Dialog::EditRoom { room, .. }) = self.dialog else {
             return;
         };
@@ -659,6 +724,10 @@ impl ThroccApp {
         let unchanged = self.state.room(room).is_some_and(|r| r.name == name);
         if !name.is_empty() && !unchanged {
             self.command(Command::RenameRoom(room, name));
+        }
+        let password = self.room_password.read(cx).value().to_string();
+        if !password.is_empty() {
+            self.command(Command::SetRoomPassword(room, Some(password)));
         }
         self.dialog = None;
         cx.notify();
@@ -976,6 +1045,12 @@ impl ThroccApp {
                     confirm_delete: false,
                 })
             }
+            "roompassword" => {
+                self.dialog = Some(Dialog::RoomPassword {
+                    room: RoomId(3),
+                    error: Some("wrong password".into()),
+                })
+            }
             "deleteroom" => {
                 self.dialog = Some(Dialog::EditRoom {
                     room,
@@ -1075,15 +1150,11 @@ impl ThroccApp {
     }
 
     fn toggle_mic(&mut self, _: &ToggleMic, _: &mut Window, _: &mut Context<Self>) {
-        if let Some(current) = &self.state.current {
-            self.command(Command::SetMic(!current.mic));
-        }
+        self.command(Command::SetMic(!self.state.mic));
     }
 
     fn toggle_deafen(&mut self, _: &ToggleDeafen, _: &mut Window, _: &mut Context<Self>) {
-        if let Some(current) = &self.state.current {
-            self.command(Command::SetDeafened(!current.deafened));
-        }
+        self.command(Command::SetDeafened(!self.state.deafened));
     }
 
     fn close_dialog(&mut self, _: &CloseDialog, window: &mut Window, cx: &mut Context<Self>) {

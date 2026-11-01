@@ -104,6 +104,34 @@ fn create_room(client: &Client) -> RoomId {
 }
 
 #[test]
+fn mic_and_deafen_set_outside_a_room_carry_into_it() {
+    let (address, bootstrap) = server();
+    let (alice, _a) = client(&address, &bootstrap);
+    wait_connected(&alice, "connected");
+    let room = create_room(&alice);
+    let code = invite(&alice);
+    let (bob, _b) = client(&address, &code);
+    wait_connected(&bob, "bob connected");
+    let bob_id = bob.state().me.unwrap();
+
+    bob.command(Command::SetDeafened(true));
+    wait_for(&bob, "bob deafened in the lobby", |s| s.deafened && !s.mic);
+    bob.command(Command::Join(Some(room)));
+    wait_for(&alice, "bob in the room, deafened", |s| {
+        s.person(bob_id)
+            .is_some_and(|p| p.room == Some(room) && p.deafened && !p.mic)
+    });
+
+    bob.command(Command::Join(None));
+    bob.command(Command::SetDeafened(false));
+    bob.command(Command::Join(Some(room)));
+    wait_for(&alice, "bob back in the room, hearing and talking", |s| {
+        s.person(bob_id)
+            .is_some_and(|p| p.room == Some(room) && !p.deafened && p.mic)
+    });
+}
+
+#[test]
 fn two_clients_see_each_other_join_and_unmute() {
     let (address, bootstrap) = server();
     let (alice, _a) = client(&address, &bootstrap);
@@ -119,13 +147,14 @@ fn two_clients_see_each_other_join_and_unmute() {
         s.person(bob_id).is_some_and(|p| p.room == Some(room))
     });
 
-    bob.command(Command::SetMic(true));
     wait_for(&alice, "bob's mic on", |s| {
         s.person(bob_id).is_some_and(|p| p.mic)
     });
-    wait_for(&bob, "bob's own state", |s| {
-        s.current.as_ref().is_some_and(|c| c.mic)
+    bob.command(Command::SetMic(false));
+    wait_for(&alice, "bob's mic off", |s| {
+        s.person(bob_id).is_some_and(|p| !p.mic)
     });
+    wait_for(&bob, "bob's own state", |s| !s.mic);
 
     bob.command(Command::SetDeafened(true));
     wait_for(&alice, "bob deafened and muted", |s| {
@@ -196,7 +225,7 @@ fn a_share_started_mid_call_shows_without_rejoining() {
             .await
             .unwrap();
         let bob = Call::start(link, &keystore).unwrap();
-        bob.join(Some(room)).await.unwrap();
+        bob.join(Some(room), None).await.unwrap();
         bob
     });
     let bob_id = bob.me();

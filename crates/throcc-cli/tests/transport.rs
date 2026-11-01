@@ -193,7 +193,11 @@ async fn stalled_tls_handshakes_time_out_and_leave_signed_in_members_alone() {
     };
     assert_eq!(users.len(), 2);
     assert!(matches!(
-        bob.request(Request::SetRoom(None)).await,
+        bob.request(Request::SetRoom {
+            room: None,
+            password: None,
+        })
+        .await,
         Response::Placed(_)
     ));
 

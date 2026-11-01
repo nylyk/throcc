@@ -37,6 +37,7 @@ pub fn render(app: &mut ThroccApp, dialog: Dialog, cx: &mut Context<ThroccApp>) 
             room,
             confirm_delete,
         } => edit_room(app, room, confirm_delete, cx),
+        Dialog::RoomPassword { room, error } => room_password(app, room, error, cx),
         Dialog::LeaveServer => leave_server(app, cx),
     };
     div()
@@ -138,12 +139,41 @@ fn edit_room(
             )
             .into_any_element();
     }
+    let locked = app.state.room(room).is_some_and(|r| r.locked);
     div()
         .flex()
         .flex_col()
         .gap_4()
         .child(title("Edit room"))
         .child(Input::new(&app.room_name))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(section("Password"))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().flex_1().child(Input::new(&app.room_password)))
+                        .children(locked.then(|| {
+                            secondary("unlock-room", "Remove").on_click(cx.listener(
+                                move |app, _, _, cx| {
+                                    app.command(Command::SetRoomPassword(room, None));
+                                    app.dialog = None;
+                                    cx.notify();
+                                },
+                            ))
+                        })),
+                )
+                .child(caption(if locked {
+                    "Members need the password to join. Type a new one to change it."
+                } else {
+                    "Anyone can join. Type a password to lock the room."
+                })),
+        )
         .child(
             div()
                 .flex()
@@ -163,8 +193,45 @@ fn edit_room(
                 .child(div().flex_1())
                 .child(close_button(cx))
                 .child(
-                    primary("rename-room", "Save")
-                        .on_click(cx.listener(|app, _, _, cx| app.rename_room(cx))),
+                    primary("save-room", "Save")
+                        .on_click(cx.listener(|app, _, _, cx| app.save_room(cx))),
+                ),
+        )
+        .into_any_element()
+}
+
+fn room_password(
+    app: &mut ThroccApp,
+    room: RoomId,
+    error: Option<String>,
+    cx: &mut Context<ThroccApp>,
+) -> AnyElement {
+    let name = app
+        .state
+        .room(room)
+        .map_or_else(|| "this room".to_owned(), |r| r.name.clone());
+    div()
+        .flex()
+        .flex_col()
+        .gap_4()
+        .child(title(format!("Join {name}")))
+        .child(caption("This room is locked. Enter its password to join."))
+        .child(Input::new(&app.room_password))
+        .children(error.map(|error| {
+            div()
+                .text_size(px(12.))
+                .text_color(theme::danger_text())
+                .child(error)
+        }))
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap_2()
+                .child(close_button(cx))
+                .child(
+                    primary("join-locked-room", "Join")
+                        .on_click(cx.listener(|app, _, _, cx| app.join_with_password(cx))),
                 ),
         )
         .into_any_element()

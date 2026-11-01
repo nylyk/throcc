@@ -66,7 +66,10 @@ mod tests {
     fn round_trips() {
         let message = ClientMessage::Request {
             id: 7,
-            req: Request::SetRoom(Some(RoomId(3))),
+            req: Request::SetRoom {
+                room: Some(RoomId(3)),
+                password: None,
+            },
         };
         let frame = encode(&message).unwrap();
         let (body, rest) = split(&frame).unwrap().unwrap();

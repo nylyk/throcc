@@ -127,9 +127,14 @@ impl Call {
         Ok(self.requester.request(request).await?)
     }
 
-    /// Moves to `room` and rekeys. Returns the placement and any key warnings.
-    pub async fn join(&self, room: Option<RoomId>) -> Result<(Placed, Vec<KeyNotice>)> {
-        match self.request(Request::SetRoom(room)).await? {
+    /// Moves to `room`, with its password if it is locked, and rekeys. Returns the placement
+    /// and any key warnings.
+    pub async fn join(
+        &self,
+        room: Option<RoomId>,
+        password: Option<String>,
+    ) -> Result<(Placed, Vec<KeyNotice>)> {
+        match self.request(Request::SetRoom { room, password }).await? {
             Response::Placed(placed) => {
                 let notices = self.engine.placed(&placed);
                 Ok((placed, notices))

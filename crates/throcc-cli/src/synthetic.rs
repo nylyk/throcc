@@ -75,7 +75,7 @@ pub async fn send(call: &mut Call, room: RoomId, options: SendOptions) -> Result
     if with_audio && matches!(track, Track::Mic) {
         bail!("--with-audio needs --track video");
     }
-    let (placed, _) = call.join(Some(room)).await?;
+    let (placed, _) = call.join(Some(room), None).await?;
     let tracks = placed.tracks.context("joined without tracks")?;
     let media_id = track.pick((tracks.mic, tracks.shares[0].video));
     let kind = track.kind();
@@ -165,7 +165,7 @@ pub async fn recv(call: &mut Call, room: RoomId, options: RecvOptions<'_>) -> Re
     if with_audio && matches!(track, Track::Mic) {
         bail!("--with-audio needs --track video");
     }
-    call.join(Some(room)).await?;
+    call.join(Some(room), None).await?;
     let mut presence: Vec<Presence> = call.welcome.presence.clone();
     let sender = loop {
         if let Some(user) = find_user(&presence, from) {
