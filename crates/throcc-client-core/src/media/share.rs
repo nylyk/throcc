@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use throcc_proto::messages::{Recovery, Share, ShareConfig};
 use tokio::sync::{mpsc, watch};
-use tracing::warn;
+use tracing::{info, warn};
 
 use super::capture::{Capture, CaptureConfig, CaptureError};
 use super::engine::{Kind, MediaEngine, Outgoing, Received};
@@ -29,6 +29,50 @@ const SELF_VIEW_WIDTH: usize = 960;
 /// Forced recoveries are at least this far apart, so a link too slow for whole keyframes
 /// gets one a second rather than one every frame.
 const RECOVERY_SPACING: Duration = Duration::from_secs(1);
+const TALLY_EVERY: Duration = Duration::from_secs(5);
+
+/// What the share thread encoded since `since`, logged every [`TALLY_EVERY`].
+struct Tally {
+    since: Instant,
+    frames: u32,
+    keyframes: u32,
+    bytes: usize,
+}
+
+impl Tally {
+    fn new() -> Self {
+        Self {
+            since: Instant::now(),
+            frames: 0,
+            keyframes: 0,
+            bytes: 0,
+        }
+    }
+
+    fn add(&mut self, units: &[EncodedUnit]) {
+        self.frames += 1;
+        for unit in units {
+            self.keyframes += u32::from(unit.keyframe);
+            self.bytes += unit.data.len();
+        }
+    }
+
+    fn report_if_due(&mut self) {
+        let seconds = self.since.elapsed().as_secs_f64();
+        if seconds < TALLY_EVERY.as_secs_f64() {
+            return;
+        }
+        let fps = f64::from(self.frames) / seconds;
+        let kbps = self.bytes as f64 * 8.0 / seconds / 1000.0;
+        info!(
+            fps = format!("{fps:.1}"),
+            kbps = kbps.round(),
+            keyframes = self.keyframes,
+            "share encoded"
+        );
+        *self = Self::new();
+    }
+}
 
 /// Merges recovery requests into one per [`RECOVERY_SPACING`]; `Idr` wins over `Refresh`.
 #[derive(Default)]
@@ -123,6 +167,7 @@ impl ShareSender {
             unsent: first == Some(First::Copied),
             self_view: self_tx,
             preview: preview.clone(),
+            tally: Tally::new(),
             #[cfg(target_os = "linux")]
             refused: Vec::new(),
             #[cfg(target_os = "macos")]
@@ -176,6 +221,7 @@ struct Sending {
     unsent: bool,
     self_view: watch::Sender<Option<Arc<VideoFrame>>>,
     preview: Arc<PreviewDemand>,
+    tally: Tally,
     /// Frames in GPU memory the share no longer takes.
     #[cfg(target_os = "linux")]
     refused: Vec<Refusal>,
@@ -197,6 +243,7 @@ impl Sending {
                 self.encoder.recover(kind);
             }
             self.send_audio(&mut sound);
+            self.tally.report_if_due();
             #[cfg(target_os = "linux")]
             if self.send_dmabuf(&mut count) {
                 continue;
@@ -239,7 +286,7 @@ impl Sending {
             .then_some(SELF_VIEW_WIDTH);
         match self.encoder.encode_dmabuf(frame, preview) {
             Ok(encoded) => {
-                send_units(&self.engine, &self.tracks, encoded.units);
+                self.send_units(encoded.units);
                 match encoded.preview {
                     Some(Ok(preview)) => {
                         self.self_view.send_replace(Some(Arc::new(preview)));
@@ -279,7 +326,7 @@ impl Sending {
             }
         }
         match self.encoder.encode_pixel_buffer(&picture) {
-            Ok(units) => send_units(&self.engine, &self.tracks, units),
+            Ok(units) => self.send_units(units),
             Err(e @ EncodeError::OtherSize(..)) => {
                 warn!("copying captured pictures from here on: {e}");
                 self.pixel_buffers = false;
@@ -304,16 +351,18 @@ impl Sending {
 
     fn send_video(&mut self) {
         match self.encoder.encode(&self.frame) {
-            Ok(units) => send_units(&self.engine, &self.tracks, units),
+            Ok(units) => self.send_units(units),
             Err(e) => warn!("encoding failed: {e}"),
         }
     }
-}
 
-fn send_units(engine: &MediaEngine, tracks: &Share, units: Vec<EncodedUnit>) {
-    for unit in units {
-        let outgoing = Outgoing::new(tracks.video, unit.data, unit.timestamp, unit.keyframe);
-        engine.send(Kind::Video, outgoing);
+    fn send_units(&mut self, units: Vec<EncodedUnit>) {
+        self.tally.add(&units);
+        for unit in units {
+            let outgoing =
+                Outgoing::new(self.tracks.video, unit.data, unit.timestamp, unit.keyframe);
+            self.engine.send(Kind::Video, outgoing);
+        }
     }
 }
 
