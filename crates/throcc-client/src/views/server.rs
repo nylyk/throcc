@@ -1,5 +1,5 @@
 use gpui::{
-    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    AnyElement, Context, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, div, px,
 };
 use gpui_component::Disableable;
@@ -8,7 +8,9 @@ use throcc_client_core::client::Command;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::Role;
 
-use super::common::{avatar, caption, card, chip, ghost_icon, mono, primary, secondary, section};
+use super::common::{
+    Typeset, avatar, caption, card, chip, ghost_icon, mono, primary, secondary, section,
+};
 use super::settings::{field, frame, nav_item, nav_list, save_line, segmented};
 use crate::app::{Dialog, PictureEdit, PictureFor, Screen, ServerPage, ServerStatus, ThroccApp};
 use crate::theme;
@@ -34,7 +36,7 @@ pub fn render(
         };
     let links = nav_list()
         .child(item("nav-server", "Server", ServerPage::Overview, cx))
-        .child(item("nav-keys", "Privacy and keys", ServerPage::Keys, cx))
+        .child(item("nav-keys", "Privacy and Keys", ServerPage::Keys, cx))
         .child(item(
             "nav-members",
             if is_admin { "Members" } else { "Invites" },
@@ -43,7 +45,7 @@ pub fn render(
         ));
     let page_title = match page {
         ServerPage::Overview => "Server",
-        ServerPage::Keys => "Privacy and keys",
+        ServerPage::Keys => "Privacy and Keys",
         ServerPage::Members if is_admin => "Members",
         ServerPage::Members => "Invites",
     };
@@ -54,7 +56,7 @@ pub fn render(
     };
     frame(
         app.sidebar_width,
-        "Server settings",
+        "Server Settings",
         links,
         page_title,
         content,
@@ -82,7 +84,7 @@ fn overview(app: &mut ThroccApp, is_admin: bool, cx: &mut Context<ThroccApp>) ->
                 .flex()
                 .gap_2()
                 .child(
-                    secondary("choose-server-picture", "Choose picture…")
+                    secondary("choose-server-picture", "Choose Picture…")
                         .disabled(saving)
                         .on_click(
                             cx.listener(|app, _, _, cx| app.choose_picture(PictureFor::Server, cx)),
@@ -113,7 +115,7 @@ fn overview(app: &mut ThroccApp, is_admin: bool, cx: &mut Context<ThroccApp>) ->
         .children(is_admin.then(|| {
             let status = app.server_status.clone().map(|status| match status {
                 ServerStatus::Saving => caption("Saving…"),
-                ServerStatus::Saved => caption("Saved.").text_color(theme::ok_text()),
+                ServerStatus::Saved => caption("Saved").text_color(theme::ok_text()),
                 ServerStatus::Failed(reason) => caption(reason).text_color(theme::danger_text()),
             });
             let save = primary("save-server", "Save")
@@ -141,11 +143,11 @@ fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .flex()
                 .flex_col()
                 .gap_2()
-                .child(section("This server"))
+                .child(section("This Server"))
                 .child(div().child(address))
                 .child(
                     mono(fingerprint.to_string())
-                        .text_size(px(12.))
+                        .typeset(theme::CAPTION)
                         .text_color(theme::text_2()),
                 )
         }))
@@ -205,16 +207,16 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .flex_col()
         .gap_3()
         .child(section("Invite"))
-        .children(invite.as_ref().map(|(code, _)| {
-            mono(code.clone())
-                .text_size(px(24.))
-                .font_weight(FontWeight::SEMIBOLD)
-        }))
+        .children(
+            invite
+                .as_ref()
+                .map(|(code, _)| mono(code.clone()).typeset(theme::TITLE_1)),
+        )
         .children(invite.is_some().then(|| {
             caption(if is_admin {
-                "Single use, expires in 24 h."
+                "Single use, expires in 24 hours."
             } else {
-                "Single use, expires in 24 h. You can make 3 a day."
+                "Single use, expires in 24 hours. You can make 3 a day."
             })
         }))
         .child(
@@ -230,9 +232,9 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                     primary(
                         "new-invite",
                         if invite.is_some() {
-                            "New code"
+                            "New Code"
                         } else {
-                            "Create a code"
+                            "Create Code"
                         },
                     )
                     .on_click(cx.listener(|app, _, _, _| app.command(Command::CreateInvite))),
@@ -246,7 +248,7 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(section(format!("{} people", users.len())))
+                .child(section(format!("{} People", users.len())))
                 .children(users.iter().map(|user| {
                     let id = user.id;
                     let name = user.name.clone();
@@ -278,7 +280,7 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                                 .children(
                                     user.invited_by
                                         .and_then(name_of)
-                                        .map(|by| caption(format!("invited by {by}"))),
+                                        .map(|by| caption(format!("Invited by {by}"))),
                                 ),
                         )
                         .child(
@@ -289,7 +291,7 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                                 .gap_3()
                                 .child(
                                     mono(Fingerprint(user.identity_key).short())
-                                        .text_size(px(12.))
+                                        .typeset(theme::CAPTION)
                                         .text_color(theme::text_3()),
                                 )
                                 .child(if editable {

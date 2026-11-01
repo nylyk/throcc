@@ -1,10 +1,10 @@
-use gpui::{Context, Div, FontWeight, IntoElement, ParentElement, Styled, div, px};
+use gpui::{Context, Div, IntoElement, ParentElement, Styled, div, px};
 use throcc_client_core::account::SignInError;
 use throcc_client_core::connection::ConnectError;
 use throcc_client_core::control::LoginError;
 use throcc_proto::messages::AuthError;
 
-use super::common::{caption, moves_window, primary};
+use super::common::{Typeset, description, moves_window, primary};
 use crate::app::{Dialog, ThroccApp};
 use crate::theme;
 
@@ -12,20 +12,20 @@ use crate::theme;
 pub fn explain(error: &SignInError) -> String {
     match error {
         SignInError::NotEnrolled(address) => {
-            format!("You haven't joined {address} yet. Ask someone there for an invite code.")
+            format!("You haven’t joined {address} yet. Ask someone there for an invite code.")
         }
         SignInError::Login(LoginError::Refused(AuthError::BadInvite)) | SignInError::Login(LoginError::Pake(_)) => {
-            "That code didn't work. It may be mistyped, used up or expired, or something between you and the server isn't the server. Ask for a fresh one.".into()
+            "That code didn’t work. It may be mistyped, used up or expired, or something between you and the server isn’t the server. Ask for a fresh one.".into()
         }
         SignInError::Login(LoginError::Refused(AuthError::RateLimited)) => {
             "Too many wrong codes from your network. Wait ten minutes, then try again.".into()
         }
         SignInError::Login(LoginError::Refused(AuthError::UnknownKey)) => {
-            "This server doesn't know you any more. Join again with a fresh invite code.".into()
+            "This server doesn’t know you anymore. Join again with a fresh invite code.".into()
         }
-        SignInError::Connect(ConnectError::Resolve(address)) => format!("Couldn't find {address}. Check the address."),
+        SignInError::Connect(ConnectError::Resolve(address)) => format!("Couldn’t find {address}. Check the address."),
         SignInError::Connect(ConnectError::Connection(_)) => {
-            "Couldn't reach the server. Check the address, and that UDP port 8476 is open.".into()
+            "Couldn’t reach the server. Check the address, and that UDP port 8476 is open.".into()
         }
         other => other.to_string(),
     }
@@ -40,7 +40,7 @@ pub(super) fn error_box(error: String) -> Div {
         .border_1()
         .border_color(theme::warn_border())
         .text_color(theme::warn_text())
-        .text_size(px(13.))
+        .typeset(theme::CALLOUT)
         .child(error)
 }
 
@@ -74,16 +74,11 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
                 .right_0()
                 .h(theme::HEADER_HEIGHT),
         )
-        .child(
-            div()
-                .text_size(px(24.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child("throcc"),
-        )
-        .child(caption(hint))
+        .child(div().typeset(theme::LARGE_TITLE).child("throcc"))
+        .child(description(hint))
         .children(error.map(|e| div().w(px(420.)).child(error_box(e))))
         .children((app.known_servers.is_empty() && !app.joining).then(|| {
-            primary("add-first-server", "Add server")
+            primary("add-first-server", "Add Server")
                 .h(theme::TOUCH)
                 .on_click(cx.listener(|app, _, window, cx| app.open_add_server(window, cx)))
         }))

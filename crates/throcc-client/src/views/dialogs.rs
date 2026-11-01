@@ -13,7 +13,10 @@ use throcc_proto::Fingerprint;
 use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::messages::Codec;
 
-use super::common::{caption, card, chip, danger, mono, primary, rate, secondary, section, title};
+use super::common::{
+    Typeset, caption, card, chip, danger, description, mono, primary, rate, secondary, section,
+    title,
+};
 use super::join::error_box;
 use crate::app::{Dialog, ThroccApp};
 use crate::theme;
@@ -78,7 +81,7 @@ fn new_room(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .flex()
         .flex_col()
         .gap_4()
-        .child(title("New room"))
+        .child(title("New Room"))
         .child(Input::new(&app.room_name))
         .child(
             div()
@@ -94,7 +97,7 @@ fn new_room(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .flex()
                 .justify_end()
                 .gap_2()
-                .child(close_button(cx))
+                .child(close_button("Cancel", cx))
                 .child(
                     primary("create-room", "Create")
                         .on_click(cx.listener(|app, _, _, cx| app.create_room(cx))),
@@ -113,27 +116,25 @@ fn delete_room(app: &mut ThroccApp, room: RoomId, cx: &mut Context<ThroccApp>) -
         .flex()
         .flex_col()
         .gap_4()
-        .child(title(format!("Delete {name}?")))
-        .child(caption(if occupied {
-            "Everyone in it goes back to the lobby. This can't be undone."
+        .child(title(format!("Delete “{name}”?")))
+        .child(description(if occupied {
+            "Everyone in it goes back to the lobby. This can’t be undone."
         } else {
-            "This can't be undone."
+            "This can’t be undone."
         }))
         .child(
             div()
                 .flex()
                 .justify_end()
                 .gap_2()
-                .child(close_button(cx))
-                .child(
-                    danger("delete-room", format!("Delete {name}")).on_click(cx.listener(
-                        move |app, _, _, cx| {
-                            app.command(Command::DeleteRoom(room));
-                            app.dialog = None;
-                            cx.notify();
-                        },
-                    )),
-                ),
+                .child(close_button("Cancel", cx))
+                .child(danger("delete-room", "Delete").on_click(cx.listener(
+                    move |app, _, _, cx| {
+                        app.command(Command::DeleteRoom(room));
+                        app.dialog = None;
+                        cx.notify();
+                    },
+                ))),
         )
         .into_any_element()
 }
@@ -144,7 +145,7 @@ fn edit_room(app: &mut ThroccApp, room: RoomId, cx: &mut Context<ThroccApp>) -> 
         .flex()
         .flex_col()
         .gap_4()
-        .child(title("Edit room"))
+        .child(title("Edit Room"))
         .child(Input::new(&app.room_name))
         .child(
             div()
@@ -179,7 +180,7 @@ fn edit_room(app: &mut ThroccApp, room: RoomId, cx: &mut Context<ThroccApp>) -> 
                 .flex()
                 .justify_end()
                 .gap_2()
-                .child(close_button(cx))
+                .child(close_button("Cancel", cx))
                 .child(
                     primary("save-room", "Save")
                         .on_click(cx.listener(|app, _, _, cx| app.save_room(cx))),
@@ -202,12 +203,14 @@ fn room_password(
         .flex()
         .flex_col()
         .gap_4()
-        .child(title(format!("Join {name}")))
-        .child(caption("This room is locked. Enter its password to join."))
+        .child(title(format!("Join “{name}”")))
+        .child(description(
+            "This room is locked. Enter its password to join.",
+        ))
         .child(Input::new(&app.room_password))
         .children(error.map(|error| {
             div()
-                .text_size(px(12.))
+                .typeset(theme::CALLOUT)
                 .text_color(theme::danger_text())
                 .child(error)
         }))
@@ -216,7 +219,7 @@ fn room_password(
                 .flex()
                 .justify_end()
                 .gap_2()
-                .child(close_button(cx))
+                .child(close_button("Cancel", cx))
                 .child(
                     primary("join-locked-room", "Join")
                         .on_click(cx.listener(|app, _, _, cx| app.join_with_password(cx))),
@@ -225,8 +228,8 @@ fn room_password(
         .into_any_element()
 }
 
-fn close_button(cx: &mut Context<ThroccApp>) -> impl IntoElement {
-    secondary("close-dialog", "Close").on_click(cx.listener(|app, _, _, cx| {
+fn close_button(label: &'static str, cx: &mut Context<ThroccApp>) -> impl IntoElement {
+    secondary("close-dialog", label).on_click(cx.listener(|app, _, _, cx| {
         app.dialog = None;
         cx.notify();
     }))
@@ -312,6 +315,7 @@ fn share(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .child(
             div()
                 .flex()
+                .items_center()
                 .justify_between()
                 .child(section("Bitrate"))
                 .child(mono(mbps(choice.kbps)).font_weight(FontWeight::SEMIBOLD)),
@@ -321,14 +325,17 @@ fn share(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             div()
                 .flex()
                 .justify_between()
-                .child(caption(mbps(offered.first().copied().unwrap_or(0))))
-                .child(caption(mbps(choice.max_kbps()))),
+                .child(
+                    caption(mbps(offered.first().copied().unwrap_or(0)))
+                        .font_family(theme::mono_font()),
+                )
+                .child(caption(mbps(choice.max_kbps())).font_family(theme::mono_font())),
         );
     div()
         .flex()
         .flex_col()
         .gap_4()
-        .child(title("Share your screen"))
+        .child(title("Share Your Screen"))
         .child(section("Resolution"))
         .child(resolutions)
         .child(section("Frame rate"))
@@ -348,9 +355,9 @@ fn share(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .flex()
                 .justify_end()
                 .gap_2()
-                .child(close_button(cx))
+                .child(close_button("Cancel", cx))
                 .child(
-                    primary("start-share", "Start sharing").on_click(cx.listener(
+                    primary("start-share", "Start Sharing").on_click(cx.listener(
                         |app, _, _, cx| {
                             let config = app.share_choice.config(Codec::Av1, app.share_audio);
                             app.command(Command::StartShare(config));
@@ -371,11 +378,7 @@ fn stat(label: &str, value: String) -> impl IntoElement {
         .flex_col()
         .gap_1()
         .child(caption(label.to_owned()))
-        .child(
-            mono(value)
-                .text_size(px(18.))
-                .font_weight(FontWeight::SEMIBOLD),
-        )
+        .child(mono(value).typeset(theme::TITLE_2))
 }
 
 fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
@@ -406,19 +409,14 @@ fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             .border_b_1()
             .border_color(theme::control())
             .text_color(theme::text_3())
-            .text_size(px(12.))
+            .typeset(theme::CAPTION)
+            .font_weight(FontWeight::MEDIUM)
             .child(div().flex_1().child("Track"))
             .child(div().w(px(90.)).child("Set"))
             .child(div().w(px(90.)).child(rate))
             .child(div().w(px(60.)).child(last))
     };
-    let heading = |text: &'static str| {
-        div()
-            .pb_1()
-            .text_size(px(14.))
-            .font_weight(FontWeight::SEMIBOLD)
-            .child(text)
-    };
+    let heading = |text: &'static str| div().pb_1().typeset(theme::HEADLINE).child(text);
     let sending = health.sending.iter().enumerate().map(|(i, row)| {
         table_row(
             row.label.to_owned(),
@@ -437,7 +435,7 @@ fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             row.detail.clone(),
             [
                 row.set_kbps.map_or("–".to_owned(), rate),
-                row.arriving_kbps.map_or("muted".to_owned(), rate),
+                row.arriving_kbps.map_or("Muted".to_owned(), rate),
                 row.loss.map_or("–".to_owned(), |l| format!("{l:.1}%")),
             ],
             i + 1 < health.receiving.len(),
@@ -487,7 +485,7 @@ fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 })
                 .children(receiving),
         )
-        .child(div().flex().justify_end().child(close_button(cx)))
+        .child(div().flex().justify_end().child(close_button("Done", cx)))
         .into_any_element()
 }
 
@@ -520,12 +518,12 @@ fn verify(app: &ThroccApp, user: UserId, cx: &mut Context<ThroccApp>) -> AnyElem
         let shown = warning.now.0;
         content = content.child(
             warning_box()
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{name}'s key changed")))
+                .child(div().typeset(theme::HEADLINE).child(format!("{name}’s key changed")))
                 .child("Check before you trust it.")
-                .child(div().flex().gap_2().child(caption("Before")).child(mono(warning.pinned.short())))
-                .child(div().flex().gap_2().child(caption("Now")).child(mono(warning.now.short())))
+                .child(div().flex().items_center().gap_2().child(caption("Before").w(px(48.))).child(mono(warning.pinned.short())))
+                .child(div().flex().items_center().gap_2().child(caption("Now").w(px(48.))).child(mono(warning.now.short())))
                 .child(caption("This happens when someone reinstalls, and also when a server swaps keys to listen in."))
-                .child(div().flex().child(primary("accept-key", "Accept new key").on_click(cx.listener(move |app, _, _, cx| {
+                .child(div().flex().child(primary("accept-key", "Accept New Key").on_click(cx.listener(move |app, _, _, cx| {
                     app.command(Command::AcceptKey(user, shown));
                     cx.notify();
                 })))),
@@ -535,18 +533,19 @@ fn verify(app: &ThroccApp, user: UserId, cx: &mut Context<ThroccApp>) -> AnyElem
     content
         .child(section("Safety number"))
         .child(if groups.is_empty() {
-            caption("You haven't seen this person's key in a room yet.").into_any_element()
+            caption("You haven’t seen this person’s key in a room yet.").into_any_element()
         } else {
             div()
                 .grid()
                 .grid_cols(4)
                 .gap_3()
                 .font_family(theme::mono_font())
-                .text_size(px(18.))
+                .typeset(theme::TITLE_2)
+                .font_weight(FontWeight::NORMAL)
                 .children(groups.into_iter().map(|g| div().child(g)))
                 .into_any_element()
         })
-        .child(caption(format!(
+        .child(description(format!(
             "Compare this with {name} in person or through another app. If both match, nobody between you is swapping keys."
         )))
         .child(
@@ -554,9 +553,9 @@ fn verify(app: &ThroccApp, user: UserId, cx: &mut Context<ThroccApp>) -> AnyElem
                 .flex()
                 .justify_end()
                 .gap_2()
-                .child(close_button(cx))
+                .child(close_button("Done", cx))
                 .child(
-                    primary("mark-verified", if verified { "Mark as not verified" } else { "Mark as verified" })
+                    primary("mark-verified", if verified { "Mark as Not Verified" } else { "Mark as Verified" })
                         .on_click(cx.listener(move |app, _, _, cx| {
                             app.command(Command::SetVerified(user, !verified));
                             cx.notify();
@@ -581,8 +580,8 @@ fn remove(user: UserId, name: &str, cascade: bool, cx: &mut Context<ThroccApp>) 
         .flex()
         .flex_col()
         .gap_4()
-        .child(title(format!("Remove {name}?")))
-        .child(caption(
+        .child(title(format!("Remove “{name}”?")))
+        .child(description(
             "They are disconnected at once and need a new invite to come back.",
         ))
         .child(
@@ -603,7 +602,7 @@ fn remove(user: UserId, name: &str, cascade: bool, cx: &mut Context<ThroccApp>) 
                 .flex()
                 .justify_end()
                 .gap_2()
-                .child(close_button(cx))
+                .child(close_button("Cancel", cx))
                 .child(danger("confirm-remove", "Remove").on_click(cx.listener(
                     move |app, _, _, cx| {
                         app.command(Command::RemoveUser { user, cascade });
@@ -620,7 +619,7 @@ fn add_server(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .flex()
         .flex_col()
         .gap_4()
-        .child(title("Add a server"))
+        .child(title("Add Server"))
         .child(
             div()
                 .flex()
@@ -636,7 +635,7 @@ fn add_server(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .gap_1()
                 .child(section("Invite code"))
                 .child(Input::new(&app.code).font_family(theme::mono_font()))
-                .child(caption("The code also proves you reached the real server. Leave it empty for a server you've joined before.")),
+                .child(caption("The code also proves you reached the real server. Leave it empty for a server you’ve joined before.")),
         )
         .children(app.join_error.clone().map(error_box))
         .child(
@@ -644,7 +643,7 @@ fn add_server(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .flex()
                 .justify_end()
                 .gap_2()
-                .child(close_button(cx))
+                .child(close_button("Cancel", cx))
                 .child(
                     primary("join", if app.joining { "Joining…" } else { "Join" })
                         .disabled(app.joining)
@@ -667,8 +666,8 @@ fn leave_server(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .flex()
         .flex_col()
         .gap_4()
-        .child(title(format!("Leave {server}?")))
-        .child(caption(
+        .child(title(format!("Leave “{server}”?")))
+        .child(description(
             "You lose your membership and the server leaves your list. Coming back needs a new invite.",
         ))
         .child(
@@ -676,8 +675,8 @@ fn leave_server(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .flex()
                 .justify_end()
                 .gap_2()
-                .child(close_button(cx))
-                .child(danger("confirm-leave", "Leave server").on_click(cx.listener(
+                .child(close_button("Cancel", cx))
+                .child(danger("confirm-leave", "Leave").on_click(cx.listener(
                     |app, _, _, cx| {
                         app.command(Command::LeaveServer);
                         app.dialog = None;
@@ -699,15 +698,15 @@ fn pin_mismatch(
         .flex()
         .flex_col()
         .gap_4()
-        .child(title("This server's key changed"))
+        .child(title("This server’s key changed"))
         .child(
             warning_box()
                 .child(caption("You trusted"))
-                .child(mono(expected.to_string()).text_size(px(12.)))
+                .child(mono(expected.to_string()).typeset(theme::CAPTION))
                 .child(caption("It now has"))
-                .child(mono(actual.to_string()).text_size(px(12.))),
+                .child(mono(actual.to_string()).typeset(theme::CAPTION)),
         )
-        .child(caption(
+        .child(description(
             "This happens when the server was reinstalled, and also when someone is pretending to be it. The safe way back is a fresh invite code: add the server again with it, and the code proves the new key.",
         ))
         .child(
@@ -715,12 +714,12 @@ fn pin_mismatch(
                 .flex()
                 .justify_end()
                 .gap_2()
-                .child(primary("use-invite", "Use a fresh invite").on_click(cx.listener(|app, _, window, cx| {
+                .child(primary("use-invite", "Use a Fresh Invite").on_click(cx.listener(|app, _, window, cx| {
                     app.dialog = Some(Dialog::AddServer);
                     app.code.update(cx, |s, cx| s.focus(window, cx));
                     cx.notify();
                 })))
-                .child(danger("trust-anyway", "Trust the new key").on_click(cx.listener(move |app, _, window, cx| {
+                .child(danger("trust-anyway", "Trust the New Key").on_click(cx.listener(move |app, _, window, cx| {
                     app.trust_new_key(&address, actual, window, cx);
                     cx.notify();
                 }))),

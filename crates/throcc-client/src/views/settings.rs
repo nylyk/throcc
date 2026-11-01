@@ -19,8 +19,8 @@ use throcc_client_core::media::audio::{
 };
 
 use super::common::{
-    avatar, caption, card, chip, gain_to_loudness, ghost_icon, key_cap, loudness_to_gain, mono,
-    moves_window, primary, secondary, section,
+    Typeset, avatar, caption, card, chip, gain_to_loudness, ghost_icon, key_cap, loudness_to_gain,
+    mono, moves_window, primary, secondary, section,
 };
 use super::main::toggle_icon;
 use crate::app::{PictureEdit, PictureFor, ProfileStatus, Screen, SettingsPage, ThroccApp};
@@ -166,12 +166,7 @@ pub(super) fn frame(
                         },
                     )),
                 )
-                .child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(16.))
-                        .child(heading),
-                ),
+                .child(div().typeset(theme::TITLE_3).child(heading)),
         )
         .child(links)
         .child(resize_handle(cx));
@@ -183,12 +178,9 @@ pub(super) fn frame(
         .flex()
         .flex_col()
         .child(
-            top_bar().px_6().child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_size(px(16.))
-                    .child(page_title),
-            ),
+            top_bar()
+                .px_6()
+                .child(div().typeset(theme::TITLE_3).child(page_title)),
         )
         .child(
             div()
@@ -220,7 +212,7 @@ pub(super) fn field(label: &str, control: impl IntoElement) -> Div {
         .gap_1p5()
         .child(
             div()
-                .text_size(px(13.))
+                .typeset(theme::CALLOUT)
                 .text_color(theme::text_2())
                 .child(label.to_owned()),
         )
@@ -308,7 +300,7 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .flex()
         .gap_2()
         .child(
-            secondary("choose-picture", "Choose picture…")
+            secondary("choose-picture", "Choose Picture…")
                 .disabled(saving)
                 .on_click(cx.listener(|app, _, _, cx| {
                     app.profile_status = None;
@@ -326,7 +318,7 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         }));
     let status = app.profile_status.clone().map(|status| match status {
         ProfileStatus::Saving => caption("Saving…"),
-        ProfileStatus::Saved => caption("Saved.").text_color(theme::ok_text()),
+        ProfileStatus::Saved => caption("Saved").text_color(theme::ok_text()),
         ProfileStatus::UntilJoined => {
             caption("Saved here. Others see your picture once you join a room.")
         }
@@ -582,7 +574,7 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                     "Mode",
                     segmented(
                         "mode",
-                        &[(true, "Voice activity"), (false, "Push to talk")],
+                        &[(true, "Voice Activity"), (false, "Push to Talk")],
                         vad,
                         cx,
                         |app, voice_activity, cx| {
@@ -615,7 +607,7 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                                     .child(Slider::new(&controls.threshold)),
                             )
                             .child(
-                                mono(format!("{threshold:.0} dB"))
+                                mono(format!("{threshold:.0} dB").replace('-', "−"))
                                     .w(px(64.))
                                     .flex_none()
                                     .text_right(),
@@ -689,9 +681,9 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 primary(
                     "mic-test",
                     if app.mic_test {
-                        "Stop test"
+                        "Stop Test"
                     } else {
-                        "Test microphone"
+                        "Test Microphone"
                     },
                 )
                 .on_click(cx.listener(|app, _, _, cx| {
@@ -815,7 +807,7 @@ fn servers(app: &mut ThroccApp) -> AnyElement {
                                     .child(div().child(address.clone()))
                                     .child(
                                         mono(fingerprint.short())
-                                            .text_size(px(12.))
+                                            .typeset(theme::CAPTION)
                                             .text_color(theme::text_3()),
                                     ),
                             )

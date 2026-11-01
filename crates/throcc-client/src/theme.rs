@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::sync::OnceLock;
 
-use gpui::{App, Hsla, Pixels, SharedString, px, rgb};
+use gpui::{App, FontWeight, Hsla, Pixels, SharedString, px, rgb};
 use gpui_component::{Theme, ThemeMode};
 
 /// The eight colours a theme is made of. Every other colour is mixed from them.
@@ -393,6 +393,31 @@ pub const SIDEBAR_MAX_WIDTH: Pixels = px(420.);
 pub const SERVER_BAR_WIDTH: Pixels = px(76.);
 pub const ROOM_MIN_WIDTH: Pixels = px(360.);
 
+/// One step of the type scale: a size with its line height and weight.
+#[derive(Clone, Copy)]
+pub struct TextStyle {
+    pub size: Pixels,
+    pub line_height: Pixels,
+    pub weight: FontWeight,
+}
+
+const fn text_style(size: f32, line_height: f32, weight: FontWeight) -> TextStyle {
+    TextStyle {
+        size: px(size),
+        line_height: px(line_height),
+        weight,
+    }
+}
+
+pub const LARGE_TITLE: TextStyle = text_style(26., 32., FontWeight::BOLD);
+pub const TITLE_1: TextStyle = text_style(20., 26., FontWeight::SEMIBOLD);
+pub const TITLE_2: TextStyle = text_style(18., 24., FontWeight::SEMIBOLD);
+pub const TITLE_3: TextStyle = text_style(16., 22., FontWeight::SEMIBOLD);
+pub const HEADLINE: TextStyle = text_style(14., 20., FontWeight::SEMIBOLD);
+pub const BODY: TextStyle = text_style(14., 20., FontWeight::NORMAL);
+pub const CALLOUT: TextStyle = text_style(13., 18., FontWeight::NORMAL);
+pub const CAPTION: TextStyle = text_style(12., 16., FontWeight::NORMAL);
+
 const FONTS: &[&str] = &[
     "Geist",
     ".SystemUIFont",
@@ -468,7 +493,7 @@ pub fn install(cx: &mut App) {
     Theme::update(cx, |theme| {
         theme.font_family = families.0;
         theme.mono_font_family = families.1;
-        theme.font_size = px(14.);
+        theme.font_size = BODY.size;
         theme.radius = RADIUS_BUTTON;
         theme.shadow = false;
         let c = &mut theme.colors;

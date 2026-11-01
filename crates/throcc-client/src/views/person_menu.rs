@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Stateful, StatefulInteractiveElement, Styled, anchored, div, px,
+    AnyElement, Context, Div, InteractiveElement, IntoElement, MouseButton, ParentElement,
+    Stateful, StatefulInteractiveElement, Styled, anchored, div, px,
 };
 use gpui_component::Icon;
 use gpui_component::slider::Slider;
@@ -8,7 +8,7 @@ use throcc_client_core::client::Command;
 use throcc_client_core::state::{Person, Sound};
 use throcc_proto::ids::{Role, UserId};
 
-use super::common::{gain_to_loudness, icon, mono, section};
+use super::common::{Typeset, gain_to_loudness, icon, mono, section};
 use super::main::toggle_icon;
 use crate::app::{Dialog, PlaybackControl, ThroccApp};
 use crate::theme;
@@ -43,7 +43,7 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .px_2()
                 .py_1()
                 .truncate()
-                .font_weight(FontWeight::SEMIBOLD)
+                .typeset(theme::HEADLINE)
                 .child(person.name.clone()),
         )
         .children(
@@ -130,7 +130,7 @@ fn playback(
                         .w(px(44.))
                         .flex_none()
                         .text_right()
-                        .text_size(px(12.)),
+                        .typeset(theme::CAPTION),
                 ),
         )
 }
@@ -146,7 +146,7 @@ fn stream_actions(app: &ThroccApp, user: UserId, mine: bool, cx: &mut Context<Th
         .border_color(theme::control());
     if app.popouts.contains_key(&user) {
         return rows.child(
-            action("person-menu-bring-back", "panel-top-open", "Bring back").on_click(cx.listener(
+            action("person-menu-bring-back", "panel-top-open", "Bring Back").on_click(cx.listener(
                 move |app, _, _, cx| {
                     app.close_person_menu(cx);
                     app.close_popout(user, cx);
@@ -155,7 +155,7 @@ fn stream_actions(app: &ThroccApp, user: UserId, mine: bool, cx: &mut Context<Th
         );
     }
     if !app.shows_stream(user) {
-        let label = if mine { "Preview" } else { "Watch stream" };
+        let label = if mine { "Preview" } else { "Watch Stream" };
         return rows.child(
             action("person-menu-watch", "eye", label).on_click(cx.listener(
                 move |app, _, _, cx| {
@@ -170,7 +170,7 @@ fn stream_actions(app: &ThroccApp, user: UserId, mine: bool, cx: &mut Context<Th
         );
     }
     rows.children((!mine).then(|| {
-        action("person-menu-pop-out", "picture-in-picture-2", "Pop out").on_click(cx.listener(
+        action("person-menu-pop-out", "picture-in-picture-2", "Pop Out").on_click(cx.listener(
             move |app, _, _, cx| {
                 app.close_person_menu(cx);
                 app.pop_out(user, cx);
@@ -178,7 +178,7 @@ fn stream_actions(app: &ThroccApp, user: UserId, mine: bool, cx: &mut Context<Th
         ))
     }))
     .child(
-        action("person-menu-fullscreen", "maximize-2", "Fullscreen").on_click(cx.listener(
+        action("person-menu-fullscreen", "maximize-2", "Full Screen").on_click(cx.listener(
             move |app, _, window, cx| {
                 app.close_person_menu(cx);
                 app.enter_fullscreen(user, window, cx);
@@ -190,9 +190,9 @@ fn stream_actions(app: &ThroccApp, user: UserId, mine: bool, cx: &mut Context<Th
             "person-menu-stop-watching",
             "eye-off",
             if mine {
-                "Stop preview"
+                "Stop Preview"
             } else {
-                "Stop watching"
+                "Stop Watching"
             },
         )
         .on_click(cx.listener(move |app, _, _, cx| {
@@ -227,7 +227,7 @@ fn moderation(
             .border_t_1()
             .border_color(theme::control())
             .children(kick.then(|| {
-                danger_action("person-menu-kick", "door-open", "Kick from room").on_click(
+                danger_action("person-menu-kick", "door-open", "Kick from Room").on_click(
                     cx.listener(move |app, _, _, cx| {
                         app.close_person_menu(cx);
                         if let Some(room) = kick_room {
@@ -237,7 +237,7 @@ fn moderation(
                 )
             }))
             .children(remove.then(|| {
-                danger_action("person-menu-remove", "user-x", "Remove from server").on_click(
+                danger_action("person-menu-remove", "user-x", "Remove from Server").on_click(
                     cx.listener(move |app, _, _, cx| {
                         app.close_person_menu(cx);
                         app.dialog = Some(Dialog::Remove {

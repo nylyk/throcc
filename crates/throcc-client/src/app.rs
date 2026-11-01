@@ -26,7 +26,7 @@ use throcc_proto::messages::User;
 
 use crate::theme;
 use crate::views;
-use crate::views::common::{gain_to_loudness, loudness_to_gain};
+use crate::views::common::{Typeset, gain_to_loudness, loudness_to_gain};
 
 actions!(throcc, [ToggleMic, ToggleDeafen, CloseDialog]);
 
@@ -773,7 +773,7 @@ impl ThroccApp {
             .state
             .person(user)
             .map_or("Someone".into(), |p| p.name.clone());
-        let title = format!("{name}'s screen");
+        let title = format!("{name}’s Screen");
         let app = cx.entity().downgrade();
         cx.defer(move |cx| {
             let Some(window) = crate::popout::PopOut::open(app.clone(), user, title, cx) else {
@@ -1045,7 +1045,7 @@ impl ThroccApp {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Use as picture".into()),
+            prompt: Some("Use as Picture".into()),
         });
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = chosen.await else {
@@ -1129,7 +1129,7 @@ impl ThroccApp {
         let address = self.address.read(cx).value().trim().to_owned();
         let code_text = self.code.read(cx).value().to_string();
         if address.is_empty() {
-            self.join_error = Some("Enter the server's address.".into());
+            self.join_error = Some("Enter the server’s address.".into());
             return;
         }
         let invite = if code_text.trim().is_empty() {
@@ -1530,7 +1530,7 @@ impl Render for ThroccApp {
                 cx.listener(|app, _, _, _| app.resizing_sidebar = false),
             )
             .font_family(theme::font())
-            .text_size(gpui::px(14.))
+            .typeset(theme::BODY)
             .child(screen)
             .children(views::banner::render(self))
             .children(

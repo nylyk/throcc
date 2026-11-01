@@ -13,8 +13,8 @@ use crate::app::ThroccApp;
 use crate::theme;
 use crate::video::Feeds;
 use crate::views::common::{
-    CONTROLS_LINGER, TRAFFIC_LIGHTS, app_titlebar, caption, moves_window, player, player_button,
-    player_title,
+    CONTROLS_LINGER, TRAFFIC_LIGHTS, Typeset, app_titlebar, caption, moves_window, player,
+    player_button, player_title,
 };
 
 /// One watched share in a window of its own.
@@ -155,7 +155,7 @@ impl Render for PopOut {
             .bg(theme::bg())
             .text_color(theme::text())
             .font_family(theme::font())
-            .text_size(px(14.))
+            .typeset(theme::BODY)
             .on_mouse_move(cx.listener(|this, _, _, cx| this.show_controls(cx)))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {

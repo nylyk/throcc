@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, ParentElement, Pixels, RenderImage, Size as Area, Stateful,
+    AnyElement, Context, Div, FontFeatures, FontWeight, InteractiveElement, IntoElement,
+    MouseButton, MouseDownEvent, ParentElement, Pixels, RenderImage, Size as Area, Stateful,
     StatefulInteractiveElement, Styled, Window, canvas, div, px, relative, size,
 };
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
@@ -14,8 +14,8 @@ use throcc_client_core::state::{Person, State, share_label};
 use throcc_proto::ids::{RoomId, UserId};
 
 use super::common::{
-    avatar, caption, card, ghost_icon, icon, moves_window, player, player_button, player_title,
-    primary, rate, section, sharing_icon,
+    Typeset, avatar, caption, card, ghost_icon, icon, moves_window, player, player_button,
+    player_title, primary, rate, section, sharing_icon,
 };
 use super::settings::{resize_handle, sidebar_column};
 use crate::app::{Dialog, Screen, ServerPage, ThroccApp};
@@ -178,19 +178,19 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                 .flex()
                 .items_center()
                 .gap_1p5()
-                .text_size(px(16.))
+                .typeset(theme::TITLE_3)
                 .child(
                     div()
                         .flex_none()
                         .max_w(server_name_width)
                         .truncate()
-                        .font_weight(FontWeight::SEMIBOLD)
                         .child(server_name.clone().unwrap_or(server_address.clone())),
                 )
                 .children(server_name.is_some().then(|| {
                     div()
                         .min_w_0()
                         .truncate()
+                        .font_weight(FontWeight::NORMAL)
                         .text_color(theme::text_3())
                         .child(format!("({server_address})"))
                 })),
@@ -200,7 +200,7 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
             let leave = this.clone();
             menu.min_w(px(200.))
                 .item(
-                    PopupMenuItem::new("Server settings")
+                    PopupMenuItem::new("Server Settings")
                         .icon(icon("settings-2"))
                         .on_click(move |_, window, cx| {
                             settings
@@ -215,7 +215,7 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                 .separator()
                 .item(
                     PopupMenuItem::element(|_, _| {
-                        div().text_color(theme::danger_text()).child("Leave server")
+                        div().text_color(theme::danger_text()).child("Leave Server")
                     })
                     .icon(icon("log-out").text_color(theme::danger_text()))
                     .on_click(move |_, _, cx| {
@@ -354,7 +354,7 @@ fn with_room_menu(
             let edit = this.clone();
             let delete = this.clone();
             menu.item(
-                PopupMenuItem::new("Edit room")
+                PopupMenuItem::new("Edit Room…")
                     .icon(icon("pencil"))
                     .on_click(move |_, window, cx| {
                         edit.update(cx, |app, cx| app.open_edit_room(room, window, cx))
@@ -364,7 +364,7 @@ fn with_room_menu(
             .separator()
             .item(
                 PopupMenuItem::element(|_, _| {
-                    div().text_color(theme::danger_text()).child("Delete room")
+                    div().text_color(theme::danger_text()).child("Delete Room")
                 })
                 .icon(icon("trash").text_color(theme::danger_text()))
                 .on_click(move |_, _, cx| {
@@ -425,7 +425,6 @@ fn occupant(
                 .flex_1()
                 .truncate()
                 .text_color(theme::text_2_muted())
-                .text_size(px(14.))
                 .child(person.name.clone()),
         )
         .children(person.sharing.is_some().then(sharing_icon))
@@ -473,8 +472,7 @@ fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_size(px(16.))
+                            .typeset(theme::TITLE_3)
                             .child(room.name.clone()),
                     )
                     .child(caption(people.len().to_string())),
@@ -495,7 +493,7 @@ fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
                             .items_center()
                             .gap_1()
                             .ml_2()
-                            .text_size(px(12.))
+                            .typeset(theme::CAPTION)
                             .text_color(theme::danger_text())
                             .child(sharing_icon())
                             .child(sharing.to_string())
@@ -516,12 +514,7 @@ fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
         .flex_none()
         .border_b_1()
         .border_color(theme::control())
-        .child(
-            div()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_size(px(16.))
-                .child("Lobby"),
-        );
+        .child(div().typeset(theme::TITLE_3).child("Lobby"));
     div().size_full().flex().flex_col().child(header).child(
         div()
             .id("lobby")
@@ -580,8 +573,7 @@ fn room(
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_size(px(16.))
+                .typeset(theme::TITLE_3)
                 .child(name),
         )
         .child(
@@ -593,6 +585,7 @@ fn room(
                     rate(state.health.upload_kbps)
                 ))
                 .icon(icon("activity"))
+                .font_features(FontFeatures(Arc::new(vec![("tnum".into(), 1)])))
                 .ghost()
                 .tooltip("Connection")
                 .on_click(cx.listener(|app, _, _, cx| {
@@ -953,7 +946,8 @@ fn tile(
         ))
         .child(
             div()
-                .text_size(px(13.))
+                .typeset(theme::CALLOUT)
+                .font_weight(FontWeight::MEDIUM)
                 .truncate()
                 .child(t.person.name.clone()),
         )
@@ -973,7 +967,7 @@ fn tile(
                 ghost_icon(
                     ("pop-out", user.0 as usize),
                     "picture-in-picture-2",
-                    "Pop out",
+                    "Pop Out",
                 )
                 .on_click(cx.listener(move |app, _, _, cx| {
                     cx.stop_propagation();
@@ -984,7 +978,7 @@ fn tile(
                 ghost_icon(
                     ("stop-watching", user.0 as usize),
                     "eye-off",
-                    "Stop watching",
+                    "Stop Watching",
                 )
                 .on_click(cx.listener(move |app, _, _, cx| {
                     cx.stop_propagation();
@@ -993,7 +987,7 @@ fn tile(
                 })),
             )
             .child(
-                ghost_icon(("fullscreen", user.0 as usize), "maximize-2", "Fullscreen").on_click(
+                ghost_icon(("fullscreen", user.0 as usize), "maximize-2", "Full Screen").on_click(
                     cx.listener(move |app, _, window, cx| {
                         cx.stop_propagation();
                         app.enter_fullscreen(user, window, cx);
@@ -1043,13 +1037,13 @@ fn person_card(t: &Tile, height: Pixels, compact: bool, cx: &mut Context<ThroccA
     let (compact, picture_size) = card_fit(height, person.sharing.is_some(), compact);
     let action = person.sharing.map(|_| {
         let (label, icon_name) = if t.popped {
-            ("Bring back", "panel-top-open")
+            ("Bring Back", "panel-top-open")
         } else if t.mine {
             ("Preview", "eye")
         } else if compact {
             ("Watch", "eye")
         } else {
-            ("Watch stream", "eye")
+            ("Watch Stream", "eye")
         };
         let popped = t.popped;
         let mine = t.mine;
@@ -1101,7 +1095,7 @@ fn person_card(t: &Tile, height: Pixels, compact: bool, cx: &mut Context<ThroccA
                 .max_w_full()
                 .child(
                     div()
-                        .text_size(px(if compact { 12. } else { 14. }))
+                        .typeset(if compact { theme::CAPTION } else { theme::BODY })
                         .font_weight(FontWeight::MEDIUM)
                         .truncate()
                         .child(if t.mine {

@@ -4,12 +4,24 @@ use gpui::{
     AnyElement, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton,
     ObjectFit, ParentElement, Pixels, Point, RenderImage, SharedString, Stateful, Styled,
     StyledImage, TitlebarOptions, WindowBackgroundAppearance, WindowOptions, div, img, px,
+    relative,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Icon, Sizable, Size};
 use throcc_client_core::state::MAX_VOLUME;
 
 use crate::theme;
+
+/// Sets text in a step of the type scale.
+pub trait Typeset: Styled + Sized {
+    fn typeset(self, style: theme::TextStyle) -> Self {
+        self.text_size(style.size)
+            .line_height(style.line_height)
+            .font_weight(style.weight)
+    }
+}
+
+impl<E: Styled> Typeset for E {}
 
 pub fn icon(name: &'static str) -> Icon {
     Icon::empty().path(format!("icons/{name}.svg"))
@@ -98,6 +110,7 @@ pub fn avatar(
                 .justify_center()
                 .text_color(theme::on_avatar())
                 .text_size(size * 0.42)
+                .line_height(relative(1.))
                 .font_weight(FontWeight::MEDIUM)
                 .overflow_hidden()
                 .child(match picture {
@@ -119,7 +132,7 @@ pub fn chip(text: impl Into<SharedString>, bg: Hsla, fg: Hsla) -> Div {
         .rounded_full()
         .bg(bg)
         .text_color(fg)
-        .text_size(px(12.))
+        .typeset(theme::CAPTION)
         .font_weight(FontWeight::MEDIUM)
         .child(text.into())
 }
@@ -132,8 +145,16 @@ pub fn sharing_icon() -> Icon {
 
 pub fn caption(text: impl Into<SharedString>) -> Div {
     div()
-        .text_size(px(12.))
+        .typeset(theme::CAPTION)
         .text_color(theme::text_3())
+        .child(text.into())
+}
+
+/// Explanatory text in a dialog or card.
+pub fn description(text: impl Into<SharedString>) -> Div {
+    div()
+        .typeset(theme::CALLOUT)
+        .text_color(theme::text_2())
         .child(text.into())
 }
 
@@ -148,20 +169,17 @@ pub fn key_cap(text: impl Into<SharedString>) -> Div {
         .px_1p5()
         .rounded(theme::RADIUS_ROW)
         .bg(theme::raised())
-        .text_size(px(12.))
+        .typeset(theme::CAPTION)
 }
 
 pub fn title(text: impl Into<SharedString>) -> Div {
-    div()
-        .text_size(px(20.))
-        .font_weight(FontWeight::SEMIBOLD)
-        .child(text.into())
+    div().typeset(theme::TITLE_1).child(text.into())
 }
 
 pub fn section(text: impl Into<SharedString>) -> Div {
     div()
-        .text_size(px(12.))
-        .font_weight(FontWeight::MEDIUM)
+        .typeset(theme::CAPTION)
+        .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme::text_3())
         .child(text.into())
 }
@@ -297,7 +315,7 @@ pub fn player(picture: AnyElement, title: Div, controls: Div, shown: bool) -> Di
         }))
 }
 
-/// The sharer's picture over "`name`'s screen" and `details`, for the top of a player.
+/// The sharer's picture over "`name`’s Screen" and `details`, for the top of a player.
 pub fn player_title(
     name: &str,
     seed: u64,
@@ -315,11 +333,15 @@ pub fn player_title(
                 .flex_col()
                 .child(
                     div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(16.))
-                        .child(format!("{name}'s screen")),
+                        .typeset(theme::TITLE_3)
+                        .child(format!("{name}’s Screen")),
                 )
-                .child(div().text_size(px(12.)).opacity(0.75).child(details.into())),
+                .child(
+                    div()
+                        .typeset(theme::CAPTION)
+                        .opacity(0.75)
+                        .child(details.into()),
+                ),
         )
 }
 

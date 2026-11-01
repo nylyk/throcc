@@ -1,6 +1,8 @@
-use gpui::{Div, ParentElement, Styled, div, px};
+use gpui::{Div, ParentElement, Styled, div};
+
 use throcc_client_core::state::ConnectionStatus;
 
+use super::common::Typeset;
 use crate::app::{Screen, ThroccApp};
 use crate::theme;
 
@@ -11,7 +13,7 @@ pub fn render(app: &ThroccApp) -> Option<Div> {
     }
     let (text, warn) = match &app.state.connection {
         ConnectionStatus::Reconnecting { attempt, reason } => (
-            format!("Reconnecting (attempt {attempt}): {reason}. You'll be put back in your room."),
+            format!("Reconnecting (attempt {attempt}): {reason}. You’ll be put back in your room."),
             true,
         ),
         ConnectionStatus::Failed(reason) => (format!("Disconnected: {reason}"), false),
@@ -32,7 +34,7 @@ pub fn render(app: &ThroccApp) -> Option<Div> {
             .py_2()
             .bg(bg)
             .text_color(fg)
-            .text_size(px(13.))
+            .typeset(theme::CALLOUT)
             .child(text),
     )
 }

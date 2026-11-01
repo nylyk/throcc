@@ -16,13 +16,12 @@ const MAX_SHOWN_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Turns any PNG or JPEG into a centred 128 px square that fits the server's size cap.
 pub fn prepare(file: &[u8]) -> Result<Vec<u8>, String> {
-    let picture =
-        decode_within(file, MAX_CHOSEN_SIDE, MAX_CHOSEN_BYTES).map_err(|e| match e {
-            ImageError::Limits(_) => format!(
-                "That picture is too large. Pick one up to {MAX_CHOSEN_SIDE} × {MAX_CHOSEN_SIDE} pixels."
-            ),
-            _ => "That isn't a PNG or JPEG picture.".into(),
-        })?;
+    let picture = decode_within(file, MAX_CHOSEN_SIDE, MAX_CHOSEN_BYTES).map_err(|e| match e {
+        ImageError::Limits(_) => format!(
+            "That picture is too large. Pick one up to {MAX_CHOSEN_SIDE}×{MAX_CHOSEN_SIDE} pixels."
+        ),
+        _ => "That isn’t a PNG or JPEG picture.".into(),
+    })?;
     let side = picture.width().min(picture.height());
     let square = picture.crop_imm(
         (picture.width() - side) / 2,
