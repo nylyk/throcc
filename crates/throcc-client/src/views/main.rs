@@ -15,8 +15,8 @@ use throcc_client_core::state::{Person, State, share_label};
 use throcc_proto::ids::{RoomId, UserId};
 
 use super::common::{
-    Typeset, avatar, caption, card, description, ghost_icon, icon, moves_window, player,
-    player_button, player_title, primary, rate, section, sharing_icon,
+    Typeset, avatar, caption, description, ghost_icon, icon, moves_window, player, player_button,
+    player_title, primary, rate, section, sharing_icon,
 };
 use super::mascot;
 use super::settings::{resize_handle, sidebar_column};
@@ -471,67 +471,7 @@ fn muted_icon(person: &Person, size: Pixels) -> Option<Icon> {
 }
 
 fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
-    let pictures = app.pictures_of_people(cx);
-    let manages = app.manages_rooms();
-    let state = app.state.clone();
-    let cards = state.rooms.iter().map(|room| {
-        let people = people_in(&state, room.id);
-        let sharing = people.iter().filter(|(_, p)| p.sharing.is_some()).count();
-        let id = room.id;
-        let card = card()
-            .id(("room-card", id.0 as usize))
-            .flex()
-            .flex_col()
-            .gap_3()
-            .w(px(280.))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .children(
-                        room.locked
-                            .then(|| icon("lock").size(px(14.)).text_color(theme::text_3())),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .typeset(theme::TITLE_3)
-                            .child(room.name.clone()),
-                    )
-                    .child(caption(people.len().to_string())),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .min_h(px(32.))
-                    .children(people.iter().take(6).map(|(u, p)| {
-                        avatar(&p.name, u.0, pictures.get(u).cloned(), px(24.), p.speaking)
-                    }))
-                    .children(people.is_empty().then(|| caption("Empty")))
-                    .children((sharing > 0).then(|| {
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .ml_2()
-                            .typeset(theme::CAPTION)
-                            .text_color(theme::danger_text())
-                            .child(sharing_icon())
-                            .child(sharing.to_string())
-                    })),
-            )
-            .child(
-                primary(("join-room", id.0 as usize), "Join")
-                    .w_full()
-                    .on_click(cx.listener(move |app, _, window, cx| app.join_room(id, window, cx))),
-            );
-        with_room_menu(card, id, manages, cx)
-    });
+    let no_rooms = app.state.rooms.is_empty();
     let header = moves_window(div())
         .flex()
         .items_center()
@@ -541,32 +481,25 @@ fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
         .border_b_1()
         .border_color(theme::control())
         .child(div().typeset(theme::TITLE_3).child("Lobby"));
-    let body = if state.rooms.is_empty() {
-        div()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_4()
-            .child(mascot::drawing(app.mascot.pick(mascot::IDLE)))
-            .child(description("There are no rooms yet."))
-            .children(manages.then(|| {
-                primary("first-room", "New Room")
-                    .h_10()
-                    .px_4()
-                    .on_click(cx.listener(|app, _, window, cx| app.open_new_room(window, cx)))
-            }))
-            .into_any_element()
-    } else {
-        div()
-            .id("lobby")
-            .flex_1()
-            .overflow_y_scroll()
-            .p_6()
-            .child(div().flex().flex_wrap().gap_4().children(cards))
-            .into_any_element()
-    };
+    let body = div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap_4()
+        .child(mascot::drawing(app.mascot.pick(mascot::IDLE)))
+        .child(description(if no_rooms {
+            "There are no rooms yet."
+        } else {
+            "Join a room on the left."
+        }))
+        .children((no_rooms && app.manages_rooms()).then(|| {
+            primary("first-room", "New Room")
+                .h_10()
+                .px_4()
+                .on_click(cx.listener(|app, _, window, cx| app.open_new_room(window, cx)))
+        }));
     div()
         .size_full()
         .flex()
