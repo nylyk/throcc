@@ -1,6 +1,8 @@
 # throcc
 
-Self-hosted voice and screen share in Rust. `PLAN.md` is the spec and the milestone list. Read it before starting work, and tick its checkboxes as you go.
+Self-hosted voice and screen share in Rust, in the spirit of TeamSpeak. Persistent rooms with low-latency voice, screen share up to 1440p60 with its system audio, and end-to-end encryption for all media. The server relays everything; there is no peer-to-peer path. One server binary, one data directory; clients join with an address and an invite code.
+
+Not in scope: web or mobile clients, rooms beyond about 20 people, recording, transcoding, simulcast, a TCP fallback, text chat.
 
 ## Commands
 
@@ -11,7 +13,43 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cargo deny check
 ./scripts/check-server-deps.sh
+throcc-client --mock --screen <name>   # sample data, no server; names in `ThroccApp::show_sample`
+./scripts/screens.sh                   # macOS: README screenshots into docs/screens/
 ```
+
+On macOS, building with `--features ffmpeg` needs `FFMPEG_PKG_CONFIG_PATH=$PWD/deps/ffmpeg-lgpl/lib/pkgconfig` (built by `packaging/ffmpeg/build.sh deps/ffmpeg-lgpl`).
+
+## Crates
+
+| Crate | Holds |
+| --- | --- |
+| `throcc-proto` | Messages, ids, the media header, framing, fingerprints. No async runtime, no media, no I/O |
+| `throcc-crypto` | PAKE, identity signatures, HPKE wrapping, media AEAD, safety numbers. No I/O. Feature `media` is off in the server |
+| `throcc-server` | Sessions, auth, rooms, SFU, key relay, SQLite storage |
+| `throcc-client-core` | Connection, keystore, key manager, voice and share pipelines. `Client` and `MockClient` behind `ClientApi` |
+| `throcc-client` | gpui UI and the video surface |
+| `throcc-cli` | Headless client for scripts and integration tests |
+
+`third_party/` holds vendored gpui crates with an NV12 surface patch; its README lists the changes and how to refresh them.
+
+## Rules
+
+- Only the main agent changes `throcc-proto`. Any change to messages bumps `PROTOCOL` in `messages.rs`; new enum variants go last.
+- The server never depends on codecs, capture, audio or media crypto. `check-server-deps.sh` enforces this.
+- The server never reads media past the 13-byte header and holds no media key.
+- **Frozen; changes need a human decision:** the media header, the media AEAD and track-key derivation, HPKE sender-key wrapping and its info, the signed encryption key, and the safety-number construction.
+- Never weaken a security property to make a test pass. Stop and ask instead.
+- Audio and capture callbacks never block, allocate, lock, await or panic. Cross into tokio only with a bounded channel, `try_send`, drop on full and a counter.
+- SFU egress never drops audio by policy, and drops video only as whole access units.
+- No GPL or AGPL dependencies. `cargo deny` enforces this.
+- Crypto, protocol and SFU changes get reviewed by a subagent that didn't write them.
+
+## UI
+
+- Every colour lives in `throcc-client/theme.rs`: an 8-colour palette the user picks, everything else mixed from it in Oklab.
+- Quiet and minimal: one accent, no gradients, no shadows beyond focus rings, no emoji.
+- Geist and Geist Mono; mono for addresses, codes, fingerprints, numbers and codecs. Spacing on a 4 px grid.
+- Match the existing screens. Add a `--mock --screen` sample for any new screen or dialog.
 
 ## Style
 
@@ -19,15 +57,3 @@ cargo deny check
 - If signing fails or asks for a passphrase, commit unsigned (`git commit --no-gpg-sign`) and carry on. Don't retry signing or rewrite history; the human signs those commits later.
 - Clean, small, readable code. Clear names over comments.
 - Comment only what the code can't say: why, invariants, safety. No comments that restate the code.
-
-## Rules
-
-- `throcc-proto` has no async runtime, no media and no I/O. Only the main agent changes it.
-- The server never depends on codecs, capture, audio or media crypto (`throcc-crypto` without the `media` feature).
-- The wire format and crypto are frozen after M5. Changing them needs a human decision.
-- Audio and capture callbacks never block, allocate, lock, await or panic. Cross into tokio only with a bounded channel, `try_send`, drop on full and a counter.
-- Colours live only in `throcc-client/theme.rs`. The UI follows `design/mockups/*.dc.html` and PLAN.md §5.13.
-- No GPL or AGPL dependencies.
-- Record non-obvious decisions in `docs/DECISIONS.md`. Record anything that needs real hardware in `docs/MANUAL_TESTS.md`.
-- A milestone is done when its *Done when* list is shown by a test or a command, not before.
-- Crypto, protocol and SFU changes get reviewed by a subagent that didn't write them.

@@ -1464,7 +1464,7 @@ fn percent(part: u64, whole: u64) -> f32 {
     }
 }
 
-/// One plain-language sentence on what limits the call right now (PLAN §5.11).
+/// One plain-language sentence on what limits the call right now.
 fn verdict(dropped_for_you: u32, local_drops: u64, download_loss: f32) -> String {
     if dropped_for_you > 0 {
         return format!(

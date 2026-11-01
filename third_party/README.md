@@ -27,4 +27,17 @@ converting every frame to BGRA on the UI thread:
   same content-mask clipping and `quad_sdf` rounding as polychrome sprites. A lost device drops
   the textures.
 
-See `docs/DECISIONS.md` for why they are vendored and how to refresh them.
+The BGRA image path these replace cost 37 ms of UI-thread CPU per 2560×1440 frame, more than
+a 60 fps frame lasts; the NV12 surface costs 2 ms. macOS keeps the BGRA path, because its Metal
+renderer lives in `gpui-pre-apple`, which is not vendored.
+
+## Refreshing on a gpui update
+
+1. Bump the pins, `cargo fetch`, and copy the unmodified `gpui-pre*-<version>` crates from
+   `~/.cargo/registry/src/*/` over the three directories. Commit that alone.
+2. Re-apply our commits on top (`git log -p -- third_party/` lists them; `git cherry-pick`
+   usually applies) and update this file.
+3. If upstream has gained an NV12 or YUV surface on Linux and Windows, drop the vendored copies
+   and the patch section instead.
+4. Check that `Cargo.lock` lists the three without a `source`, and that
+   `crates/throcc-client/tests/surface.rs` and `tests/surface/run.sh` still pass.

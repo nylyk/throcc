@@ -60,7 +60,7 @@ enum Input {
     Yuv420p,
 }
 
-/// One rung of the encoder ladder (PLAN §5.9, S4).
+/// One rung of the encoder ladder.
 struct Candidate {
     name: &'static CStr,
     codec: Codec,
