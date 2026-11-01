@@ -5,8 +5,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use throcc_proto::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
 use throcc_proto::messages::{PublicKey, ServerProfile, SignedEncKey, User};
 
-const SCHEMA_VERSION: i64 = 1;
-const SCHEMA: &str = "
+const SCHEMA_V1: &str = "
 CREATE TABLE users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pubkey BLOB NOT NULL UNIQUE,
@@ -37,19 +36,29 @@ CREATE TABLE counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
 CREATE TABLE server_profile (id INTEGER PRIMARY KEY CHECK (id = 0), name TEXT, avatar_hash BLOB);
 ";
 
-/// Creates the schema in an empty database, and refuses one with any other schema version.
-fn create_schema(conn: &mut Connection) -> Result<()> {
+type Migration = fn(&Transaction) -> rusqlite::Result<()>;
+
+/// Migration `i` moves the schema from version `i` to `i + 1`, kept in `PRAGMA user_version`.
+const MIGRATIONS: [Migration; 1] = [to_v1];
+
+/// Creates the first schema in an empty database.
+fn to_v1(tx: &Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(SCHEMA_V1)
+}
+
+fn migrate(conn: &mut Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version == SCHEMA_VERSION {
-        return Ok(());
+    let current = MIGRATIONS.len() as i64;
+    if version > current {
+        bail!("the database has schema version {version}, newer than this server's {current}");
     }
-    if version != 0 {
-        bail!("the database has schema version {version}; this server reads {SCHEMA_VERSION}");
+    for (from, migration) in MIGRATIONS.iter().enumerate().skip(version as usize) {
+        let to = from as i64 + 1;
+        let tx = conn.transaction()?;
+        migration(&tx).with_context(|| format!("migrating the database to schema version {to}"))?;
+        tx.pragma_update(None, "user_version", to)?;
+        tx.commit()?;
     }
-    let tx = conn.transaction()?;
-    tx.execute_batch(SCHEMA).context("creating the database")?;
-    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    tx.commit()?;
     Ok(())
 }
 
@@ -114,7 +123,7 @@ impl Database {
     fn init(mut conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        create_schema(&mut conn)?;
+        migrate(&mut conn)?;
         Ok(Self { conn })
     }
 
@@ -634,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn a_database_with_another_schema_version_is_refused() {
+    fn a_database_from_a_newer_server_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db");
         drop(Database::open(&path).unwrap());

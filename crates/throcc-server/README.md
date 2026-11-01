@@ -20,6 +20,6 @@ The server: sign-in, rooms and presence, the key relay, and an SFU that forwards
 | `limits.rs` | Token buckets and per-source connection caps |
 | `sfu.rs` | Ingress: the per-connection rate limit, the ownership check, the forwarding table and keyframe-request merging |
 | `egress.rs` | One task per receiver: audio first, video in whole units within a 150 ms budget, link stats |
-| `database.rs` | The SQLite schema and every query |
+| `database.rs` | The SQLite schema, its migrations and every query |
 
 The server never depends on codecs, capture, audio or media crypto. `scripts/check-server-deps.sh` checks this. Its integration tests live in `throcc-cli/tests/`.
