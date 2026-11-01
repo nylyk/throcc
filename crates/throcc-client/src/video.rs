@@ -10,6 +10,7 @@ use gpui_component::spinner::Spinner;
 use gpui_component::{Sizable, Size};
 
 use crate::theme;
+use crate::views::common::icon;
 
 /// The share pictures shown in one window, by sharer. The only place frames meet gpui.
 #[derive(Default)]
@@ -39,7 +40,12 @@ impl Feeds {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(Spinner::new().with_size(Size::Large).color(theme::text_3()))
+                .child(
+                    Spinner::new()
+                        .icon(icon("loader-circle"))
+                        .with_size(Size::Large)
+                        .color(theme::text_3()),
+                )
                 .into_any_element();
         };
         let previous = self.0.get(&user);
