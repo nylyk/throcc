@@ -1124,11 +1124,14 @@ impl ThroccApp {
         self.client.as_ref().and(self.state.server.as_ref())
     }
 
-    /// Shows the server at `address`, connecting to it first unless we already are.
+    /// Shows the server at `address`, connecting to it first unless we already are and haven't
+    /// given up reconnecting.
     pub fn open_server(&mut self, address: String, window: &mut Window, cx: &mut Context<Self>) {
-        if self
-            .connected_server()
-            .is_some_and(|s| s.address == address)
+        let gave_up = matches!(self.state.connection, ConnectionStatus::Failed(_));
+        if !gave_up
+            && self
+                .connected_server()
+                .is_some_and(|s| s.address == address)
         {
             if matches!(self.screen, Screen::Settings(_) | Screen::Server(_)) {
                 self.screen = Screen::Main;
@@ -1553,16 +1556,21 @@ impl ThroccApp {
 impl Render for ThroccApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sidebar_width = self.sidebar_width.min(widest_sidebar(window));
+        let lost = match self.screen {
+            Screen::Main => views::join::render_lost(self),
+            _ => None,
+        };
+        let shows_lost = lost.is_some();
         let screen = match self.screen {
             Screen::Join => views::join::render(self, cx).into_any_element(),
-            Screen::Main => match views::join::render_lost(self) {
+            Screen::Main => match lost {
                 Some(lost) => lost.into_any_element(),
                 None => views::main::render(self, window, cx).into_any_element(),
             },
             Screen::Settings(page) => views::settings::render(self, page, cx).into_any_element(),
             Screen::Server(page) => views::server::render(self, page, cx).into_any_element(),
         };
-        let screen = if self.fullscreen_stream().is_some() {
+        let screen = if self.fullscreen_stream().is_some() && !shows_lost {
             screen
         } else {
             div()
