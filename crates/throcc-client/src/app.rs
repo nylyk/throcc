@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{
@@ -16,6 +17,7 @@ use throcc_client_core::keystore::{self, Keystore};
 use throcc_client_core::media::audio::{Transmit, VoiceSettings};
 use throcc_client_core::media::cues::Cue;
 use throcc_client_core::media::devices;
+use throcc_client_core::server_look::ServerLook;
 use throcc_client_core::state::{Playback, ServerView, ShareChoice, Sound, State};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
@@ -166,6 +168,33 @@ fn widest_sidebar(window: &Window) -> gpui::Pixels {
         .clamp(theme::SIDEBAR_MIN_WIDTH, theme::SIDEBAR_MAX_WIDTH)
 }
 
+/// A known server's name and picture as last seen, for while we aren't connected to it.
+pub struct CachedLook {
+    pub name: Option<String>,
+    pub picture: Option<Arc<RenderImage>>,
+}
+
+/// The kept looks of `known` servers, by address.
+fn cached_looks(known: &[(String, Fingerprint)]) -> HashMap<String, CachedLook> {
+    let Ok(dir) = keystore::default_dir() else {
+        return HashMap::new();
+    };
+    known
+        .iter()
+        .filter_map(|(address, fingerprint)| {
+            let look = ServerLook::load(&dir, fingerprint).ok()?;
+            let picture = look.picture.as_deref().and_then(crate::avatar::decode);
+            Some((
+                address.clone(),
+                CachedLook {
+                    name: look.name,
+                    picture,
+                },
+            ))
+        })
+        .collect()
+}
+
 fn known_servers() -> Vec<(String, Fingerprint)> {
     Keystore::default_known_servers()
         .map(|k| k.iter().map(|(a, f)| (a.to_owned(), f)).collect())
@@ -203,6 +232,7 @@ pub struct ThroccApp {
     pub profile_status: Option<ProfileStatus>,
     pub profile_picture_edit: Option<PictureEdit>,
     pub known_servers: Vec<(String, Fingerprint)>,
+    pub server_looks: HashMap<String, CachedLook>,
     pub users: Vec<User>,
     pub invite: Option<(String, u64)>,
     pub voice: VoiceSettings,
@@ -302,6 +332,17 @@ impl ThroccApp {
         } else {
             known_servers()
         };
+        let server_looks = if mock {
+            HashMap::from([(
+                "lan.example.org".to_owned(),
+                CachedLook {
+                    name: Some("LAN Party".into()),
+                    picture: None,
+                },
+            )])
+        } else {
+            cached_looks(&known_servers)
+        };
         let share_choice = ShareChoice::default();
         let (bitrate, bitrate_changes) = Self::bitrate_slider(share_choice, cx);
         let (inputs, outputs) = devices::list();
@@ -329,6 +370,7 @@ impl ThroccApp {
             profile_status: None,
             profile_picture_edit: None,
             known_servers,
+            server_looks,
             users: Vec::new(),
             invite: None,
             voice,
@@ -475,7 +517,7 @@ impl ThroccApp {
             Event::LeftServer => {
                 self.end_session(window, cx);
                 self.events = None;
-                self.known_servers = known_servers();
+                self.reload_known_servers();
             }
         }
         cx.notify();
@@ -1129,7 +1171,7 @@ impl ThroccApp {
                 this.update(cx, |app, cx| {
                     match result {
                         Ok(client) => {
-                            app.known_servers = known_servers();
+                            app.reload_known_servers();
                             app.attach(Arc::new(client), window, cx);
                         }
                         Err(e) => {
@@ -1192,6 +1234,21 @@ impl ThroccApp {
         self.preview_self = false;
         self.push_to_talk = None;
         self.screen = Screen::Join;
+        self.server_looks = cached_looks(&self.known_servers);
+    }
+
+    fn reload_known_servers(&mut self) {
+        self.known_servers = known_servers();
+        self.server_looks = cached_looks(&self.known_servers);
+    }
+
+    /// The name of the server at `address`: the live one while connected to it, else the
+    /// one last seen.
+    pub fn server_name(&self, address: &str) -> Option<String> {
+        match self.connected_server().filter(|s| s.address == address) {
+            Some(server) => server.name.clone(),
+            None => self.server_looks.get(address)?.name.clone(),
+        }
     }
 
     /// Opens a screen of the mock client by name, for screenshots: join, lobby, room, focus,

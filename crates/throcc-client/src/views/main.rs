@@ -106,10 +106,11 @@ fn people_in(state: &State, room: RoomId) -> Vec<(UserId, Person)> {
 fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
     let pictures = app.pictures_of_people(cx);
     let state = app.state.clone();
-    let server = state
+    let server_address = state
         .server
         .as_ref()
-        .map_or("server".to_owned(), |s| s.title().to_owned());
+        .map_or_else(String::new, |s| s.address.clone());
+    let server_name = state.server.as_ref().and_then(|s| s.name.clone());
     let own_picture = app.picture(state.profile_picture, cx);
     let current_room = state.current.as_ref().map(|c| c.room);
     let manages = app.manages_rooms();
@@ -174,10 +175,25 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
         .child(
             div()
                 .max_w(server_name_width)
-                .truncate()
-                .font_weight(FontWeight::SEMIBOLD)
+                .flex()
+                .items_center()
+                .gap_1p5()
                 .text_size(px(16.))
-                .child(server),
+                .child(
+                    div()
+                        .flex_none()
+                        .max_w(server_name_width)
+                        .truncate()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(server_name.clone().unwrap_or(server_address.clone())),
+                )
+                .children(server_name.is_some().then(|| {
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme::text_3())
+                        .child(format!("({server_address})"))
+                })),
         )
         .dropdown_menu(move |menu, _, _| {
             let settings = this.clone();

@@ -5,7 +5,7 @@ use gpui::{
 };
 use gpui_component::tooltip::Tooltip;
 
-use super::common::{avatar, icon, moves_window};
+use super::common::{avatar, icon, moves_window, server_label};
 use crate::app::{Screen, SettingsPage, ThroccApp};
 use crate::theme;
 
@@ -19,15 +19,20 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
         .iter()
         .enumerate()
         .map(|(i, (address, _))| {
-            let here = connected.as_ref().filter(|s| &s.address == address);
-            let name: SharedString = here
-                .map_or(address.as_str(), |s| s.title())
-                .to_owned()
-                .into();
-            let picture = here.and(connected_picture.clone());
+            let here = connected.as_ref().is_some_and(|s| &s.address == address);
+            let name = app.server_name(address);
+            let picture = if here {
+                connected_picture.clone()
+            } else {
+                app.server_looks
+                    .get(address)
+                    .and_then(|look| look.picture.clone())
+            };
+            let tooltip = server_label(name.as_deref(), address).into();
+            let initials_from = name.unwrap_or_else(|| address.clone());
             let address = address.clone();
-            item(("server", i), name.clone(), here.is_some())
-                .child(avatar(&name, i as u64, picture, px(36.), false))
+            item(("server", i), tooltip, here)
+                .child(avatar(&initials_from, i as u64, picture, px(36.), false))
                 .on_click(cx.listener(move |app, _, window, cx| {
                     app.open_server(address.clone(), window, cx)
                 }))

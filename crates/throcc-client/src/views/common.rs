@@ -35,6 +35,14 @@ pub fn gain_to_loudness(gain: f32) -> f32 {
     }
 }
 
+/// A server as "name (address)", or its address alone when it has no name.
+pub fn server_label(name: Option<&str>, address: &str) -> String {
+    match name {
+        Some(name) => format!("{name} ({address})"),
+        None => address.to_owned(),
+    }
+}
+
 /// A bitrate in kbps, in Mbps from 1000 up.
 pub fn rate(kbps: u32) -> String {
     if kbps >= 1000 {
