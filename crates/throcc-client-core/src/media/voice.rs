@@ -17,6 +17,7 @@ use super::engine::{Kind, MediaEngine, Outgoing, Received};
 use super::jitter::{JitterBuffer, PULL};
 use super::share_audio::Playout;
 use crate::lock;
+use crate::state::MAX_VOLUME;
 
 /// Playback kept queued in the device ring, in 10 ms pulls: enough to ride out
 /// scheduling hiccups, little enough to keep mouth-to-ear delay low.
@@ -247,7 +248,7 @@ impl Worker {
             VoiceCommand::Deafened(deafened) => self.deafened = deafened,
             VoiceCommand::Volume(user, volume) => self.mixer.set_volume(user, volume),
             VoiceCommand::ShareVolume(user, volume) => {
-                let volume = volume.clamp(0.0, 2.0);
+                let volume = volume.clamp(0.0, MAX_VOLUME);
                 self.share_volumes.insert(user, volume);
                 if let Some(share) = self.shares.get_mut(&user) {
                     share.volume = volume;

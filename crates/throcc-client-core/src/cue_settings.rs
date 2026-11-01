@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use crate::keystore::replace_file;
-use crate::state::Playback;
+use crate::state::{MAX_VOLUME, Playback};
 
 const FILE: &str = "cues";
 
@@ -66,7 +66,7 @@ impl CueSettings {
             settings.set(
                 category,
                 Playback {
-                    volume: volume.parse::<f32>()?.clamp(0.0, 2.0),
+                    volume: volume.parse::<f32>()?.clamp(0.0, MAX_VOLUME),
                     muted: muted == "1",
                 },
             );

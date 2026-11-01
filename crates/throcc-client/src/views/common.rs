@@ -7,6 +7,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Icon, Sizable, Size};
+use throcc_client_core::state::MAX_VOLUME;
 
 use crate::theme;
 
@@ -14,24 +15,30 @@ pub fn icon(name: &'static str) -> Icon {
     Icon::empty().path(format!("icons/{name}.svg"))
 }
 
-/// The gain for a volume slider at `loudness`, from 0 to 2 where 1 plays the sound as it
-/// arrives: cubic up to 1, as loudness is heard, then rising evenly in decibels to +6 dB.
+const QUIETEST_DB: f32 = -36.0;
+
+/// The gain for a volume slider at `loudness`, from 0 (silent) to 2 where 1 plays the sound
+/// as it arrives. Each half rises evenly in decibels: from -36 dB to unity, then to +12 dB.
 pub fn loudness_to_gain(loudness: f32) -> f32 {
     let loudness = loudness.clamp(0.0, 2.0);
-    if loudness <= 1.0 {
-        loudness.powi(3)
+    if loudness == 0.0 {
+        0.0
+    } else if loudness <= 1.0 {
+        10f32.powf(QUIETEST_DB * (1.0 - loudness) / 20.0)
     } else {
-        2f32.powf(loudness - 1.0)
+        MAX_VOLUME.powf(loudness - 1.0)
     }
 }
 
 /// Where a volume slider sits for `gain`, the inverse of [`loudness_to_gain`].
 pub fn gain_to_loudness(gain: f32) -> f32 {
-    let gain = gain.clamp(0.0, 2.0);
-    if gain <= 1.0 {
-        gain.cbrt()
+    let gain = gain.clamp(0.0, MAX_VOLUME);
+    if gain == 0.0 {
+        0.0
+    } else if gain <= 1.0 {
+        (1.0 - 20.0 * gain.log10() / QUIETEST_DB).max(0.0)
     } else {
-        1.0 + gain.log2()
+        1.0 + gain.ln() / MAX_VOLUME.ln()
     }
 }
 
@@ -343,8 +350,8 @@ mod tests {
     fn the_middle_of_a_volume_slider_plays_as_it_arrives() {
         assert_eq!(loudness_to_gain(1.0), 1.0);
         assert_eq!(loudness_to_gain(0.0), 0.0);
-        assert_eq!(loudness_to_gain(2.0), 2.0);
-        assert_eq!(loudness_to_gain(0.5), 0.125);
+        assert_eq!(loudness_to_gain(2.0), MAX_VOLUME);
+        assert!((loudness_to_gain(0.5) - 10f32.powf(-18.0 / 20.0)).abs() < 1e-6);
     }
 
     #[test]

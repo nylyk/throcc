@@ -8,7 +8,7 @@ use throcc_proto::Fingerprint;
 use throcc_proto::ids::UserId;
 
 use crate::keystore::replace_file;
-use crate::state::{Playback, Sound};
+use crate::state::{MAX_VOLUME, Playback, Sound};
 
 /// How loud each person's voice and share audio play, kept per server on this computer.
 pub struct SavedPlayback {
@@ -39,7 +39,7 @@ impl SavedPlayback {
             };
             let playback = |volume: &str, muted: &str| -> Result<Playback> {
                 Ok(Playback {
-                    volume: volume.parse::<f32>()?.clamp(0.0, 2.0),
+                    volume: volume.parse::<f32>()?.clamp(0.0, MAX_VOLUME),
                     muted: muted == "1",
                 })
             };

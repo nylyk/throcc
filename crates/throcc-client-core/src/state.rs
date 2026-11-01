@@ -117,9 +117,12 @@ pub enum Sound {
 }
 
 /// How loud one of someone's sounds plays on this machine. It is never sent.
+/// The highest gain a volume can boost a sound by, +12 dB.
+pub const MAX_VOLUME: f32 = 4.0;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Playback {
-    /// From 0 to 2, where 1 plays the sound as it arrives.
+    /// From 0 to [`MAX_VOLUME`], where 1 plays the sound as it arrives.
     pub volume: f32,
     pub muted: bool,
 }

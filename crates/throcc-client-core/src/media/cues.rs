@@ -2,6 +2,7 @@ use std::f32::consts::PI;
 
 use super::audio::SAMPLE_RATE;
 use crate::cue_settings::CueCategory;
+use crate::state::MAX_VOLUME;
 
 /// A short sound played on this machine when something happens, never sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,7 +156,7 @@ impl CuePlayer {
         self.playing = Some(Playing {
             cue,
             position: 0,
-            gain: gain.clamp(0.0, 2.0),
+            gain: gain.clamp(0.0, MAX_VOLUME),
         });
     }
 

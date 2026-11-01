@@ -10,6 +10,7 @@ use throcc_proto::ids::UserId;
 pub use sonora::config::NoiseSuppressionLevel;
 
 use super::jitter::{FRAME, JitterBuffer, PULL};
+use crate::state::MAX_VOLUME;
 
 pub const SAMPLE_RATE: u32 = 48_000;
 /// Voice activation keeps sending, and the speaking ring stays lit, this long after speech stops.
@@ -298,7 +299,7 @@ impl Mixer {
 
     /// Sets `user`'s volume, kept for streams they start later.
     pub fn set_volume(&mut self, user: UserId, volume: f32) {
-        let volume = volume.clamp(0.0, 2.0);
+        let volume = volume.clamp(0.0, MAX_VOLUME);
         self.volumes.insert(user, volume);
         if let Some(stream) = self.streams.get_mut(&user) {
             stream.volume = volume;
