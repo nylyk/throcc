@@ -14,7 +14,7 @@ use throcc_client_core::client::{Client, ClientApi, ClientOptions, Command, Even
 use throcc_client_core::keystore::Keystore;
 use throcc_client_core::media::audio::{Transmit, VoiceSettings};
 use throcc_client_core::media::devices;
-use throcc_client_core::state::{ServerView, ShareChoice, State};
+use throcc_client_core::state::{Playback, ServerView, ShareChoice, Sound, State};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
 use throcc_proto::invite::{self, InviteCode};
@@ -96,6 +96,30 @@ impl PictureEdit {
             bytes: Some(bytes),
         }
     }
+}
+
+/// The menu of someone's sound and stream, open where it was asked for.
+pub struct PersonMenu {
+    pub user: UserId,
+    pub position: gpui::Point<gpui::Pixels>,
+    pub voice: PlaybackControl,
+    pub share: PlaybackControl,
+}
+
+impl PersonMenu {
+    fn control_mut(&mut self, sound: Sound) -> &mut PlaybackControl {
+        match sound {
+            Sound::Voice => &mut self.voice,
+            Sound::Share => &mut self.share,
+        }
+    }
+}
+
+/// One of someone's sounds as the person menu last set it, with its volume slider.
+pub struct PlaybackControl {
+    pub playback: Playback,
+    pub slider: Entity<SliderState>,
+    _changes: Subscription,
 }
 
 /// How the last save on the server page went.
@@ -201,6 +225,7 @@ pub struct ThroccApp {
     /// The window's space around the room besides the sidebar, measured whenever the room is
     /// drawn.
     pub room_chrome: gpui::Size<gpui::Pixels>,
+    pub person_menu: Option<PersonMenu>,
     /// The tile whose overlay shows, and until when once the pointer has left it.
     overlay: Option<(UserId, Option<std::time::Instant>)>,
     pub resizing_sidebar: bool,
@@ -316,6 +341,7 @@ impl ThroccApp {
                 theme::HEADER_HEIGHT + theme::FOOTER_HEIGHT,
             ),
             overlay: None,
+            person_menu: None,
             resizing_sidebar: false,
             events: None,
             _subscriptions: subscriptions,
@@ -390,6 +416,13 @@ impl ThroccApp {
                     self.dialog = None;
                 }
                 self.close_unwatched_popouts(cx);
+                if self
+                    .person_menu
+                    .as_ref()
+                    .is_some_and(|m| self.state.person(m.user).is_none())
+                {
+                    self.person_menu = None;
+                }
                 if self.fullscreen.is_some_and(|user| !self.shows_stream(user)) {
                     self.exit_fullscreen(window, cx);
                 }
@@ -539,6 +572,75 @@ impl ThroccApp {
         if std::mem::take(&mut self.made_window_fullscreen) && window.is_fullscreen() {
             window.toggle_fullscreen();
         }
+        cx.notify();
+    }
+
+    /// Opens the person menu for `user` at `position`, unless it would be empty.
+    pub fn open_person_menu(
+        &mut self,
+        user: UserId,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(person) = self.state.person(user).cloned() else {
+            return;
+        };
+        if Some(user) == self.state.me && person.sharing.is_none() {
+            return;
+        }
+        self.person_menu = Some(PersonMenu {
+            user,
+            position,
+            voice: Self::playback_control(Sound::Voice, person.voice, cx),
+            share: Self::playback_control(Sound::Share, person.share_audio, cx),
+        });
+        cx.notify();
+    }
+
+    fn playback_control(
+        sound: Sound,
+        playback: Playback,
+        cx: &mut Context<Self>,
+    ) -> PlaybackControl {
+        let slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.)
+                .max(200.)
+                .step(1.)
+                .default_value(playback.volume * 100.)
+        });
+        let changes = cx.subscribe(&slider, move |app, _, event: &SliderEvent, cx| {
+            let (SliderEvent::Change(value) | SliderEvent::Release(value)) = event;
+            let volume = value.start() / 100.;
+            app.change_playback(sound, |p| p.volume = volume, cx);
+        });
+        PlaybackControl {
+            playback,
+            slider,
+            _changes: changes,
+        }
+    }
+
+    /// Changes one sound of the person in the open menu, and plays it that way.
+    pub fn change_playback(
+        &mut self,
+        sound: Sound,
+        change: impl FnOnce(&mut Playback),
+        cx: &mut Context<Self>,
+    ) {
+        let Some(menu) = &mut self.person_menu else {
+            return;
+        };
+        let user = menu.user;
+        let control = menu.control_mut(sound);
+        change(&mut control.playback);
+        let command = Command::SetPlayback(user, sound, control.playback);
+        self.command(command);
+        cx.notify();
+    }
+
+    pub fn close_person_menu(&mut self, cx: &mut Context<Self>) {
+        self.person_menu = None;
         cx.notify();
     }
 
@@ -1070,6 +1172,7 @@ impl ThroccApp {
         self.invite = None;
         self.users.clear();
         self.dialog = None;
+        self.person_menu = None;
         self.focus = None;
         self.preview_self = false;
         self.push_to_talk = None;
@@ -1078,7 +1181,7 @@ impl ThroccApp {
 
     /// Opens a screen of the mock client by name, for screenshots: join, lobby, room, focus,
     /// fullscreen, popout, share, settings, appearance, profile, connection, verify, members,
-    /// keychange or addserver.
+    /// keychange, addserver or personmenu.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         let room = RoomId(1);
         let joined = |app: &mut Self| {
@@ -1090,6 +1193,10 @@ impl ThroccApp {
             "join" => {
                 self.client = None;
                 self.screen = Screen::Join;
+            }
+            "personmenu" => {
+                joined(self);
+                self.open_person_menu(UserId(4), gpui::point(gpui::px(900.), gpui::px(420.)), cx);
             }
             "addserver" => {
                 self.client = None;
@@ -1259,6 +1366,10 @@ impl ThroccApp {
     }
 
     fn close_dialog(&mut self, _: &CloseDialog, window: &mut Window, cx: &mut Context<Self>) {
+        if self.person_menu.take().is_some() {
+            cx.notify();
+            return;
+        }
         if self.dialog.is_none() && self.fullscreen.is_some() {
             self.exit_fullscreen(window, cx);
         }
@@ -1336,6 +1447,11 @@ impl Render for ThroccApp {
                 self.dialog
                     .clone()
                     .map(|dialog| views::dialogs::render(self, dialog, cx)),
+            )
+            .children(
+                self.person_menu
+                    .is_some()
+                    .then(|| views::person_menu::render(self, cx)),
             )
     }
 }

@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement, Pixels,
-    RenderImage, Size as Area, StatefulInteractiveElement, Styled, Window, canvas, div, px,
-    relative, size,
+    AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, MouseButton,
+    MouseDownEvent, ParentElement, Pixels, RenderImage, Size as Area, Stateful,
+    StatefulInteractiveElement, Styled, Window, canvas, div, px, relative, size,
 };
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
-use gpui_component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::{Icon, Sizable, Size};
 use throcc_client_core::client::Command;
 use throcc_client_core::state::{Person, State, share_label};
@@ -118,42 +118,33 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
         let sharing = people.iter().any(|(_, p)| p.sharing.is_some());
         let selected = current_room == Some(room.id);
         let id = room.id;
+        let row = div()
+            .id(("room", room.id.0 as usize))
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .min_h(px(36.))
+            .rounded(theme::RADIUS_ROW)
+            .cursor_pointer()
+            .when(selected, |s| s.bg(theme::selected()))
+            .hover(|s| s.bg(theme::raised()))
+            .child(room_marker(room.locked, selected))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(room.name.clone()),
+            )
+            .children((!people.is_empty()).then(|| caption(people.len().to_string())))
+            .child(div().flex_1())
+            .children(sharing.then(sharing_icon))
+            .on_click(cx.listener(move |app, _, window, cx| app.join_room(id, window, cx)));
         div()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .id(("room", room.id.0 as usize))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_2()
-                    .min_h(px(36.))
-                    .rounded(theme::RADIUS_ROW)
-                    .cursor_pointer()
-                    .when(selected, |s| s.bg(theme::selected()))
-                    .hover(|s| s.bg(theme::raised()))
-                    .child(room_marker(room.locked, selected))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(room.name.clone()),
-                    )
-                    .children((!people.is_empty()).then(|| caption(people.len().to_string())))
-                    .child(div().flex_1())
-                    .children(sharing.then(sharing_icon))
-                    .children(manages.then(|| {
-                        ghost_icon(("edit-room", id.0 as usize), "pencil", "Edit room")
-                            .with_size(Size::Small)
-                            .on_click(cx.listener(move |app, _, window, cx| {
-                                cx.stop_propagation();
-                                app.open_edit_room(id, window, cx);
-                            }))
-                    }))
-                    .on_click(cx.listener(move |app, _, window, cx| app.join_room(id, window, cx))),
-            )
+            .child(with_room_menu(row, id, manages, cx))
             .children(
                 people
                     .into_iter()
@@ -331,8 +322,34 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
         .child(resize_handle(cx))
 }
 
+/// `element` with a right-click menu to edit `room`, for those who manage rooms.
+fn with_room_menu(
+    element: Stateful<Div>,
+    room: RoomId,
+    manages: bool,
+    cx: &Context<ThroccApp>,
+) -> AnyElement {
+    if !manages {
+        return element.into_any_element();
+    }
+    let this = cx.entity().downgrade();
+    element
+        .context_menu(move |menu, _, _| {
+            let this = this.clone();
+            menu.item(
+                PopupMenuItem::new("Edit room")
+                    .icon(icon("pencil"))
+                    .on_click(move |_, window, cx| {
+                        this.update(cx, |app, cx| app.open_edit_room(room, window, cx))
+                            .ok();
+                    }),
+            )
+        })
+        .into_any_element()
+}
+
 /// A ghost icon that turns red, showing `active_icon`, while `active`.
-fn toggle_icon(
+pub(super) fn toggle_icon(
     id: &'static str,
     icon_name: &'static str,
     active_icon: &'static str,
@@ -404,7 +421,8 @@ fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
         let people = people_in(&state, room.id);
         let sharing = people.iter().filter(|(_, p)| p.sharing.is_some()).count();
         let id = room.id;
-        card()
+        let card = card()
+            .id(("room-card", id.0 as usize))
             .flex()
             .flex_col()
             .gap_3()
@@ -455,7 +473,8 @@ fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
                 primary(("join-room", id.0 as usize), "Join")
                     .w_full()
                     .on_click(cx.listener(move |app, _, window, cx| app.join_room(id, window, cx))),
-            )
+            );
+        with_room_menu(card, id, manages, cx)
     });
     let header = moves_window(div())
         .flex()
@@ -854,7 +873,13 @@ fn tile(
             theme::speaking()
         } else {
             theme::control()
-        });
+        })
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |app, event: &MouseDownEvent, _, cx| {
+                app.open_person_menu(user, event.position, cx)
+            }),
+        );
     if !t.shows_stream {
         return frame
             .bg(theme::surface())
