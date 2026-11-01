@@ -31,6 +31,7 @@ use crate::media::video::{Picture, PreviewDemand};
 use crate::media::voice::{VoiceCommand, VoiceEngine};
 use crate::playback::SavedPlayback;
 use crate::profile::Profile;
+use crate::server_look::ServerLook;
 use crate::state::{
     ConnectionStatus, CurrentRoom, Health, KeyWarning, Person, Playback, RoomView, SentTrack,
     ServerView, Sound, State, TrackHealth, share_detail,
@@ -88,6 +89,13 @@ impl Shared {
                 avatars.insert(hash, AvatarSlot::Fetching);
                 (None, true)
             }
+        }
+    }
+
+    fn ready_avatar(&self, hash: Hash) -> Option<Arc<[u8]>> {
+        match lock(&self.avatars).get(&hash) {
+            Some(AvatarSlot::Ready(bytes)) => Some(bytes.clone()),
+            _ => None,
         }
     }
 
@@ -219,6 +227,9 @@ pub(crate) struct Session {
     pending_avatar: Option<Option<Hash>>,
     profile: Profile,
     saved_playback: SavedPlayback,
+    /// The pinned key of the server we are connected to.
+    server: Fingerprint,
+    server_look: ServerLook,
     #[cfg(feature = "ffmpeg")]
     sharing: Option<crate::media::share::ShareSender>,
     tracks: HashMap<MediaId, Watched>,
@@ -247,6 +258,10 @@ impl Session {
             warn!("no saved playback: {e:#}");
             SavedPlayback::empty(keystore.dir(), &server)
         });
+        let server_look = ServerLook::load(keystore.dir(), &server).unwrap_or_else(|e| {
+            warn!("no kept server look: {e:#}");
+            ServerLook::default()
+        });
         let mut session = Self {
             shared,
             keystore,
@@ -268,6 +283,8 @@ impl Session {
             pending_avatar: None,
             profile: Profile::default(),
             saved_playback,
+            server,
+            server_look,
             #[cfg(feature = "ffmpeg")]
             sharing: None,
             tracks: HashMap::new(),
@@ -596,11 +613,8 @@ impl Session {
     }
 
     fn apply_welcome(&mut self, welcome: &Welcome) {
-        let fingerprint = self
-            .keystore
-            .known_servers
-            .get(&self.address)
-            .unwrap_or(Fingerprint([0; 32]));
+        let fingerprint = self.server;
+        self.remember_server(welcome.server.name.clone(), welcome.server.avatar);
         let address = self.address.clone();
         let media = self.media;
         let saved = &self.saved_playback;
@@ -954,7 +968,40 @@ impl Session {
                 return;
             }
         };
+        if let AvatarSlot::Ready(bytes) = &slot
+            && self.server_look.avatar == Some(hash)
+        {
+            let look = ServerLook {
+                picture: Some(bytes.clone()),
+                ..self.server_look.clone()
+            };
+            self.keep_server_look(look);
+        }
         self.shared.set_avatar(hash, slot);
+    }
+
+    /// Keeps the server's name and picture on this computer, to show while not connected.
+    fn remember_server(&mut self, name: Option<String>, avatar: Option<Hash>) {
+        let mut look = self.server_look.clone();
+        look.name = name;
+        if look.avatar != avatar {
+            look.avatar = avatar;
+            look.picture = None;
+        }
+        if look.picture.is_none() {
+            look.picture = avatar.and_then(|hash| self.shared.ready_avatar(hash));
+        }
+        self.keep_server_look(look);
+    }
+
+    fn keep_server_look(&mut self, look: ServerLook) {
+        if look == self.server_look {
+            return;
+        }
+        self.server_look = look;
+        if let Err(e) = self.server_look.save(self.keystore.dir(), &self.server) {
+            warn!("keeping the server's name and picture: {e:#}");
+        }
     }
 
     async fn simple(&mut self, request: Request) {
@@ -1343,12 +1390,15 @@ impl Session {
 
     async fn server_event(&mut self, event: ServerEvent) {
         match event {
-            ServerEvent::ServerProfileChanged(profile) => self.shared.update(|s| {
-                if let Some(server) = s.server.as_mut() {
-                    server.name = profile.name;
-                    server.avatar = profile.avatar;
-                }
-            }),
+            ServerEvent::ServerProfileChanged(profile) => {
+                self.remember_server(profile.name.clone(), profile.avatar);
+                self.shared.update(|s| {
+                    if let Some(server) = s.server.as_mut() {
+                        server.name = profile.name;
+                        server.avatar = profile.avatar;
+                    }
+                });
+            }
             ServerEvent::PresenceChanged(p) => {
                 let before = self.shared.state().person(p.user).and_then(|old| old.room);
                 self.room_cue(p.user, before, p.room);

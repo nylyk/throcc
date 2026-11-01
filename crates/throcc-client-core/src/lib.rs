@@ -11,6 +11,7 @@ pub mod known_servers;
 pub mod media;
 pub mod playback;
 pub mod profile;
+pub mod server_look;
 pub mod session;
 pub mod state;
 
