@@ -431,6 +431,13 @@ fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             .child(div().w(px(90.)).child(rate))
             .child(div().w(px(60.)).child(last))
     };
+    let heading = |text: &'static str| {
+        div()
+            .pb_1()
+            .text_size(px(14.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(text)
+    };
     let sending = health.sending.iter().map(|row| {
         table_row(
             row.label.to_owned(),
@@ -476,7 +483,7 @@ fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(section("Sending"))
+                .child(heading("Sending"))
                 .child(if health.sending.is_empty() {
                     caption("Nothing").into_any_element()
                 } else {
@@ -489,7 +496,7 @@ fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(section("Receiving"))
+                .child(heading("Receiving"))
                 .child(if health.receiving.is_empty() {
                     caption("Nothing").into_any_element()
                 } else {
