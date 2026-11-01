@@ -6,3 +6,4 @@ ci-run.log
 /.claude/worktrees/
 /deps/
 /result
+.DS_Store
