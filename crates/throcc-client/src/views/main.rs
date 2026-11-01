@@ -605,22 +605,12 @@ fn room(
         )
         .child(div().flex_1())
         .child(
-            Button::new("traffic")
+            Button::new("connection")
                 .label(format!(
-                    "↓ {}  ↑ {}",
+                    "↓ {}  ↑ {}  ·  {rtt:.0} ms",
                     rate(state.health.download_kbps),
                     rate(state.health.upload_kbps)
                 ))
-                .ghost()
-                .tooltip("Download and upload")
-                .on_click(cx.listener(|app, _, _, cx| {
-                    app.dialog = Some(Dialog::Connection);
-                    cx.notify();
-                })),
-        )
-        .child(
-            Button::new("rtt")
-                .label(format!("{rtt:.0} ms"))
                 .icon(icon("activity"))
                 .ghost()
                 .tooltip("Connection")
