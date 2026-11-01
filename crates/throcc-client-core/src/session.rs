@@ -27,6 +27,7 @@ use crate::media::engine::{KeyState, Kind};
 use crate::media::share_audio::Playout;
 use crate::media::video::{Picture, PreviewDemand};
 use crate::media::voice::{VoiceCommand, VoiceEngine};
+use crate::playback::SavedPlayback;
 use crate::profile::Profile;
 use crate::state::{
     ConnectionStatus, CurrentRoom, Health, KeyWarning, Person, Playback, RoomView, SentTrack,
@@ -214,6 +215,7 @@ pub(crate) struct Session {
     /// A picture to put on our profile once the server tells us our name.
     pending_avatar: Option<Option<Hash>>,
     profile: Profile,
+    saved_playback: SavedPlayback,
     #[cfg(feature = "ffmpeg")]
     sharing: Option<crate::media::share::ShareSender>,
     tracks: HashMap<MediaId, Watched>,
@@ -234,6 +236,14 @@ impl Session {
         options: ClientOptions,
         call: Call,
     ) -> Self {
+        let server = keystore
+            .known_servers
+            .get(&address)
+            .unwrap_or(Fingerprint([0; 32]));
+        let saved_playback = SavedPlayback::load(keystore.dir(), &server).unwrap_or_else(|e| {
+            warn!("no saved playback: {e:#}");
+            SavedPlayback::empty(keystore.dir(), &server)
+        });
         let mut session = Self {
             shared,
             keystore,
@@ -254,6 +264,7 @@ impl Session {
             mic_before_deafen: false,
             pending_avatar: None,
             profile: Profile::default(),
+            saved_playback,
             #[cfg(feature = "ffmpeg")]
             sharing: None,
             tracks: HashMap::new(),
@@ -274,6 +285,7 @@ impl Session {
         session.start_voice();
         let welcome = session.call.welcome.clone();
         session.apply_welcome(&welcome);
+        session.send_saved_gains();
         session
     }
 
@@ -343,6 +355,12 @@ impl Session {
                 warn!("no audio: {e:#}");
                 self.shared.notice(format!("Audio is unavailable: {e}"));
             }
+        }
+    }
+
+    fn send_saved_gains(&self) {
+        for (user, sound, playback) in self.saved_playback.iter() {
+            self.voice(gain_command(user, sound, playback));
         }
     }
 
@@ -548,6 +566,7 @@ impl Session {
             .unwrap_or(Fingerprint([0; 32]));
         let address = self.address.clone();
         let media = self.media;
+        let saved = &self.saved_playback;
         self.shared.update(move |s| {
             s.mic = media.mic;
             s.deafened = media.deafened;
@@ -569,11 +588,10 @@ impl Session {
                     locked: r.locked,
                 })
                 .collect();
-            let before = std::mem::take(&mut s.people);
             s.people = welcome
                 .presence
                 .iter()
-                .map(|p| (p.user, person(p, before.get(&p.user))))
+                .map(|p| (p.user, person(p, saved)))
                 .collect();
             s.current = None;
         });
@@ -731,6 +749,9 @@ impl Session {
             }
             Command::SetPlayback(user, sound, playback) => {
                 self.voice(gain_command(user, sound, playback));
+                if let Err(e) = self.saved_playback.set(user, sound, playback) {
+                    warn!("saving playback: {e:#}");
+                }
                 self.shared.update(|s| {
                     if let Some(p) = s.people.get_mut(&user) {
                         *p.playback_mut(sound) = playback;
@@ -806,6 +827,7 @@ impl Session {
                 self.options.input_device = input;
                 self.options.output_device = output;
                 self.start_voice();
+                self.send_saved_gains();
                 self.voice(VoiceCommand::Loopback(self.mic_test));
                 if self.call.engine.keys().keys.room().is_some() {
                     self.voice(VoiceCommand::SendOn(self.my_tracks.as_ref().map(|t| t.mic)));
@@ -818,11 +840,6 @@ impl Session {
                         self.stop_watching(user);
                     }
                     self.sync_watching();
-                    for (user, person) in &self.shared.state().people {
-                        for sound in [Sound::Voice, Sound::Share] {
-                            self.voice(gain_command(*user, sound, person.playback(sound)));
-                        }
-                    }
                 }
             }
             Command::MicTest(on) => {
@@ -1280,14 +1297,15 @@ impl Session {
                 }
             }),
             ServerEvent::PresenceChanged(p) => {
+                let saved = &self.saved_playback;
                 self.shared.update(|s| {
                     let updated = match s.people.get(&p.user) {
                         Some(old) => Person {
                             verified: old.verified,
                             speaking: old.speaking,
-                            ..person(&p, Some(old))
+                            ..person(&p, saved)
                         },
-                        None => person(&p, None),
+                        None => person(&p, saved),
                     };
                     s.people.insert(p.user, updated);
                 });
@@ -1484,8 +1502,8 @@ impl Session {
     }
 }
 
-/// `p` as a person, playing as loud as `before` did.
-fn person(p: &Presence, before: Option<&Person>) -> Person {
+/// `p` as a person, playing as loud as `saved` keeps them.
+fn person(p: &Presence, saved: &SavedPlayback) -> Person {
     Person {
         name: p.name.clone(),
         avatar: p.avatar,
@@ -1494,8 +1512,8 @@ fn person(p: &Presence, before: Option<&Person>) -> Person {
         deafened: p.deafened,
         sharing: None,
         speaking: false,
-        voice: before.map_or_else(Playback::default, |b| b.voice),
-        share_audio: before.map_or_else(Playback::default, |b| b.share_audio),
+        voice: saved.get(p.user, Sound::Voice),
+        share_audio: saved.get(p.user, Sound::Share),
         verified: false,
     }
 }
