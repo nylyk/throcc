@@ -12,7 +12,7 @@ use throcc_proto::messages::{
     Response, RoomPeer, Share, ShareConfig, Welcome,
 };
 use throcc_proto::transport::close;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use tracing::{info, warn};
 
 use crate::account::{self, SignInError};
@@ -30,7 +30,7 @@ use crate::media::voice::{VoiceCommand, VoiceEngine};
 use crate::profile::Profile;
 use crate::state::{
     ConnectionStatus, CurrentRoom, Health, KeyWarning, Person, RoomView, SentTrack, ServerView,
-    State, TrackHealth,
+    State, TrackHealth, share_detail,
 };
 
 const LEVELS_EVERY: Duration = Duration::from_millis(100);
@@ -40,6 +40,8 @@ const RENEWAL_CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
 const MAX_QUEUED_WHILE_RECONNECTING: usize = 64;
 const MIC_KBPS: u32 = 64;
 const SHARE_AUDIO_KBPS: u32 = 128;
+const VOICE_DETAIL: &str = "Opus voice, mono";
+const SHARE_AUDIO_DETAIL: &str = "Opus music, stereo";
 
 #[derive(Clone, Debug, Default)]
 pub struct ClientOptions {
@@ -145,11 +147,49 @@ impl Shared {
 /// One subscribed remote track, with counters from the last health refresh.
 struct Watched {
     user: UserId,
-    label: &'static str,
-    set_kbps: u32,
+    carries: Carries,
     last_bytes: u64,
     last_received: u64,
     last_lost: u64,
+}
+
+/// What a watched track carries.
+enum Carries {
+    Mic,
+    ShareAudio,
+    ShareVideo {
+        config: ShareConfig,
+        decoder: Option<watch::Receiver<&'static str>>,
+    },
+}
+
+impl Carries {
+    fn label(&self) -> &'static str {
+        match self {
+            Carries::Mic => "mic",
+            Carries::ShareAudio => "screen audio",
+            Carries::ShareVideo { .. } => "screen",
+        }
+    }
+
+    fn set_kbps(&self) -> u32 {
+        match self {
+            Carries::Mic => MIC_KBPS,
+            Carries::ShareAudio => SHARE_AUDIO_KBPS,
+            Carries::ShareVideo { config, .. } => config.kbps,
+        }
+    }
+
+    fn detail(&self) -> String {
+        match self {
+            Carries::Mic => VOICE_DETAIL.into(),
+            Carries::ShareAudio => SHARE_AUDIO_DETAIL.into(),
+            Carries::ShareVideo { config, decoder } => share_detail(
+                config,
+                decoder.as_ref().map_or("not decoded", |d| *d.borrow()),
+            ),
+        }
+    }
 }
 
 pub(crate) struct Session {
@@ -605,7 +645,7 @@ impl Session {
                 self.voice(VoiceCommand::Listen { user: *user, units });
                 self.tracks.insert(
                     peer.tracks.mic,
-                    self.watched(peer.tracks.mic, *user, "mic", MIC_KBPS),
+                    self.watched(peer.tracks.mic, *user, Carries::Mic),
                 );
             }
         }
@@ -963,46 +1003,47 @@ impl Session {
                 });
                 self.tracks.insert(
                     share.audio,
-                    self.watched(share.audio, user, "screen audio", SHARE_AUDIO_KBPS),
+                    self.watched(share.audio, user, Carries::ShareAudio),
                 );
                 self.watched_audio.insert(user, share.audio);
                 playout
             });
             let video = share.video;
             #[cfg(feature = "ffmpeg")]
-            {
+            let decoder = {
                 let units = self.call.engine.subscribe(video, Kind::Video, 64);
                 let ask_idr = self.call.engine.idr_requester(video);
                 match crate::media::share::receive(units, config, playout, ask_idr) {
-                    Ok(picture) => self.shared.set_picture(user, Some(picture)),
-                    Err(e) => self.shared.notice(format!("Can't show this share: {e}")),
+                    Ok((picture, decoder)) => {
+                        self.shared.set_picture(user, Some(picture));
+                        Some(decoder)
+                    }
+                    Err(e) => {
+                        self.shared.notice(format!("Can't show this share: {e}"));
+                        None
+                    }
                 }
-            }
+            };
             #[cfg(not(feature = "ffmpeg"))]
-            {
+            let decoder = {
                 drop(playout);
                 self.shared
                     .notice("This build can't show video; it was built without ffmpeg.");
-            }
+                None
+            };
+            let carries = Carries::ShareVideo { config, decoder };
             self.tracks
-                .insert(video, self.watched(video, user, "screen", config.kbps));
+                .insert(video, self.watched(video, user, carries));
             self.watched_video.insert(user, (video, config));
         }
     }
 
     /// Health bookkeeping for `media_id`, counting from the engine's totals so far.
-    fn watched(
-        &self,
-        media_id: MediaId,
-        user: UserId,
-        label: &'static str,
-        set_kbps: u32,
-    ) -> Watched {
+    fn watched(&self, media_id: MediaId, user: UserId, carries: Carries) -> Watched {
         let (last_received, last_lost) = self.call.engine.datagrams(media_id);
         Watched {
             user,
-            label,
-            set_kbps,
+            carries,
             last_bytes: self.call.engine.received_bytes(media_id),
             last_received,
             last_lost,
@@ -1082,6 +1123,17 @@ impl Session {
             self.media.share = None;
             self.push_media().await;
         }
+    }
+
+    /// The running share's codec, size, frame rate and encoder.
+    fn sharing_detail(&self) -> Option<String> {
+        #[cfg(feature = "ffmpeg")]
+        return self
+            .sharing
+            .as_ref()
+            .map(|sender| share_detail(&sender.config, sender.engine));
+        #[cfg(not(feature = "ffmpeg"))]
+        None
     }
 
     fn recover_share(&self, kind: Recovery) {
@@ -1370,8 +1422,9 @@ impl Session {
                 .person(track.user)
                 .map_or("someone".to_owned(), |p| p.name.clone());
             rows.push(TrackHealth {
-                label: format!("{name}, {}", track.label),
-                set_kbps: Some(track.set_kbps),
+                label: format!("{name}, {}", track.carries.label()),
+                detail: track.carries.detail(),
+                set_kbps: Some(track.carries.set_kbps()),
                 arriving_kbps: (new_received > 0).then_some(kbps(new_bytes)),
                 loss: (new_received + new_lost > 0)
                     .then(|| percent(new_lost, new_received + new_lost)),
@@ -1388,7 +1441,6 @@ impl Session {
             upload_loss,
             download_loss,
             dropped_for_you: dropped,
-            verdict: verdict(dropped, new_local_drops, download_loss),
             sending: self.sent_tracks(new_local_drops),
             receiving: rows,
         };
@@ -1401,21 +1453,32 @@ impl Session {
         };
         let mut wanted = Vec::new();
         if self.media.mic {
-            wanted.push(("mic", tracks.mic, MIC_KBPS, None));
+            wanted.push(("mic", VOICE_DETAIL.into(), tracks.mic, MIC_KBPS, None));
         }
         if let (Some(config), Some(share)) = (self.media.share, tracks.shares.first()) {
-            wanted.push(("screen", share.video, config.kbps, Some(new_local_drops)));
+            let detail = self
+                .sharing_detail()
+                .unwrap_or_else(|| share_detail(&config, "no encoder"));
+            wanted.push((
+                "screen",
+                detail,
+                share.video,
+                config.kbps,
+                Some(new_local_drops),
+            ));
             if config.audio {
-                wanted.push(("screen audio", share.audio, SHARE_AUDIO_KBPS, None));
+                let detail = SHARE_AUDIO_DETAIL.into();
+                wanted.push(("screen audio", detail, share.audio, SHARE_AUDIO_KBPS, None));
             }
         }
         wanted
             .into_iter()
-            .map(|(label, media_id, set_kbps, dropped)| {
+            .map(|(label, detail, media_id, set_kbps, dropped)| {
                 let bytes = self.call.engine.sent_bytes(media_id);
                 let last = self.last_sent_bytes.entry(media_id).or_insert(bytes);
                 SentTrack {
                     label,
+                    detail,
                     set_kbps,
                     leaving_kbps: kbps(advance(last, bytes)),
                     dropped,
@@ -1466,22 +1529,6 @@ fn percent(part: u64, whole: u64) -> f32 {
     }
 }
 
-/// One plain-language sentence on what limits the call right now.
-fn verdict(dropped_for_you: u32, local_drops: u64, download_loss: f32) -> String {
-    if dropped_for_you > 0 {
-        return format!(
-            "{dropped_for_you} frames were dropped for you in the last 2 s. Your download can't carry everything you watch."
-        );
-    }
-    if local_drops > 0 {
-        return "Your upload can't carry your share's bitrate, so frames are dropped before they leave.".into();
-    }
-    if download_loss > 2.0 {
-        return format!("{download_loss:.1}% of packets are lost between the server and you.");
-    }
-    "Everything is arriving.".into()
-}
-
 /// Deafens, which also mutes, or undeafens back to the mic state from before.
 fn set_deafened(media: &mut MediaState, mic_before: &mut bool, deafened: bool) {
     if deafened == media.deafened {
@@ -1517,14 +1564,6 @@ fn supersedes(newer: &Command, older: &Command) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn verdict_names_the_bottleneck() {
-        assert!(verdict(3, 0, 0.0).contains("dropped for you"));
-        assert!(verdict(0, 2, 0.0).contains("Your upload"));
-        assert!(verdict(0, 0, 4.0).contains("4.0% of packets"));
-        assert_eq!(verdict(0, 0, 0.0), "Everything is arriving.");
-    }
 
     #[test]
     fn only_the_latest_setting_is_replayed() {

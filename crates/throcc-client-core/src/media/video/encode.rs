@@ -344,6 +344,20 @@ impl Encoder {
         self.name
     }
 
+    /// The hardware API or software library doing the work, as people see it named.
+    pub fn engine(&self) -> &'static str {
+        let suffixes = [
+            ("_vaapi", "VA-API"),
+            ("_videotoolbox", "VideoToolbox"),
+            ("_nvenc", "NVENC"),
+            ("_mf", "Media Foundation"),
+        ];
+        suffixes
+            .iter()
+            .find(|(suffix, _)| self.name.ends_with(suffix))
+            .map_or("libvpx (software)", |(_, engine)| engine)
+    }
+
     /// Asks for recovery: an IDR, or for `Refresh`, whatever the encoder's intra refresh
     /// does on its own. An encoder without intra refresh treats `Refresh` as `Idr`.
     pub fn recover(&mut self, kind: Recovery) {

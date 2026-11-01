@@ -144,6 +144,8 @@ pub struct ShareSender {
     thread: Option<JoinHandle<()>>,
     pub config: ShareConfig,
     pub encoder: &'static str,
+    /// The hardware API or software library encoding the share.
+    pub engine: &'static str,
     pub self_view: Picture,
     pub preview: Arc<PreviewDemand>,
 }
@@ -186,6 +188,7 @@ impl ShareSender {
             ..wanted
         };
         let name = encoder.name();
+        let encoded_by = encoder.engine();
         #[cfg(target_os = "macos")]
         let pixel_buffers = encoder.takes_pixel_buffers();
         let stop = Arc::new(AtomicBool::new(false));
@@ -221,6 +224,7 @@ impl ShareSender {
             thread: Some(thread),
             config,
             encoder: name,
+            engine: encoded_by,
             self_view,
             preview,
         })
@@ -504,15 +508,17 @@ fn make_room(held: &mut VecDeque<Arc<VideoFrame>>, incoming: usize) {
 /// due once the share audio reaching the speakers has caught up with it.
 /// Decodes `units` on a thread of its own. After a unit fails to decode, `ask_idr` is called
 /// once, and again only after a unit has decoded since.
-/// Pictures larger than `config` announces are dropped.
+/// Pictures larger than `config` announces are dropped. Also returns what decodes the
+/// share, which changes when hardware decoding fails.
 pub fn receive(
     units: mpsc::Receiver<Received>,
     config: ShareConfig,
     playout: Option<Arc<Playout>>,
     ask_idr: impl Fn() + Send + 'static,
-) -> Result<Picture, String> {
+) -> Result<(Picture, watch::Receiver<&'static str>), String> {
     let mut decoder = Decoder::new(config.codec, max_pixels(&config)).map_err(|e| e.to_string())?;
     let (tx, picture) = watch::channel(None);
+    let (engine_tx, engine) = watch::channel(decoder.engine());
     std::thread::Builder::new()
         .name("throcc-decode".into())
         .spawn(move || {
@@ -533,7 +539,11 @@ pub fn receive(
                     }
                 };
                 if let Some(unit) = &unit {
-                    match decoder.decode(&unit.data, unit.timestamp) {
+                    let decoded = decoder.decode(&unit.data, unit.timestamp);
+                    if *engine_tx.borrow() != decoder.engine() {
+                        engine_tx.send_replace(decoder.engine());
+                    }
+                    match decoded {
                         Ok(Some(frame)) => {
                             asked = false;
                             make_room(&mut held, frame_bytes(&frame));
@@ -561,7 +571,7 @@ pub fn receive(
             }
         })
         .map_err(|e| e.to_string())?;
-    Ok(picture)
+    Ok((picture, engine))
 }
 
 #[cfg(all(test, target_os = "linux"))]

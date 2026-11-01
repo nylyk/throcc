@@ -401,18 +401,24 @@ fn stat(label: &str, value: String) -> impl IntoElement {
 
 fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let health = &app.state.health;
-    let table_row = |cells: [String; 4]| {
-        let [track, set, rate, last] = cells;
+    let table_row = |label: String, detail: String, [set, rate, last]: [String; 3]| {
         div()
             .flex()
-            .gap_2()
-            .py_1()
+            .flex_col()
+            .gap_0p5()
+            .py_2()
             .border_b_1()
             .border_color(theme::control())
-            .child(div().flex_1().truncate().child(track))
-            .child(mono(set).w(px(90.)))
-            .child(mono(rate).w(px(90.)))
-            .child(mono(last).w(px(60.)))
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(div().flex_1().truncate().child(label))
+                    .child(mono(set).w(px(90.)))
+                    .child(mono(rate).w(px(90.)))
+                    .child(mono(last).w(px(60.))),
+            )
+            .child(caption(detail).truncate())
     };
     let table_head = |rate: &'static str, last: &'static str| {
         div()
@@ -425,21 +431,27 @@ fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             .child(div().w(px(90.)).child(rate))
             .child(div().w(px(60.)).child(last))
     };
-    let receiving = health.receiving.iter().map(|row| {
-        table_row([
-            row.label.clone(),
-            row.set_kbps.map_or("–".to_owned(), rate),
-            row.arriving_kbps.map_or("muted".to_owned(), rate),
-            row.loss.map_or("–".to_owned(), |l| format!("{l:.1}%")),
-        ])
-    });
     let sending = health.sending.iter().map(|row| {
-        table_row([
+        table_row(
             row.label.to_owned(),
-            rate(row.set_kbps),
-            rate(row.leaving_kbps),
-            row.dropped.map_or("–".to_owned(), |d| d.to_string()),
-        ])
+            row.detail.clone(),
+            [
+                rate(row.set_kbps),
+                rate(row.leaving_kbps),
+                row.dropped.map_or("–".to_owned(), |d| d.to_string()),
+            ],
+        )
+    });
+    let receiving = health.receiving.iter().map(|row| {
+        table_row(
+            row.label.clone(),
+            row.detail.clone(),
+            [
+                row.set_kbps.map_or("–".to_owned(), rate),
+                row.arriving_kbps.map_or("muted".to_owned(), rate),
+                row.loss.map_or("–".to_owned(), |l| format!("{l:.1}%")),
+            ],
+        )
     });
     div()
         .flex()
@@ -461,21 +473,30 @@ fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         )
         .child(
             div()
-                .p_3()
-                .rounded(theme::RADIUS_ROW)
-                .bg(theme::raised())
-                .child(health.verdict.clone()),
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(section("Sending"))
+                .child(if health.sending.is_empty() {
+                    caption("Nothing").into_any_element()
+                } else {
+                    table_head("Leaving", "Dropped").into_any_element()
+                })
+                .children(sending),
         )
-        .child(section("Receiving"))
-        .child(table_head("Arriving", "Loss"))
-        .children(receiving)
-        .child(section("Sending"))
-        .child(if health.sending.is_empty() {
-            caption("Nothing").into_any_element()
-        } else {
-            table_head("Leaving", "Dropped").into_any_element()
-        })
-        .children(sending)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(section("Receiving"))
+                .child(if health.receiving.is_empty() {
+                    caption("Nothing").into_any_element()
+                } else {
+                    table_head("Arriving", "Loss").into_any_element()
+                })
+                .children(receiving),
+        )
         .child(div().flex().justify_end().child(close_button(cx)))
         .into_any_element()
 }

@@ -116,7 +116,6 @@ pub struct Health {
     pub upload_loss: f32,
     pub download_loss: f32,
     pub dropped_for_you: u32,
-    pub verdict: String,
     pub receiving: Vec<TrackHealth>,
     pub sending: Vec<SentTrack>,
 }
@@ -124,6 +123,8 @@ pub struct Health {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TrackHealth {
     pub label: String,
+    /// The codec, and for video its size, frame rate and decoder.
+    pub detail: String,
     pub set_kbps: Option<u32>,
     pub arriving_kbps: Option<u32>,
     pub loss: Option<f32>,
@@ -132,6 +133,8 @@ pub struct TrackHealth {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SentTrack {
     pub label: &'static str,
+    /// The codec, and for video its size, frame rate and encoder.
+    pub detail: String,
     pub set_kbps: u32,
     pub leaving_kbps: u32,
     /// Units dropped before they left, for tracks that can drop them.
@@ -243,15 +246,34 @@ impl ShareChoice {
     }
 }
 
-/// "1440p60 · AV1" for a share.
-pub fn share_label(config: &ShareConfig) -> String {
-    let codec = match config.codec {
+pub fn codec_name(codec: Codec) -> &'static str {
+    match codec {
         Codec::Av1 => "AV1",
         Codec::Hevc => "HEVC",
         Codec::H264 => "H.264",
         Codec::Vp9 => "VP9",
-    };
-    format!("{}p{} · {codec}", config.height, config.fps)
+    }
+}
+
+/// "1440p60 · AV1" for a share.
+pub fn share_label(config: &ShareConfig) -> String {
+    format!(
+        "{}p{} · {}",
+        config.height,
+        config.fps,
+        codec_name(config.codec)
+    )
+}
+
+/// "AV1 · 2560×1440 · 60 fps · VA-API" for a share and what encodes or decodes it.
+pub fn share_detail(config: &ShareConfig, engine: &str) -> String {
+    format!(
+        "{} · {}×{} · {} fps · {engine}",
+        codec_name(config.codec),
+        config.width,
+        config.height,
+        config.fps
+    )
 }
 
 #[cfg(test)]

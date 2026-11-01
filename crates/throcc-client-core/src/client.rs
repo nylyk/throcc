@@ -554,28 +554,31 @@ fn sample_state() -> State {
             upload_loss: 0.0,
             download_loss: 0.3,
             dropped_for_you: 0,
-            verdict: "Everything is arriving.".into(),
             receiving: vec![
                 TrackHealth {
                     label: "Ilse, screen".into(),
+                    detail: "AV1 · 2560×1440 · 60 fps · VideoToolbox".into(),
                     set_kbps: Some(10_000),
                     arriving_kbps: Some(6_100),
                     loss: Some(4.2),
                 },
                 TrackHealth {
                     label: "Ilse, screen audio".into(),
+                    detail: "Opus music, stereo".into(),
                     set_kbps: Some(128),
                     arriving_kbps: Some(128),
                     loss: Some(0.0),
                 },
                 TrackHealth {
                     label: "Mara, mic".into(),
+                    detail: "Opus voice, mono".into(),
                     set_kbps: Some(64),
                     arriving_kbps: Some(61),
                     loss: Some(0.3),
                 },
                 TrackHealth {
                     label: "Jonas, mic".into(),
+                    detail: "Opus voice, mono".into(),
                     set_kbps: Some(64),
                     arriving_kbps: None,
                     loss: None,
@@ -583,6 +586,7 @@ fn sample_state() -> State {
             ],
             sending: vec![SentTrack {
                 label: "mic",
+                detail: "Opus voice, mono".into(),
                 set_kbps: 64,
                 leaving_kbps: 61,
                 dropped: None,

@@ -63,6 +63,7 @@ pub struct Decoder {
     ctx: AVCodecContext,
     codec: Codec,
     hardware: bool,
+    engine: &'static str,
     max_pixels: usize,
 }
 
@@ -104,6 +105,7 @@ impl Decoder {
                 ctx,
                 codec,
                 hardware: true,
+                engine: device_name(device_type),
                 max_pixels,
             })
         })
@@ -118,10 +120,16 @@ impl Decoder {
         ctx.set_flags(ctx.flags | ffi::AV_CODEC_FLAG_LOW_DELAY as i32);
         limit_pixels(&mut ctx, max_pixels);
         ctx.open(None)?;
+        let engine = if found.name().to_bytes() == b"libdav1d" {
+            "dav1d (software)"
+        } else {
+            "FFmpeg (software)"
+        };
         Ok(Self {
             ctx,
             codec,
             hardware: false,
+            engine,
             max_pixels,
         })
     }
@@ -129,6 +137,11 @@ impl Decoder {
     /// Whether frames are decoded on a hardware device.
     pub fn is_hardware(&self) -> bool {
         self.hardware
+    }
+
+    /// The hardware API or software decoder doing the work, as people see it named.
+    pub fn engine(&self) -> &'static str {
+        self.engine
     }
 
     /// Decodes one access unit. Returns the newest picture it produced, if any. A hardware
@@ -184,6 +197,16 @@ impl Decoder {
             }
         }
         Ok(newest)
+    }
+}
+
+fn device_name(device_type: ffi::AVHWDeviceType) -> &'static str {
+    match device_type {
+        ffi::AV_HWDEVICE_TYPE_VIDEOTOOLBOX => "VideoToolbox",
+        ffi::AV_HWDEVICE_TYPE_VAAPI => "VA-API",
+        ffi::AV_HWDEVICE_TYPE_CUDA => "NVDEC",
+        ffi::AV_HWDEVICE_TYPE_D3D11VA => "D3D11VA",
+        _ => "hardware",
     }
 }
 
