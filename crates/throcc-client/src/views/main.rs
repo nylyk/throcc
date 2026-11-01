@@ -537,7 +537,7 @@ fn room(
             Button::new("connection")
                 .flex_none()
                 .label(format!(
-                    "↓ {}  ↑ {}  ·  {rtt:.0} ms",
+                    "{rtt:.0} ms  ↓ {}  ↑ {}",
                     rate(state.health.download_kbps),
                     rate(state.health.upload_kbps)
                 ))
