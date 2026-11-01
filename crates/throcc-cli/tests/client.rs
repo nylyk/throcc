@@ -98,7 +98,7 @@ fn invite(client: &Client) -> InviteCode {
 }
 
 fn create_room(client: &Client) -> RoomId {
-    client.command(Command::CreateRoom("General".into()));
+    client.command(Command::CreateRoom("General".into(), None));
     wait_for(client, "the room", |s| !s.rooms.is_empty());
     client.state().rooms[0].id
 }

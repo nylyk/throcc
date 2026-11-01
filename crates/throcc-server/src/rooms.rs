@@ -265,7 +265,7 @@ impl Hub {
             Request::GetAvatar(hash) => self.get_avatar(hash),
             Request::SetEncKey(enc_key) => self.set_enc_key(user, enc_key),
             Request::SetMedia(media) => self.set_media(user, media),
-            Request::CreateRoom { name } => self.create_room(user, name),
+            Request::CreateRoom { name, password } => self.create_room(user, name, password),
             Request::RenameRoom { room, name } => self.rename_room(user, room, name),
             Request::DeleteRoom(room) => self.delete_room(user, room),
             Request::SetRoomPassword { room, password } => {
@@ -713,7 +713,7 @@ impl Hub {
         Ok(Response::Ok)
     }
 
-    fn create_room(&mut self, user: UserId, name: String) -> Outcome {
+    fn create_room(&mut self, user: UserId, name: String, password: Option<String>) -> Outcome {
         self.require(permissions::can_manage_rooms(self.role(user)?))?;
         let name = valid_name(&name)?;
         if self.rooms.len() >= MAX_ROOMS {
@@ -722,21 +722,22 @@ impl Hub {
                 format!("a server holds at most {MAX_ROOMS} rooms"),
             ));
         }
-        let id = self.db.create_room(&name).map_err(Refusal::internal)?;
+        let password_hash = password.as_deref().map(hash_password).transpose()?;
+        let id = self
+            .db
+            .create_room(&name, password_hash.as_deref())
+            .map_err(Refusal::internal)?;
+        let locked = password_hash.is_some();
         self.rooms.insert(
             id,
             RoomEntry {
                 name: name.clone(),
                 epoch: Epoch(0),
-                password_hash: None,
+                password_hash,
                 members: BTreeSet::new(),
             },
         );
-        self.emit_all(Event::RoomCreated(Room {
-            id,
-            name,
-            locked: false,
-        }));
+        self.emit_all(Event::RoomCreated(Room { id, name, locked }));
         Ok(Response::Ok)
     }
 
@@ -763,12 +764,7 @@ impl Hub {
     ) -> Outcome {
         self.require(permissions::can_manage_rooms(self.role(user)?))?;
         self.room_entry(room)?;
-        let hash = match password {
-            Some(password) => {
-                Some(room_password::hash(valid_password(&password)?).map_err(Refusal::internal)?)
-            }
-            None => None,
-        };
+        let hash = password.as_deref().map(hash_password).transpose()?;
         self.db
             .set_room_password_hash(room, hash.as_deref())
             .map_err(Refusal::internal)?;
@@ -1136,7 +1132,7 @@ fn valid_name(name: &str) -> Result<String, Refusal> {
     Ok(name.to_owned())
 }
 
-fn valid_password(password: &str) -> Result<&str, Refusal> {
+fn hash_password(password: &str) -> Result<String, Refusal> {
     let chars = password.chars().count();
     if chars == 0 || chars > MAX_PASSWORD_CHARS {
         return Err(Refusal::new(
@@ -1144,7 +1140,7 @@ fn valid_password(password: &str) -> Result<&str, Refusal> {
             format!("passwords are 1 to {MAX_PASSWORD_CHARS} characters"),
         ));
     }
-    Ok(password)
+    room_password::hash(password).map_err(Refusal::internal)
 }
 
 pub fn unix_now() -> u64 {

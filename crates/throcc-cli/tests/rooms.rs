@@ -191,6 +191,50 @@ async fn a_locked_room_needs_its_password_from_members_on_every_join() {
 }
 
 #[tokio::test]
+async fn a_room_created_with_a_password_is_locked_from_the_start() {
+    let server = start_server();
+    let alice = admin(&server).await;
+    let mut bob = invited(&server, &alice).await;
+    let create = |name: &str, password: &str| Request::CreateRoom {
+        name: name.into(),
+        password: Some(password.to_owned()),
+    };
+
+    assert_error(
+        &alice.request(create("Empty", "")).await,
+        ErrorCode::Invalid,
+    );
+    assert_eq!(
+        alice.request(create("Private", "hunter2")).await,
+        Response::Ok
+    );
+    let private = bob
+        .event(|e| match e {
+            Event::RoomCreated(room) => {
+                assert_eq!(room.name, "Private", "the refused room was created");
+                assert!(room.locked);
+                Some(room.id)
+            }
+            _ => None,
+        })
+        .await;
+    assert_error(&enter(&bob, private, None).await, ErrorCode::WrongPassword);
+    let placed = enter(&bob, private, Some("hunter2")).await;
+    assert!(matches!(placed, Response::Placed(p) if p.room == Some(private)));
+
+    bob.link.connected.connection.close(0u32.into(), b"");
+    let link = account::sign_in(&bob.keystore, &server.addr, None)
+        .await
+        .unwrap();
+    assert!(
+        link.welcome
+            .rooms
+            .iter()
+            .any(|r| r.id == private && r.locked)
+    );
+}
+
+#[tokio::test]
 async fn failed_set_room_leaves_the_client_in_place() {
     let server = start_server();
     let mut alice = admin(&server).await;
@@ -515,7 +559,7 @@ async fn a_server_holds_a_bounded_number_of_rooms() {
     first.stop();
     let db = Database::open(&dir.path().join(DATABASE_FILE)).unwrap();
     for i in 0..MAX_ROOMS {
-        db.create_room(&format!("Room {i}")).unwrap();
+        db.create_room(&format!("Room {i}"), None).unwrap();
     }
     drop(db);
 
@@ -528,6 +572,7 @@ async fn a_server_holds_a_bounded_number_of_rooms() {
     let res = alice
         .request(Request::CreateRoom {
             name: "One more".into(),
+            password: None,
         })
         .await;
     assert_error(&res, ErrorCode::TooLarge);

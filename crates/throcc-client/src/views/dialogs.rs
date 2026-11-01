@@ -80,6 +80,15 @@ fn new_room(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .child(
             div()
                 .flex()
+                .flex_col()
+                .gap_2()
+                .child(section("Password"))
+                .child(Input::new(&app.room_password))
+                .child(caption("Leave it empty to let anyone join.")),
+        )
+        .child(
+            div()
+                .flex()
                 .justify_end()
                 .gap_2()
                 .child(close_button(cx))

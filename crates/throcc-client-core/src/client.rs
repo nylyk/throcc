@@ -54,7 +54,8 @@ pub enum Command {
         picture: Option<Option<Vec<u8>>>,
     },
     FetchAvatar(Hash),
-    CreateRoom(String),
+    /// Creates a room with this name, locked behind the password when there is one.
+    CreateRoom(String, Option<String>),
     RenameRoom(RoomId, String),
     /// Locks the room behind a password, or unlocks it with `None`.
     SetRoomPassword(RoomId, Option<String>),
@@ -382,12 +383,12 @@ impl ClientApi for MockClient {
                 self.events.send(Event::ServerProfileSaved).ok();
             }
             Command::FetchAvatar(_) => {}
-            Command::CreateRoom(name) => self.update(|s| {
+            Command::CreateRoom(name, password) => self.update(|s| {
                 let id = RoomId(s.rooms.iter().map(|r| r.id.0).max().unwrap_or(0) + 1);
                 s.rooms.push(RoomView {
                     id,
                     name,
-                    locked: false,
+                    locked: password.is_some(),
                 });
             }),
             Command::RenameRoom(room, name) => self.update(|s| {

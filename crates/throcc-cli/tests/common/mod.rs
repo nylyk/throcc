@@ -127,7 +127,10 @@ pub fn assert_error(response: &Response, expected: ErrorCode) {
 pub async fn create_room(client: &mut TestClient, name: &str) -> RoomId {
     assert_eq!(
         client
-            .request(Request::CreateRoom { name: name.into() })
+            .request(Request::CreateRoom {
+                name: name.into(),
+                password: None,
+            })
             .await,
         Response::Ok
     );

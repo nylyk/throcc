@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
 
-pub const PROTOCOL: u16 = 3;
+pub const PROTOCOL: u16 = 4;
 pub const MAX_AVATAR_BYTES: usize = 64 * 1024;
 pub const MAX_NAME_CHARS: usize = 32;
 pub const MAX_PASSWORD_CHARS: usize = 128;
@@ -123,8 +123,10 @@ pub enum Request {
         epoch: Epoch,
         wrapped: Vec<(UserId, Vec<u8>)>,
     },
+    /// Creates a room, locked behind `password` when there is one.
     CreateRoom {
         name: String,
+        password: Option<String>,
     },
     RenameRoom {
         room: RoomId,

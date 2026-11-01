@@ -351,6 +351,7 @@ async fn run_command(requester: &Requester, welcome: &Welcome, line: &str) -> Re
         "users" => Request::ListUsers,
         "create-room" => Request::CreateRoom {
             name: rest.to_owned(),
+            password: None,
         },
         "name" => Request::SetProfile {
             name: rest.to_owned(),

@@ -722,7 +722,9 @@ impl Session {
                     other => Event::ServerProfileRefused(refusal(other)),
                 });
             }
-            Command::CreateRoom(name) => self.simple(Request::CreateRoom { name }).await,
+            Command::CreateRoom(name, password) => {
+                self.simple(Request::CreateRoom { name, password }).await
+            }
             Command::RenameRoom(room, name) => {
                 self.simple(Request::RenameRoom { room, name }).await
             }

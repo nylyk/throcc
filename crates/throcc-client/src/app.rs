@@ -679,6 +679,7 @@ impl ThroccApp {
     }
 
     pub fn open_new_room(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_room_password(window, cx);
         self.room_name.update(cx, |s, cx| {
             s.set_value("", window, cx);
             s.focus(window, cx);
@@ -692,7 +693,9 @@ impl ThroccApp {
         if name.is_empty() {
             return;
         }
-        self.command(Command::CreateRoom(name));
+        let password = self.room_password.read(cx).value().to_string();
+        let password = (!password.is_empty()).then_some(password);
+        self.command(Command::CreateRoom(name, password));
         self.dialog = None;
         cx.notify();
     }

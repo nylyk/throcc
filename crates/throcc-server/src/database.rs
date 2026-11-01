@@ -351,9 +351,11 @@ impl Database {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn create_room(&self, name: &str) -> Result<RoomId> {
-        self.conn
-            .execute("INSERT INTO rooms (name, epoch) VALUES (?1, 0)", [name])?;
+    pub fn create_room(&self, name: &str, password_hash: Option<&str>) -> Result<RoomId> {
+        self.conn.execute(
+            "INSERT INTO rooms (name, epoch, password_hash) VALUES (?1, 0, ?2)",
+            params![name, password_hash],
+        )?;
         Ok(RoomId(self.conn.last_insert_rowid() as u64))
     }
 
@@ -666,10 +668,10 @@ mod tests {
     #[test]
     fn room_ids_are_not_reused_after_deleting_the_last_room() {
         let db = Database::open_in_memory().unwrap();
-        db.create_room("a").unwrap();
-        let last = db.create_room("b").unwrap();
+        db.create_room("a", None).unwrap();
+        let last = db.create_room("b", None).unwrap();
         db.delete_room(last).unwrap();
-        assert!(db.create_room("c").unwrap() > last);
+        assert!(db.create_room("c", None).unwrap() > last);
     }
 
     #[test]
@@ -756,7 +758,7 @@ mod tests {
         db.set_enc_key(fern.id, &key).unwrap();
         assert_eq!(db.user(fern.id).unwrap().unwrap().enc_key, Some(key));
         db.delete_room(RoomId(2)).unwrap();
-        assert_eq!(db.create_room("New").unwrap(), RoomId(3));
+        assert_eq!(db.create_room("New", None).unwrap(), RoomId(3));
         db.remove_users(&[fern.id]).unwrap();
         assert_eq!(enroll(&mut db, 9, None), UserId(3));
         assert_eq!(db.delete_unused_blobs(1).unwrap(), 1);
