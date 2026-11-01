@@ -401,14 +401,13 @@ fn stat(label: &str, value: String) -> impl IntoElement {
 
 fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let health = &app.state.health;
-    let table_row = |label: String, detail: String, [set, rate, last]: [String; 3]| {
+    let table_row = |label: String, detail: String, [set, rate, last]: [String; 3], ruled: bool| {
         div()
             .flex()
             .flex_col()
             .gap_0p5()
             .py_2()
-            .border_b_1()
-            .border_color(theme::control())
+            .when(ruled, |row| row.border_b_1().border_color(theme::control()))
             .child(
                 div()
                     .flex()
@@ -441,7 +440,7 @@ fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             .font_weight(FontWeight::SEMIBOLD)
             .child(text)
     };
-    let sending = health.sending.iter().map(|row| {
+    let sending = health.sending.iter().enumerate().map(|(i, row)| {
         table_row(
             row.label.to_owned(),
             row.detail.clone(),
@@ -450,9 +449,10 @@ fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 rate(row.leaving_kbps),
                 row.dropped.map_or("–".to_owned(), |d| d.to_string()),
             ],
+            i + 1 < health.sending.len(),
         )
     });
-    let receiving = health.receiving.iter().map(|row| {
+    let receiving = health.receiving.iter().enumerate().map(|(i, row)| {
         table_row(
             row.label.clone(),
             row.detail.clone(),
@@ -461,6 +461,7 @@ fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 row.arriving_kbps.map_or("muted".to_owned(), rate),
                 row.loss.map_or("–".to_owned(), |l| format!("{l:.1}%")),
             ],
+            i + 1 < health.receiving.len(),
         )
     });
     div()
