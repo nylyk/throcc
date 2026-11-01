@@ -246,6 +246,8 @@ pub struct ThroccApp {
     /// Pictures by hash, `None` while one decodes in the background or if it can't be shown.
     pub pictures: std::collections::HashMap<Hash, Option<Arc<RenderImage>>>,
     pub joining: bool,
+    /// The mascot on the join screen once a server is known.
+    pub greeter: &'static str,
     /// Counts joins started, so a join that was overtaken by a newer one is ignored.
     join_attempt: u64,
     pub join_error: Option<String>,
@@ -386,6 +388,7 @@ impl ThroccApp {
             custom_palette: !theme::PRESETS.iter().any(|(_, p)| *p == theme::palette()),
             pictures: std::collections::HashMap::new(),
             joining: false,
+            greeter: views::join::random_greeter(),
             join_attempt: 0,
             join_error: None,
             profile_status: None,

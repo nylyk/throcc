@@ -1,3 +1,6 @@
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hasher};
+
 use gpui::{Context, Div, IntoElement, ParentElement, Styled, div, px, svg};
 use throcc_client_core::account::SignInError;
 use throcc_client_core::connection::ConnectError;
@@ -44,15 +47,34 @@ pub(super) fn error_box(error: String) -> Div {
         .child(error)
 }
 
+const GREETERS: [&str; 5] = [
+    "mascot/cool.svg",
+    "mascot/happy.svg",
+    "mascot/love.svg",
+    "mascot/sing.svg",
+    "mascot/thinking.svg",
+];
+
+/// One of the mascots that greet someone back, picked at random.
+pub fn random_greeter() -> &'static str {
+    let random = RandomState::new().build_hasher().finish();
+    GREETERS[random as usize % GREETERS.len()]
+}
+
 /// The window with no server connected: how a join is going, or what to do next.
 pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
-    let first_run = app.known_servers.is_empty() && !app.joining;
+    let first_run = app.known_servers.is_empty();
+    let mascot = if first_run {
+        "mascot/happy.svg"
+    } else {
+        app.greeter
+    };
     let hint = if app.joining {
         "Joining…"
     } else if first_run {
         "Add a server with its address and an invite code."
     } else {
-        "Pick a server on the left."
+        "Join a server on the left, or add a new one."
     };
     let error = app
         .join_error
@@ -75,20 +97,16 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
                 .right_0()
                 .h(theme::HEADER_HEIGHT),
         )
-        .children(first_run.then(|| {
+        .child(
             svg()
-                .path("mascot/happy.svg")
+                .path(mascot)
                 .size(px(180.))
-                .text_color(theme::text_3())
-        }))
-        .child(div().typeset(theme::LARGE_TITLE).child(if first_run {
-            "Welcome to throcc"
-        } else {
-            "throcc"
-        }))
+                .text_color(theme::text_3()),
+        )
+        .children(first_run.then(|| div().typeset(theme::LARGE_TITLE).child("Welcome to throcc")))
         .child(description(hint))
         .children(error.map(|e| div().w(px(420.)).child(error_box(e))))
-        .children(first_run.then(|| {
+        .children((first_run && !app.joining).then(|| {
             primary("add-first-server", "Add Server")
                 .h_10()
                 .px_4()

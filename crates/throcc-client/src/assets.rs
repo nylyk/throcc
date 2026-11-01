@@ -6,10 +6,28 @@ use gpui_kit_assets::AllAssets;
 /// The Lucide icons plus the mascot drawings in `assets/mascot`.
 pub struct Assets;
 
-const MASCOTS: &[(&str, &[u8])] = &[(
-    "mascot/happy.svg",
-    include_bytes!("../assets/mascot/happy.svg"),
-)];
+const MASCOTS: &[(&str, &[u8])] = &[
+    (
+        "mascot/cool.svg",
+        include_bytes!("../assets/mascot/cool.svg"),
+    ),
+    (
+        "mascot/happy.svg",
+        include_bytes!("../assets/mascot/happy.svg"),
+    ),
+    (
+        "mascot/love.svg",
+        include_bytes!("../assets/mascot/love.svg"),
+    ),
+    (
+        "mascot/sing.svg",
+        include_bytes!("../assets/mascot/sing.svg"),
+    ),
+    (
+        "mascot/thinking.svg",
+        include_bytes!("../assets/mascot/thinking.svg"),
+    ),
+];
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
