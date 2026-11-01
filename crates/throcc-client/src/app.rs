@@ -228,6 +228,8 @@ pub struct ThroccApp {
     /// Pictures by hash, `None` while one decodes in the background or if it can't be shown.
     pub pictures: std::collections::HashMap<Hash, Option<Arc<RenderImage>>>,
     pub joining: bool,
+    /// Counts joins started, so a join that was overtaken by a newer one is ignored.
+    join_attempt: u64,
     pub join_error: Option<String>,
     pub profile_status: Option<ProfileStatus>,
     pub profile_picture_edit: Option<PictureEdit>,
@@ -366,6 +368,7 @@ impl ThroccApp {
             palette_fields,
             pictures: std::collections::HashMap::new(),
             joining: false,
+            join_attempt: 0,
             join_error: None,
             profile_status: None,
             profile_picture_edit: None,
@@ -1100,7 +1103,7 @@ impl ThroccApp {
             cx.notify();
             return;
         }
-        if self.joining {
+        if self.joining && self.address.read(cx).value() == address {
             return;
         }
         self.address
@@ -1121,11 +1124,9 @@ impl ThroccApp {
         cx.notify();
     }
 
-    /// Connects to the server in the address field, leaving the one we are on first.
+    /// Connects to the server in the address field, leaving the one we are on first and
+    /// abandoning any join still under way.
     pub fn join(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.joining {
-            return;
-        }
         let address = self.address.read(cx).value().trim().to_owned();
         let code_text = self.code.read(cx).value().to_string();
         if address.is_empty() {
@@ -1149,6 +1150,8 @@ impl ThroccApp {
             self.dialog = dialog;
         }
         self.joining = true;
+        self.join_attempt += 1;
+        let attempt = self.join_attempt;
         self.join_error = None;
         let options = ClientOptions {
             voice: self.voice,
@@ -1169,6 +1172,9 @@ impl ThroccApp {
             let result = connecting.await;
             cx.update_window(window_handle, |_, window, cx| {
                 this.update(cx, |app, cx| {
+                    if app.join_attempt != attempt {
+                        return;
+                    }
                     match result {
                         Ok(client) => {
                             app.reload_known_servers();
