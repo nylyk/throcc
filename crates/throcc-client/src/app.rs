@@ -243,8 +243,8 @@ pub struct ThroccApp {
     pub server_picture_edit: Option<PictureEdit>,
     /// One hex field per palette colour, in [`theme::Palette::LABELS`] order.
     pub palette_fields: Vec<Entity<InputState>>,
-    /// Whether the Custom theme is picked, which unlocks the colour fields.
-    pub custom_palette: bool,
+    /// The picked theme's name: a preset's, or [`theme::CUSTOM`], which unlocks the colour fields.
+    pub picked_theme: &'static str,
     /// The Custom theme's colours, kept while a preset is picked.
     pub custom_colors: theme::Palette,
     /// Pictures by hash, `None` while one decodes in the background or if it can't be shown.
@@ -309,7 +309,12 @@ pub struct ThroccApp {
 }
 
 impl ThroccApp {
-    pub fn new(mock: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        mock: bool,
+        picked_theme: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let address = cx.new(|cx| InputState::new(window, cx).placeholder("voice.example.net"));
         let code = cx.new(|cx| InputState::new(window, cx).placeholder("K7Q-M2XPD"));
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Your name"));
@@ -399,7 +404,7 @@ impl ThroccApp {
             server_status: None,
             server_picture_edit: None,
             palette_fields,
-            custom_palette: !theme::PRESETS.iter().any(|(_, p)| *p == theme::palette()),
+            picked_theme,
             custom_colors,
             pictures: std::collections::HashMap::new(),
             joining: false,
@@ -607,15 +612,20 @@ impl ThroccApp {
     }
 
     /// Switches every window to the preset `name` and keeps it for next time.
-    pub fn use_preset(&mut self, name: &str, palette: theme::Palette, cx: &mut Context<Self>) {
-        self.custom_palette = false;
+    pub fn use_preset(
+        &mut self,
+        name: &'static str,
+        palette: theme::Palette,
+        cx: &mut Context<Self>,
+    ) {
+        self.picked_theme = name;
         theme::set(palette, cx);
         theme::save_preset(name);
     }
 
     /// Switches every window to the Custom theme and keeps it for next time.
     pub fn use_custom(&mut self, cx: &mut Context<Self>) {
-        self.custom_palette = true;
+        self.picked_theme = theme::CUSTOM;
         theme::set(self.custom_colors, cx);
         theme::save_custom(self.custom_colors);
     }
@@ -631,7 +641,7 @@ impl ThroccApp {
         }
         colors[index] = color;
         self.custom_colors = theme::Palette::from_colors(colors);
-        if self.custom_palette {
+        if self.picked_theme == theme::CUSTOM {
             self.use_custom(cx);
         }
     }

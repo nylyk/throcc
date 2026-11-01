@@ -754,14 +754,12 @@ fn servers(app: &mut ThroccApp) -> AnyElement {
 }
 
 fn appearance(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
-    let current = theme::palette();
-    let custom = app.custom_palette;
+    let custom = app.picked_theme == theme::CUSTOM;
     let presets = theme::PRESETS
         .iter()
         .enumerate()
-        .map(|(i, (name, palette))| {
-            let palette = *palette;
-            theme_option(("preset", i), name, palette, !custom && palette == current).on_click(
+        .map(|(i, &(name, palette))| {
+            theme_option(("preset", i), name, palette, app.picked_theme == name).on_click(
                 cx.listener(move |app, _, _, cx| {
                     app.use_preset(name, palette, cx);
                     cx.notify();

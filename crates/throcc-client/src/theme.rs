@@ -190,16 +190,24 @@ pub fn palette() -> Palette {
 
 pub const CUSTOM: &str = "Custom";
 
-/// The palette of the theme picked last time, if one was saved.
-pub fn saved() -> Option<Palette> {
+/// The name and palette of the theme picked last time, if one was saved.
+pub fn saved() -> Option<(&'static str, Palette)> {
     picked(&saved_settings()?)
 }
 
-fn picked(settings: &Settings) -> Option<Palette> {
+fn picked(settings: &Settings) -> Option<(&'static str, Palette)> {
     match settings.theme.as_deref() {
-        None | Some(CUSTOM) => Palette::from_hex(settings.palette.as_ref()?),
-        Some(name) => PRESETS.iter().find(|(n, _)| *n == name).map(|(_, p)| *p),
+        None | Some(CUSTOM) => Some((CUSTOM, Palette::from_hex(settings.palette.as_ref()?)?)),
+        Some(name) => preset(name),
     }
+}
+
+/// The preset called `name`, ignoring case.
+pub fn preset(name: &str) -> Option<(&'static str, Palette)> {
+    PRESETS
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        .copied()
 }
 
 /// The Custom theme's colours, if they were ever saved.
@@ -638,11 +646,11 @@ mod tests {
             palette: Some(custom.to_hex()),
             ..Settings::default()
         };
-        assert_eq!(picked(&settings), Some(PRESETS[5].1));
+        assert_eq!(picked(&settings), Some(PRESETS[5]));
         settings.theme = Some(CUSTOM.into());
-        assert_eq!(picked(&settings), Some(custom));
+        assert_eq!(picked(&settings), Some((CUSTOM, custom)));
         settings.theme = None;
-        assert_eq!(picked(&settings), Some(custom));
+        assert_eq!(picked(&settings), Some((CUSTOM, custom)));
         settings.theme = Some("Gone".into());
         assert_eq!(picked(&settings), None);
     }

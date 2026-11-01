@@ -23,12 +23,7 @@ fn main() {
         .iter()
         .position(|a| a == "--theme")
         .and_then(|i| args.get(i + 1))
-        .and_then(|name| {
-            theme::PRESETS
-                .iter()
-                .find(|(n, _)| n.eq_ignore_ascii_case(name))
-        })
-        .map(|(_, palette)| *palette);
+        .and_then(|name| theme::preset(name));
     let window_size = args
         .iter()
         .position(|a| a == "--size")
@@ -46,7 +41,8 @@ fn main() {
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
             let saved = if mock { None } else { theme::saved() };
-            theme::set(theme.or(saved).unwrap_or(theme::PRESETS[0].1), cx);
+            let (theme_name, palette) = theme.or(saved).unwrap_or(theme::PRESETS[0]);
+            theme::set(palette, cx);
             app::bind_keys(cx);
             let bounds = Bounds::centered(None, window_size, cx);
             let options = common::app_titlebar(
@@ -60,7 +56,7 @@ fn main() {
             );
             let opened = cx.open_window(options, |window, cx| {
                 window.set_window_title("throcc");
-                let view = cx.new(|cx| app::ThroccApp::new(mock, window, cx));
+                let view = cx.new(|cx| app::ThroccApp::new(mock, theme_name, window, cx));
                 if let Some(screen) = &screen {
                     view.update(cx, |app, cx| app.show_sample(screen, window, cx));
                 }
