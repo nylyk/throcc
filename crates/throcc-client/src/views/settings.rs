@@ -577,7 +577,7 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .flex()
                 .flex_col()
                 .gap_2()
-                .child(section("Sounds"))
+                .child(section("Notification sounds"))
                 .child(row("Volume", percent_slider(&controls.cue_volume, cx))),
         )
         .child(
