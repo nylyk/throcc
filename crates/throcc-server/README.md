@@ -18,7 +18,7 @@ The server: sign-in, rooms and presence, the key relay, and an SFU that forwards
 | `permissions.rs` | What each role may do to which other roles |
 | `room_password.rs` | Argon2id hashes of room passwords |
 | `limits.rs` | Token buckets and per-source connection caps |
-| `sfu.rs` | Ingress: the ownership check, the forwarding table and keyframe-request merging |
+| `sfu.rs` | Ingress: the per-connection rate limit, the ownership check, the forwarding table and keyframe-request merging |
 | `egress.rs` | One task per receiver: audio first, video in whole units within a 150 ms budget, link stats |
 | `database.rs` | The SQLite schema, its migrations and every query |
 

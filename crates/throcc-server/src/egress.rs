@@ -19,7 +19,7 @@ const MAX_QUEUED_VIDEO_BYTES: usize = 8 * 1024 * 1024;
 /// Two seconds of 20 mic tracks at 50 frames/s: a cap against a receiver that stops
 /// reading, not a drop policy.
 const MAX_QUEUED_AUDIO: usize = 2000;
-/// A unit's fragment limit: a 1440p keyframe at 18 Mbps is well under 1000.
+/// A unit's fragment limit: a 1440p keyframe at 15 Mbps is well under 1000.
 const MAX_UNIT_FRAGMENTS: usize = 4096;
 /// A started unit that gets no fragment for this long is given up on.
 const UNIT_IDLE: Duration = Duration::from_secs(1);

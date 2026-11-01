@@ -7,6 +7,7 @@ use bytes::Bytes;
 use throcc_client_core::call::CallEvent;
 use throcc_client_core::media::engine::{Kind, Outgoing};
 use throcc_proto::messages::{Codec, Event, MediaState, Request, Response, ShareConfig};
+use throcc_proto::transport::close;
 
 use common::*;
 
@@ -22,18 +23,18 @@ fn synthetic(index: u32, len: usize) -> Bytes {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[cfg_attr(
     debug_assertions,
-    ignore = "a debug build can't encrypt 20 Mbps on CI runners"
+    ignore = "a debug build can't encrypt 15 Mbps on CI runners"
 )]
-async fn ten_seconds_of_frames_at_20_mbps_arrive_intact() {
+async fn ten_seconds_of_frames_at_15_mbps_arrive_intact() {
     const FPS: u32 = 60;
     const UNITS: u32 = 10 * FPS;
-    const LEN: usize = 20_000_000 / 8 / FPS as usize;
+    const LEN: usize = 15_000_000 / 8 / FPS as usize;
     let server = start_server();
     let (alice, bob, _) = room_with_two(&server).await;
 
     let config = ShareConfig {
         audio: false,
-        kbps: 20_000,
+        kbps: 15_000,
         codec: Codec::Av1,
         width: 1920,
         height: 1080,
@@ -117,7 +118,7 @@ async fn ten_seconds_of_frames_at_20_mbps_arrive_intact() {
     }
     let elapsed = started.elapsed();
     let mbps = f64::from(UNITS) * LEN as f64 * 8.0 / elapsed.as_secs_f64() / 1e6;
-    assert!(mbps >= 19.0, "only {mbps:.1} Mbps");
+    assert!(mbps >= 14.0, "only {mbps:.1} Mbps");
     let stats = &bob.engine.stats;
     assert_eq!(stats.decrypt_failures.load(Ordering::Relaxed), 0);
     assert_eq!(
@@ -290,4 +291,39 @@ async fn keyframes_arrive_whole_through_two_percent_loss() {
         whole >= KEYFRAMES * 8 / 10,
         "only {whole} of {KEYFRAMES} keyframes whole"
     );
+}
+
+#[tokio::test]
+async fn a_member_who_sends_too_fast_is_disconnected() {
+    let server = start_server();
+    let alice = admin(&server).await;
+    let code = invite(&alice).await;
+    let bob = raw_enroll(
+        &server.addr,
+        &code,
+        throcc_client_core::connection::transport_config(100_000),
+    )
+    .await;
+    let connection = &bob.connected.connection;
+
+    let datagram = Bytes::from(vec![0u8; 1100]);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while connection.close_reason().is_none() && Instant::now() < deadline {
+        if connection
+            .send_datagram_wait(datagram.clone())
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+
+    let reason = tokio::time::timeout(Duration::from_secs(5), connection.closed())
+        .await
+        .expect("bob was never disconnected");
+    let quinn::ConnectionError::ApplicationClosed(closed) = reason else {
+        panic!("bob's connection ended with {reason:?}");
+    };
+    assert_eq!(closed.error_code, close::PROTOCOL_ERROR.into());
+    assert_eq!(&closed.reason[..], b"sent media too fast");
 }

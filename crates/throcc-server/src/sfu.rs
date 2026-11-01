@@ -7,11 +7,17 @@ use arc_swap::ArcSwap;
 use throcc_proto::frame::Header;
 use throcc_proto::ids::MediaId;
 use throcc_proto::messages::Recovery;
+use throcc_proto::transport::close;
+use tracing::warn;
 
 use crate::egress::{EgressHandle, Packet, TrackKind};
+use crate::limits::TokenBucket;
 
 /// Keyframe requests for one track are forwarded at most this often.
 pub const KEYFRAME_INTERVAL: Duration = Duration::from_secs(1);
+/// The most a connection may send in datagrams, voice and share together: 20 Mbps.
+pub const MAX_INGRESS_BYTES_PER_SECOND: f64 = 20_000_000.0 / 8.0;
+const INGRESS_BURST_BYTES: f64 = MAX_INGRESS_BYTES_PER_SECOND;
 
 pub struct Route {
     pub owner: u64,
@@ -34,9 +40,20 @@ pub struct Sfu {
 }
 
 impl Sfu {
-    /// Forwards datagrams from one connection until it closes. Never reads past the header.
+    /// Forwards datagrams from one connection until it closes, and closes it if it sends
+    /// faster than [`MAX_INGRESS_BYTES_PER_SECOND`]. Never reads past the header.
     pub async fn ingress(self: Arc<Self>, conn_id: u64, connection: quinn::Connection) {
+        let mut budget = TokenBucket::full(
+            INGRESS_BURST_BYTES,
+            MAX_INGRESS_BYTES_PER_SECOND,
+            Instant::now(),
+        );
         while let Ok(datagram) = connection.read_datagram().await {
+            if !budget.take(datagram.len() as f64, Instant::now()) {
+                warn!(conn_id, "closing a connection that sent media too fast");
+                connection.close(close::PROTOCOL_ERROR.into(), b"sent media too fast");
+                return;
+            }
             let Ok(header) = Header::parse(&datagram) else {
                 self.malformed.fetch_add(1, Ordering::Relaxed);
                 continue;

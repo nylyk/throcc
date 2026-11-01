@@ -10,7 +10,7 @@ use crate::identity::ServerIdentity;
 
 /// Flow-control window of the control stream, which the server opens. Clients open none.
 const CONTROL_WINDOW: u32 = 128 * 1024;
-/// About 100 ms of the fastest share (20 Mbps) plus voice.
+/// About 100 ms at the most a connection may send, [`crate::sfu::MAX_INGRESS_BYTES_PER_SECOND`].
 const DATAGRAM_RECEIVE_BUFFER: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
