@@ -150,16 +150,14 @@ pub enum Dialog {
         actual: Fingerprint,
     },
     NewRoom,
-    EditRoom {
-        room: RoomId,
-        confirm_delete: bool,
-    },
+    EditRoom(RoomId),
     RoomPassword {
         room: RoomId,
         error: Option<String>,
     },
     LeaveServer,
     AddServer,
+    DeleteRoom(RoomId),
 }
 
 /// The widest the sidebar may be in `window` and still leave the room its minimum width.
@@ -809,7 +807,7 @@ impl ThroccApp {
         if matches!(event, InputEvent::PressEnter { .. }) {
             match self.dialog {
                 Some(Dialog::NewRoom) => self.create_room(cx),
-                Some(Dialog::EditRoom { .. }) => self.save_room(cx),
+                Some(Dialog::EditRoom(_)) => self.save_room(cx),
                 Some(Dialog::RoomPassword { .. }) => self.join_with_password(cx),
                 _ => {}
             }
@@ -881,16 +879,13 @@ impl ThroccApp {
             s.set_value(name, window, cx);
             s.focus(window, cx);
         });
-        self.dialog = Some(Dialog::EditRoom {
-            room,
-            confirm_delete: false,
-        });
+        self.dialog = Some(Dialog::EditRoom(room));
         cx.notify();
     }
 
     /// Renames the edited room, and locks it with the typed password if there is one.
     pub fn save_room(&mut self, cx: &mut Context<Self>) {
-        let Some(Dialog::EditRoom { room, .. }) = self.dialog else {
+        let Some(Dialog::EditRoom(room)) = self.dialog else {
             return;
         };
         let name = self.room_name.read(cx).value().trim().to_owned();
@@ -1268,24 +1263,14 @@ impl ThroccApp {
             "sounds" => self.screen = Screen::Settings(SettingsPage::Sounds),
             "appearance" => self.screen = Screen::Settings(SettingsPage::Appearance),
             "newroom" => self.dialog = Some(Dialog::NewRoom),
-            "editroom" => {
-                self.dialog = Some(Dialog::EditRoom {
-                    room,
-                    confirm_delete: false,
-                })
-            }
+            "editroom" => self.dialog = Some(Dialog::EditRoom(room)),
             "roompassword" => {
                 self.dialog = Some(Dialog::RoomPassword {
                     room: RoomId(3),
                     error: Some("wrong password".into()),
                 })
             }
-            "deleteroom" => {
-                self.dialog = Some(Dialog::EditRoom {
-                    room,
-                    confirm_delete: true,
-                })
-            }
+            "deleteroom" => self.dialog = Some(Dialog::DeleteRoom(room)),
             "profile" => {
                 self.screen = Screen::Settings(SettingsPage::Profile);
                 joined(self);

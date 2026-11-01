@@ -35,10 +35,8 @@ pub fn render(app: &mut ThroccApp, dialog: Dialog, cx: &mut Context<ThroccApp>) 
             actual,
         } => pin_mismatch(&address, expected, actual, cx),
         Dialog::NewRoom => new_room(app, cx),
-        Dialog::EditRoom {
-            room,
-            confirm_delete,
-        } => edit_room(app, room, confirm_delete, cx),
+        Dialog::EditRoom(room) => edit_room(app, room, cx),
+        Dialog::DeleteRoom(room) => delete_room(app, room, cx),
         Dialog::RoomPassword { room, error } => room_password(app, room, error, cx),
         Dialog::LeaveServer => leave_server(app, cx),
         Dialog::AddServer => add_server(app, cx),
@@ -105,54 +103,42 @@ fn new_room(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .into_any_element()
 }
 
-fn edit_room(
-    app: &mut ThroccApp,
-    room: RoomId,
-    confirm_delete: bool,
-    cx: &mut Context<ThroccApp>,
-) -> AnyElement {
+fn delete_room(app: &mut ThroccApp, room: RoomId, cx: &mut Context<ThroccApp>) -> AnyElement {
     let name = app
         .state
         .room(room)
         .map_or_else(|| "this room".to_owned(), |r| r.name.clone());
-    if confirm_delete {
-        let occupied = app.state.occupants(room).next().is_some();
-        return div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(title(format!("Delete {name}?")))
-            .child(caption(if occupied {
-                "Everyone in it goes back to the lobby. This can't be undone."
-            } else {
-                "This can't be undone."
-            }))
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(secondary("keep-room", "Cancel").on_click(cx.listener(
+    let occupied = app.state.occupants(room).next().is_some();
+    div()
+        .flex()
+        .flex_col()
+        .gap_4()
+        .child(title(format!("Delete {name}?")))
+        .child(caption(if occupied {
+            "Everyone in it goes back to the lobby. This can't be undone."
+        } else {
+            "This can't be undone."
+        }))
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap_2()
+                .child(close_button(cx))
+                .child(
+                    danger("delete-room", format!("Delete {name}")).on_click(cx.listener(
                         move |app, _, _, cx| {
-                            app.dialog = Some(Dialog::EditRoom {
-                                room,
-                                confirm_delete: false,
-                            });
+                            app.command(Command::DeleteRoom(room));
+                            app.dialog = None;
                             cx.notify();
                         },
-                    )))
-                    .child(
-                        danger("delete-room", format!("Delete {name}")).on_click(cx.listener(
-                            move |app, _, _, cx| {
-                                app.command(Command::DeleteRoom(room));
-                                app.dialog = None;
-                                cx.notify();
-                            },
-                        )),
-                    ),
-            )
-            .into_any_element();
-    }
+                    )),
+                ),
+        )
+        .into_any_element()
+}
+
+fn edit_room(app: &mut ThroccApp, room: RoomId, cx: &mut Context<ThroccApp>) -> AnyElement {
     let locked = app.state.room(room).is_some_and(|r| r.locked);
     div()
         .flex()
@@ -191,20 +177,8 @@ fn edit_room(
         .child(
             div()
                 .flex()
-                .items_center()
+                .justify_end()
                 .gap_2()
-                .child(
-                    danger("ask-delete-room", "Delete room").on_click(cx.listener(
-                        move |app, _, _, cx| {
-                            app.dialog = Some(Dialog::EditRoom {
-                                room,
-                                confirm_delete: true,
-                            });
-                            cx.notify();
-                        },
-                    )),
-                )
-                .child(div().flex_1())
                 .child(close_button(cx))
                 .child(
                     primary("save-room", "Save")

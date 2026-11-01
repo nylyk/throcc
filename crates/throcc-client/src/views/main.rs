@@ -335,14 +335,30 @@ fn with_room_menu(
     let this = cx.entity().downgrade();
     element
         .context_menu(move |menu, _, _| {
-            let this = this.clone();
+            let edit = this.clone();
+            let delete = this.clone();
             menu.item(
                 PopupMenuItem::new("Edit room")
                     .icon(icon("pencil"))
                     .on_click(move |_, window, cx| {
-                        this.update(cx, |app, cx| app.open_edit_room(room, window, cx))
+                        edit.update(cx, |app, cx| app.open_edit_room(room, window, cx))
                             .ok();
                     }),
+            )
+            .separator()
+            .item(
+                PopupMenuItem::element(|_, _| {
+                    div().text_color(theme::danger_text()).child("Delete room")
+                })
+                .icon(icon("trash").text_color(theme::danger_text()))
+                .on_click(move |_, _, cx| {
+                    delete
+                        .update(cx, |app, cx| {
+                            app.dialog = Some(Dialog::DeleteRoom(room));
+                            cx.notify();
+                        })
+                        .ok();
+                }),
             )
         })
         .into_any_element()
