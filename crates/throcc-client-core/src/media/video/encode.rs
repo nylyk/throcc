@@ -1019,6 +1019,45 @@ mod round_trip {
     }
 
     #[test]
+    fn every_encoder_this_machine_opens_keeps_to_its_bitrate() {
+        let config = EncoderConfig {
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            kbps: 6000,
+        };
+        let seconds = 3;
+        for candidate in LADDER {
+            let Some(mut encoder) = Encoder::open_with(candidate, config) else {
+                continue;
+            };
+            let mut bytes = 0;
+            let mut noise = 0x2545_f491_4f6c_dd1du64;
+            for n in 0..config.fps * (seconds + 1) {
+                let mut input = VideoFrame::test_pattern(1920, 1080, n as u16, n * 1500);
+                for sample in &mut input.y {
+                    noise ^= noise << 13;
+                    noise ^= noise >> 7;
+                    noise ^= noise << 17;
+                    *sample = sample.wrapping_add(noise as u8 & 0x3f);
+                }
+                let units = encoder.encode(&input).unwrap();
+                if n >= config.fps {
+                    bytes += units.iter().map(|u| u.data.len()).sum::<usize>();
+                }
+            }
+            let kbps = bytes as u32 * 8 / 1000 / seconds;
+            eprintln!("{:?}: {kbps} kbps for {} set", candidate.name, config.kbps);
+            assert!(
+                kbps <= config.kbps * 5 / 4,
+                "{:?} sends {kbps} kbps for {} set",
+                candidate.name,
+                config.kbps
+            );
+        }
+    }
+
+    #[test]
     fn every_codec_this_machine_encodes_decodes_back() {
         for (encoder, codec) in [
             (c"hevc_videotoolbox", Codec::Hevc),
