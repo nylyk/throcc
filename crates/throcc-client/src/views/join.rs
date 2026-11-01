@@ -1,4 +1,4 @@
-use gpui::{Context, Div, IntoElement, ParentElement, Styled, div, px};
+use gpui::{Context, Div, IntoElement, ParentElement, Styled, div, px, svg};
 use throcc_client_core::account::SignInError;
 use throcc_client_core::connection::ConnectError;
 use throcc_client_core::control::LoginError;
@@ -46,9 +46,10 @@ pub(super) fn error_box(error: String) -> Div {
 
 /// The window with no server connected: how a join is going, or what to do next.
 pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
+    let first_run = app.known_servers.is_empty() && !app.joining;
     let hint = if app.joining {
         "Joining…"
-    } else if app.known_servers.is_empty() {
+    } else if first_run {
         "Add a server with its address and an invite code."
     } else {
         "Pick a server on the left."
@@ -74,12 +75,23 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
                 .right_0()
                 .h(theme::HEADER_HEIGHT),
         )
-        .child(div().typeset(theme::LARGE_TITLE).child("throcc"))
+        .children(first_run.then(|| {
+            svg()
+                .path("mascot/happy.svg")
+                .size(px(180.))
+                .text_color(theme::text_3())
+        }))
+        .child(div().typeset(theme::LARGE_TITLE).child(if first_run {
+            "Welcome to throcc"
+        } else {
+            "throcc"
+        }))
         .child(description(hint))
         .children(error.map(|e| div().w(px(420.)).child(error_box(e))))
-        .children((app.known_servers.is_empty() && !app.joining).then(|| {
+        .children(first_run.then(|| {
             primary("add-first-server", "Add Server")
-                .h(theme::TOUCH)
+                .h_10()
+                .px_4()
                 .on_click(cx.listener(|app, _, window, cx| app.open_add_server(window, cx)))
         }))
 }

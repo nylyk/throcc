@@ -1289,7 +1289,7 @@ impl ThroccApp {
         }
     }
 
-    /// Opens a screen of the mock client by name, for screenshots: join, lobby, room, focus,
+    /// Opens a screen of the mock client by name, for screenshots: welcome, join, lobby, room, focus,
     /// fullscreen, popout, share, settings, sounds, appearance, profile, connection, verify,
     /// members, keychange, addserver, removeserver or personmenu.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1300,6 +1300,11 @@ impl ThroccApp {
             app.command(Command::Watch(UserId(4)));
         };
         match screen {
+            "welcome" => {
+                self.client = None;
+                self.screen = Screen::Join;
+                self.known_servers.clear();
+            }
             "join" => {
                 self.client = None;
                 self.screen = Screen::Join;

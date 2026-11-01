@@ -1,4 +1,5 @@
 mod app;
+mod assets;
 mod avatar;
 mod hotkey;
 mod popout;
@@ -41,7 +42,7 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .cloned();
     gpui_platform::application()
-        .with_assets(gpui_kit_assets::AllAssets)
+        .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
             let saved = if mock { None } else { theme::saved() };
