@@ -104,12 +104,12 @@ fn playback(
         .flex_col()
         .px_2()
         .pb_1()
+        .child(section(label))
         .child(
             div()
                 .flex()
                 .items_center()
-                .justify_between()
-                .child(section(label))
+                .gap_2()
                 .child(
                     toggle_icon(
                         toggle_id,
@@ -121,13 +121,7 @@ fn playback(
                     .on_click(cx.listener(move |app, _, _, cx| {
                         app.change_playback(sound, |p| p.muted = !p.muted, cx)
                     })),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_3()
+                )
                 .child(div().flex_1().child(Slider::new(&control.slider)))
                 .child(
                     mono(format!("{percent:.0}%"))
