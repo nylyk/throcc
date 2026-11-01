@@ -12,7 +12,7 @@ pub use sonora::config::NoiseSuppressionLevel;
 use super::jitter::{FRAME, JitterBuffer, PULL};
 
 pub const SAMPLE_RATE: u32 = 48_000;
-/// Voice activation keeps sending this long after speech stops.
+/// Voice activation keeps sending, and the speaking ring stays lit, this long after speech stops.
 const HANGOVER_PULLS: u32 = 30;
 const MAX_PACKET: usize = 1500;
 /// Processed mic level (dBFS) above which voice activation opens, unless configured otherwise.
@@ -245,7 +245,8 @@ fn processing_config(settings: &VoiceSettings) -> Config {
 struct Stream {
     jitter: JitterBuffer,
     volume: f32,
-    level_dbfs: f32,
+    /// Pulls left before the stream stops counting as speaking.
+    speaking_pulls: u32,
 }
 
 /// Every remote voice stream summed into one output: per-user volume, soft clip.
@@ -280,7 +281,7 @@ impl Mixer {
                 jitter: JitterBuffer::new(Channels::Mono)
                     .map_err(|e| AudioError::Decoder(e.to_string()))?,
                 volume: self.volumes.get(&user).copied().unwrap_or(1.0),
-                level_dbfs: f32::NEG_INFINITY,
+                speaking_pulls: 0,
             }),
         };
         stream.jitter.insert(timestamp, payload, arrival);
@@ -309,7 +310,11 @@ impl Mixer {
         out.fill(0.0);
         for stream in self.streams.values_mut() {
             stream.jitter.pull(&mut self.pull);
-            stream.level_dbfs = dbfs(&self.pull);
+            stream.speaking_pulls = if dbfs(&self.pull) > SPEAKING_DBFS {
+                HANGOVER_PULLS
+            } else {
+                stream.speaking_pulls.saturating_sub(1)
+            };
             for (o, s) in out.iter_mut().zip(&self.pull) {
                 *o += s * stream.volume;
             }
@@ -322,7 +327,7 @@ impl Mixer {
     pub fn speaking(&self) -> impl Iterator<Item = (UserId, bool)> + '_ {
         self.streams
             .iter()
-            .map(|(user, s)| (*user, s.level_dbfs > SPEAKING_DBFS))
+            .map(|(user, s)| (*user, s.speaking_pulls > 0))
     }
 }
 
@@ -588,6 +593,40 @@ pub(crate) mod tests {
         let mut out = [1.0f32; PULL];
         mixer.mix(&mut out);
         assert!(out.iter().all(|s| *s == 0.0));
+    }
+
+    #[test]
+    fn speaking_holds_through_the_gaps_between_syllables_and_ends_after_speech() {
+        let user = UserId(7);
+        let mut input = speech(0, 2.0);
+        input.extend([0.0; SAMPLE_RATE as usize]);
+        let mut encoder = Encoder::builder(SAMPLE_RATE, Channels::Mono, Application::Voip)
+            .frame_duration(FrameDuration::Ms20)
+            .build()
+            .unwrap();
+        let mut mixer = Mixer::default();
+        let mut out = [0.0f32; PULL];
+        let mut samples = Vec::new();
+        for (i, frame) in input.as_chunks::<FRAME>().0.iter().enumerate() {
+            let mut packet = vec![0u8; MAX_PACKET];
+            let n = encoder.encode_float(frame, &mut packet).unwrap();
+            let timestamp = (i * FRAME) as u32;
+            mixer
+                .insert(user, timestamp, &packet[..n], u64::from(timestamp))
+                .unwrap();
+            for _ in 0..FRAME / PULL {
+                mixer.mix(&mut out);
+            }
+            if i % 5 == 4 {
+                samples.push(mixer.speaking().any(|(_, speaking)| speaking));
+            }
+        }
+        let during = &samples[3..18];
+        assert!(
+            during.iter().all(|s| *s),
+            "the ring went dark mid-speech: {during:?}"
+        );
+        assert!(!samples.last().unwrap(), "the ring stayed lit after speech");
     }
 
     #[test]
