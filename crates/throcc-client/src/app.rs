@@ -252,6 +252,8 @@ pub struct ThroccApp {
     pub greeter: &'static str,
     /// The mascot beside a failed join or a lost connection.
     pub upset: &'static str,
+    /// The mascot in a lobby with no rooms.
+    pub idle: &'static str,
     /// Counts joins started, so a join that was overtaken by a newer one is ignored.
     join_attempt: u64,
     pub join_error: Option<String>,
@@ -392,8 +394,9 @@ impl ThroccApp {
             custom_palette: !theme::PRESETS.iter().any(|(_, p)| *p == theme::palette()),
             pictures: std::collections::HashMap::new(),
             joining: false,
-            greeter: views::join::pick(views::join::GREETERS),
-            upset: views::join::pick(views::join::UPSET),
+            greeter: views::mascot::pick(views::mascot::GREETERS),
+            upset: views::mascot::pick(views::mascot::UPSET),
+            idle: views::mascot::pick(views::mascot::IDLE),
             join_attempt: 0,
             join_error: None,
             profile_status: None,
@@ -1298,7 +1301,7 @@ impl ThroccApp {
     }
 
     /// Opens a screen of the mock client by name, for screenshots: welcome, join, joinfailed, lost,
-    /// lobby, room, focus,
+    /// lobby, emptylobby, room, focus,
     /// fullscreen, popout, share, settings, sounds, appearance, profile, connection, verify,
     /// members, keychange, addserver, removeserver or personmenu.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1358,6 +1361,13 @@ impl ThroccApp {
                 self.dialog = Some(Dialog::RemoveServer("lan.example.org".into()));
             }
             "room" => joined(self),
+            "emptylobby" => {
+                if let Some(client) = &self.client {
+                    for room in client.state().rooms.iter() {
+                        self.command(Command::DeleteRoom(room.id));
+                    }
+                }
+            }
             "focus" => {
                 joined(self);
                 self.focus = Some(UserId(4));

@@ -14,9 +14,10 @@ use throcc_client_core::state::{Person, State, share_label};
 use throcc_proto::ids::{RoomId, UserId};
 
 use super::common::{
-    Typeset, avatar, caption, card, ghost_icon, icon, moves_window, player, player_button,
-    player_title, primary, rate, section, sharing_icon,
+    Typeset, avatar, caption, card, description, ghost_icon, icon, moves_window, player,
+    player_button, player_title, primary, rate, section, sharing_icon,
 };
+use super::mascot;
 use super::settings::{resize_handle, sidebar_column};
 use crate::app::{Dialog, Screen, ServerPage, ThroccApp, ToggleDeafen, ToggleMic};
 use crate::theme;
@@ -517,24 +518,38 @@ fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
         .border_b_1()
         .border_color(theme::control())
         .child(div().typeset(theme::TITLE_3).child("Lobby"));
-    div().size_full().flex().flex_col().child(header).child(
+    let body = if state.rooms.is_empty() {
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_4()
+            .child(mascot::drawing(app.idle))
+            .child(description("There are no rooms yet."))
+            .children(manages.then(|| {
+                primary("first-room", "New Room")
+                    .h_10()
+                    .px_4()
+                    .on_click(cx.listener(|app, _, window, cx| app.open_new_room(window, cx)))
+            }))
+            .into_any_element()
+    } else {
         div()
             .id("lobby")
             .flex_1()
             .overflow_y_scroll()
             .p_6()
-            .flex()
-            .flex_col()
-            .gap_4()
             .child(div().flex().flex_wrap().gap_4().children(cards))
-            .children(state.rooms.is_empty().then(|| {
-                card().child(caption(if manages {
-                    "There are no rooms yet. Create one with + next to Rooms."
-                } else {
-                    "There are no rooms yet. A manager or admin can create one."
-                }))
-            })),
-    )
+            .into_any_element()
+    };
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .child(header)
+        .child(body)
 }
 
 fn room(

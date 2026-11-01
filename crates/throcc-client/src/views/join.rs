@@ -1,7 +1,4 @@
-use std::collections::hash_map::RandomState;
-use std::hash::{BuildHasher, Hasher};
-
-use gpui::{Context, Div, IntoElement, ParentElement, Styled, div, px, svg};
+use gpui::{Context, Div, IntoElement, ParentElement, Styled, div, px};
 use throcc_client_core::account::SignInError;
 use throcc_client_core::connection::ConnectError;
 use throcc_client_core::control::LoginError;
@@ -9,6 +6,7 @@ use throcc_client_core::state::ConnectionStatus;
 use throcc_proto::messages::AuthError;
 
 use super::common::{Typeset, description, moves_window, primary};
+use super::mascot;
 use crate::app::{Dialog, ThroccApp};
 use crate::theme;
 
@@ -48,21 +46,6 @@ pub(super) fn error_box(error: String) -> Div {
         .child(error)
 }
 
-pub const GREETERS: &[&str] = &[
-    "mascot/cool.svg",
-    "mascot/happy.svg",
-    "mascot/love.svg",
-    "mascot/sing.svg",
-    "mascot/thinking.svg",
-];
-
-pub const UPSET: &[&str] = &["mascot/angry.svg", "mascot/dizzy.svg", "mascot/glitch.svg"];
-
-pub fn pick(mascots: &[&'static str]) -> &'static str {
-    let random = RandomState::new().build_hasher().finish();
-    mascots[random as usize % mascots.len()]
-}
-
 /// The window with no server connected: how a join is going, or what to do next.
 pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
     let first_run = app.known_servers.is_empty();
@@ -73,7 +56,7 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
     let mascot = if error.is_some() {
         app.upset
     } else if first_run {
-        "mascot/happy.svg"
+        mascot::HAPPY
     } else {
         app.greeter
     };
@@ -136,10 +119,5 @@ fn frame(mascot: &'static str) -> Div {
                 .right_0()
                 .h(theme::HEADER_HEIGHT),
         )
-        .child(
-            svg()
-                .path(mascot)
-                .size(px(180.))
-                .text_color(theme::text_3()),
-        )
+        .child(mascot::drawing(mascot))
 }
