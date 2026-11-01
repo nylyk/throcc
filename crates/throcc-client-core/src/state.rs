@@ -221,8 +221,8 @@ impl Resolution {
 pub const FRAME_RATES: [u8; 3] = [15, 30, 60];
 
 /// The bitrates a share can be set to, in kbps.
-pub const BITRATES: [u32; 13] = [
-    1_000, 1_500, 2_000, 3_000, 4_000, 5_000, 6_000, 8_000, 10_000, 12_000, 15_000, 18_000, 20_000,
+pub const BITRATES: [u32; 11] = [
+    1_000, 1_500, 2_000, 3_000, 4_000, 5_000, 6_000, 8_000, 10_000, 12_000, 15_000,
 ];
 
 /// What a share asks for before the screen is known.
