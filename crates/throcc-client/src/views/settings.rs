@@ -881,13 +881,10 @@ fn theme_preview(palette: theme::Palette) -> Div {
             .justify_center()
             .child(div().size(px(10.)).rounded_full().bg(color(avatar)))
     };
-    div()
+    let screen = div()
         .flex()
-        .h(px(64.))
-        .rounded(px(6.))
-        .overflow_hidden()
-        .border_1()
-        .border_color(theme::control())
+        .size_full()
+        .rounded(px(5.))
         .bg(color(palette.bg))
         .child(
             div()
@@ -934,5 +931,11 @@ fn theme_preview(palette: theme::Palette) -> Div {
                         .child(tile(palette.accent))
                         .child(tile(palette.muted)),
                 ),
-        )
+        );
+    div()
+        .h(px(64.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(theme::control())
+        .child(screen)
 }
