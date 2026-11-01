@@ -1,4 +1,4 @@
-name: nightly
+name: arch
 
 on:
   push:
@@ -20,7 +20,7 @@ jobs:
   arch:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - run: ./scripts/ci-run.sh tests/arch/run.sh out

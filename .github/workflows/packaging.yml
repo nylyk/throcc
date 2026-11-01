@@ -8,8 +8,6 @@ on:
       - 'packaging/**'
       - 'crates/throcc-client-core/src/media/video/**'
       - 'crates/throcc-client-core/src/media/capture/**'
-      - 'tests/deploy/**'
-      - 'crates/throcc-server/Dockerfile'
       - 'scripts/ci-run.sh'
       - '.github/workflows/packaging.yml'
   schedule:
@@ -24,42 +22,14 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: ./scripts/ci-run.sh tests/deploy/run.sh
-        shell: bash
-
-  server-binaries:
-    strategy:
-      matrix:
-        include:
-          - runner: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v4
-      - run: docker build -f tests/deploy/Dockerfile.static --build-arg TARGET=${{ matrix.target }} -t throcc-static .
-      - run: |
-          docker create --name copy throcc-static
-          docker cp copy:/throcc-server throcc-server-${{ matrix.target }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: throcc-server-${{ matrix.target }}
-          path: throcc-server-${{ matrix.target }}
-          retention-days: 7
-
   macos-app:
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: brew install dav1d libvpx pkgconf
       - id: dav1d
         run: echo "version=$(brew list --versions dav1d libvpx | tr ' \n' '--')" >>"$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: deps/ffmpeg-lgpl
           key: macos-ffmpeg-${{ steps.dav1d.outputs.version }}-${{ hashFiles('packaging/ffmpeg/build.sh', 'packaging/ffmpeg/patches/*') }}
@@ -67,7 +37,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/ci-run.sh packaging/macos/bundle.sh
         shell: bash
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: throcc-macos
           path: target/macos/throcc.dmg
@@ -76,10 +46,10 @@ jobs:
   windows-app:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ilammy/msvc-dev-cmd@v1
       - id: deps
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: deps
           key: windows-deps-nv13.0.19.0-${{ hashFiles('packaging/ffmpeg/build.sh', 'packaging/ffmpeg/patches/*', 'packaging/ffmpeg/bindings.sh', 'packaging/windows/build-deps.sh') }}
@@ -116,7 +86,7 @@ jobs:
           ./scripts/ci-run.sh cargo install bindgen-cli --version 0.72.1 --locked
           ./scripts/ci-run.sh packaging/ffmpeg/bindings.sh deps/ffmpeg-lgpl deps/ffmpeg-lgpl/binding.rs
       - if: steps.deps.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: deps
           key: ${{ steps.deps.outputs.cache-primary-key }}
@@ -125,7 +95,7 @@ jobs:
         run: |
           export PATH="$(dirname "$(command -v cl)"):$PATH"
           ./scripts/ci-run.sh pwsh -NoProfile -File packaging/windows/package.ps1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: throcc-windows
           path: target/windows/throcc-windows.zip

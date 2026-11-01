@@ -24,26 +24,6 @@ docker run -d --name throcc --restart unless-stopped -p 8476:8476/udp -v throcc-
 docker logs throcc | grep 'becomes admin'
 ```
 
-### With systemd
-
-Build the static binary (use `aarch64-unknown-linux-musl` on ARM):
-
-```sh
-docker build -f tests/deploy/Dockerfile.static --build-arg TARGET=x86_64-unknown-linux-musl -t throcc-static .
-docker create --name copy throcc-static && docker cp copy:/throcc-server . && docker rm copy
-```
-
-Install it with the unit from `packaging/`:
-
-```sh
-sudo install -m 0755 throcc-server /usr/local/bin/
-sudo install -m 0644 packaging/throcc-server.service /etc/systemd/system/
-sudo systemctl enable --now throcc-server
-journalctl -u throcc-server | grep 'becomes admin'
-```
-
-The unit runs the server as a throwaway system user with its data in `/var/lib/private/throcc`.
-
 ### With Nix
 
 `nix run github:nylyk/throcc#server`

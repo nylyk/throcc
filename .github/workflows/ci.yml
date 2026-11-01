@@ -15,7 +15,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup toolchain install
       - run: cargo fmt --all --check
       - run: ./scripts/check-server-deps.sh
@@ -25,10 +25,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-26, windows-2022]
+        include:
+          - os: ubuntu-latest
+          - os: macos-26
+            features: --features throcc-client/ffmpeg,throcc-cli/ffmpeg
+            ffmpeg_pkg_config: /opt/homebrew/opt/ffmpeg@8/lib/pkgconfig
+          - os: windows-2022
     runs-on: ${{ matrix.os }}
+    env:
+      FFMPEG_PKG_CONFIG_PATH: ${{ matrix.ffmpeg_pkg_config }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - if: runner.os == 'macOS'
+        run: brew update && brew install ffmpeg@8
       - if: runner.os == 'Linux'
         run: |
           sudo apt-get update
@@ -38,25 +47,11 @@ jobs:
             libegl-dev libssl-dev libzstd-dev pkg-config mesa-vulkan-drivers
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - run: ./scripts/ci-run.sh cargo clippy --workspace --all-targets -- -D warnings
+      - run: ./scripts/ci-run.sh cargo clippy --workspace --all-targets ${{ matrix.features }} -- -D warnings
         shell: bash
-      - run: ./scripts/ci-run.sh cargo test --workspace --no-fail-fast
+      - run: ./scripts/ci-run.sh cargo test --workspace --no-fail-fast ${{ matrix.features }}
         shell: bash
-      - run: ./scripts/ci-run.sh cargo test --release -p throcc-cli --test media
-        shell: bash
-
-  video:
-    runs-on: macos-26
-    env:
-      FFMPEG_PKG_CONFIG_PATH: /opt/homebrew/opt/ffmpeg@8/lib/pkgconfig
-    steps:
-      - uses: actions/checkout@v4
-      - run: brew update && brew install ffmpeg@8
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - run: ./scripts/ci-run.sh cargo clippy -p throcc-client -p throcc-client-core -p throcc-cli --features ffmpeg --all-targets -- -D warnings
-        shell: bash
-      - run: ./scripts/ci-run.sh cargo test -p throcc-client-core -p throcc-cli --features ffmpeg
+      - run: ./scripts/ci-run.sh cargo test --release -p throcc-cli --test media ten_seconds_of_frames_at_20_mbps_arrive_intact
         shell: bash
 
   linux-video:
@@ -66,7 +61,7 @@ jobs:
       FFMPEG_BINDING_PATH: ${{ github.workspace }}/deps/ffmpeg-lgpl/binding.rs
       LD_LIBRARY_PATH: ${{ github.workspace }}/deps/ffmpeg-lgpl/lib
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
@@ -76,7 +71,7 @@ jobs:
       - id: versions
         run: echo "libs=$(pkg-config --modversion libva dav1d vpx | tr '\n' '-')" >>"$GITHUB_OUTPUT"
       - id: ffmpeg
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: deps/ffmpeg-lgpl
           key: linux-ffmpeg-${{ steps.versions.outputs.libs }}-${{ hashFiles('packaging/ffmpeg/build.sh', 'packaging/ffmpeg/patches/*', 'packaging/ffmpeg/bindings.sh') }}
@@ -90,7 +85,7 @@ jobs:
           ./scripts/ci-run.sh packaging/ffmpeg/bindings.sh deps/ffmpeg-lgpl deps/ffmpeg-lgpl/binding.rs
         shell: bash
       - if: steps.ffmpeg.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: deps/ffmpeg-lgpl
           key: ${{ steps.ffmpeg.outputs.cache-primary-key }}
@@ -102,7 +97,7 @@ jobs:
   surface:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
@@ -114,7 +109,7 @@ jobs:
       - run: ./scripts/ci-run.sh tests/surface/run.sh
         shell: bash
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: surface
           path: target/surface/*.ppm
@@ -123,6 +118,6 @@ jobs:
   netem:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: ./scripts/ci-run.sh tests/netem/run.sh
         shell: bash
