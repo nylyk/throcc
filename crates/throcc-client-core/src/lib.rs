@@ -1,4 +1,5 @@
 pub mod account;
+pub mod avatars;
 pub mod call;
 pub mod client;
 pub mod connection;
@@ -9,7 +10,6 @@ pub mod keys;
 pub mod keystore;
 pub mod known_servers;
 pub mod media;
-mod pictures;
 pub mod playback;
 pub mod profile;
 pub mod server_look;

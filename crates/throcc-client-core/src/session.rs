@@ -12,10 +12,11 @@ use throcc_proto::messages::{
     Response, RoomPeer, Share, ShareConfig, Welcome,
 };
 use throcc_proto::transport::close;
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{Semaphore, broadcast, mpsc, watch};
 use tracing::{info, warn};
 
 use crate::account::{self, SignInError};
+use crate::avatars;
 use crate::call::{Call, CallEvent};
 use crate::client::{Command, Event};
 use crate::control::LoginError;
@@ -41,6 +42,8 @@ const HEALTH_EVERY: Duration = Duration::from_secs(2);
 const MAX_BACKOFF: Duration = Duration::from_secs(15);
 const RENEWAL_CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
 const MAX_QUEUED_WHILE_RECONNECTING: usize = 64;
+/// How many pictures are fetched from the server at once.
+const AVATAR_FETCHES: usize = 8;
 const MIC_KBPS: u32 = 64;
 const SHARE_AUDIO_KBPS: u32 = 128;
 const VOICE_DETAIL: &str = "Opus voice, mono";
@@ -90,14 +93,6 @@ impl Shared {
         }
     }
 
-    fn ready_avatar(&self, hash: Hash) -> Option<Arc<[u8]>> {
-        match lock(&self.avatars).get(&hash) {
-            Some(AvatarSlot::Ready(bytes)) => Some(bytes.clone()),
-            _ => None,
-        }
-    }
-
-    /// Forgets a picture whose fetch failed, so the next ask fetches it again.
     fn forget_avatar(&self, hash: Hash) {
         lock(&self.avatars).remove(&hash);
     }
@@ -228,6 +223,7 @@ pub(crate) struct Session {
     /// The pinned key of the server we are connected to.
     server: Fingerprint,
     server_look: ServerLook,
+    avatar_fetches: Arc<Semaphore>,
     #[cfg(feature = "ffmpeg")]
     sharing: Option<crate::media::share::ShareSender>,
     tracks: HashMap<MediaId, Watched>,
@@ -256,11 +252,10 @@ impl Session {
             warn!("no saved playback: {e:#}");
             SavedPlayback::empty(keystore.dir(), &server)
         });
-        let server_look = ServerLook::load(keystore.dir(), keystore.cache_dir(), &server)
-            .unwrap_or_else(|e| {
-                warn!("no kept server look: {e:#}");
-                ServerLook::default()
-            });
+        let server_look = ServerLook::load(keystore.dir(), &server).unwrap_or_else(|e| {
+            warn!("no kept server look: {e:#}");
+            ServerLook::default()
+        });
         let mut session = Self {
             shared,
             keystore,
@@ -284,6 +279,7 @@ impl Session {
             saved_playback,
             server,
             server_look,
+            avatar_fetches: Arc::new(Semaphore::new(AVATAR_FETCHES)),
             #[cfg(feature = "ffmpeg")]
             sharing: None,
             tracks: HashMap::new(),
@@ -839,7 +835,7 @@ impl Session {
                 });
                 self.push_profile().await;
             }
-            Command::FetchAvatar(hash) => self.fetch_avatar(hash).await,
+            Command::FetchAvatar(hash) => self.fetch_avatar(hash),
             Command::SetServerProfile { name, picture } => {
                 let response = self.set_server_profile(name, picture).await;
                 self.shared.emit(match response {
@@ -962,43 +958,43 @@ impl Session {
         }
     }
 
-    /// Fetches a picture by its hash, keeping it only if the bytes match the hash.
-    async fn fetch_avatar(&mut self, hash: Hash) {
-        let slot = match self.call.request(Request::GetAvatar(hash)).await {
-            Ok(Response::Avatar(bytes)) if Sha256::digest(&bytes).as_slice() == hash.0 => {
-                AvatarSlot::Ready(bytes.into())
-            }
-            Ok(_) => AvatarSlot::Missing,
-            Err(e) => {
-                info!("fetching a picture: {e:#}");
-                self.shared.forget_avatar(hash);
+    /// Finds a picture by its hash in the cache, or fetches it beside the session loop,
+    /// [`AVATAR_FETCHES`] at a time. Keeps it only if the bytes match the hash.
+    fn fetch_avatar(&self, hash: Hash) {
+        let shared = self.shared.clone();
+        let requester = self.call.requester.clone();
+        let cache = self.keystore.cache_dir().to_owned();
+        let fetches = self.avatar_fetches.clone();
+        tokio::spawn(async move {
+            if let Some(bytes) = avatars::load(&cache, hash) {
+                shared.set_avatar(hash, AvatarSlot::Ready(bytes));
                 return;
             }
-        };
-        if let AvatarSlot::Ready(bytes) = &slot
-            && self.server_look.avatar == Some(hash)
-        {
-            let look = ServerLook {
-                picture: Some(bytes.clone()),
-                ..self.server_look.clone()
+            let Ok(_turn) = fetches.acquire().await else {
+                return;
             };
-            self.keep_server_look(look);
-        }
-        self.shared.set_avatar(hash, slot);
+            let slot = match requester.request(Request::GetAvatar(hash)).await {
+                Ok(Response::Avatar(bytes)) if avatars::matches(&bytes, hash) => {
+                    if let Err(e) = avatars::save(&cache, hash, &bytes) {
+                        warn!("caching a picture: {e:#}");
+                    }
+                    AvatarSlot::Ready(bytes.into())
+                }
+                Ok(_) => AvatarSlot::Missing,
+                Err(e) => {
+                    info!("fetching a picture: {e:#}");
+                    shared.forget_avatar(hash);
+                    return;
+                }
+            };
+            shared.set_avatar(hash, slot);
+        });
     }
 
-    /// Keeps the server's name and picture on this computer, to show while not connected.
+    /// Keeps the server's name and picture hash on this computer, to show while not
+    /// connected.
     fn remember_server(&mut self, name: Option<String>, avatar: Option<Hash>) {
-        let mut look = self.server_look.clone();
-        look.name = name;
-        if look.avatar != avatar {
-            look.avatar = avatar;
-            look.picture = None;
-        }
-        if look.picture.is_none() {
-            look.picture = avatar.and_then(|hash| self.shared.ready_avatar(hash));
-        }
-        self.keep_server_look(look);
+        self.keep_server_look(ServerLook { name, avatar });
     }
 
     fn keep_server_look(&mut self, look: ServerLook) {
@@ -1006,10 +1002,7 @@ impl Session {
             return;
         }
         self.server_look = look;
-        if let Err(e) =
-            self.server_look
-                .save(self.keystore.dir(), self.keystore.cache_dir(), &self.server)
-        {
+        if let Err(e) = self.server_look.save(self.keystore.dir(), &self.server) {
             warn!("keeping the server's name and picture: {e:#}");
         }
     }

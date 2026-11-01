@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use std::path::PathBuf;
 use throcc_proto::Fingerprint;
@@ -11,8 +11,10 @@ use throcc_crypto::safety;
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::PublicKey;
 use tokio::sync::{broadcast, mpsc};
+use tracing::warn;
 
 use crate::account::{self, SignInError};
+use crate::avatars;
 use crate::call::Call;
 use crate::contacts::Contacts;
 use crate::keystore::Keystore;
@@ -173,6 +175,12 @@ impl Client {
         let server = link.connected.fingerprint;
         let identity = keystore.identity().public();
         let dir = keystore.dir().to_owned();
+        let cache = keystore.cache_dir().to_owned();
+        runtime.spawn_blocking(move || {
+            if let Err(e) = avatars::prune(&cache, SystemTime::now()) {
+                warn!("removing unused cached pictures: {e:#}");
+            }
+        });
         let (events, _) = broadcast::channel(EVENTS);
         let shared = Arc::new(Shared {
             state: Mutex::new(Arc::new(State::default())),

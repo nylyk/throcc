@@ -1,12 +1,14 @@
+use std::fs;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
-use crate::pictures;
+use crate::keystore::replace_file;
 use crate::settings::Settings;
 
-const PICTURE: &str = "profile";
+const PICTURE_FILE: &str = "profile_picture";
 
 /// Our name and picture, kept on this computer and given to every server we join.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -22,13 +24,27 @@ impl Profile {
             .profile_name
             .map(|name| name.trim().to_owned())
             .filter(|name| !name.is_empty());
-        let picture = pictures::load(dir, PICTURE)?;
+        let path = dir.join(PICTURE_FILE);
+        let picture = match fs::read(&path) {
+            Ok(bytes) => Some(bytes.into()),
+            Err(e) if e.kind() == ErrorKind::NotFound => None,
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
         Ok(Self { name, picture })
     }
 
     pub fn save(&self, dir: &Path) -> Result<()> {
         Settings::update(dir, |s| s.profile_name.clone_from(&self.name))?;
-        pictures::save(dir, PICTURE, self.picture.as_deref())
+        let path = dir.join(PICTURE_FILE);
+        match &self.picture {
+            Some(bytes) => replace_file(&path, bytes),
+            None => match fs::remove_file(&path) {
+                Err(e) if e.kind() != ErrorKind::NotFound => {
+                    Err(e).with_context(|| format!("removing {}", path.display()))
+                }
+                _ => Ok(()),
+            },
+        }
     }
 }
 

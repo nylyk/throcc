@@ -120,7 +120,7 @@ pub fn config_dir() -> Result<PathBuf> {
     Ok(project_dirs()?.config_dir().to_owned())
 }
 
-/// Where throcc keeps what it can fetch again, such as server pictures.
+/// Where throcc keeps what it can fetch again, such as pictures.
 pub fn cache_dir() -> Result<PathBuf> {
     Ok(project_dirs()?.cache_dir().to_owned())
 }

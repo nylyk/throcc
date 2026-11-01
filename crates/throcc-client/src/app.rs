@@ -11,6 +11,7 @@ use gpui_component::notification::Notification;
 use gpui_component::slider::{SliderEvent, SliderState};
 use gpui_component::{Root, WindowExt};
 use throcc_client_core::account::SignInError;
+use throcc_client_core::avatars;
 use throcc_client_core::client::{Client, ClientApi, ClientOptions, Command, Event, MockClient};
 use throcc_client_core::keystore::{self, Keystore};
 use throcc_client_core::media::audio::{Transmit, VoiceSettings};
@@ -192,8 +193,12 @@ fn cached_looks(known: &[(String, Fingerprint)]) -> HashMap<String, CachedLook> 
     known
         .iter()
         .filter_map(|(address, fingerprint)| {
-            let look = ServerLook::load(&dir, &cache, fingerprint).ok()?;
-            let picture = look.picture.as_deref().and_then(crate::avatar::decode);
+            let look = ServerLook::load(&dir, fingerprint).ok()?;
+            let picture = look
+                .avatar
+                .and_then(|hash| avatars::load(&cache, hash))
+                .as_deref()
+                .and_then(crate::avatar::decode);
             Some((
                 address.clone(),
                 CachedLook {
