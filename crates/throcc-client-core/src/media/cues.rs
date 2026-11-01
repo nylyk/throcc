@@ -62,7 +62,7 @@ impl Cue {
             notes,
             gap: 0.08,
             length: 0.2,
-            decay: 0.07,
+            decay: 0.04,
         };
         let tap = |notes| Shape {
             notes,
