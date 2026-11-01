@@ -153,7 +153,7 @@ pub const PRESETS: [(&str, Palette); 7] = [
     (
         "Sand",
         Palette {
-            bg: 0xF4EEDB,
+            bg: 0xF3EEDF,
             panel: 0xFCF9EE,
             text: 0x24201A,
             muted: 0x756C5F,
