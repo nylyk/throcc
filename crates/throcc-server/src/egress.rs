@@ -14,7 +14,7 @@ use crate::rooms::Outgoing;
 pub const VIDEO_BUDGET: Duration = Duration::from_millis(150);
 const LINK_STATS_INTERVAL: Duration = Duration::from_secs(2);
 const INBOX: usize = 8192;
-/// About 150 ms of 16 watched 20 Mbps shares. Over this, even started units are dropped.
+/// About 150 ms of 16 watched senders at 25 Mbps. Over this, even started units are dropped.
 const MAX_QUEUED_VIDEO_BYTES: usize = 8 * 1024 * 1024;
 /// Two seconds of 20 mic tracks at 50 frames/s: a cap against a receiver that stops
 /// reading, not a drop policy.

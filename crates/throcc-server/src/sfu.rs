@@ -15,8 +15,8 @@ use crate::limits::TokenBucket;
 
 /// Keyframe requests for one track are forwarded at most this often.
 pub const KEYFRAME_INTERVAL: Duration = Duration::from_secs(1);
-/// The most a connection may send in datagrams, voice and share together: 20 Mbps.
-pub const MAX_INGRESS_BYTES_PER_SECOND: f64 = 20_000_000.0 / 8.0;
+/// The most a connection may send in datagrams, voice and share together: 25 Mbps.
+pub const MAX_INGRESS_BYTES_PER_SECOND: f64 = 25_000_000.0 / 8.0;
 const INGRESS_BURST_BYTES: f64 = MAX_INGRESS_BYTES_PER_SECOND;
 
 pub struct Route {
