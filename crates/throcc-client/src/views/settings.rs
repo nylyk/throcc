@@ -823,52 +823,25 @@ fn servers(app: &mut ThroccApp) -> AnyElement {
 
 fn appearance(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let current = theme::palette();
-    let presets =
-        div()
-            .flex()
-            .flex_wrap()
-            .gap_3()
-            .children(
-                theme::PRESETS
-                    .iter()
-                    .enumerate()
-                    .map(|(i, (name, palette))| {
-                        let palette = *palette;
-                        let selected = palette == current;
-                        div()
-                            .id(("preset", i))
-                            .w(px(136.))
-                            .p_2()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .rounded(theme::RADIUS_BUTTON)
-                            .border_1()
-                            .border_color(if selected {
-                                theme::accent()
-                            } else {
-                                theme::control()
-                            })
-                            .when(selected, |s| s.bg(theme::selected()))
-                            .cursor_pointer()
-                            .hover(|s| s.border_color(theme::border_strong()))
-                            .child(
-                                div()
-                                    .flex()
-                                    .h(px(24.))
-                                    .rounded(px(6.))
-                                    .overflow_hidden()
-                                    .children(palette.colors().map(|color| {
-                                        div().flex_1().h_full().bg(theme::swatch(color))
-                                    })),
-                            )
-                            .child(div().font_weight(FontWeight::MEDIUM).child(*name))
-                            .on_click(cx.listener(move |app, _, window, cx| {
-                                app.use_palette(palette, window, cx);
-                                cx.notify();
-                            }))
-                    }),
-            );
+    let custom = app.custom_palette;
+    let presets = theme::PRESETS
+        .iter()
+        .enumerate()
+        .map(|(i, (name, palette))| {
+            let palette = *palette;
+            theme_option(("preset", i), name, palette, !custom && palette == current).on_click(
+                cx.listener(move |app, _, window, cx| {
+                    app.custom_palette = false;
+                    app.use_palette(palette, window, cx);
+                    cx.notify();
+                }),
+            )
+        });
+    let custom_option =
+        theme_option("custom", "Custom", current, custom).on_click(cx.listener(|app, _, _, cx| {
+            app.custom_palette = true;
+            cx.notify();
+        }));
     let colors = theme::Palette::LABELS
         .iter()
         .zip(current.colors())
@@ -906,15 +879,62 @@ fn appearance(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .flex_col()
                 .gap_3()
                 .child(section("Theme"))
-                .child(presets),
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_3()
+                        .children(presets)
+                        .child(custom_option),
+                ),
         )
-        .child(
-            card()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(section("Colors"))
-                .children(colors),
-        )
+        .when(custom, |page| {
+            page.child(
+                card()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(section("Colors"))
+                    .children(colors),
+            )
+        })
         .into_any_element()
+}
+
+fn theme_option(
+    id: impl Into<ElementId>,
+    name: &'static str,
+    palette: theme::Palette,
+    selected: bool,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .w(px(136.))
+        .p_2()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .rounded(theme::RADIUS_BUTTON)
+        .border_1()
+        .border_color(if selected {
+            theme::accent()
+        } else {
+            theme::control()
+        })
+        .when(selected, |s| s.bg(theme::selected()))
+        .cursor_pointer()
+        .hover(|s| s.border_color(theme::border_strong()))
+        .child(
+            div()
+                .flex()
+                .h(px(24.))
+                .rounded(px(6.))
+                .overflow_hidden()
+                .children(
+                    palette
+                        .colors()
+                        .map(|color| div().flex_1().h_full().bg(theme::swatch(color))),
+                ),
+        )
+        .child(div().font_weight(FontWeight::MEDIUM).child(name))
 }

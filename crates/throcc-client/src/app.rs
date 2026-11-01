@@ -236,6 +236,8 @@ pub struct ThroccApp {
     pub server_picture_edit: Option<PictureEdit>,
     /// One hex field per palette colour, in [`theme::Palette::LABELS`] order.
     pub palette_fields: Vec<Entity<InputState>>,
+    /// Whether the Custom theme is picked, which unlocks the colour fields.
+    pub custom_palette: bool,
     /// Pictures by hash, `None` while one decodes in the background or if it can't be shown.
     pub pictures: std::collections::HashMap<Hash, Option<Arc<RenderImage>>>,
     pub joining: bool,
@@ -377,6 +379,7 @@ impl ThroccApp {
             server_status: None,
             server_picture_edit: None,
             palette_fields,
+            custom_palette: !theme::PRESETS.iter().any(|(_, p)| *p == theme::palette()),
             pictures: std::collections::HashMap::new(),
             joining: false,
             join_attempt: 0,

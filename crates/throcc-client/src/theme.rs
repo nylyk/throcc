@@ -74,7 +74,7 @@ impl Palette {
     }
 }
 
-pub const PRESETS: [(&str, Palette); 4] = [
+pub const PRESETS: [(&str, Palette); 7] = [
     (
         "Ink",
         Palette {
@@ -125,6 +125,45 @@ pub const PRESETS: [(&str, Palette); 4] = [
             warning: 0xFFC285,
             good: 0x7FE0C4,
             bad: 0xFF6F6F,
+        },
+    ),
+    (
+        "Tide",
+        Palette {
+            bg: 0x0B1218,
+            panel: 0x111B23,
+            text: 0xE6EEF3,
+            muted: 0x8798A6,
+            accent: 0x5CC8E8,
+            warning: 0xF2B55E,
+            good: 0x5FD9A0,
+            bad: 0xF2727F,
+        },
+    ),
+    (
+        "Sand",
+        Palette {
+            bg: 0xF3EEE4,
+            panel: 0xFBF8F2,
+            text: 0x24201A,
+            muted: 0x756C5F,
+            accent: 0x1E7F86,
+            warning: 0xC07A1F,
+            good: 0x4A8B3A,
+            bad: 0xC8414F,
+        },
+    ),
+    (
+        "Ember",
+        Palette {
+            bg: 0x14100D,
+            panel: 0x1D1814,
+            text: 0xF2ECE6,
+            muted: 0xA0958A,
+            accent: 0xFF9A5C,
+            warning: 0xF5D06B,
+            good: 0x8FD88A,
+            bad: 0xFF6B6B,
         },
     ),
 ];
@@ -572,12 +611,12 @@ mod tests {
     }
 
     #[test]
-    fn only_paper_is_light() {
+    fn only_paper_and_sand_are_light() {
         let light: Vec<&str> = PRESETS
             .iter()
             .filter(|(_, p)| p.is_light())
             .map(|(name, _)| *name)
             .collect();
-        assert_eq!(light, ["Paper"]);
+        assert_eq!(light, ["Paper", "Sand"]);
     }
 }
