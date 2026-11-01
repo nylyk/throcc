@@ -2,9 +2,9 @@ use std::time::Instant;
 
 use gpui::{
     App, AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, ParentElement, Render, StatefulInteractiveElement, Styled,
-    Subscription, WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions, div, point, px,
-    size,
+    MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, StatefulInteractiveElement,
+    Styled, Subscription, WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions, div,
+    point, px, size,
 };
 use gpui_component::Root;
 use throcc_client_core::state::share_label;
@@ -18,12 +18,15 @@ use crate::views::common::{
     player_button, player_title,
 };
 
+const TRAFFIC_LIGHTS_AT: Point<Pixels> = point(px(20.), px(25.));
+
 /// One watched share in a window of its own.
 pub struct PopOut {
     app: WeakEntity<ThroccApp>,
     user: UserId,
     feeds: Feeds,
     controls_until: Instant,
+    traffic_lights_shown: bool,
     focus: FocusHandle,
     _released: Subscription,
 }
@@ -42,7 +45,7 @@ impl PopOut {
                 window_min_size: Some(size(px(320.), px(228.))),
                 ..Default::default()
             },
-            point(px(20.), px(25.)),
+            TRAFFIC_LIGHTS_AT,
             false,
         );
         let opened = cx.open_window(options, |window, cx| {
@@ -52,6 +55,7 @@ impl PopOut {
                 user,
                 feeds: Feeds::default(),
                 controls_until: Instant::now(),
+                traffic_lights_shown: true,
                 focus: cx.focus_handle(),
                 _released: cx.on_release(move |this: &mut Self, cx| {
                     let app = this.app.clone();
@@ -150,6 +154,10 @@ impl Render for PopOut {
                 })),
             );
         let controls = Instant::now() < self.controls_until;
+        if controls != self.traffic_lights_shown {
+            show_traffic_lights(window, controls);
+            self.traffic_lights_shown = controls;
+        }
         moves_window(div().id("popout"))
             .track_focus(&self.focus)
             .size_full()
@@ -179,3 +187,36 @@ impl Render for PopOut {
             }))
     }
 }
+
+#[cfg(target_os = "macos")]
+fn show_traffic_lights(gpui_window: &Window, shown: bool) {
+    use objc2_app_kit::{NSView, NSWindowButton};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = HasWindowHandle::window_handle(gpui_window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    // SAFETY: an AppKit handle's `ns_view` is the window's live content view.
+    let view = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+    let Some(window) = view.window() else {
+        return;
+    };
+    for button in [
+        NSWindowButton::CloseButton,
+        NSWindowButton::MiniaturizeButton,
+        NSWindowButton::ZoomButton,
+    ] {
+        if let Some(button) = window.standardWindowButton(button) {
+            button.setHidden(!shown);
+        }
+    }
+    if shown {
+        gpui_window.set_traffic_light_position(TRAFFIC_LIGHTS_AT);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn show_traffic_lights(_: &Window, _: bool) {}
