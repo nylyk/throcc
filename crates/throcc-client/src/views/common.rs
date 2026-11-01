@@ -137,10 +137,8 @@ pub fn chip(text: impl Into<SharedString>, bg: Hsla, fg: Hsla) -> Div {
         .child(text.into())
 }
 
-pub fn sharing_icon() -> Icon {
-    icon("monitor")
-        .size(px(14.))
-        .text_color(theme::danger_text())
+pub fn sharing_icon(size: Pixels) -> Icon {
+    icon("monitor").size(size).text_color(theme::danger_text())
 }
 
 pub fn caption(text: impl Into<SharedString>) -> Div {

@@ -148,7 +148,7 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
             )
             .children((!people.is_empty()).then(|| caption(people.len().to_string())))
             .child(div().flex_1())
-            .children(sharing.then(sharing_icon))
+            .children(sharing.then(|| sharing_icon(px(16.))))
             .on_click(cx.listener(move |app, _, window, cx| app.join_room(id, window, cx)));
         div()
             .flex()
@@ -448,7 +448,7 @@ fn occupant(
         )
         .children(key_changed.then(|| key_changed_marker(user, cx)))
         .child(div().flex_1())
-        .children(person.sharing.is_some().then(sharing_icon))
+        .children(person.sharing.is_some().then(|| sharing_icon(px(16.))))
         .children(muted_icon(person, px(16.)))
 }
 
@@ -594,11 +594,14 @@ fn room(
         .border_color(theme::control())
         .child(
             Button::new("share")
-                .icon(icon(if sharing {
-                    "screen-share-off"
-                } else {
-                    "monitor-up"
-                }))
+                .child(
+                    icon(if sharing {
+                        "screen-share-off"
+                    } else {
+                        "monitor-up"
+                    })
+                    .size(px(16.)),
+                )
                 .tooltip(if sharing {
                     "Stop sharing"
                 } else {
@@ -612,6 +615,7 @@ fn room(
                 .rounded(theme::RADIUS_CALL_BUTTON)
                 .w(theme::TOUCH)
                 .h(theme::TOUCH)
+                .px_0()
                 .on_click(cx.listener(move |app, _, _, cx| {
                     if sharing {
                         app.command(Command::StopShare);
@@ -623,12 +627,13 @@ fn room(
         )
         .child(
             Button::new("leave")
-                .icon(icon("phone-off"))
+                .child(icon("phone-off").size(px(16.)))
                 .tooltip("Leave the room")
                 .danger()
                 .rounded(theme::RADIUS_CALL_BUTTON)
                 .w(theme::TOUCH)
                 .h(theme::TOUCH)
+                .px_0()
                 .on_click(cx.listener(|app, _, _, _| app.command(Command::Join(None)))),
         );
 
@@ -1070,7 +1075,7 @@ fn person_card(t: &Tile, height: Pixels, compact: bool, cx: &mut Context<ThroccA
             .flex()
             .items_center()
             .gap_2()
-            .child(sharing_icon())
+            .child(sharing_icon(px(14.)))
             .children((!compact).then(|| caption(share_label(&config))))
     });
     div()
