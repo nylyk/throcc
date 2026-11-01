@@ -248,15 +248,15 @@ impl ShareChoice {
     /// nothing visible for screen content.
     pub fn max_kbps(self) -> u32 {
         match (self.resolution, self.fps) {
-            (Resolution::P720, ..=15) => 3_000,
-            (Resolution::P720, ..=30) => 5_000,
-            (Resolution::P720, _) => 8_000,
-            (Resolution::P1080, ..=15) => 5_000,
-            (Resolution::P1080, ..=30) => 10_000,
-            (Resolution::P1080, _) => 15_000,
-            (Resolution::P1440, ..=15) => 8_000,
-            (Resolution::P1440, ..=30) => 15_000,
-            (Resolution::P1440, _) => 20_000,
+            (Resolution::P720, ..=15) => 2_000,
+            (Resolution::P720, ..=30) => 4_000,
+            (Resolution::P720, _) => 6_000,
+            (Resolution::P1080, ..=15) => 4_000,
+            (Resolution::P1080, ..=30) => 6_000,
+            (Resolution::P1080, _) => 10_000,
+            (Resolution::P1440, ..=15) => 5_000,
+            (Resolution::P1440, ..=30) => 10_000,
+            (Resolution::P1440, _) => 15_000,
         }
     }
 
@@ -334,12 +334,12 @@ mod tests {
         let top = ShareChoice {
             resolution: Resolution::P1440,
             fps: 60,
-            kbps: 20_000,
+            kbps: 15_000,
         };
-        assert_eq!(top.bitrates().last(), Some(&20_000));
+        assert_eq!(top.bitrates().last(), Some(&15_000));
         let lower = top.with_resolution(Resolution::P720).with_fps(15);
-        assert_eq!(lower.kbps, 3_000);
-        assert_eq!(lower.bitrates(), [1_000, 1_500, 2_000, 3_000]);
+        assert_eq!(lower.kbps, 2_000);
+        assert_eq!(lower.bitrates(), [1_000, 1_500, 2_000]);
         assert!(
             ShareChoice::default()
                 .bitrates()
