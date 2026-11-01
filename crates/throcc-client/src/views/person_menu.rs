@@ -7,7 +7,7 @@ use throcc_client_core::client::Command;
 use throcc_client_core::state::Sound;
 use throcc_proto::ids::UserId;
 
-use super::common::{icon, mono, section};
+use super::common::{gain_to_loudness, icon, mono, section};
 use super::main::toggle_icon;
 use crate::app::{PlaybackControl, ThroccApp};
 use crate::theme;
@@ -94,7 +94,7 @@ fn playback(
     cx: &mut Context<ThroccApp>,
 ) -> Div {
     let muted = control.playback.muted;
-    let percent = control.playback.volume * 100.;
+    let percent = gain_to_loudness(control.playback.volume) * 100.;
     let toggle_id = match sound {
         Sound::Voice => "person-menu-voice-mute",
         Sound::Share => "person-menu-share-mute",

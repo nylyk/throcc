@@ -14,6 +14,27 @@ pub fn icon(name: &'static str) -> Icon {
     Icon::empty().path(format!("icons/{name}.svg"))
 }
 
+/// The gain for a volume slider at `loudness`, from 0 to 2 where 1 plays the sound as it
+/// arrives: cubic up to 1, as loudness is heard, then rising evenly in decibels to +6 dB.
+pub fn loudness_to_gain(loudness: f32) -> f32 {
+    let loudness = loudness.clamp(0.0, 2.0);
+    if loudness <= 1.0 {
+        loudness.powi(3)
+    } else {
+        2f32.powf(loudness - 1.0)
+    }
+}
+
+/// Where a volume slider sits for `gain`, the inverse of [`loudness_to_gain`].
+pub fn gain_to_loudness(gain: f32) -> f32 {
+    let gain = gain.clamp(0.0, 2.0);
+    if gain <= 1.0 {
+        gain.cbrt()
+    } else {
+        1.0 + gain.log2()
+    }
+}
+
 /// A bitrate in kbps, in Mbps from 1000 up.
 pub fn rate(kbps: u32) -> String {
     if kbps >= 1000 {
@@ -304,4 +325,29 @@ pub fn player_button(id: impl Into<ElementId>, icon_name: &'static str) -> State
                 .size(px(22.))
                 .text_color(theme::player_text()),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_middle_of_a_volume_slider_plays_as_it_arrives() {
+        assert_eq!(loudness_to_gain(1.0), 1.0);
+        assert_eq!(loudness_to_gain(0.0), 0.0);
+        assert_eq!(loudness_to_gain(2.0), 2.0);
+        assert_eq!(loudness_to_gain(0.5), 0.125);
+    }
+
+    #[test]
+    fn gain_and_loudness_round_trip() {
+        for step in 0..=200 {
+            let loudness = step as f32 / 100.0;
+            let back = gain_to_loudness(loudness_to_gain(loudness));
+            assert!(
+                (back - loudness).abs() < 1e-4,
+                "{loudness} came back as {back}"
+            );
+        }
+    }
 }

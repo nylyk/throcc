@@ -22,6 +22,7 @@ use throcc_proto::messages::User;
 
 use crate::theme;
 use crate::views;
+use crate::views::common::{gain_to_loudness, loudness_to_gain};
 
 actions!(throcc, [ToggleMic, ToggleDeafen, CloseDialog]);
 
@@ -607,11 +608,11 @@ impl ThroccApp {
                 .min(0.)
                 .max(200.)
                 .step(1.)
-                .default_value(playback.volume * 100.)
+                .default_value(gain_to_loudness(playback.volume) * 100.)
         });
         let changes = cx.subscribe(&slider, move |app, _, event: &SliderEvent, cx| {
             let (SliderEvent::Change(value) | SliderEvent::Release(value)) = event;
-            let volume = value.start() / 100.;
+            let volume = loudness_to_gain(value.start() / 100.);
             app.change_playback(sound, |p| p.volume = volume, cx);
         });
         PlaybackControl {

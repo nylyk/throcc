@@ -18,8 +18,8 @@ use throcc_client_core::media::audio::{
 };
 
 use super::common::{
-    avatar, caption, card, chip, ghost_icon, key_cap, mono, moves_window, primary, secondary,
-    section,
+    avatar, caption, card, chip, gain_to_loudness, ghost_icon, key_cap, loudness_to_gain, mono,
+    moves_window, primary, secondary, section,
 };
 use crate::app::{PictureEdit, PictureFor, ProfileStatus, Screen, SettingsPage, ThroccApp};
 use crate::theme;
@@ -399,8 +399,8 @@ impl AudioControls {
                     .default_value(value)
             })
         };
-        let input_volume = slider(0., 200., voice.input_volume * 100.);
-        let output_volume = slider(0., 200., voice.output_volume * 100.);
+        let input_volume = slider(0., 200., gain_to_loudness(voice.input_volume) * 100.);
+        let output_volume = slider(0., 200., gain_to_loudness(voice.output_volume) * 100.);
         let threshold = slider(METER_FLOOR_DBFS, 0., gate_dbfs(voice.transmit));
         let on_device = |is_input: bool| {
             move |app: &mut ThroccApp,
@@ -436,11 +436,11 @@ impl AudioControls {
             cx.subscribe(&output, on_device(false)),
             cx.subscribe(
                 &input_volume,
-                on_slide(|voice, percent| voice.input_volume = percent / 100.),
+                on_slide(|voice, percent| voice.input_volume = loudness_to_gain(percent / 100.)),
             ),
             cx.subscribe(
                 &output_volume,
-                on_slide(|voice, percent| voice.output_volume = percent / 100.),
+                on_slide(|voice, percent| voice.output_volume = loudness_to_gain(percent / 100.)),
             ),
             cx.subscribe(
                 &threshold,
