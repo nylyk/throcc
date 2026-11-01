@@ -24,8 +24,8 @@ pub use crate::session::ClientOptions;
 use crate::session::{Session, Shared};
 
 use crate::state::{
-    ConnectionStatus, CurrentRoom, Health, KeyWarning, Person, RoomView, SentTrack, ServerView,
-    State, TrackHealth,
+    ConnectionStatus, CurrentRoom, Health, KeyWarning, Person, Playback, RoomView, SentTrack,
+    ServerView, Sound, State, TrackHealth,
 };
 
 const EVENTS: usize = 256;
@@ -41,7 +41,7 @@ pub enum Command {
     StopShare,
     Watch(UserId),
     Unwatch(UserId),
-    SetVolume(UserId, f32),
+    SetPlayback(UserId, Sound, Playback),
     /// Changes our name and picture (at most 64 KiB, `Some(None)` clears it) in one save.
     /// A `None` field keeps what we have.
     SetProfile {
@@ -345,9 +345,9 @@ impl ClientApi for MockClient {
                     c.watching.retain(|u| *u != user);
                 }
             }),
-            Command::SetVolume(user, volume) => self.update(|s| {
+            Command::SetPlayback(user, sound, playback) => self.update(|s| {
                 if let Some(p) = s.people.get_mut(&user) {
-                    p.volume = volume;
+                    *p.playback_mut(sound) = playback;
                 }
             }),
             Command::SetProfile { name, picture } => {
@@ -481,7 +481,8 @@ fn person(name: &str, room: Option<u64>) -> Person {
         deafened: false,
         sharing: None,
         speaking: false,
-        volume: 1.0,
+        voice: Playback::default(),
+        share_audio: Playback::default(),
         verified: false,
     }
 }

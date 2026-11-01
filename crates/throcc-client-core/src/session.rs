@@ -29,8 +29,8 @@ use crate::media::video::{Picture, PreviewDemand};
 use crate::media::voice::{VoiceCommand, VoiceEngine};
 use crate::profile::Profile;
 use crate::state::{
-    ConnectionStatus, CurrentRoom, Health, KeyWarning, Person, RoomView, SentTrack, ServerView,
-    State, TrackHealth, share_detail,
+    ConnectionStatus, CurrentRoom, Health, KeyWarning, Person, Playback, RoomView, SentTrack,
+    ServerView, Sound, State, TrackHealth, share_detail,
 };
 
 const LEVELS_EVERY: Duration = Duration::from_millis(100);
@@ -569,17 +569,11 @@ impl Session {
                     locked: r.locked,
                 })
                 .collect();
-            let volumes: HashMap<UserId, f32> =
-                s.people.iter().map(|(u, p)| (*u, p.volume)).collect();
+            let before = std::mem::take(&mut s.people);
             s.people = welcome
                 .presence
                 .iter()
-                .map(|p| {
-                    (
-                        p.user,
-                        person(p, volumes.get(&p.user).copied().unwrap_or(1.0)),
-                    )
-                })
+                .map(|p| (p.user, person(p, before.get(&p.user))))
                 .collect();
             s.current = None;
         });
@@ -735,11 +729,11 @@ impl Session {
                 self.watching.retain(|u| *u != user);
                 self.push_watching().await;
             }
-            Command::SetVolume(user, volume) => {
-                self.voice(VoiceCommand::Volume(user, volume));
+            Command::SetPlayback(user, sound, playback) => {
+                self.voice(gain_command(user, sound, playback));
                 self.shared.update(|s| {
                     if let Some(p) = s.people.get_mut(&user) {
-                        p.volume = volume;
+                        *p.playback_mut(sound) = playback;
                     }
                 });
             }
@@ -825,7 +819,9 @@ impl Session {
                     }
                     self.sync_watching();
                     for (user, person) in &self.shared.state().people {
-                        self.voice(VoiceCommand::Volume(*user, person.volume));
+                        for sound in [Sound::Voice, Sound::Share] {
+                            self.voice(gain_command(*user, sound, person.playback(sound)));
+                        }
                     }
                 }
             }
@@ -1289,9 +1285,9 @@ impl Session {
                         Some(old) => Person {
                             verified: old.verified,
                             speaking: old.speaking,
-                            ..person(&p, old.volume)
+                            ..person(&p, Some(old))
                         },
-                        None => person(&p, 1.0),
+                        None => person(&p, None),
                     };
                     s.people.insert(p.user, updated);
                 });
@@ -1488,7 +1484,8 @@ impl Session {
     }
 }
 
-fn person(p: &Presence, volume: f32) -> Person {
+/// `p` as a person, playing as loud as `before` did.
+fn person(p: &Presence, before: Option<&Person>) -> Person {
     Person {
         name: p.name.clone(),
         avatar: p.avatar,
@@ -1497,7 +1494,8 @@ fn person(p: &Presence, volume: f32) -> Person {
         deafened: p.deafened,
         sharing: None,
         speaking: false,
-        volume,
+        voice: before.map_or_else(Playback::default, |b| b.voice),
+        share_audio: before.map_or_else(Playback::default, |b| b.share_audio),
         verified: false,
     }
 }
@@ -1543,11 +1541,18 @@ fn set_deafened(media: &mut MediaState, mic_before: &mut bool, deafened: bool) {
     media.deafened = deafened;
 }
 
+fn gain_command(user: UserId, sound: Sound, playback: Playback) -> VoiceCommand {
+    match sound {
+        Sound::Voice => VoiceCommand::Volume(user, playback.gain()),
+        Sound::Share => VoiceCommand::ShareVolume(user, playback.gain()),
+    }
+}
+
 /// Whether `newer` sets the same thing as `older`, so only `newer` needs replaying.
 fn supersedes(newer: &Command, older: &Command) -> bool {
     use std::mem::discriminant;
     match (newer, older) {
-        (Command::SetVolume(a, _), Command::SetVolume(b, _)) => a == b,
+        (Command::SetPlayback(a, sa, _), Command::SetPlayback(b, sb, _)) => a == b && sa == sb,
         (
             Command::SetMic(_)
             | Command::SetDeafened(_)
@@ -1577,9 +1582,25 @@ mod tests {
             &Command::SetMic(false),
             &Command::SetDeafened(true)
         ));
-        let volume = |user, v| Command::SetVolume(UserId(user), v);
-        assert!(supersedes(&volume(1, 0.5), &volume(1, 1.0)));
-        assert!(!supersedes(&volume(1, 0.5), &volume(2, 1.0)));
+        let volume = |user, sound, v| {
+            let playback = Playback {
+                volume: v,
+                muted: false,
+            };
+            Command::SetPlayback(UserId(user), sound, playback)
+        };
+        assert!(supersedes(
+            &volume(1, Sound::Voice, 0.5),
+            &volume(1, Sound::Voice, 1.0)
+        ));
+        assert!(!supersedes(
+            &volume(1, Sound::Voice, 0.5),
+            &volume(2, Sound::Voice, 1.0)
+        ));
+        assert!(!supersedes(
+            &volume(1, Sound::Share, 0.5),
+            &volume(1, Sound::Voice, 1.0)
+        ));
         assert!(!supersedes(
             &Command::Watch(UserId(1)),
             &Command::Watch(UserId(2))

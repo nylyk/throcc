@@ -31,6 +31,8 @@ pub enum VoiceCommand {
     PushToTalk(bool),
     Deafened(bool),
     Volume(UserId, f32),
+    /// Sets the gain of `user`'s share audio, kept for shares they start later.
+    ShareVolume(UserId, f32),
     Listen {
         user: UserId,
         units: mpsc::Receiver<Received>,
@@ -117,6 +119,7 @@ struct ShareAudio {
     units: mpsc::Receiver<Received>,
     jitter: JitterBuffer,
     playout: Arc<Playout>,
+    volume: f32,
 }
 
 struct Worker {
@@ -125,6 +128,7 @@ struct Worker {
     mixer: Mixer,
     remotes: HashMap<UserId, mpsc::Receiver<Received>>,
     shares: HashMap<UserId, ShareAudio>,
+    share_volumes: HashMap<UserId, f32>,
     engine: Arc<MediaEngine>,
     levels: Arc<Mutex<Levels>>,
     /// Left and right resamplers to the output device's rate.
@@ -169,6 +173,7 @@ impl Worker {
             mixer: Mixer::default(),
             remotes: HashMap::new(),
             shares: HashMap::new(),
+            share_volumes: HashMap::new(),
             engine,
             levels,
             mic_track: None,
@@ -236,6 +241,13 @@ impl Worker {
             VoiceCommand::PushToTalk(down) => self.push_to_talk = down,
             VoiceCommand::Deafened(deafened) => self.deafened = deafened,
             VoiceCommand::Volume(user, volume) => self.mixer.set_volume(user, volume),
+            VoiceCommand::ShareVolume(user, volume) => {
+                let volume = volume.clamp(0.0, 2.0);
+                self.share_volumes.insert(user, volume);
+                if let Some(share) = self.shares.get_mut(&user) {
+                    share.volume = volume;
+                }
+            }
             VoiceCommand::Listen { user, units } => {
                 self.remotes.insert(user, units);
             }
@@ -255,6 +267,7 @@ impl Worker {
                             units,
                             jitter,
                             playout,
+                            volume: self.share_volumes.get(&user).copied().unwrap_or(1.0),
                         },
                     );
                 }
@@ -365,7 +378,7 @@ impl Worker {
         for share in self.shares.values_mut() {
             share.jitter.pull(&mut pull);
             for (o, s) in out.iter_mut().zip(&pull) {
-                *o += s;
+                *o += s * share.volume;
             }
             let heard = share
                 .jitter

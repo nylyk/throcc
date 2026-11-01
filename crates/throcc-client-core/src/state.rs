@@ -87,8 +87,56 @@ pub struct Person {
     pub deafened: bool,
     pub sharing: Option<ShareConfig>,
     pub speaking: bool,
-    pub volume: f32,
+    pub voice: Playback,
+    pub share_audio: Playback,
     pub verified: bool,
+}
+
+impl Person {
+    pub fn playback(&self, sound: Sound) -> Playback {
+        match sound {
+            Sound::Voice => self.voice,
+            Sound::Share => self.share_audio,
+        }
+    }
+
+    pub fn playback_mut(&mut self, sound: Sound) -> &mut Playback {
+        match sound {
+            Sound::Voice => &mut self.voice,
+            Sound::Share => &mut self.share_audio,
+        }
+    }
+}
+
+/// Which of someone's sounds a [`Playback`] is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sound {
+    Voice,
+    Share,
+}
+
+/// How loud one of someone's sounds plays on this machine. It is never sent.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Playback {
+    /// From 0 to 2, where 1 plays the sound as it arrives.
+    pub volume: f32,
+    pub muted: bool,
+}
+
+impl Default for Playback {
+    fn default() -> Self {
+        Self {
+            volume: 1.0,
+            muted: false,
+        }
+    }
+}
+
+impl Playback {
+    /// What the mix multiplies the sound by.
+    pub fn gain(self) -> f32 {
+        if self.muted { 0.0 } else { self.volume }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
