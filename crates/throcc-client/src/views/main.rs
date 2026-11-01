@@ -398,14 +398,16 @@ pub(super) fn toggle_icon(
     tooltip: &'static str,
 ) -> Button {
     let shown = if active { active_icon } else { icon_name };
-    let shown = icon(shown);
+    let shown = icon(shown).size(px(16.));
     Button::new(id)
-        .icon(if active {
+        .child(if active {
             shown.text_color(theme::danger_text())
         } else {
             shown
         })
         .ghost()
+        .size_8()
+        .px_0()
         .rounded(theme::RADIUS_ROW)
         .tooltip(tooltip)
 }
