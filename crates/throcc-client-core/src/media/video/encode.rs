@@ -1018,8 +1018,9 @@ mod round_trip {
         Some(decoder.is_hardware())
     }
 
-    #[test]
-    fn every_encoder_this_machine_opens_keeps_to_its_bitrate() {
+    /// The rate `candidate` sends at for 6 Mbps of 1080p60. `noisy` makes every frame
+    /// expensive, and `idr_every_second` asks for a keyframe each second.
+    fn sent_kbps(candidate: &Candidate, noisy: bool, idr_every_second: bool) -> Option<u32> {
         let config = EncoderConfig {
             width: 1920,
             height: 1080,
@@ -1027,33 +1028,46 @@ mod round_trip {
             kbps: 6000,
         };
         let seconds = 3;
-        for candidate in LADDER {
-            let Some(mut encoder) = Encoder::open_with(candidate, config) else {
-                continue;
-            };
-            let mut bytes = 0;
-            let mut noise = 0x2545_f491_4f6c_dd1du64;
-            for n in 0..config.fps * (seconds + 1) {
-                let mut input = VideoFrame::test_pattern(1920, 1080, n as u16, n * 1500);
+        let mut encoder = Encoder::open_with(candidate, config)?;
+        let mut bytes = 0;
+        let mut noise = 0x2545_f491_4f6c_dd1du64;
+        for n in 0..config.fps * (seconds + 1) {
+            let mut input = VideoFrame::test_pattern(1920, 1080, n as u16, n * 1500);
+            if noisy {
                 for sample in &mut input.y {
                     noise ^= noise << 13;
                     noise ^= noise >> 7;
                     noise ^= noise << 17;
                     *sample = sample.wrapping_add(noise as u8 & 0x3f);
                 }
-                let units = encoder.encode(&input).unwrap();
-                if n >= config.fps {
-                    bytes += units.iter().map(|u| u.data.len()).sum::<usize>();
-                }
             }
-            let kbps = bytes as u32 * 8 / 1000 / seconds;
-            eprintln!("{:?}: {kbps} kbps for {} set", candidate.name, config.kbps);
-            assert!(
-                kbps <= config.kbps * 5 / 4,
-                "{:?} sends {kbps} kbps for {} set",
-                candidate.name,
-                config.kbps
-            );
+            if idr_every_second && n % config.fps == config.fps / 2 {
+                encoder.recover(Recovery::Idr);
+            }
+            let units = encoder.encode(&input).unwrap();
+            if n >= config.fps {
+                bytes += units.iter().map(|u| u.data.len()).sum::<usize>();
+            }
+        }
+        Some(bytes as u32 * 8 / 1000 / seconds)
+    }
+
+    #[test]
+    fn every_encoder_this_machine_opens_keeps_to_its_bitrate() {
+        for candidate in LADDER {
+            for (what, noisy, idr_every_second) in
+                [("noise", true, false), ("a keyframe a second", false, true)]
+            {
+                let Some(kbps) = sent_kbps(candidate, noisy, idr_every_second) else {
+                    continue;
+                };
+                eprintln!("{:?} with {what}: {kbps} kbps for 6000 set", candidate.name);
+                assert!(
+                    kbps <= 7500,
+                    "{:?} with {what} sends {kbps} kbps for 6000 set",
+                    candidate.name
+                );
+            }
         }
     }
 
