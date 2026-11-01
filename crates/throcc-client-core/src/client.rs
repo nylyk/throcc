@@ -15,7 +15,6 @@ use tokio::sync::{broadcast, mpsc};
 use crate::account::{self, SignInError};
 use crate::call::Call;
 use crate::contacts::Contacts;
-use crate::cue_settings::CueSettings;
 use crate::keystore::Keystore;
 use crate::lock;
 use crate::media::audio::VoiceSettings;
@@ -85,8 +84,7 @@ pub enum Command {
     /// Plays your processed mic back to you.
     MicTest(bool),
     PushToTalk(bool),
-    Cues(CueSettings),
-    /// Plays a cue as its category is set, to hear the setting.
+    /// Plays a cue at the cue volume, to hear the setting.
     PlayCue(Cue),
     /// Ends our membership of this server and forgets it, then disconnects.
     LeaveServer,
@@ -450,7 +448,6 @@ impl ClientApi for MockClient {
             Command::Voice(_)
             | Command::Devices { .. }
             | Command::MicTest(_)
-            | Command::Cues(_)
             | Command::PlayCue(_) => {}
             Command::LeaveServer => {
                 self.update(|s| s.connection = ConnectionStatus::Disconnected);

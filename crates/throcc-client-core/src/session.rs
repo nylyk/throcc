@@ -19,7 +19,6 @@ use crate::account::{self, SignInError};
 use crate::call::{Call, CallEvent};
 use crate::client::{Command, Event};
 use crate::control::LoginError;
-use crate::cue_settings::CueSettings;
 use crate::keys::KeyNotice;
 use crate::keystore::Keystore;
 use crate::lock;
@@ -50,7 +49,6 @@ const SHARE_AUDIO_DETAIL: &str = "Opus music, stereo";
 #[derive(Clone, Debug, Default)]
 pub struct ClientOptions {
     pub voice: VoiceSettings,
-    pub cues: CueSettings,
     pub input_device: Option<String>,
     pub output_device: Option<String>,
     /// Opens audio devices. Off for headless tests.
@@ -391,7 +389,7 @@ impl Session {
     }
 
     fn cue(&self, cue: Cue) {
-        let gain = self.options.cues.get(cue.category()).gain();
+        let gain = self.options.voice.cue_volume;
         if gain > 0.0 {
             self.voice(VoiceCommand::Cue(cue, gain));
         }
@@ -717,6 +715,12 @@ impl Session {
                 );
             }
         }
+        let share_change = current.iter().find_map(|(user, peer)| {
+            share_cue(self.peers.get(user)?.share.is_some(), peer.share.is_some())
+        });
+        if let Some(cue) = share_change {
+            self.cue(cue);
+        }
         self.peers = current;
         self.show_shares();
         changed
@@ -795,6 +799,9 @@ impl Session {
             }
             Command::StartShare(config) => self.start_share(config).await,
             Command::StopShare => {
+                if self.media.share.is_some() {
+                    self.cue(Cue::ShareStop);
+                }
                 self.stop_share();
                 self.media.share = None;
                 self.push_media().await;
@@ -912,7 +919,6 @@ impl Session {
                 self.voice(VoiceCommand::Loopback(on));
             }
             Command::PushToTalk(down) => self.voice(VoiceCommand::PushToTalk(down)),
-            Command::Cues(settings) => self.options.cues = settings,
             Command::PlayCue(cue) => self.cue(cue),
             Command::LeaveServer | Command::Disconnect => {}
         }
@@ -1202,6 +1208,7 @@ impl Session {
                 *lock(&self.shared.preview) = Some((self.call.me(), sender.preview.clone()));
                 info!(encoder = sender.encoder, "sharing");
                 self.sharing = Some(sender);
+                self.cue(Cue::ShareStart);
                 self.push_media().await;
             }
             Ok(Err(e)) => self.shared.notice(format!("Couldn't start sharing: {e}")),
@@ -1232,6 +1239,7 @@ impl Session {
             .as_ref()
             .is_some_and(crate::media::share::ShareSender::ended)
         {
+            self.cue(Cue::ShareStop);
             self.stop_share();
             self.media.share = None;
             self.push_media().await;
@@ -1655,6 +1663,14 @@ fn percent(part: u64, whole: u64) -> f32 {
 }
 
 /// The cue for turning the mic `on`, which also undeafens, if it changes anything.
+fn share_cue(was_sharing: bool, sharing: bool) -> Option<Cue> {
+    match (was_sharing, sharing) {
+        (false, true) => Some(Cue::ShareStart),
+        (true, false) => Some(Cue::ShareStop),
+        _ => None,
+    }
+}
+
 fn mic_cue(media: &MediaState, on: bool) -> Option<Cue> {
     match on {
         _ if on == media.mic => None,
@@ -1696,7 +1712,6 @@ fn supersedes(newer: &Command, older: &Command) -> bool {
             | Command::PushToTalk(_)
             | Command::MicTest(_)
             | Command::Voice(_)
-            | Command::Cues(_)
             | Command::Devices { .. },
             _,
         ) => discriminant(newer) == discriminant(older),

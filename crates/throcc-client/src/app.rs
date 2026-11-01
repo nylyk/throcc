@@ -12,7 +12,7 @@ use gpui_component::slider::{SliderEvent, SliderState};
 use gpui_component::{Root, WindowExt};
 use throcc_client_core::account::SignInError;
 use throcc_client_core::client::{Client, ClientApi, ClientOptions, Command, Event, MockClient};
-use throcc_client_core::cue_settings::{CueCategory, CueSettings};
+use throcc_client_core::cue_volume;
 use throcc_client_core::keystore::{self, Keystore};
 use throcc_client_core::media::audio::{Transmit, VoiceSettings};
 use throcc_client_core::media::cues::Cue;
@@ -53,7 +53,6 @@ pub fn bind_keys(cx: &mut App) {
 pub enum SettingsPage {
     Profile,
     Audio,
-    Sounds,
     Appearance,
     Servers,
 }
@@ -212,12 +211,12 @@ fn known_servers() -> Vec<(String, Fingerprint)> {
         .unwrap_or_default()
 }
 
-fn saved_cues() -> CueSettings {
+fn saved_cue_volume() -> f32 {
     keystore::default_dir()
-        .and_then(|dir| CueSettings::load(&dir))
+        .and_then(|dir| cue_volume::load(&dir))
         .unwrap_or_else(|e| {
-            tracing::warn!("no saved sound settings: {e:#}");
-            CueSettings::default()
+            tracing::warn!("no saved cue volume: {e:#}");
+            1.0
         })
 }
 
@@ -255,8 +254,6 @@ pub struct ThroccApp {
     pub output_device: Option<String>,
     pub mic_test: bool,
     pub audio: views::settings::AudioControls,
-    pub cues: CueSettings,
-    pub cue_controls: views::settings::CueControls,
     push_to_talk: Option<(crate::hotkey::PushToTalkKey, Task<()>)>,
     pub feeds: crate::video::Feeds,
     /// What the share dialog asks for, kept between shares.
@@ -361,10 +358,11 @@ impl ThroccApp {
         let share_choice = ShareChoice::default();
         let (bitrate, bitrate_changes) = Self::bitrate_slider(share_choice, cx);
         let (inputs, outputs) = devices::list();
-        let voice = VoiceSettings::default();
+        let voice = VoiceSettings {
+            cue_volume: saved_cue_volume(),
+            ..VoiceSettings::default()
+        };
         let audio = views::settings::AudioControls::new(&voice, &inputs, &outputs, window, cx);
-        let cues = saved_cues();
-        let cue_controls = views::settings::CueControls::new(&cues, cx);
         let mut app = Self {
             client: None,
             state: Arc::new(State::default()),
@@ -395,8 +393,6 @@ impl ThroccApp {
             output_device: None,
             mic_test: false,
             audio,
-            cues,
-            cue_controls,
             push_to_talk: None,
             feeds: crate::video::Feeds::default(),
             share_choice,
@@ -1169,7 +1165,6 @@ impl ThroccApp {
         self.join_error = None;
         let options = ClientOptions {
             voice: self.voice,
-            cues: self.cues,
             input_device: self.input_device.clone(),
             output_device: self.output_device.clone(),
             audio: true,
@@ -1359,7 +1354,6 @@ impl ThroccApp {
             "verify" => self.dialog = Some(Dialog::Verify(UserId(2))),
             "keychange" => self.dialog = Some(Dialog::Verify(UserId(3))),
             "settings" => self.screen = Screen::Settings(SettingsPage::Audio),
-            "sounds" => self.screen = Screen::Settings(SettingsPage::Sounds),
             "appearance" => self.screen = Screen::Settings(SettingsPage::Appearance),
             "newroom" => self.dialog = Some(Dialog::NewRoom),
             "editroom" => self.dialog = Some(Dialog::EditRoom(room)),
@@ -1446,31 +1440,14 @@ impl ThroccApp {
             && self.root_focus.is_focused(window)
     }
 
-    /// Changes how one category of cues plays, keeping it on this computer once `done`, and
-    /// plays one of its cues then.
-    pub fn change_cues(
-        &mut self,
-        category: CueCategory,
-        change: impl FnOnce(&mut Playback),
-        done: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let mut playback = self.cues.get(category);
-        change(&mut playback);
-        self.cues.set(category, playback);
-        self.command(Command::Cues(self.cues));
-        if done {
-            let saved = keystore::default_dir().and_then(|dir| self.cues.save(&dir));
-            if let Err(e) = saved {
-                tracing::warn!("could not save the sound settings: {e:#}");
-            }
-            self.command(Command::PlayCue(match category {
-                CueCategory::People => Cue::Join,
-                CueCategory::Microphone => Cue::Unmute,
-                CueCategory::Connection => Cue::ConnectionLost,
-            }));
+    /// Keeps the cue volume on this computer and plays a cue at it.
+    pub fn save_cue_volume(&mut self) {
+        let saved =
+            keystore::default_dir().and_then(|dir| cue_volume::save(&dir, self.voice.cue_volume));
+        if let Err(e) = saved {
+            tracing::warn!("could not save the cue volume: {e:#}");
         }
-        cx.notify();
+        self.command(Command::PlayCue(Cue::Join));
     }
 
     pub fn stop_mic_test(&mut self) {

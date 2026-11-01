@@ -38,6 +38,8 @@ pub struct VoiceSettings {
     pub input_volume: f32,
     /// Gain on everything played, 0 to 2.
     pub output_volume: f32,
+    /// Gain on cues before the output volume, 0 to 2.
+    pub cue_volume: f32,
 }
 
 impl Default for VoiceSettings {
@@ -52,6 +54,7 @@ impl Default for VoiceSettings {
             kbps: 64,
             input_volume: 1.0,
             output_volume: 1.0,
+            cue_volume: 1.0,
         }
     }
 }
