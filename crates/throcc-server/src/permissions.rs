@@ -24,6 +24,11 @@ pub fn can_set_role(actor: Role, target: Role, new: Role) -> bool {
     actor == Role::Admin && target < actor && new < actor
 }
 
+/// Managers and admins move users out of rooms, but only users of strictly lower rank.
+pub fn can_kick_from_room(actor: Role, target: Role) -> bool {
+    actor >= Role::Manager && target < actor
+}
+
 /// Only admins remove users, and only users of strictly lower rank.
 pub fn can_remove(actor: Role, target: Role) -> bool {
     actor == Role::Admin && target < actor
@@ -33,6 +38,16 @@ pub fn can_remove(actor: Role, target: Role) -> bool {
 mod tests {
     use super::*;
     use Role::*;
+
+    #[test]
+    fn kicks_go_down_the_ranks_only() {
+        assert!(can_kick_from_room(Manager, User));
+        assert!(can_kick_from_room(Admin, Manager));
+        assert!(!can_kick_from_room(User, User));
+        assert!(!can_kick_from_room(Manager, Manager));
+        assert!(!can_kick_from_room(Manager, Admin));
+        assert!(!can_kick_from_room(Admin, Admin));
+    }
 
     #[test]
     fn ranks_are_strict() {

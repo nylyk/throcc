@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
 
-pub const PROTOCOL: u16 = 4;
+pub const PROTOCOL: u16 = 5;
 pub const MAX_AVATAR_BYTES: usize = 64 * 1024;
 pub const MAX_NAME_CHARS: usize = 32;
 pub const MAX_PASSWORD_CHARS: usize = 128;
@@ -150,6 +150,11 @@ pub enum Request {
     },
     SetServerName(Option<String>),
     SetServerAvatar(Option<Hash>),
+    /// Moves `user` from `room` to the lobby. Managers and admins, on lower ranks only.
+    KickFromRoom {
+        user: UserId,
+        room: RoomId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,6 +224,11 @@ pub enum Event {
         reason: String,
     },
     ServerProfileChanged(ServerProfile),
+    /// Tells the kicked user that `by` moved them out of `room`.
+    KickedFromRoom {
+        by: UserId,
+        room: RoomId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,6 +311,7 @@ pub struct Presence {
     pub mic: bool,
     pub deafened: bool,
     pub sharing: bool,
+    pub role: Role,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

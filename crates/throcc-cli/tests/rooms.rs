@@ -676,3 +676,47 @@ async fn a_member_who_stops_reading_pictures_stops_being_read() {
     assert_eq!(pictures, FETCHES);
     assert_eq!(invites(), 1);
 }
+
+#[tokio::test]
+async fn managers_kick_lower_ranks_out_of_rooms() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let general = create_room(&mut alice, "General").await;
+    let bob = invited(&server, &alice).await;
+    let mut carol = invited(&server, &alice).await;
+    let (alice_id, bob_id, carol_id) = (
+        alice.link.welcome.me,
+        bob.link.welcome.me,
+        carol.link.welcome.me,
+    );
+    let kick = |user| Request::KickFromRoom {
+        user,
+        room: general,
+    };
+    let promote = Request::SetRole {
+        user: bob_id,
+        role: Role::Manager,
+    };
+    assert_eq!(alice.request(promote).await, Response::Ok);
+    join(&alice, Some(general)).await;
+    join(&bob, Some(general)).await;
+    join(&carol, Some(general)).await;
+
+    assert_error(&carol.request(kick(bob_id)).await, ErrorCode::Forbidden);
+    assert_error(&bob.request(kick(alice_id)).await, ErrorCode::Forbidden);
+    assert_eq!(bob.request(kick(carol_id)).await, Response::Ok);
+    let by = carol
+        .event(|e| match e {
+            Event::KickedFromRoom { by, room } => Some((*by, *room)),
+            _ => None,
+        })
+        .await;
+    assert_eq!(by, (bob_id, general));
+    assert_error(&bob.request(kick(carol_id)).await, ErrorCode::NotFound);
+    assert_eq!(join(&carol, Some(general)).await.room, Some(general));
+    let elsewhere = Request::KickFromRoom {
+        user: carol_id,
+        room: RoomId(999),
+    };
+    assert_error(&bob.request(elsewhere).await, ErrorCode::NotFound);
+}

@@ -285,6 +285,7 @@ impl Hub {
             Request::PublishKey { epoch, wrapped } => self.publish_key(user, epoch, wrapped),
             Request::SetServerName(name) => self.set_server_name(user, name),
             Request::SetServerAvatar(avatar) => self.set_server_avatar(user, avatar),
+            Request::KickFromRoom { user: target, room } => self.kick_from_room(user, target, room),
         };
         outcome.unwrap_or_else(|Refusal(code, message)| Response::Err { code, message })
     }
@@ -861,11 +862,29 @@ impl Hub {
         if let Some(session) = self.sessions.get_mut(&target) {
             session.row.role = role;
         }
+        if let Some(p) = self.sessions.get(&target).and_then(presence) {
+            self.emit_all(Event::PresenceChanged(p));
+        }
         let event = Event::RoleChanged { user: target, role };
         self.emit_admins(event.clone());
         if role != Role::Admin {
             self.emit_to(target, event);
         }
+        Ok(Response::Ok)
+    }
+
+    fn kick_from_room(&mut self, user: UserId, target: UserId, room: RoomId) -> Outcome {
+        let actor = self.role(user)?;
+        let session = self
+            .sessions
+            .get(&target)
+            .filter(|s| s.room == Some(room))
+            .ok_or_else(|| Refusal::new(ErrorCode::NotFound, "they aren't in that room"))?;
+        self.require(permissions::can_kick_from_room(actor, session.row.role))?;
+        self.last_joined.remove(&target);
+        self.leave_room(target);
+        self.emit_to(target, Event::KickedFromRoom { by: user, room });
+        info!(user = user.0, target = target.0, "kicked from room");
         Ok(Response::Ok)
     }
 
@@ -1098,6 +1117,7 @@ fn presence(session: &Session) -> Option<Presence> {
         mic: session.media.mic,
         deafened: session.media.deafened,
         sharing: session.media.share.is_some(),
+        role: session.row.role,
     })
 }
 
