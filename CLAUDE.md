@@ -30,6 +30,8 @@ On macOS, building with `--features ffmpeg` needs `FFMPEG_PKG_CONFIG_PATH=$PWD/d
 | `throcc-client` | gpui UI and the video surface |
 | `throcc-cli` | Headless client for scripts and integration tests |
 
+Each crate's `README.md` explains its modules and how they fit together. Update it when a module is added, removed or changes its role.
+
 `third_party/` holds vendored gpui crates with an NV12 surface patch; its README lists the changes and how to refresh them.
 
 ## Rules
