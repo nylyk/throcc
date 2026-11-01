@@ -181,14 +181,14 @@ fn stream_actions(app: &ThroccApp, user: UserId, mine: bool, cx: &mut Context<Th
             },
         ))
     }))
-    .child(
+    .children((app.fullscreen_stream() != Some(user)).then(|| {
         action("person-menu-fullscreen", "maximize-2", "Full Screen").on_click(cx.listener(
             move |app, _, window, cx| {
                 app.close_person_menu(cx);
                 app.enter_fullscreen(user, window, cx);
             },
-        )),
-    )
+        ))
+    }))
     .child(
         action(
             "person-menu-stop-watching",
