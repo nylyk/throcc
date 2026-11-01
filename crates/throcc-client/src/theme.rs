@@ -382,6 +382,7 @@ pub fn on_avatar() -> Hsla {
 
 pub const RADIUS_ROW: Pixels = px(8.);
 pub const RADIUS_BUTTON: Pixels = px(10.);
+pub const RADIUS_CALL_BUTTON: Pixels = px(16.);
 pub const RADIUS_TILE: Pixels = px(12.);
 pub const RADIUS_CARD: Pixels = px(14.);
 pub const RADIUS_DIALOG: Pixels = px(18.);

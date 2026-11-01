@@ -633,22 +633,23 @@ fn room(
         .border_color(theme::control())
         .child(
             Button::new("share")
-                .label(if sharing {
-                    "Stop sharing"
-                } else {
-                    "Share screen"
-                })
                 .icon(icon(if sharing {
                     "screen-share-off"
                 } else {
                     "monitor-up"
                 }))
+                .tooltip(if sharing {
+                    "Stop sharing"
+                } else {
+                    "Share screen"
+                })
                 .with_variant(if sharing {
                     ButtonVariant::Danger
                 } else {
                     ButtonVariant::Secondary
                 })
-                .rounded(theme::RADIUS_BUTTON)
+                .rounded(theme::RADIUS_CALL_BUTTON)
+                .w(theme::TOUCH)
                 .h(theme::TOUCH)
                 .on_click(cx.listener(move |app, _, _, cx| {
                     if sharing {
@@ -664,7 +665,7 @@ fn room(
                 .icon(icon("phone-off"))
                 .tooltip("Leave the room")
                 .danger()
-                .rounded(theme::RADIUS_BUTTON)
+                .rounded(theme::RADIUS_CALL_BUTTON)
                 .w(theme::TOUCH)
                 .h(theme::TOUCH)
                 .on_click(cx.listener(|app, _, _, _| app.command(Command::Join(None)))),
