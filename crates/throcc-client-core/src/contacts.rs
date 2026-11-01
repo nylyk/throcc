@@ -1,14 +1,12 @@
 use std::collections::BTreeMap;
-use std::fs;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::UserId;
 use throcc_proto::messages::PublicKey;
 
-use crate::keystore::replace_file;
+use crate::servers::{Hex, SavedContact, Servers};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Contact {
@@ -25,37 +23,30 @@ pub enum ContactStatus {
 
 /// Identity keys pinned per user on one server, on first sight.
 pub struct Contacts {
-    path: PathBuf,
+    dir: PathBuf,
+    server: Fingerprint,
     pins: BTreeMap<UserId, Contact>,
 }
 
 impl Contacts {
     pub fn load(dir: &Path, server: &Fingerprint) -> Result<Self> {
-        let hex: String = server.0.iter().map(|b| format!("{b:02x}")).collect();
-        let path = dir.join(format!("contacts-{hex}"));
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-        };
-        let mut pins = BTreeMap::new();
-        for line in text.lines() {
-            let mut parts = line.split(' ');
-            let (Some(user), Some(key), Some(verified)) =
-                (parts.next(), parts.next(), parts.next())
-            else {
-                continue;
-            };
-            let key: Fingerprint = key.parse()?;
-            pins.insert(
-                UserId(user.parse()?),
-                Contact {
-                    key: key.0,
-                    verified: verified == "1",
-                },
-            );
-        }
-        Ok(Self { path, pins })
+        let pins = Servers::load(dir)?
+            .take(server)
+            .contacts
+            .into_iter()
+            .map(|(user, c)| {
+                let contact = Contact {
+                    key: c.key.0,
+                    verified: c.verified,
+                };
+                (user, contact)
+            })
+            .collect();
+        Ok(Self {
+            dir: dir.to_owned(),
+            server: *server,
+            pins,
+        })
     }
 
     pub fn status(&self, user: UserId, key: &PublicKey) -> ContactStatus {
@@ -78,27 +69,25 @@ impl Contacts {
             .pins
             .get(&user)
             .is_some_and(|c| c.key == key && c.verified);
-        self.pins.insert(user, Contact { key, verified });
-        self.save()
+        self.keep(user, Contact { key, verified })
     }
 
     pub fn set_verified(&mut self, user: UserId, verified: bool) -> Result<()> {
-        if let Some(contact) = self.pins.get_mut(&user) {
-            contact.verified = verified;
+        match self.pins.get(&user) {
+            Some(c) => self.keep(user, Contact { verified, ..*c }),
+            None => Ok(()),
         }
-        self.save()
     }
 
-    fn save(&self) -> Result<()> {
-        let text: String = self
-            .pins
-            .iter()
-            .map(|(user, c)| {
-                let key = Fingerprint(c.key).to_string().replace(' ', "");
-                format!("{} {key} {}\n", user.0, u8::from(c.verified))
-            })
-            .collect();
-        replace_file(&self.path, text.as_bytes())
+    fn keep(&mut self, user: UserId, contact: Contact) -> Result<()> {
+        let saved = SavedContact {
+            key: Hex(contact.key),
+            verified: contact.verified,
+        };
+        self.pins.insert(user, contact);
+        Servers::update(&self.dir, |s| {
+            s.server_mut(&self.server).contacts.insert(user, saved);
+        })
     }
 }
 

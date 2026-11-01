@@ -7779,6 +7779,7 @@ dependencies = [
  "rustls-webpki",
  "screencapturekit 11.0.0",
  "serde",
+ "serde_json",
  "sha2 0.11.1",
  "sonora",
  "sonora-common-audio",

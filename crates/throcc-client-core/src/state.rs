@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
 use throcc_proto::messages::{Codec, ShareConfig};
@@ -120,7 +121,7 @@ pub enum Sound {
 /// The highest gain a volume can boost a sound by, +12 dB.
 pub const MAX_VOLUME: f32 = 4.0;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Playback {
     /// From 0 to [`MAX_VOLUME`], where 1 plays the sound as it arrives.
     pub volume: f32,

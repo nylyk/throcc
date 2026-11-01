@@ -17,7 +17,6 @@ use crate::known_servers::KnownServers;
 const KEYCHAIN_SERVICE: &str = "throcc";
 const KEYCHAIN_IDENTITY: &str = "identity";
 const IDENTITY_FILE: &str = "identity_key";
-const KNOWN_SERVERS_FILE: &str = "known_servers";
 const ENC_KEY_FILE: &str = "enc_key";
 const ENC_KEY_LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// How long before it expires the encryption key is replaced.
@@ -35,7 +34,7 @@ pub struct Keystore {
 impl Keystore {
     /// The pinned servers in the platform data directory, without touching the keychain.
     pub fn default_known_servers() -> Result<KnownServers> {
-        KnownServers::load(&default_dir()?.join(KNOWN_SERVERS_FILE))
+        KnownServers::load(&default_dir()?)
     }
 
     /// Opens the platform data directory, keeping the identity key in the OS keychain.
@@ -62,7 +61,7 @@ impl Keystore {
     }
 
     fn assemble(dir: PathBuf, identity: IdentityKey) -> Result<Self> {
-        let known_servers = KnownServers::load(&dir.join(KNOWN_SERVERS_FILE))?;
+        let known_servers = KnownServers::load(&dir)?;
         let (enc_key, enc_key_created) = load_enc_key(&dir.join(ENC_KEY_FILE))?;
         Ok(Self {
             dir,
@@ -163,7 +162,7 @@ fn keychain_identity() -> Result<IdentityKey> {
 
 /// The identity key in `dir`. A missing one is created only while no server is known.
 fn fallback_identity(dir: &Path) -> Result<IdentityKey> {
-    let known_servers = KnownServers::load(&dir.join(KNOWN_SERVERS_FILE))?;
+    let known_servers = KnownServers::load(dir)?;
     if known_servers.iter().next().is_some() && !dir.join(IDENTITY_FILE).exists() {
         bail!(
             "the OS keychain holding your identity key can't be reached; unlock or start your \

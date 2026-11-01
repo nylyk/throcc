@@ -11,7 +11,7 @@ mod egl;
 use std::cell::{Cell, RefCell};
 use std::io::Cursor;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
-use std::path::PathBuf;
+use std::path::Path;
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -42,6 +42,7 @@ use super::{Capture, CaptureConfig, CaptureError};
 use crate::media::audio::SAMPLE_RATE;
 use crate::media::share_audio::STEREO_FRAME;
 use crate::media::video::frame::VideoFrame;
+use crate::settings::Settings;
 use desktop_audio::DesktopAudio;
 
 /// Frame buffers shared by the PipeWire thread and the share thread.
@@ -73,13 +74,13 @@ pub struct LinuxCapture {
 }
 
 pub fn start(config: CaptureConfig) -> Result<LinuxCapture, CaptureError> {
-    let token_file = token_file();
-    let token = token_file
-        .as_ref()
-        .and_then(|path| std::fs::read_to_string(path).ok());
+    let dir = crate::keystore::default_dir().ok();
+    let token = dir
+        .as_deref()
+        .and_then(|dir| Settings::load(dir).ok()?.screencast_restore_token);
     let shared = async_io::block_on(share(token.as_deref()))?;
-    if let (Some(path), Some(token)) = (&token_file, &shared.token) {
-        save_token(path, token);
+    if let (Some(dir), Some(token)) = (&dir, &shared.token) {
+        save_token(dir, token);
     }
     match PipeWireCapture::start(shared.node, Some(shared.fd), config) {
         Ok(stream) => Ok(LinuxCapture {
@@ -209,19 +210,10 @@ fn portal_error(e: ashpd::Error) -> CaptureError {
     }
 }
 
-fn token_file() -> Option<PathBuf> {
-    crate::keystore::default_dir()
-        .ok()
-        .map(|dir| dir.join("screencast-restore-token"))
-}
-
-fn save_token(path: &std::path::Path, token: &str) {
-    let saved = path
-        .parent()
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| std::fs::write(path, token));
+fn save_token(dir: &Path, token: &str) {
+    let saved = Settings::update(dir, |s| s.screencast_restore_token = Some(token.to_owned()));
     if let Err(e) = saved {
-        warn!("couldn't keep the screen share choice: {e}");
+        warn!("couldn't keep the screen share choice: {e:#}");
     }
 }
 
@@ -1954,7 +1946,9 @@ mod tests {
                 "{share} share: only {} frames in 5 s",
                 timestamps.len()
             );
-            assert!(token_file().unwrap().exists(), "no restore token kept");
+            let dir = crate::keystore::default_dir().unwrap();
+            let token = Settings::load(&dir).unwrap().screencast_restore_token;
+            assert!(token.is_some(), "no restore token kept");
             println!("{share} share: {}×{}", frame.width, frame.height);
         }
     }

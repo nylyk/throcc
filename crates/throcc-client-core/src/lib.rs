@@ -4,15 +4,18 @@ pub mod client;
 pub mod connection;
 pub mod contacts;
 pub mod control;
-pub mod cue_volume;
+mod json_file;
 pub mod keys;
 pub mod keystore;
 pub mod known_servers;
 pub mod media;
+mod pictures;
 pub mod playback;
 pub mod profile;
 pub mod server_look;
+mod servers;
 pub mod session;
+pub mod settings;
 pub mod state;
 
 /// Locks `mutex`, carrying on with the data a panicking holder left behind.

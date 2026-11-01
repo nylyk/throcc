@@ -12,13 +12,13 @@ use gpui_component::slider::{SliderEvent, SliderState};
 use gpui_component::{Root, WindowExt};
 use throcc_client_core::account::SignInError;
 use throcc_client_core::client::{Client, ClientApi, ClientOptions, Command, Event, MockClient};
-use throcc_client_core::cue_volume;
 use throcc_client_core::keystore::{self, Keystore};
 use throcc_client_core::media::audio::{Transmit, VoiceSettings};
 use throcc_client_core::media::cues::Cue;
 use throcc_client_core::media::devices;
 use throcc_client_core::server_look::ServerLook;
-use throcc_client_core::state::{Playback, ServerView, ShareChoice, Sound, State};
+use throcc_client_core::settings::Settings;
+use throcc_client_core::state::{MAX_VOLUME, Playback, ServerView, ShareChoice, Sound, State};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
 use throcc_proto::invite::{self, InviteCode};
@@ -213,7 +213,8 @@ fn known_servers() -> Vec<(String, Fingerprint)> {
 
 fn saved_cue_volume() -> f32 {
     keystore::default_dir()
-        .and_then(|dir| cue_volume::load(&dir))
+        .and_then(|dir| Settings::load(&dir))
+        .map(|s| s.cue_volume.clamp(0.0, MAX_VOLUME))
         .unwrap_or_else(|e| {
             tracing::warn!("no saved cue volume: {e:#}");
             1.0
@@ -1442,8 +1443,9 @@ impl ThroccApp {
 
     /// Keeps the cue volume on this computer and plays a cue at it.
     pub fn save_cue_volume(&mut self) {
-        let saved =
-            keystore::default_dir().and_then(|dir| cue_volume::save(&dir, self.voice.cue_volume));
+        let volume = self.voice.cue_volume;
+        let saved = keystore::default_dir()
+            .and_then(|dir| Settings::update(&dir, |s| s.cue_volume = volume));
         if let Err(e) = saved {
             tracing::warn!("could not save the cue volume: {e:#}");
         }

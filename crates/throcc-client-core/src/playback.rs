@@ -1,52 +1,61 @@
 use std::collections::BTreeMap;
-use std::fs;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::UserId;
 
-use crate::keystore::replace_file;
+use crate::servers::Servers;
 use crate::state::{MAX_VOLUME, Playback, Sound};
+
+/// How loud one person's voice and share audio play.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PersonPlayback {
+    pub voice: Playback,
+    pub share: Playback,
+}
+
+impl PersonPlayback {
+    fn get(&self, sound: Sound) -> Playback {
+        match sound {
+            Sound::Voice => self.voice,
+            Sound::Share => self.share,
+        }
+    }
+
+    fn get_mut(&mut self, sound: Sound) -> &mut Playback {
+        match sound {
+            Sound::Voice => &mut self.voice,
+            Sound::Share => &mut self.share,
+        }
+    }
+}
 
 /// How loud each person's voice and share audio play, kept per server on this computer.
 pub struct SavedPlayback {
-    path: PathBuf,
-    people: BTreeMap<UserId, [Playback; 2]>,
+    dir: PathBuf,
+    server: Fingerprint,
+    people: BTreeMap<UserId, PersonPlayback>,
 }
 
 impl SavedPlayback {
     pub fn empty(dir: &Path, server: &Fingerprint) -> Self {
-        let hex: String = server.0.iter().map(|b| format!("{b:02x}")).collect();
         Self {
-            path: dir.join(format!("playback-{hex}")),
+            dir: dir.to_owned(),
+            server: *server,
             people: BTreeMap::new(),
         }
     }
 
     pub fn load(dir: &Path, server: &Fingerprint) -> Result<Self> {
         let mut saved = Self::empty(dir, server);
-        let text = match fs::read_to_string(&saved.path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", saved.path.display())),
-        };
-        for line in text.lines() {
-            let parts: Vec<&str> = line.split(' ').collect();
-            let [user, voice, voice_muted, share, share_muted] = parts[..] else {
-                continue;
-            };
-            let playback = |volume: &str, muted: &str| -> Result<Playback> {
-                Ok(Playback {
-                    volume: volume.parse::<f32>()?.clamp(0.0, MAX_VOLUME),
-                    muted: muted == "1",
-                })
-            };
-            saved.people.insert(
-                UserId(user.parse()?),
-                [playback(voice, voice_muted)?, playback(share, share_muted)?],
-            );
+        saved.people = Servers::load(dir)?.take(server).playback;
+        for person in saved.people.values_mut() {
+            for sound in [Sound::Voice, Sound::Share] {
+                let playback = person.get_mut(sound);
+                playback.volume = playback.volume.clamp(0.0, MAX_VOLUME);
+            }
         }
         Ok(saved)
     }
@@ -54,54 +63,31 @@ impl SavedPlayback {
     pub fn get(&self, user: UserId, sound: Sound) -> Playback {
         self.people
             .get(&user)
-            .map_or_else(Playback::default, |p| p[index(sound)])
+            .map_or_else(Playback::default, |p| p.get(sound))
     }
 
     /// Both sounds of everyone saved.
     pub fn iter(&self) -> impl Iterator<Item = (UserId, Sound, Playback)> + '_ {
         self.people.iter().flat_map(|(user, p)| {
-            [Sound::Voice, Sound::Share].map(|sound| (*user, sound, p[index(sound)]))
+            [Sound::Voice, Sound::Share].map(|sound| (*user, sound, p.get(sound)))
         })
     }
 
     pub fn set(&mut self, user: UserId, sound: Sound, playback: Playback) -> Result<()> {
-        let mut both = self
-            .people
-            .get(&user)
-            .copied()
-            .unwrap_or([Playback::default(); 2]);
-        both[index(sound)] = playback;
-        if both == [Playback::default(); 2] {
-            self.people.remove(&user);
-        } else {
-            self.people.insert(user, both);
-        }
-        self.save()
-    }
-
-    fn save(&self) -> Result<()> {
-        let text: String = self
-            .people
-            .iter()
-            .map(|(user, [voice, share])| {
-                format!(
-                    "{} {} {} {} {}\n",
-                    user.0,
-                    voice.volume,
-                    u8::from(voice.muted),
-                    share.volume,
-                    u8::from(share.muted)
-                )
-            })
-            .collect();
-        replace_file(&self.path, text.as_bytes())
-    }
-}
-
-fn index(sound: Sound) -> usize {
-    match sound {
-        Sound::Voice => 0,
-        Sound::Share => 1,
+        let mut person = self.people.get(&user).copied().unwrap_or_default();
+        *person.get_mut(sound) = playback;
+        let kept = (person != PersonPlayback::default()).then_some(person);
+        match kept {
+            Some(person) => self.people.insert(user, person),
+            None => self.people.remove(&user),
+        };
+        Servers::update(&self.dir, |s| {
+            let people = &mut s.server_mut(&self.server).playback;
+            match kept {
+                Some(person) => people.insert(user, person),
+                None => people.remove(&user),
+            };
+        })
     }
 }
 

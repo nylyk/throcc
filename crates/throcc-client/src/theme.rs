@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 
 use gpui::{App, FontWeight, Hsla, Pixels, SharedString, px, rgb};
 use gpui_component::{Theme, ThemeMode};
+use throcc_client_core::settings::Settings;
 
 /// The eight colours a theme is made of. Every other colour is mixed from them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,16 +57,12 @@ impl Palette {
     }
 
     /// One line of eight `#rrggbb` colours, in [`Self::LABELS`] order.
-    pub fn to_line(self) -> String {
-        let colors: Vec<String> = self.colors().iter().map(|c| format_hex(*c)).collect();
-        colors.join(" ")
+    pub fn to_hex(self) -> Vec<String> {
+        self.colors().iter().map(|c| format_hex(*c)).collect()
     }
 
-    pub fn from_line(line: &str) -> Option<Self> {
-        let colors: Vec<u32> = line
-            .split_whitespace()
-            .map(parse_hex)
-            .collect::<Option<_>>()?;
+    pub fn from_hex(colors: &[String]) -> Option<Self> {
+        let colors: Vec<u32> = colors.iter().map(|c| parse_hex(c)).collect::<Option<_>>()?;
         Some(Self::from_colors(colors.try_into().ok()?))
     }
 
@@ -191,20 +188,15 @@ pub fn palette() -> Palette {
     PALETTE.with(Cell::get)
 }
 
-const APPEARANCE_FILE: &str = "appearance";
-
 /// The palette chosen last time, if one was saved.
 pub fn saved() -> Option<Palette> {
     let dir = throcc_client_core::keystore::default_dir().ok()?;
-    Palette::from_line(&std::fs::read_to_string(dir.join(APPEARANCE_FILE)).ok()?)
+    Palette::from_hex(&Settings::load(&dir).ok()?.palette?)
 }
 
 pub fn save(palette: Palette) {
-    let saved = throcc_client_core::keystore::default_dir().and_then(|dir| {
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join(APPEARANCE_FILE), palette.to_line() + "\n")?;
-        Ok(())
-    });
+    let saved = throcc_client_core::keystore::default_dir()
+        .and_then(|dir| Settings::update(&dir, |s| s.palette = Some(palette.to_hex())));
     if let Err(e) = saved {
         tracing::warn!("could not save the theme: {e:#}");
     }
@@ -594,11 +586,14 @@ mod tests {
     }
 
     #[test]
-    fn a_palette_survives_its_own_line() {
+    fn a_palette_survives_its_own_hex() {
         for (_, palette) in PRESETS {
-            assert_eq!(Palette::from_line(&palette.to_line()), Some(palette));
+            assert_eq!(Palette::from_hex(&palette.to_hex()), Some(palette));
         }
-        assert_eq!(Palette::from_line("#000000 #FFFFFF"), None);
+        assert_eq!(
+            Palette::from_hex(&["#000000".into(), "#FFFFFF".into()]),
+            None
+        );
     }
 
     #[test]

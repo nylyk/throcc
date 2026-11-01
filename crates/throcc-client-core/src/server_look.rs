@@ -1,13 +1,12 @@
-use std::fs;
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::Hash;
 
-use crate::keystore::replace_file;
+use crate::pictures;
+use crate::servers::{Hex, Servers};
 
 /// A server's name and picture as last seen, kept on this computer to show while not
 /// connected to it.
@@ -22,76 +21,32 @@ pub struct ServerLook {
 impl ServerLook {
     /// The look kept for `server` in `dir`, empty when none was kept.
     pub fn load(dir: &Path, server: &Fingerprint) -> Result<Self> {
-        let (text_path, picture_path) = paths(dir, server);
-        let Some(text) = read(&text_path)? else {
-            return Ok(Self::default());
-        };
-        let text = String::from_utf8_lossy(&text);
-        let mut lines = text.lines();
-        let avatar = lines.next().and_then(parse_hash);
-        let name = lines
-            .next()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(str::to_owned);
+        let kept = Servers::load(dir)?.take(server);
+        let avatar = kept.avatar.map(|Hex(hash)| Hash(hash));
         let picture = match avatar {
-            Some(_) => read(&picture_path)?.map(Arc::from),
+            Some(_) => pictures::load(dir, &picture_name(server))?,
             None => None,
         };
         Ok(Self {
-            name,
+            name: kept.name,
             avatar,
             picture,
         })
     }
 
     pub fn save(&self, dir: &Path, server: &Fingerprint) -> Result<()> {
-        let (text_path, picture_path) = paths(dir, server);
-        let avatar = self.avatar.map(|h| hex(&h.0)).unwrap_or_default();
-        let name = self.name.as_deref().unwrap_or_default();
-        replace_file(&text_path, format!("{avatar}\n{name}\n").as_bytes())?;
-        match &self.picture {
-            Some(bytes) => replace_file(&picture_path, bytes),
-            None => match fs::remove_file(&picture_path) {
-                Err(e) if e.kind() != ErrorKind::NotFound => {
-                    Err(e).with_context(|| format!("removing {}", picture_path.display()))
-                }
-                _ => Ok(()),
-            },
-        }
+        Servers::update(dir, |s| {
+            let kept = s.server_mut(server);
+            kept.name.clone_from(&self.name);
+            kept.avatar = self.avatar.map(|Hash(hash)| Hex(hash));
+        })?;
+        pictures::save(dir, &picture_name(server), self.picture.as_deref())
     }
 }
 
-fn paths(dir: &Path, server: &Fingerprint) -> (PathBuf, PathBuf) {
-    let hex = hex(&server.0);
-    (
-        dir.join(format!("server-{hex}")),
-        dir.join(format!("server-{hex}-picture")),
-    )
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn parse_hash(text: &str) -> Option<Hash> {
-    let text = text.trim();
-    if text.len() != 64 {
-        return None;
-    }
-    let mut hash = [0u8; 32];
-    for (i, byte) in hash.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(text.get(i * 2..i * 2 + 2)?, 16).ok()?;
-    }
-    Some(Hash(hash))
-}
-
-fn read(path: &Path) -> Result<Option<Vec<u8>>> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
-    }
+fn picture_name(server: &Fingerprint) -> String {
+    let hex: String = server.0.iter().map(|b| format!("{b:02x}")).collect();
+    format!("server-{hex}")
 }
 
 #[cfg(test)]
