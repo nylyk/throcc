@@ -6,7 +6,7 @@ The desktop app, built with gpui and gpui-component on top of `throcc-client-cor
 | --- | --- |
 | `main.rs` | Arguments, window setup and the saved theme |
 | `app.rs` | `ThroccApp`: the current screen and dialog, form inputs, and every action. `show_sample` lists the mock screens |
-| `views/` | Rendering, one file per area: `server_bar` (known servers down the left edge, under the traffic lights), `join` (no server connected), `main` (lobby and room), `person_menu` (right-click on a person: their volumes and stream), `dialogs`, `settings`, `server`, `banner`, and shared pieces in `common` |
+| `views/` | Rendering, one file per area: `server_bar` (known servers down the left edge, under the traffic lights), `join` (no server connected), `main` (lobby and room), `person_menu` (right-click on a person: their volumes and stream), `dialogs`, `settings` (profile, audio, sounds, appearance, servers), `server`, `banner`, and shared pieces in `common` |
 | `theme.rs` | The 8-colour palette, its presets and everything mixed from it. The only place colours live |
 | `video.rs` | Share pictures handed to gpui as NV12 surfaces or BGRA images. The only place frames meet gpui |
 | `popout.rs` | A watched share in a window of its own |

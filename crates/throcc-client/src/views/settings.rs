@@ -13,6 +13,7 @@ use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::switch::Switch;
 use gpui_component::{Disableable, IndexPath};
 use throcc_client_core::client::Command;
+use throcc_client_core::cue_settings::{CueCategory, CueSettings};
 use throcc_client_core::media::audio::{
     DEFAULT_GATE_DBFS, NoiseSuppressionLevel, Transmit, VoiceSettings,
 };
@@ -21,6 +22,7 @@ use super::common::{
     avatar, caption, card, chip, gain_to_loudness, ghost_icon, key_cap, loudness_to_gain, mono,
     moves_window, primary, secondary, section,
 };
+use super::main::toggle_icon;
 use crate::app::{PictureEdit, PictureFor, ProfileStatus, Screen, SettingsPage, ThroccApp};
 use crate::theme;
 
@@ -44,6 +46,7 @@ pub fn render(
     let links = nav_list()
         .child(item("nav-profile", "Profile", SettingsPage::Profile, cx))
         .child(item("nav-audio", "Audio", SettingsPage::Audio, cx))
+        .child(item("nav-sounds", "Sounds", SettingsPage::Sounds, cx))
         .child(item(
             "nav-appearance",
             "Appearance",
@@ -54,12 +57,14 @@ pub fn render(
     let content = match page {
         SettingsPage::Profile => profile(app, cx),
         SettingsPage::Audio => audio(app, cx),
+        SettingsPage::Sounds => sounds(app, cx),
         SettingsPage::Appearance => appearance(app, cx),
         SettingsPage::Servers => servers(app),
     };
     let page_title = match page {
         SettingsPage::Profile => "Profile",
         SettingsPage::Audio => "Audio",
+        SettingsPage::Sounds => "Sounds",
         SettingsPage::Appearance => "Appearance",
         SettingsPage::Servers => "Servers",
     };
@@ -696,6 +701,90 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 })),
             ),
         )
+        .into_any_element()
+}
+
+/// The sounds page's volume sliders, one per category of cues.
+pub struct CueControls {
+    sliders: [Entity<SliderState>; 3],
+    _subscriptions: Vec<Subscription>,
+}
+
+impl CueControls {
+    pub fn new(cues: &CueSettings, cx: &mut Context<ThroccApp>) -> Self {
+        let sliders = CueCategory::ALL.map(|category| {
+            let percent = gain_to_loudness(cues.get(category).volume) * 100.;
+            cx.new(|_| {
+                SliderState::new()
+                    .min(0.)
+                    .max(200.)
+                    .step(1.)
+                    .default_value(percent)
+            })
+        });
+        let subscriptions = CueCategory::ALL
+            .into_iter()
+            .zip(&sliders)
+            .map(|(category, slider)| {
+                cx.subscribe(slider, move |app, _, event: &SliderEvent, cx| {
+                    let (SliderEvent::Change(value) | SliderEvent::Release(value)) = event;
+                    let volume = loudness_to_gain(value.start() / 100.);
+                    let done = matches!(event, SliderEvent::Release(_));
+                    app.change_cues(category, |p| p.volume = volume, done, cx);
+                })
+            })
+            .collect();
+        Self {
+            sliders,
+            _subscriptions: subscriptions,
+        }
+    }
+}
+
+fn sounds(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
+    let rows = CueCategory::ALL
+        .into_iter()
+        .zip(&app.cue_controls.sliders)
+        .map(|(category, slider)| {
+            let (label, toggle_id) = match category {
+                CueCategory::People => ("Join and leave", "cues-people-mute"),
+                CueCategory::Microphone => ("Mute and deafen", "cues-microphone-mute"),
+                CueCategory::Connection => ("Connection", "cues-connection-mute"),
+            };
+            let muted = app.cues.get(category).muted;
+            let percent = slider.read(cx).value().start().round();
+            row(
+                label,
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        toggle_icon(
+                            toggle_id,
+                            "volume-2",
+                            "volume-x",
+                            muted,
+                            if muted { "Unmute" } else { "Mute" },
+                        )
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.change_cues(category, |p| p.muted = !muted, true, cx)
+                        })),
+                    )
+                    .child(div().flex_1().child(Slider::new(slider)))
+                    .child(
+                        mono(format!("{percent:.0}%"))
+                            .w(px(64.))
+                            .flex_none()
+                            .text_right(),
+                    ),
+            )
+        });
+    div()
+        .flex()
+        .flex_col()
+        .gap_6()
+        .child(card().flex().flex_col().gap_2().children(rows))
         .into_any_element()
 }
 

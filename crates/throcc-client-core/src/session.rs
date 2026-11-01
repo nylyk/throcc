@@ -19,10 +19,12 @@ use crate::account::{self, SignInError};
 use crate::call::{Call, CallEvent};
 use crate::client::{Command, Event};
 use crate::control::LoginError;
+use crate::cue_settings::CueSettings;
 use crate::keys::KeyNotice;
 use crate::keystore::Keystore;
 use crate::lock;
 use crate::media::audio::VoiceSettings;
+use crate::media::cues::Cue;
 use crate::media::engine::{KeyState, Kind};
 use crate::media::share_audio::Playout;
 use crate::media::video::{Picture, PreviewDemand};
@@ -47,6 +49,7 @@ const SHARE_AUDIO_DETAIL: &str = "Opus music, stereo";
 #[derive(Clone, Debug, Default)]
 pub struct ClientOptions {
     pub voice: VoiceSettings,
+    pub cues: CueSettings,
     pub input_device: Option<String>,
     pub output_device: Option<String>,
     /// Opens audio devices. Off for headless tests.
@@ -370,6 +373,25 @@ impl Session {
         }
     }
 
+    fn cue(&self, cue: Cue) {
+        let gain = self.options.cues.get(cue.category()).gain();
+        if gain > 0.0 {
+            self.voice(VoiceCommand::Cue(cue, gain));
+        }
+    }
+
+    /// Plays join or leave when someone else enters or leaves our room.
+    fn room_cue(&self, user: UserId, before: Option<RoomId>, after: Option<RoomId>) {
+        if user == self.call.me() || self.room.is_none() || before == after {
+            return;
+        }
+        if after == self.room {
+            self.cue(Cue::Join);
+        } else if before == self.room {
+            self.cue(Cue::Leave);
+        }
+    }
+
     pub async fn run(mut self, mut commands: mpsc::Receiver<Command>) {
         if self.profile != Profile::default() {
             self.push_profile().await;
@@ -464,6 +486,7 @@ impl Session {
             .connection
             .close_reason()
             .map_or("connection lost".to_owned(), |e| e.to_string());
+        self.cue(Cue::ConnectionLost);
         let mut backoff = Duration::from_secs(1);
         let mut queued = Vec::new();
         let mut dropped_any = false;
@@ -533,6 +556,7 @@ impl Session {
                     self.call = call;
                     self.reset_room();
                     self.start_voice();
+                    self.cue(Cue::Reconnected);
                     let welcome = self.call.welcome.clone();
                     self.apply_welcome(&welcome);
                     self.push_media().await;
@@ -603,6 +627,11 @@ impl Session {
 
     async fn joined(&mut self, placed: &Placed, notices: Vec<KeyNotice>) {
         self.after_join(placed);
+        self.cue(if placed.room.is_some() {
+            Cue::Join
+        } else {
+            Cue::Leave
+        });
         self.notices(notices);
         self.push_media().await;
     }
@@ -721,6 +750,9 @@ impl Session {
                 }
             }
             Command::SetMic(on) => {
+                if on != self.media.mic {
+                    self.cue(if on { Cue::Unmute } else { Cue::Mute });
+                }
                 self.media.mic = on;
                 if on {
                     self.media.deafened = false;
@@ -728,6 +760,9 @@ impl Session {
                 self.push_media().await;
             }
             Command::SetDeafened(deafened) => {
+                if deafened != self.media.deafened {
+                    self.cue(if deafened { Cue::Deafen } else { Cue::Undeafen });
+                }
                 set_deafened(&mut self.media, &mut self.mic_before_deafen, deafened);
                 self.push_media().await;
             }
@@ -847,6 +882,8 @@ impl Session {
                 self.voice(VoiceCommand::Loopback(on));
             }
             Command::PushToTalk(down) => self.voice(VoiceCommand::PushToTalk(down)),
+            Command::Cues(settings) => self.options.cues = settings,
+            Command::PlayCue(cue) => self.cue(cue),
             Command::LeaveServer | Command::Disconnect => {}
         }
     }
@@ -1297,6 +1334,8 @@ impl Session {
                 }
             }),
             ServerEvent::PresenceChanged(p) => {
+                let before = self.shared.state().person(p.user).and_then(|old| old.room);
+                self.room_cue(p.user, before, p.room);
                 let saved = &self.saved_playback;
                 self.shared.update(|s| {
                     let updated = match s.people.get(&p.user) {
@@ -1313,6 +1352,8 @@ impl Session {
                 self.follow_room().await;
             }
             ServerEvent::PresenceEnded(user) => {
+                let before = self.shared.state().person(user).and_then(|old| old.room);
+                self.room_cue(user, before, None);
                 self.shared.update(|s| {
                     s.people.remove(&user);
                 });
@@ -1577,6 +1618,7 @@ fn supersedes(newer: &Command, older: &Command) -> bool {
             | Command::PushToTalk(_)
             | Command::MicTest(_)
             | Command::Voice(_)
+            | Command::Cues(_)
             | Command::Devices { .. },
             _,
         ) => discriminant(newer) == discriminant(older),

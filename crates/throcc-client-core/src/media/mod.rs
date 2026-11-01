@@ -1,5 +1,6 @@
 pub mod audio;
 pub mod capture;
+pub mod cues;
 pub mod devices;
 pub mod engine;
 pub mod fragment;

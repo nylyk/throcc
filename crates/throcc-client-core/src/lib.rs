@@ -4,6 +4,7 @@ pub mod client;
 pub mod connection;
 pub mod contacts;
 pub mod control;
+pub mod cue_settings;
 pub mod keys;
 pub mod keystore;
 pub mod known_servers;

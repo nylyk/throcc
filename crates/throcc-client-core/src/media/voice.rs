@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use super::audio::{CaptureChain, Mixer, SAMPLE_RATE, VoiceSettings};
+use super::cues::{Cue, CuePlayer};
 use super::devices::{self, Devices};
 use super::engine::{Kind, MediaEngine, Outgoing, Received};
 use super::jitter::{JitterBuffer, PULL};
@@ -48,6 +49,8 @@ pub enum VoiceCommand {
     ForgetAll,
     /// Plays the processed mic back locally, for the settings screen's mic test.
     Loopback(bool),
+    /// Plays a cue at this gain, heard even while deafened.
+    Cue(Cue, f32),
 }
 
 /// What the UI shows about audio, refreshed every 100 ms.
@@ -126,6 +129,7 @@ struct Worker {
     devices: Devices,
     chain: CaptureChain,
     mixer: Mixer,
+    cues: CuePlayer,
     remotes: HashMap<UserId, mpsc::Receiver<Received>>,
     shares: HashMap<UserId, ShareAudio>,
     share_volumes: HashMap<UserId, f32>,
@@ -171,6 +175,7 @@ impl Worker {
             devices,
             chain,
             mixer: Mixer::default(),
+            cues: CuePlayer::default(),
             remotes: HashMap::new(),
             shares: HashMap::new(),
             share_volumes: HashMap::new(),
@@ -287,6 +292,7 @@ impl Worker {
                 self.shares.clear();
             }
             VoiceCommand::Loopback(on) => self.loopback = on,
+            VoiceCommand::Cue(cue, gain) => self.cues.play(cue, gain),
         }
     }
 
@@ -308,8 +314,8 @@ impl Worker {
         }
     }
 
-    /// Mixes 10 ms of voices and shares, feeds it to the echo canceller and queues it for
-    /// the speakers.
+    /// Mixes 10 ms of voices, shares and cues, feeds it to the echo canceller and queues it
+    /// for the speakers.
     fn play(&mut self, loopback: &[f32; PULL]) {
         let mut voices = [0.0f32; PULL];
         let mut stereo = [0.0f32; PULL * 2];
@@ -324,6 +330,7 @@ impl Worker {
                 *m = (*m + l).clamp(-1.0, 1.0);
             }
         }
+        self.cues.mix(&mut voices);
         for (pair, voice) in stereo.as_chunks_mut::<2>().0.iter_mut().zip(voices) {
             for sample in pair {
                 *sample = ((*sample + voice) * self.output_volume).clamp(-1.0, 1.0);
