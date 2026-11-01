@@ -549,7 +549,7 @@ fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
             .items_center()
             .justify_center()
             .gap_4()
-            .child(mascot::drawing(app.idle))
+            .child(mascot::drawing(app.mascot.pick(mascot::IDLE)))
             .child(description("There are no rooms yet."))
             .children(manages.then(|| {
                 primary("first-room", "New Room")
@@ -702,7 +702,7 @@ fn room(
             .items_center()
             .justify_center()
             .gap_4()
-            .child(mascot::drawing(app.lonely))
+            .child(mascot::drawing(app.mascot.pick(mascot::LONELY)))
             .child(description("No one else is here yet :("))
             .into_any_element()
     } else {

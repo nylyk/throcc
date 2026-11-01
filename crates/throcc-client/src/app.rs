@@ -250,16 +250,7 @@ pub struct ThroccApp {
     /// Pictures by hash, `None` while one decodes in the background or if it can't be shown.
     pub pictures: std::collections::HashMap<Hash, Option<Arc<RenderImage>>>,
     pub joining: bool,
-    /// The mascot on the join screen once a server is known.
-    pub greeter: &'static str,
-    /// The mascot on the join screen before any server is known.
-    pub welcomer: &'static str,
-    /// The mascot beside a failed join or a lost connection.
-    pub upset: &'static str,
-    /// The mascot in a lobby with no rooms.
-    pub idle: &'static str,
-    /// The mascot in a room with no one else in it and nothing shared.
-    pub lonely: &'static str,
+    pub mascot: views::mascot::Shown,
     /// Counts joins started, so a join that was overtaken by a newer one is ignored.
     join_attempt: u64,
     pub join_error: Option<String>,
@@ -408,11 +399,7 @@ impl ThroccApp {
             custom_colors,
             pictures: std::collections::HashMap::new(),
             joining: false,
-            greeter: views::mascot::pick(views::mascot::GREETERS),
-            welcomer: views::mascot::pick(views::mascot::WELCOMERS),
-            upset: views::mascot::pick(views::mascot::UPSET),
-            idle: views::mascot::pick(views::mascot::IDLE),
-            lonely: views::mascot::pick(views::mascot::LONELY),
+            mascot: views::mascot::Shown::default(),
             join_attempt: 0,
             join_error: None,
             profile_status: None,
@@ -1579,6 +1566,7 @@ impl ThroccApp {
 impl Render for ThroccApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sidebar_width = self.sidebar_width.min(widest_sidebar(window));
+        self.mascot.start_render();
         let lost = match self.screen {
             Screen::Main => views::join::render_lost(self),
             _ => None,

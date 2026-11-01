@@ -53,13 +53,13 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
         .join_error
         .clone()
         .filter(|_| app.dialog != Some(Dialog::AddServer));
-    let mascot = if error.is_some() {
-        app.upset
+    let mascot = app.mascot.pick(if error.is_some() {
+        mascot::UPSET
     } else if first_run {
-        app.welcomer
+        mascot::WELCOMERS
     } else {
-        app.greeter
-    };
+        mascot::GREETERS
+    });
     let hint = if app.joining {
         "Joining…"
     } else if first_run {
@@ -82,7 +82,7 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
 }
 
 /// The window in place of the room while the connection is lost, or `None` while it holds.
-pub fn render_lost(app: &ThroccApp) -> Option<Div> {
+pub fn render_lost(app: &mut ThroccApp) -> Option<Div> {
     let (hint, error) = match &app.state.connection {
         ConnectionStatus::Reconnecting { attempt, reason } => (
             format!("Reconnecting, attempt {attempt}. You’ll be put back in your room."),
@@ -95,7 +95,7 @@ pub fn render_lost(app: &ThroccApp) -> Option<Div> {
         _ => return None,
     };
     Some(
-        frame(app.upset)
+        frame(app.mascot.pick(mascot::UPSET))
             .child(description(hint))
             .child(div().w(px(420.)).child(error_box(error))),
     )
