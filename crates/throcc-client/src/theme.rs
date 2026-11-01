@@ -390,6 +390,7 @@ pub const TOUCH: Pixels = px(44.);
 pub const SIDEBAR_WIDTH: Pixels = px(264.);
 pub const SIDEBAR_MIN_WIDTH: Pixels = px(248.);
 pub const SIDEBAR_MAX_WIDTH: Pixels = px(420.);
+pub const SERVER_BAR_WIDTH: Pixels = px(76.);
 
 const FONTS: &[&str] = &[
     "Geist",

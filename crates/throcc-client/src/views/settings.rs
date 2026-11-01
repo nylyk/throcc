@@ -18,8 +18,8 @@ use throcc_client_core::media::audio::{
 };
 
 use super::common::{
-    TRAFFIC_LIGHTS, avatar, caption, card, chip, ghost_icon, key_cap, mono, moves_window, primary,
-    secondary, section,
+    avatar, caption, card, chip, ghost_icon, key_cap, mono, moves_window, primary, secondary,
+    section,
 };
 use crate::app::{PictureEdit, PictureFor, ProfileStatus, Screen, SettingsPage, ThroccApp};
 use crate::theme;
@@ -149,11 +149,14 @@ pub(super) fn frame(
             top_bar()
                 .gap_2()
                 .px_3()
-                .pl(px(12.) + TRAFFIC_LIGHTS)
                 .child(
                     ghost_icon("settings-back", "arrow-left", "Back").on_click(cx.listener(
                         |app, _, _, cx| {
-                            app.screen = Screen::Main;
+                            app.screen = if app.client.is_some() {
+                                Screen::Main
+                            } else {
+                                Screen::Join
+                            };
                             cx.notify();
                         },
                     )),

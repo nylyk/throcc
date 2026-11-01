@@ -14,7 +14,7 @@ use throcc_client_core::client::{Client, ClientApi, ClientOptions, Command, Even
 use throcc_client_core::keystore::Keystore;
 use throcc_client_core::media::audio::{Transmit, VoiceSettings};
 use throcc_client_core::media::devices;
-use throcc_client_core::state::{ShareChoice, State};
+use throcc_client_core::state::{ServerView, ShareChoice, State};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
 use throcc_proto::invite::{self, InviteCode};
@@ -131,6 +131,7 @@ pub enum Dialog {
         error: Option<String>,
     },
     LeaveServer,
+    AddServer,
 }
 
 fn known_servers() -> Vec<(String, Fingerprint)> {
@@ -157,8 +158,6 @@ pub struct ThroccApp {
     /// Pictures by hash, `None` while one decodes in the background or if it can't be shown.
     pub pictures: std::collections::HashMap<Hash, Option<Arc<RenderImage>>>,
     pub joining: bool,
-    /// Whether the join screen shows the form for a new server over the list of known ones.
-    pub adding_server: bool,
     pub join_error: Option<String>,
     pub profile_status: Option<ProfileStatus>,
     pub profile_picture_edit: Option<PictureEdit>,
@@ -245,7 +244,15 @@ impl ThroccApp {
             cx.subscribe_in(&room_name, window, Self::on_room_field),
             cx.subscribe_in(&room_password, window, Self::on_room_field),
         ]);
-        let known_servers = if mock { Vec::new() } else { known_servers() };
+        let known_servers = if mock {
+            vec![
+                ("voice.example.net".into(), Fingerprint([0x2c; 32])),
+                ("lan.example.org".into(), Fingerprint([0x5e; 32])),
+                ("192.0.2.40".into(), Fingerprint([0x91; 32])),
+            ]
+        } else {
+            known_servers()
+        };
         let share_choice = ShareChoice::default();
         let (bitrate, bitrate_changes) = Self::bitrate_slider(share_choice, cx);
         let (inputs, outputs) = devices::list();
@@ -267,7 +274,6 @@ impl ThroccApp {
             palette_fields,
             pictures: std::collections::HashMap::new(),
             joining: false,
-            adding_server: false,
             join_error: None,
             profile_status: None,
             profile_picture_edit: None,
@@ -335,8 +341,8 @@ impl ThroccApp {
         self.client = Some(client);
         self.screen = Screen::Main;
         self.joining = false;
-        self.adding_server = false;
         self.join_error = None;
+        self.dialog = None;
         window.focus(&self.root_focus, cx);
         self.sync_push_to_talk(cx);
         let window_handle = window.window_handle();
@@ -480,6 +486,11 @@ impl ThroccApp {
         let palette = theme::Palette::from_colors(colors);
         theme::set(palette, cx);
         theme::save(palette);
+    }
+
+    /// The share filling the whole window, while it is still shown here.
+    pub fn fullscreen_stream(&self) -> Option<UserId> {
+        self.fullscreen.filter(|user| self.shows_stream(*user))
     }
 
     /// Whether `user`'s share is watched here, in this window.
@@ -876,8 +887,47 @@ impl ThroccApp {
         .detach();
     }
 
+    /// The server we are connected to.
+    pub fn connected_server(&self) -> Option<&ServerView> {
+        self.client.as_ref().and(self.state.server.as_ref())
+    }
+
+    /// Shows the server at `address`, connecting to it first unless we already are.
+    pub fn open_server(&mut self, address: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .connected_server()
+            .is_some_and(|s| s.address == address)
+        {
+            if matches!(self.screen, Screen::Settings(_) | Screen::Server(_)) {
+                self.screen = Screen::Main;
+            }
+            cx.notify();
+            return;
+        }
+        if self.joining {
+            return;
+        }
+        self.address
+            .update(cx, |s, cx| s.set_value(address, window, cx));
+        self.code.update(cx, |s, cx| s.set_value("", window, cx));
+        self.join(window, cx);
+        cx.notify();
+    }
+
+    pub fn open_add_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.join_error = None;
+        self.address.update(cx, |s, cx| {
+            s.set_value("", window, cx);
+            s.focus(window, cx);
+        });
+        self.code.update(cx, |s, cx| s.set_value("", window, cx));
+        self.dialog = Some(Dialog::AddServer);
+        cx.notify();
+    }
+
+    /// Connects to the server in the address field, leaving the one we are on first.
     pub fn join(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.joining || self.client.is_some() {
+        if self.joining {
             return;
         }
         let address = self.address.read(cx).value().trim().to_owned();
@@ -897,6 +947,11 @@ impl ThroccApp {
                 }
             }
         };
+        if self.client.is_some() {
+            let dialog = self.dialog.take();
+            self.disconnect(window, cx);
+            self.dialog = dialog;
+        }
         self.joining = true;
         self.join_error = None;
         let options = ClientOptions {
@@ -918,7 +973,10 @@ impl ThroccApp {
             cx.update_window(window_handle, |_, window, cx| {
                 this.update(cx, |app, cx| {
                     match result {
-                        Ok(client) => app.attach(Arc::new(client), window, cx),
+                        Ok(client) => {
+                            app.known_servers = known_servers();
+                            app.attach(Arc::new(client), window, cx);
+                        }
                         Err(e) => {
                             app.joining = false;
                             match e.pin_mismatch() {
@@ -958,16 +1016,14 @@ impl ThroccApp {
         }
     }
 
-    /// Disconnects and goes back to the server list, keeping our membership.
-    pub fn switch_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Disconnects from the server, keeping our membership.
+    fn disconnect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.command(Command::Disconnect);
         self.end_session(window, cx);
         self.events = None;
-        self.known_servers = known_servers();
-        cx.notify();
     }
 
-    /// Returns to the join screen without anything that belonged to the server's session.
+    /// Returns to the screen for no server without anything that belonged to the server's session.
     fn end_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_all_popouts(cx);
         self.exit_fullscreen(window, cx);
@@ -983,8 +1039,8 @@ impl ThroccApp {
     }
 
     /// Opens a screen of the mock client by name, for screenshots: join, lobby, room, focus,
-    /// fullscreen, popout, share, settings, appearance, profile, connection, verify, members
-    /// or keychange.
+    /// fullscreen, popout, share, settings, appearance, profile, connection, verify, members,
+    /// keychange or addserver.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         let room = RoomId(1);
         let joined = |app: &mut Self| {
@@ -996,7 +1052,11 @@ impl ThroccApp {
             "join" => {
                 self.client = None;
                 self.screen = Screen::Join;
-                self.known_servers = vec![("voice.example.net".into(), Fingerprint([0x2c; 32]))];
+            }
+            "addserver" => {
+                self.client = None;
+                self.screen = Screen::Join;
+                self.dialog = Some(Dialog::AddServer);
             }
             "room" => joined(self),
             "focus" => {
@@ -1177,6 +1237,16 @@ impl Render for ThroccApp {
             Screen::Settings(page) => views::settings::render(self, page, cx).into_any_element(),
             Screen::Server(page) => views::server::render(self, page, cx).into_any_element(),
         };
+        let screen = if self.fullscreen_stream().is_some() {
+            screen
+        } else {
+            div()
+                .size_full()
+                .flex()
+                .child(views::server_bar::render(self, cx))
+                .child(div().flex_1().min_w_0().h_full().child(screen))
+                .into_any_element()
+        };
         div()
             .id("throcc")
             .key_context("Throcc")
@@ -1206,9 +1276,7 @@ impl Render for ThroccApp {
                     return;
                 }
                 if event.pressed_button == Some(gpui::MouseButton::Left) {
-                    app.sidebar_width = event
-                        .position
-                        .x
+                    app.sidebar_width = (event.position.x - theme::SERVER_BAR_WIDTH)
                         .clamp(theme::SIDEBAR_MIN_WIDTH, theme::SIDEBAR_MAX_WIDTH);
                 } else {
                     app.resizing_sidebar = false;

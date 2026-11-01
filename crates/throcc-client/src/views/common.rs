@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton,
-    ObjectFit, ParentElement, Pixels, RenderImage, SharedString, Stateful, Styled, StyledImage,
-    TitlebarOptions, WindowBackgroundAppearance, WindowOptions, div, img, point, px,
+    ObjectFit, ParentElement, Pixels, Point, RenderImage, SharedString, Stateful, Styled,
+    StyledImage, TitlebarOptions, WindowBackgroundAppearance, WindowOptions, div, img, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Icon, Sizable, Size};
@@ -178,9 +178,9 @@ pub fn ghost_icon(
 /// Room the macOS traffic lights take at the left of a window's top bar.
 pub const TRAFFIC_LIGHTS: Pixels = px(if cfg!(target_os = "macos") { 76. } else { 0. });
 
-/// `options` with the titlebar drawn by the app on macOS: the traffic lights sit in our top
-/// bar at `lights_top`, and a `blurred` window shows the desktop behind see-through views.
-pub fn app_titlebar(options: WindowOptions, lights_top: Pixels, blurred: bool) -> WindowOptions {
+/// `options` with the titlebar drawn by the app on macOS: the traffic lights sit in our own
+/// views at `lights`, and a `blurred` window shows the desktop behind see-through views.
+pub fn app_titlebar(options: WindowOptions, lights: Point<Pixels>, blurred: bool) -> WindowOptions {
     if !cfg!(target_os = "macos") {
         return options;
     }
@@ -188,7 +188,7 @@ pub fn app_titlebar(options: WindowOptions, lights_top: Pixels, blurred: bool) -
         titlebar: Some(TitlebarOptions {
             title: None,
             appears_transparent: true,
-            traffic_light_position: Some(point(px(20.), lights_top)),
+            traffic_light_position: Some(lights),
         }),
         app_owns_titlebar_drag: true,
         window_background: if blurred {

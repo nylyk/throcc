@@ -6,7 +6,7 @@ mod theme;
 mod video;
 mod views;
 
-use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
+use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, point, px, size};
 use gpui_component::Root;
 use views::common;
 
@@ -54,7 +54,7 @@ fn main() {
                     window_min_size: Some(size(px(900.), px(600.))),
                     ..Default::default()
                 },
-                (theme::HEADER_HEIGHT - px(14.)) / 2.,
+                point(px(8.), (theme::HEADER_HEIGHT - px(14.)) / 2.),
                 true,
             );
             let opened = cx.open_window(options, |window, cx| {

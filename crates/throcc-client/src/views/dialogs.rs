@@ -3,6 +3,7 @@ use gpui::{
     AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, MouseButton,
     ParentElement, StatefulInteractiveElement, Styled, div, px,
 };
+use gpui_component::Disableable;
 use gpui_component::input::Input;
 use gpui_component::slider::Slider;
 use gpui_component::switch::Switch;
@@ -13,6 +14,7 @@ use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::messages::Codec;
 
 use super::common::{caption, card, chip, danger, mono, primary, rate, secondary, section, title};
+use super::join::error_box;
 use crate::app::{Dialog, ThroccApp};
 use crate::theme;
 
@@ -39,6 +41,7 @@ pub fn render(app: &mut ThroccApp, dialog: Dialog, cx: &mut Context<ThroccApp>) 
         } => edit_room(app, room, confirm_delete, cx),
         Dialog::RoomPassword { room, error } => room_password(app, room, error, cx),
         Dialog::LeaveServer => leave_server(app, cx),
+        Dialog::AddServer => add_server(app, cx),
     };
     div()
         .id("scrim")
@@ -636,6 +639,48 @@ fn remove(user: UserId, name: &str, cascade: bool, cx: &mut Context<ThroccApp>) 
         .into_any_element()
 }
 
+fn add_server(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_4()
+        .child(title("Add a server"))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(section("Address"))
+                .child(Input::new(&app.address).font_family(theme::mono_font())),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(section("Invite code"))
+                .child(Input::new(&app.code).font_family(theme::mono_font()))
+                .child(caption("The code also proves you reached the real server. Leave it empty for a server you've joined before.")),
+        )
+        .children(app.join_error.clone().map(error_box))
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap_2()
+                .child(close_button(cx))
+                .child(
+                    primary("join", if app.joining { "Joining…" } else { "Join" })
+                        .disabled(app.joining)
+                        .on_click(cx.listener(|app, _, window, cx| {
+                            app.join(window, cx);
+                            cx.notify();
+                        })),
+                ),
+        )
+        .into_any_element()
+}
+
 fn leave_server(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let server = app
         .state
@@ -687,7 +732,7 @@ fn pin_mismatch(
                 .child(mono(actual.to_string()).text_size(px(12.))),
         )
         .child(caption(
-            "This happens when the server was reinstalled, and also when someone is pretending to be it. The safe way back is a fresh invite code: enter it on the join screen and the code proves the new key.",
+            "This happens when the server was reinstalled, and also when someone is pretending to be it. The safe way back is a fresh invite code: add the server again with it, and the code proves the new key.",
         ))
         .child(
             div()
@@ -695,8 +740,7 @@ fn pin_mismatch(
                 .justify_end()
                 .gap_2()
                 .child(primary("use-invite", "Use a fresh invite").on_click(cx.listener(|app, _, window, cx| {
-                    app.dialog = None;
-                    app.adding_server = true;
+                    app.dialog = Some(Dialog::AddServer);
                     app.code.update(cx, |s, cx| s.focus(window, cx));
                     cx.notify();
                 })))

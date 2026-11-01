@@ -1,18 +1,11 @@
-use gpui::{
-    Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, div, px,
-};
-use gpui_component::Disableable;
-use gpui_component::input::Input;
+use gpui::{Context, Div, FontWeight, IntoElement, ParentElement, Styled, div, px};
 use throcc_client_core::account::SignInError;
 use throcc_client_core::connection::ConnectError;
 use throcc_client_core::control::LoginError;
 use throcc_proto::messages::AuthError;
 
-use super::common::{
-    avatar, caption, card, icon, mono, moves_window, primary, secondary, section, title,
-};
-use crate::app::ThroccApp;
+use super::common::{caption, moves_window, primary};
+use crate::app::{Dialog, ThroccApp};
 use crate::theme;
 
 /// Turns a failed sign-in into a sentence for the join screen.
@@ -38,151 +31,32 @@ pub fn explain(error: &SignInError) -> String {
     }
 }
 
+/// A failed join, in the warning colours.
+pub(super) fn error_box(error: String) -> Div {
+    div()
+        .p_3()
+        .rounded(theme::RADIUS_ROW)
+        .bg(theme::warn_bg())
+        .border_1()
+        .border_color(theme::warn_border())
+        .text_color(theme::warn_text())
+        .text_size(px(13.))
+        .child(error)
+}
+
+/// The window with no server connected: how a join is going, or what to do next.
 pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
-    let servers = app.known_servers.clone();
-    let error_box = |error: String| {
-        div()
-            .p_3()
-            .rounded(theme::RADIUS_ROW)
-            .bg(theme::warn_bg())
-            .border_1()
-            .border_color(theme::warn_border())
-            .text_color(theme::warn_text())
-            .text_size(px(13.))
-            .child(error)
+    let hint = if app.joining {
+        "Joining…"
+    } else if app.known_servers.is_empty() {
+        "Add a server with its address and an invite code."
+    } else {
+        "Pick a server on the left."
     };
-    let form = card()
-        .w(px(420.))
-        .flex()
-        .flex_col()
-        .gap_4()
-        .child(title("Join a server"))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(section("Address"))
-                .child(Input::new(&app.address).font_family(theme::mono_font())),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(section("Invite code"))
-                .child(Input::new(&app.code).font_family(theme::mono_font()))
-                .child(caption("The code also proves you reached the real server. Leave it empty for a server you've joined before.")),
-        )
-        .children(app.join_error.clone().map(error_box))
-        .child(
-            div()
-                .flex()
-                .gap_2()
-                .children((!servers.is_empty()).then(|| {
-                    secondary("back-to-servers", "Back")
-                        .h(theme::TOUCH)
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.adding_server = false;
-                            app.join_error = None;
-                            cx.notify();
-                        }))
-                }))
-                .child(
-                    primary("join", if app.joining { "Joining…" } else { "Join" })
-                        .flex_1()
-                        .h(theme::TOUCH)
-                        .disabled(app.joining)
-                        .on_click(cx.listener(|app, _, window, cx| {
-                            app.join(window, cx);
-                            cx.notify();
-                        })),
-                ),
-        );
-
-    let known = card()
-        .w(px(420.))
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(section("Your servers"))
-        .children(
-            servers
-                .iter()
-                .enumerate()
-                .map(|(i, (address, fingerprint))| {
-                    let address = address.clone();
-                    div()
-                        .id(("server", i))
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .p_2()
-                        .min_h(theme::TOUCH)
-                        .rounded(theme::RADIUS_ROW)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme::raised()))
-                        .child(avatar(&address, i as u64, None, px(28.), false))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .child(div().font_weight(FontWeight::MEDIUM).child(address.clone()))
-                                .child(
-                                    mono(fingerprint.short())
-                                        .text_size(px(12.))
-                                        .text_color(theme::text_3()),
-                                ),
-                        )
-                        .on_click(cx.listener(move |app, _, window, cx| {
-                            if app.joining {
-                                return;
-                            }
-                            let address = address.clone();
-                            app.address
-                                .update(cx, |s, cx| s.set_value(address, window, cx));
-                            app.code.update(cx, |s, cx| s.set_value("", window, cx));
-                            app.join(window, cx);
-                            cx.notify();
-                        }))
-                }),
-        )
-        .child(
-            div()
-                .id("add-server")
-                .flex()
-                .items_center()
-                .gap_3()
-                .p_2()
-                .min_h(theme::TOUCH)
-                .rounded(theme::RADIUS_ROW)
-                .cursor_pointer()
-                .hover(|s| s.bg(theme::raised()))
-                .text_color(theme::text_2())
-                .child(
-                    div()
-                        .size(px(28.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(icon("plus").size(px(16.))),
-                )
-                .child(div().font_weight(FontWeight::MEDIUM).child("Add server"))
-                .on_click(cx.listener(|app, _, window, cx| {
-                    app.adding_server = true;
-                    app.join_error = None;
-                    app.address.update(cx, |s, cx| {
-                        s.set_value("", window, cx);
-                        s.focus(window, cx);
-                    });
-                    app.code.update(cx, |s, cx| s.set_value("", window, cx));
-                    cx.notify();
-                })),
-        )
-        .children(app.joining.then(|| caption("Joining…")))
-        .children(app.join_error.clone().map(error_box));
-    let adding = servers.is_empty() || app.adding_server;
-
+    let error = app
+        .join_error
+        .clone()
+        .filter(|_| app.dialog != Some(Dialog::AddServer));
     div()
         .size_full()
         .relative()
@@ -191,7 +65,7 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
         .flex_col()
         .items_center()
         .justify_center()
-        .gap_6()
+        .gap_4()
         .child(
             moves_window(div())
                 .absolute()
@@ -206,9 +80,11 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
                 .font_weight(FontWeight::SEMIBOLD)
                 .child("throcc"),
         )
-        .child(if adding {
-            form.into_any_element()
-        } else {
-            known.into_any_element()
-        })
+        .child(caption(hint))
+        .children(error.map(|e| div().w(px(420.)).child(error_box(e))))
+        .children((app.known_servers.is_empty() && !app.joining).then(|| {
+            primary("add-first-server", "Add server")
+                .h(theme::TOUCH)
+                .on_click(cx.listener(|app, _, window, cx| app.open_add_server(window, cx)))
+        }))
 }

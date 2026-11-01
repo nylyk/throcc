@@ -3,7 +3,7 @@ use std::time::Instant;
 use gpui::{
     App, AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
     ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window,
-    WindowBounds, WindowHandle, WindowOptions, div, px, size,
+    WindowBounds, WindowHandle, WindowOptions, div, point, px, size,
 };
 use gpui_component::Root;
 use throcc_client_core::state::share_label;
@@ -41,7 +41,7 @@ impl PopOut {
                 window_min_size: Some(size(px(320.), px(228.))),
                 ..Default::default()
             },
-            px(25.),
+            point(px(20.), px(25.)),
             false,
         );
         let opened = cx.open_window(options, |window, cx| {

@@ -2,9 +2,8 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Anchor, AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    Pixels, RenderImage, Size as Area, StatefulInteractiveElement, Styled, Window, div, px,
-    relative, size,
+    AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement, Pixels,
+    RenderImage, Size as Area, StatefulInteractiveElement, Styled, Window, div, px, relative, size,
 };
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
@@ -14,11 +13,11 @@ use throcc_client_core::state::{Person, State, share_label};
 use throcc_proto::ids::{RoomId, UserId};
 
 use super::common::{
-    TRAFFIC_LIGHTS, avatar, caption, card, ghost_icon, icon, moves_window, player, player_button,
-    player_title, primary, rate, section, sharing_icon,
+    avatar, caption, card, ghost_icon, icon, moves_window, player, player_button, player_title,
+    primary, rate, section, sharing_icon,
 };
 use super::settings::{resize_handle, sidebar_column};
-use crate::app::{Dialog, Screen, ServerPage, SettingsPage, ThroccApp};
+use crate::app::{Dialog, Screen, ServerPage, ThroccApp};
 use crate::theme;
 
 pub fn render(
@@ -26,7 +25,7 @@ pub fn render(
     window: &mut Window,
     cx: &mut Context<ThroccApp>,
 ) -> impl IntoElement {
-    if let Some(user) = app.fullscreen.filter(|user| app.shows_stream(*user)) {
+    if let Some(user) = app.fullscreen_stream() {
         return fullscreen(app, user, window, cx).into_any_element();
     }
     let content = match app.state.current.clone() {
@@ -110,7 +109,6 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
         .server
         .as_ref()
         .map_or("server".to_owned(), |s| s.title().to_owned());
-    let server_picture = app.picture(state.server.as_ref().and_then(|s| s.avatar), cx);
     let own_picture = app.picture(state.profile_picture, cx);
     let current_room = state.current.as_ref().map(|c| c.room);
     let manages = app.manages_rooms();
@@ -172,8 +170,8 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
     let in_room = state.current.is_some();
 
     // The dropdown wraps its trigger in elements that grow to the text, so the name gets an
-    // explicit width: the sidebar minus the lights, paddings, picture, gaps and caret.
-    let server_name_width = app.sidebar_width - TRAFFIC_LIGHTS - px(84.);
+    // explicit width: the sidebar minus the paddings, gap and caret.
+    let server_name_width = app.sidebar_width - px(44.);
     let this = cx.entity().downgrade();
     let server_menu = Button::new("server-menu")
         .ghost()
@@ -183,19 +181,11 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
         .dropdown_caret(true)
         .child(
             div()
-                .flex()
-                .flex_1()
-                .min_w_0()
-                .items_center()
-                .gap_2()
-                .child(avatar(&server, 0, server_picture, px(28.), false))
-                .child(
-                    div()
-                        .max_w(server_name_width)
-                        .truncate()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(server),
-                ),
+                .max_w(server_name_width)
+                .truncate()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(px(16.))
+                .child(server),
         )
         .dropdown_menu(move |menu, _, _| {
             let settings = this.clone();
@@ -232,74 +222,33 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
         });
 
     let speaking = me.is_some_and(|m| state.person(m).is_some_and(|p| p.speaking));
-    let profile_name_width = app.sidebar_width - px(168.);
-    let profile = cx.entity().downgrade();
-    let profile_menu = Button::new("profile-menu")
-        .ghost()
-        .rounded(theme::RADIUS_ROW)
-        .h(px(48.))
+    let profile = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap_2()
         .px_2()
+        .child(avatar(
+            &my_name,
+            me.map_or(0, |m| m.0),
+            my_picture,
+            px(36.),
+            speaking,
+        ))
         .child(
             div()
+                .min_w_0()
                 .flex()
-                .items_center()
-                .gap_2()
-                .child(avatar(
-                    &my_name,
-                    me.map_or(0, |m| m.0),
-                    my_picture,
-                    px(28.),
-                    speaking,
-                ))
+                .flex_col()
                 .child(
                     div()
-                        .flex()
-                        .flex_col()
-                        .items_start()
-                        .max_w(profile_name_width)
-                        .child(
-                            div()
-                                .w_full()
-                                .truncate()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(my_name),
-                        )
-                        .child(
-                            caption(if in_room { "Connected" } else { "In the lobby" })
-                                .w_full()
-                                .truncate(),
-                        ),
-                ),
-        )
-        .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-            let edit = profile.clone();
-            let settings = profile.clone();
-            menu.min_w(px(200.))
-                .item(
-                    PopupMenuItem::new("Edit profile")
-                        .icon(icon("user-pen"))
-                        .on_click(move |_, window, cx| {
-                            edit.update(cx, |app, cx| {
-                                app.fill_profile(window, cx);
-                                app.screen = Screen::Settings(SettingsPage::Profile);
-                                cx.notify();
-                            })
-                            .ok();
-                        }),
+                        .truncate()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(my_name),
                 )
-                .item(
-                    PopupMenuItem::new("Settings")
-                        .icon(icon("settings"))
-                        .on_click(move |_, _, cx| {
-                            settings
-                                .update(cx, |app, cx| {
-                                    app.screen = Screen::Settings(SettingsPage::Audio);
-                                    cx.notify();
-                                })
-                                .ok();
-                        }),
-                )
-        });
+                .child(caption(if in_room { "Connected" } else { "In the lobby" }).truncate()),
+        );
 
     sidebar_column(app.sidebar_width)
         .child(
@@ -307,7 +256,6 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                 .flex()
                 .items_center()
                 .px_2()
-                .pl(px(8.) + TRAFFIC_LIGHTS)
                 .h(theme::HEADER_HEIGHT)
                 .flex_none()
                 .border_b_1()
@@ -354,8 +302,7 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                 .flex_none()
                 .border_t_1()
                 .border_color(theme::control())
-                .child(profile_menu)
-                .child(div().flex_1())
+                .child(profile)
                 .child(
                     div()
                         .flex()
@@ -377,12 +324,6 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                             .on_click(cx.listener(
                                 move |app, _, _, _| app.command(Command::SetDeafened(!deafened)),
                             )),
-                        )
-                        .child(
-                            ghost_icon("switch-server", "arrow-left-right", "Switch server")
-                                .on_click(
-                                    cx.listener(|app, _, window, cx| app.switch_server(window, cx)),
-                                ),
                         ),
                 ),
         )
@@ -736,7 +677,7 @@ fn grid_fit(count: usize, area: Area<Pixels>, gap: Pixels) -> (usize, Area<Pixel
 fn room_area(app: &ThroccApp, window: &Window) -> Area<Pixels> {
     let viewport = window.viewport_size();
     size(
-        viewport.width - app.sidebar_width - ROOM_PADDING * 2.,
+        viewport.width - theme::SERVER_BAR_WIDTH - app.sidebar_width - ROOM_PADDING * 2.,
         viewport.height - theme::HEADER_HEIGHT - theme::FOOTER_HEIGHT - ROOM_PADDING * 2.,
     )
 }
