@@ -47,6 +47,7 @@ pub fn render(app: &mut ThroccApp, dialog: Dialog, cx: &mut Context<ThroccApp>) 
         .id("scrim")
         .absolute()
         .inset_0()
+        .occlude()
         .bg(theme::scrim())
         .on_mouse_down(
             MouseButton::Left,
