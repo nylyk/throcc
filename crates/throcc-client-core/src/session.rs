@@ -750,8 +750,8 @@ impl Session {
                 }
             }
             Command::SetMic(on) => {
-                if on != self.media.mic {
-                    self.cue(if on { Cue::Unmute } else { Cue::Mute });
+                if let Some(cue) = mic_cue(&self.media, on) {
+                    self.cue(cue);
                 }
                 self.media.mic = on;
                 if on {
@@ -1586,6 +1586,16 @@ fn percent(part: u64, whole: u64) -> f32 {
     }
 }
 
+/// The cue for turning the mic `on`, which also undeafens, if it changes anything.
+fn mic_cue(media: &MediaState, on: bool) -> Option<Cue> {
+    match on {
+        _ if on == media.mic => None,
+        true if media.deafened => Some(Cue::Undeafen),
+        true => Some(Cue::Unmute),
+        false => Some(Cue::Mute),
+    }
+}
+
 /// Deafens, which also mutes, or undeafens back to the mic state from before.
 fn set_deafened(media: &mut MediaState, mic_before: &mut bool, deafened: bool) {
     if deafened == media.deafened {
@@ -1683,5 +1693,17 @@ mod tests {
         set_deafened(&mut media, &mut before, true);
         set_deafened(&mut media, &mut before, false);
         assert!(!media.mic);
+    }
+
+    #[test]
+    fn turning_the_mic_on_while_deafened_sounds_like_undeafening() {
+        let mut media = MediaState::default();
+        assert_eq!(mic_cue(&media, true), Some(Cue::Unmute));
+        assert_eq!(mic_cue(&media, false), None);
+        set_deafened(&mut media, &mut false, true);
+        assert_eq!(mic_cue(&media, true), Some(Cue::Undeafen));
+        media.mic = true;
+        media.deafened = false;
+        assert_eq!(mic_cue(&media, false), Some(Cue::Mute));
     }
 }
