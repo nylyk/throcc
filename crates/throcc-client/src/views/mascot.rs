@@ -5,11 +5,11 @@ use gpui::{Styled, Svg, px, svg};
 
 use crate::theme;
 
-pub const HAPPY: &str = "mascot/happy.svg";
+pub const WELCOMERS: &[&str] = &["mascot/cool.svg", "mascot/happy.svg", "mascot/love.svg"];
 
 pub const GREETERS: &[&str] = &[
     "mascot/cool.svg",
-    HAPPY,
+    "mascot/happy.svg",
     "mascot/love.svg",
     "mascot/sing.svg",
     "mascot/thinking.svg",
@@ -18,9 +18,17 @@ pub const GREETERS: &[&str] = &[
 pub const IDLE: &[&str] = &[
     "mascot/asleep.svg",
     "mascot/cool.svg",
-    HAPPY,
+    "mascot/happy.svg",
     "mascot/love.svg",
     "mascot/sing.svg",
+    "mascot/thinking.svg",
+];
+
+pub const LONELY: &[&str] = &[
+    "mascot/asleep.svg",
+    "mascot/sad.svg",
+    "mascot/side-eye.svg",
+    "mascot/sobbing.svg",
     "mascot/thinking.svg",
 ];
 

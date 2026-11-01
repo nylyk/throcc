@@ -250,10 +250,14 @@ pub struct ThroccApp {
     pub joining: bool,
     /// The mascot on the join screen once a server is known.
     pub greeter: &'static str,
+    /// The mascot on the join screen before any server is known.
+    pub welcomer: &'static str,
     /// The mascot beside a failed join or a lost connection.
     pub upset: &'static str,
     /// The mascot in a lobby with no rooms.
     pub idle: &'static str,
+    /// The mascot in a room with no one else in it and nothing shared.
+    pub lonely: &'static str,
     /// Counts joins started, so a join that was overtaken by a newer one is ignored.
     join_attempt: u64,
     pub join_error: Option<String>,
@@ -395,8 +399,10 @@ impl ThroccApp {
             pictures: std::collections::HashMap::new(),
             joining: false,
             greeter: views::mascot::pick(views::mascot::GREETERS),
+            welcomer: views::mascot::pick(views::mascot::WELCOMERS),
             upset: views::mascot::pick(views::mascot::UPSET),
             idle: views::mascot::pick(views::mascot::IDLE),
+            lonely: views::mascot::pick(views::mascot::LONELY),
             join_attempt: 0,
             join_error: None,
             profile_status: None,
@@ -1361,6 +1367,7 @@ impl ThroccApp {
                 self.dialog = Some(Dialog::RemoveServer("lan.example.org".into()));
             }
             "room" => joined(self),
+            "alone" => self.command(Command::Join(Some(RoomId(3)))),
             "emptylobby" => {
                 if let Some(client) = &self.client {
                     for room in client.state().rooms.iter() {

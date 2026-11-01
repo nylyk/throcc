@@ -56,7 +56,7 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
     let mascot = if error.is_some() {
         app.upset
     } else if first_run {
-        mascot::HAPPY
+        app.welcomer
     } else {
         app.greeter
     };

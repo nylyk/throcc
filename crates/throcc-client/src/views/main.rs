@@ -670,9 +670,23 @@ fn room(
         viewport.width - app.sidebar_width - app.room_chrome.width,
         viewport.height - app.room_chrome.height,
     ));
-    let body = match focus {
-        Some(focus) => focused(app, &tiles, focus, area, window, cx),
-        None => grid(app, &tiles, area, window, cx),
+    let alone = !sharing && tiles.iter().all(|t| t.mine);
+    let body = if alone {
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_4()
+            .child(mascot::drawing(app.lonely))
+            .child(description("No one else is here yet :("))
+            .into_any_element()
+    } else {
+        match focus {
+            Some(focus) => focused(app, &tiles, focus, area, window, cx),
+            None => grid(app, &tiles, area, window, cx),
+        }
     };
     let this = cx.entity().downgrade();
     let measure = canvas(
