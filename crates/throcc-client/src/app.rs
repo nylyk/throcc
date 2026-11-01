@@ -1309,10 +1309,10 @@ impl ThroccApp {
         }
     }
 
-    /// Opens a screen of the mock client by name, for screenshots: welcome, join, joinfailed, lost,
-    /// lobby, emptylobby, room, focus,
-    /// fullscreen, popout, share, settings, sounds, appearance, profile, connection, verify,
-    /// members, keychange, addserver, removeserver or personmenu.
+    /// Opens a screen of the mock client by name, for screenshots: welcome, join, joinfailed,
+    /// lost, lobby, emptylobby, room, alone, focus, fullscreen, popout, share, settings, sounds,
+    /// appearance, profile, connection, verify, members, keychange, pinmismatch, addserver,
+    /// removeserver or personmenu.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         let room = RoomId(1);
         let joined = |app: &mut Self| {
@@ -1418,6 +1418,15 @@ impl ThroccApp {
             }
             "verify" => self.dialog = Some(Dialog::Verify(UserId(2))),
             "keychange" => self.dialog = Some(Dialog::Verify(UserId(3))),
+            "pinmismatch" => {
+                self.client = None;
+                self.screen = Screen::Join;
+                self.dialog = Some(Dialog::PinMismatch {
+                    address: "voice.example.net".into(),
+                    expected: Fingerprint([0x2c; 32]),
+                    actual: Fingerprint([0xb8; 32]),
+                });
+            }
             "settings" => self.screen = Screen::Settings(SettingsPage::Audio),
             "appearance" => self.screen = Screen::Settings(SettingsPage::Appearance),
             "newroom" => self.dialog = Some(Dialog::NewRoom),

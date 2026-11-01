@@ -8,8 +8,8 @@ use throcc_crypto::hpke::EncKeyPair;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, MediaId, RoomId, UserId};
 use throcc_proto::messages::{
-    AuthError, Event as ServerEvent, MediaState, Placed, Presence, PublicKey, Recovery, Request,
-    Response, RoomPeer, Share, ShareConfig, Welcome,
+    AuthError, Event as ServerEvent, MediaState, Placed, Presence, Recovery, Request, Response,
+    RoomPeer, Share, ShareConfig, Welcome,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{Semaphore, broadcast, mpsc, watch};
@@ -25,7 +25,7 @@ use crate::keystore::Keystore;
 use crate::lock;
 use crate::media::audio::VoiceSettings;
 use crate::media::cues::Cue;
-use crate::media::engine::{KeyState, Kind};
+use crate::media::engine::Kind;
 use crate::media::share_audio::Playout;
 use crate::media::video::{Picture, PreviewDemand};
 use crate::media::voice::{VoiceCommand, VoiceEngine};
@@ -875,7 +875,6 @@ impl Session {
                 self.simple(Request::RemoveUser { user, cascade }).await;
                 self.list_users().await;
             }
-            Command::AcceptKey(user, key) => self.accept_key(user, key).await,
             Command::SetVerified(user, verified) => {
                 if let Err(e) = self
                     .call
@@ -1261,46 +1260,6 @@ impl Session {
         }
         #[cfg(not(feature = "ffmpeg"))]
         let _ = kind;
-    }
-
-    /// Pins `key` for `user` if it is the changed key we warned about and the room state
-    /// still presents it.
-    async fn accept_key(&mut self, user: UserId, key: PublicKey) {
-        let warned = self
-            .shared
-            .state()
-            .key_warnings
-            .iter()
-            .any(|w| w.user == user && w.now.0 == key);
-        if !warned {
-            return;
-        }
-        let pinned = {
-            let mut state = self.call.engine.keys();
-            let KeyState { keys, contacts } = &mut *state;
-            keys.presents(user, &key).then(|| contacts.pin(user, key))
-        };
-        match pinned {
-            None => {
-                self.shared.notice(format!(
-                    "{} isn't presenting that key right now, so it wasn't accepted.",
-                    self.name_of(user)
-                ));
-                return;
-            }
-            Some(Err(e)) => {
-                warn!("saving the new key: {e:#}");
-                self.shared
-                    .notice(format!("Couldn't keep the new key: {e}"));
-            }
-            Some(Ok(())) => {}
-        }
-        self.shared
-            .update(|s| s.key_warnings.retain(|w| w.user != user));
-        let notices = self.call.refresh_keys();
-        self.notices(notices);
-        self.refresh_verified();
-        self.follow_room().await;
     }
 
     /// Replaces our encryption key once it nears expiry, and gives the server the new one.

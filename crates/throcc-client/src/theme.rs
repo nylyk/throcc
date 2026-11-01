@@ -355,6 +355,10 @@ pub fn danger_bg() -> Hsla {
     let p = palette();
     mixed(p.bad, 0.18, p.panel)
 }
+pub fn danger_border() -> Hsla {
+    let p = palette();
+    mixed(p.bad, 0.35, p.panel)
+}
 pub fn danger_text() -> Hsla {
     hex(palette().bad)
 }

@@ -21,7 +21,7 @@ const MAX_EARLY: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KeyNotice {
-    /// A user's identity key differs from the pinned one. They are left out until accepted.
+    /// A user's identity key differs from the pinned one. They are left out until it matches again.
     KeyChanged {
         user: UserId,
         pinned: PublicKey,

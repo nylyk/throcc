@@ -227,7 +227,7 @@ impl MediaEngine {
         }
     }
 
-    /// Applies the current room state again, after a pin or presence changed.
+    /// Applies the current room state again, after presence changed.
     pub fn refresh_keys(&self) -> Vec<KeyNotice> {
         let mut state = self.keys();
         let KeyState { keys, contacts } = &mut *state;

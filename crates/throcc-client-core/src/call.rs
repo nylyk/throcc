@@ -118,11 +118,6 @@ impl Call {
         self.connected.fingerprint
     }
 
-    /// Applies the current room state again, after a pin changed.
-    pub fn refresh_keys(&self) -> Vec<KeyNotice> {
-        self.engine.refresh_keys()
-    }
-
     pub async fn request(&self, request: Request) -> Result<Response> {
         Ok(self.requester.request(request).await?)
     }

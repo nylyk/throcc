@@ -8,6 +8,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, Sizable, Size};
 use throcc_client_core::client::Command;
 use throcc_client_core::state::{Person, State, share_label};
@@ -147,11 +148,10 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
             .flex()
             .flex_col()
             .child(with_room_menu(row, id, manages, cx))
-            .children(
-                people
-                    .into_iter()
-                    .map(|(user, person)| occupant(user, &person, pictures.get(&user).cloned())),
-            )
+            .children(people.into_iter().map(|(user, person)| {
+                let changed = state.key_warnings.iter().any(|w| w.user == user);
+                occupant(user, &person, pictures.get(&user).cloned(), changed, cx)
+            }))
     });
 
     let me = state.me;
@@ -408,6 +408,8 @@ fn occupant(
     user: UserId,
     person: &Person,
     picture: Option<std::sync::Arc<gpui::RenderImage>>,
+    key_changed: bool,
+    cx: &Context<ThroccApp>,
 ) -> Div {
     div()
         .flex()
@@ -425,13 +427,34 @@ fn occupant(
         ))
         .child(
             div()
-                .flex_1()
+                .min_w_0()
                 .truncate()
                 .text_color(theme::text_2_muted())
                 .child(person.name.clone()),
         )
+        .children(key_changed.then(|| key_changed_marker(user, cx)))
+        .child(div().flex_1())
         .children(person.sharing.is_some().then(sharing_icon))
         .children(muted_icon(person, px(16.)))
+}
+
+/// The danger sign beside the name of someone whose identity key changed, opening their key dialog.
+fn key_changed_marker(user: UserId, cx: &Context<ThroccApp>) -> Stateful<Div> {
+    div()
+        .id(("key-changed", user.0 as usize))
+        .flex()
+        .flex_none()
+        .cursor_pointer()
+        .child(
+            icon("triangle-alert")
+                .size(px(16.))
+                .text_color(theme::danger_text()),
+        )
+        .tooltip(|window, cx| Tooltip::new("Key changed").build(window, cx))
+        .on_click(cx.listener(move |app, _, _, cx| {
+            app.dialog = Some(Dialog::Verify(user));
+            cx.notify();
+        }))
 }
 
 /// The headphones-off icon while `person` is deafened, which mutes too, or else the

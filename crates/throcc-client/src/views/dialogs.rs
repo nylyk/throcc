@@ -1,6 +1,6 @@
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, MouseButton,
+    AnyElement, Context, Div, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton,
     ParentElement, StatefulInteractiveElement, Styled, div, px, relative,
 };
 use gpui_component::Disableable;
@@ -273,13 +273,25 @@ fn choices<T: Copy + PartialEq + 'static>(
 }
 
 fn warning_box() -> Div {
+    callout(theme::warn_bg(), theme::warn_border(), theme::warn_text())
+}
+
+fn danger_box() -> Div {
+    callout(
+        theme::danger_bg(),
+        theme::danger_border(),
+        theme::danger_text(),
+    )
+}
+
+fn callout(bg: Hsla, border: Hsla, text: Hsla) -> Div {
     div()
         .p_4()
         .rounded(theme::RADIUS_TILE)
-        .bg(theme::warn_bg())
+        .bg(bg)
         .border_1()
-        .border_color(theme::warn_border())
-        .text_color(theme::warn_text())
+        .border_color(border)
+        .text_color(text)
         .flex()
         .flex_col()
         .gap_2()
@@ -502,32 +514,30 @@ fn verify(app: &ThroccApp, user: UserId, cx: &mut Context<ThroccApp>) -> AnyElem
         .iter()
         .find(|w| w.user == user)
         .cloned();
+    let changed = warning.is_some();
     let number = app.safety_number(user);
     let mut content = div()
         .flex()
         .flex_col()
         .gap_4()
         .child(title(name.clone()))
-        .child(div().flex().gap_2().child(if warning.is_some() {
-            chip("Key changed", theme::warn_bg(), theme::warn_text())
+        .child(div().flex().gap_2().child(if changed {
+            chip("Key changed", theme::danger_bg(), theme::danger_text())
         } else if verified {
             chip("Verified", theme::ok_bg(), theme::ok_text())
         } else {
             chip("Not verified", theme::raised(), theme::text_2())
         }));
     if let Some(warning) = warning {
-        let shown = warning.now.0;
         content = content.child(
-            warning_box()
+            danger_box()
                 .child(div().typeset(theme::HEADLINE).child(format!("{name}’s key changed")))
-                .child("Check before you trust it.")
+                .child(format!(
+                    "The server is showing a different key for {name} than the one you know. An honest server never does this, so someone may be trying to listen in."
+                ))
                 .child(div().flex().items_center().gap_2().child(caption("Before").w(px(48.))).child(mono(warning.pinned.short())))
                 .child(div().flex().items_center().gap_2().child(caption("Now").w(px(48.))).child(mono(warning.now.short())))
-                .child(caption("This happens when someone reinstalls, and also when a server swaps keys to listen in."))
-                .child(div().flex().child(primary("accept-key", "Accept New Key").on_click(cx.listener(move |app, _, _, cx| {
-                    app.command(Command::AcceptKey(user, shown));
-                    cx.notify();
-                })))),
+                .child(caption("Nothing you say or share is encrypted to the new key, so it can’t hear or see you.")),
         );
     }
     let groups: Vec<String> = number.as_deref().map(safety_groups).unwrap_or_default();
@@ -546,9 +556,15 @@ fn verify(app: &ThroccApp, user: UserId, cx: &mut Context<ThroccApp>) -> AnyElem
                 .children(groups.into_iter().map(|g| div().child(g)))
                 .into_any_element()
         })
-        .child(description(format!(
-            "Compare this with {name} in person or through another app. If both match, nobody between you is swapping keys."
-        )))
+        .child(description(if changed {
+            format!(
+                "This number belongs to the key you knew. If it matches {name}’s, you know the real {name}, but the server is still showing a different key."
+            )
+        } else {
+            format!(
+                "Compare this with {name} in person or through another app. If both match, nobody between you is swapping keys."
+            )
+        }))
         .child(
             div()
                 .flex()

@@ -75,8 +75,6 @@ pub enum Command {
         user: UserId,
         cascade: bool,
     },
-    /// Trusts `user`'s changed identity key, if it is the one we warned about.
-    AcceptKey(UserId, PublicKey),
     SetVerified(UserId, bool),
     Voice(VoiceSettings),
     Devices {
@@ -443,10 +441,6 @@ impl ClientApi for MockClient {
             Command::ListUsers | Command::SetRole(..) | Command::RemoveUser { .. } => {
                 self.events.send(Event::Users(sample_users())).ok();
             }
-            Command::AcceptKey(user, key) => self.update(|s| {
-                s.key_warnings
-                    .retain(|w| !(w.user == user && w.now.0 == key))
-            }),
             Command::SetVerified(user, verified) => self.update(|s| {
                 if let Some(p) = s.people.get_mut(&user) {
                     p.verified = verified;
