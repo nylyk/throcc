@@ -161,7 +161,12 @@ pub(super) fn frame(
                         },
                     )),
                 )
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(heading)),
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(16.))
+                        .child(heading),
+                ),
         )
         .child(links)
         .child(resize_handle(cx));
@@ -220,8 +225,10 @@ pub(super) fn field(label: &str, control: impl IntoElement) -> Div {
 pub(super) fn row(label: &str, control: impl IntoElement) -> Div {
     div()
         .flex()
+        .flex_wrap()
         .items_center()
-        .gap_4()
+        .gap_x_4()
+        .gap_y_1()
         .min_h(theme::TOUCH)
         .child(
             div()
@@ -229,7 +236,7 @@ pub(super) fn row(label: &str, control: impl IntoElement) -> Div {
                 .text_color(theme::text_2())
                 .child(label.to_owned()),
         )
-        .child(div().flex_1().child(control))
+        .child(div().flex_1().min_w(px(200.)).child(control))
 }
 
 /// A row of mutually exclusive choices.

@@ -240,7 +240,7 @@ pub fn sidebar() -> Hsla {
 /// The sidebar over the blurred desktop on macOS, solid elsewhere.
 pub fn sidebar_glass() -> Hsla {
     if cfg!(target_os = "macos") {
-        sidebar().opacity(0.92)
+        sidebar().opacity(0.91)
     } else {
         sidebar()
     }
@@ -391,6 +391,7 @@ pub const SIDEBAR_WIDTH: Pixels = px(264.);
 pub const SIDEBAR_MIN_WIDTH: Pixels = px(248.);
 pub const SIDEBAR_MAX_WIDTH: Pixels = px(420.);
 pub const SERVER_BAR_WIDTH: Pixels = px(76.);
+pub const ROOM_MIN_WIDTH: Pixels = px(360.);
 
 const FONTS: &[&str] = &[
     "Geist",

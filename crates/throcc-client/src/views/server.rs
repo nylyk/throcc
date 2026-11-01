@@ -253,8 +253,10 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                     let editable = user.role != Role::Admin && Some(id) != my_id;
                     div()
                         .flex()
+                        .flex_wrap()
                         .items_center()
-                        .gap_3()
+                        .gap_x_3()
+                        .gap_y_1()
                         .min_h(theme::TOUCH)
                         .child(avatar(
                             &user.name,
@@ -280,35 +282,46 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                                 ),
                         )
                         .child(
-                            mono(Fingerprint(user.identity_key).short())
-                                .text_size(px(12.))
-                                .text_color(theme::text_3()),
+                            div()
+                                .ml_auto()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .child(
+                                    mono(Fingerprint(user.identity_key).short())
+                                        .text_size(px(12.))
+                                        .text_color(theme::text_3()),
+                                )
+                                .child(if editable {
+                                    segmented(
+                                        ("role", id.0),
+                                        &[(Role::Manager, "Manager"), (Role::User, "User")],
+                                        user.role,
+                                        cx,
+                                        move |app, role, _| app.command(Command::SetRole(id, role)),
+                                    )
+                                    .into_any_element()
+                                } else {
+                                    chip(
+                                        format!("{:?}", user.role),
+                                        theme::raised(),
+                                        theme::text_2(),
+                                    )
+                                    .into_any_element()
+                                })
+                                .children(editable.then(|| {
+                                    ghost_icon(("remove", id.0 as usize), "x", "Remove").on_click(
+                                        cx.listener(move |app, _, _, cx| {
+                                            app.dialog = Some(Dialog::Remove {
+                                                user: id,
+                                                name: name.clone(),
+                                                cascade: false,
+                                            });
+                                            cx.notify();
+                                        }),
+                                    )
+                                })),
                         )
-                        .child(if editable {
-                            segmented(
-                                ("role", id.0),
-                                &[(Role::Manager, "Manager"), (Role::User, "User")],
-                                user.role,
-                                cx,
-                                move |app, role, _| app.command(Command::SetRole(id, role)),
-                            )
-                            .into_any_element()
-                        } else {
-                            chip(format!("{:?}", user.role), theme::raised(), theme::text_2())
-                                .into_any_element()
-                        })
-                        .children(editable.then(|| {
-                            ghost_icon(("remove", id.0 as usize), "x", "Remove").on_click(
-                                cx.listener(move |app, _, _, cx| {
-                                    app.dialog = Some(Dialog::Remove {
-                                        user: id,
-                                        name: name.clone(),
-                                        cascade: false,
-                                    });
-                                    cx.notify();
-                                }),
-                            )
-                        }))
                 })),
         );
     }

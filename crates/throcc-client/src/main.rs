@@ -51,7 +51,7 @@ fn main() {
             let options = common::app_titlebar(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(900.), px(600.))),
+                    window_min_size: Some(size(px(720.), px(480.))),
                     ..Default::default()
                 },
                 point(px(8.), (theme::HEADER_HEIGHT - px(14.)) / 2.),

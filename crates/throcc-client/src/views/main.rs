@@ -3,7 +3,8 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement, Pixels,
-    RenderImage, Size as Area, StatefulInteractiveElement, Styled, Window, div, px, relative, size,
+    RenderImage, Size as Area, StatefulInteractiveElement, Styled, Window, canvas, div, px,
+    relative, size,
 };
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
@@ -525,13 +526,16 @@ fn room(
         .border_color(theme::control())
         .child(
             div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_size(px(16.))
                 .child(name),
         )
-        .child(div().flex_1())
         .child(
             Button::new("connection")
+                .flex_none()
                 .label(format!(
                     "↓ {}  ↑ {}  ·  {rtt:.0} ms",
                     rate(state.health.download_kbps),
@@ -600,17 +604,49 @@ fn room(
     let focus = app
         .focus
         .filter(|f| tiles.iter().any(|t| t.user == *f && t.shows_stream));
+    let viewport = window.viewport_size();
+    let area = room_area(size(
+        viewport.width - app.sidebar_width - app.room_chrome.width,
+        viewport.height - app.room_chrome.height,
+    ));
     let body = match focus {
-        Some(focus) => focused(app, &tiles, focus, window, cx),
-        None => grid(app, &tiles, window, cx),
+        Some(focus) => focused(app, &tiles, focus, area, window, cx),
+        None => grid(app, &tiles, area, window, cx),
     };
+    let this = cx.entity().downgrade();
+    let measure = canvas(
+        move |bounds, window, cx| {
+            this.update(cx, |app, cx| {
+                let viewport = window.viewport_size();
+                let chrome = size(
+                    viewport.width - app.sidebar_width - bounds.size.width,
+                    viewport.height - bounds.size.height,
+                );
+                if app.room_chrome != chrome {
+                    app.room_chrome = chrome;
+                    cx.notify();
+                }
+            })
+            .ok();
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_full();
 
     div()
         .size_full()
         .flex()
         .flex_col()
         .child(header)
-        .child(body)
+        .child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .relative()
+                .child(measure)
+                .child(body),
+        )
         .child(controls)
 }
 
@@ -648,7 +684,8 @@ struct Tile {
 
 const TILE_GAP: Pixels = px(12.);
 const ROOM_PADDING: Pixels = px(16.);
-const STRIP_HEIGHT: Pixels = px(124.);
+const STRIP_HEIGHT: Pixels = px(104.);
+const STRIP_MIN_WIDTH: Pixels = px(96.);
 
 /// How many columns of 16:9 tiles make `count` of them as large as fits `area`, and their size.
 fn grid_fit(count: usize, area: Area<Pixels>, gap: Pixels) -> (usize, Area<Pixels>) {
@@ -673,12 +710,11 @@ fn grid_fit(count: usize, area: Area<Pixels>, gap: Pixels) -> (usize, Area<Pixel
         .unwrap_or((1, size(px(0.), px(0.))))
 }
 
-/// The space inside the room's padding, between its header and control bar.
-fn room_area(app: &ThroccApp, window: &Window) -> Area<Pixels> {
-    let viewport = window.viewport_size();
+/// The space inside the room's padding, given the `room` between its header and control bar.
+fn room_area(room: Area<Pixels>) -> Area<Pixels> {
     size(
-        viewport.width - theme::SERVER_BAR_WIDTH - app.sidebar_width - ROOM_PADDING * 2.,
-        viewport.height - theme::HEADER_HEIGHT - theme::FOOTER_HEIGHT - ROOM_PADDING * 2.,
+        (room.width - ROOM_PADDING * 2.).max(px(0.)),
+        (room.height - ROOM_PADDING * 2.).max(px(0.)),
     )
 }
 
@@ -694,13 +730,13 @@ fn fit_aspect(area: Area<Pixels>, aspect: f32) -> Area<Pixels> {
 fn grid(
     app: &mut ThroccApp,
     tiles: &[Tile],
+    area: Area<Pixels>,
     window: &mut Window,
     cx: &mut Context<ThroccApp>,
 ) -> AnyElement {
-    let (_, tile_size) = grid_fit(tiles.len(), room_area(app, window), TILE_GAP);
+    let (_, tile_size) = grid_fit(tiles.len(), area, TILE_GAP);
     div()
-        .flex_1()
-        .min_h_0()
+        .size_full()
         .overflow_hidden()
         .p(ROOM_PADDING)
         .flex()
@@ -714,7 +750,7 @@ fn grid(
                 .flex_none()
                 .w(tile_size.width)
                 .h(tile_size.height)
-                .child(tile(app, t, Layout::Grid, window, cx))
+                .child(tile(app, t, Layout::Grid, tile_size.height, window, cx))
         }))
         .into_any_element()
 }
@@ -723,6 +759,7 @@ fn focused(
     app: &mut ThroccApp,
     tiles: &[Tile],
     focus: UserId,
+    area: Area<Pixels>,
     window: &mut Window,
     cx: &mut Context<ThroccApp>,
 ) -> AnyElement {
@@ -733,15 +770,19 @@ fn focused(
         .map(|c| f32::from(c.width) / f32::from(c.height))
         .filter(|aspect| aspect.is_finite() && *aspect > 0.)
         .unwrap_or(16. / 9.);
-    let area = room_area(app, window);
     let strip_room = if others.is_empty() {
         px(0.)
     } else {
         STRIP_HEIGHT + TILE_GAP
     };
     let stage_size = fit_aspect(size(area.width, area.height - strip_room), aspect);
-    let stage = focused.map(|t| tile(app, t, Layout::Stage, window, cx));
-    let strip_tile = size(STRIP_HEIGHT * (16. / 9.), STRIP_HEIGHT);
+    let stage = focused.map(|t| tile(app, t, Layout::Stage, stage_size.height, window, cx));
+    let fitting_width = (area.width - TILE_GAP * others.len().saturating_sub(1) as f32)
+        / others.len().max(1) as f32;
+    let tile_width = fitting_width
+        .min(STRIP_HEIGHT * (16. / 9.))
+        .max(STRIP_MIN_WIDTH);
+    let strip_tile = size(tile_width, STRIP_HEIGHT);
     let strip_width = (strip_tile.width + TILE_GAP) * others.len() as f32;
     let strip = (!others.is_empty()).then(|| {
         div()
@@ -757,12 +798,11 @@ fn focused(
                     .flex_none()
                     .w(strip_tile.width)
                     .h(strip_tile.height)
-                    .child(tile(app, t, Layout::Strip, window, cx))
+                    .child(tile(app, t, Layout::Strip, STRIP_HEIGHT, window, cx))
             }))
     });
     div()
-        .flex_1()
-        .min_h_0()
+        .size_full()
         .p(ROOM_PADDING)
         .flex()
         .flex_col()
@@ -797,6 +837,7 @@ fn tile(
     app: &mut ThroccApp,
     t: &Tile,
     layout: Layout,
+    height: Pixels,
     window: &mut Window,
     cx: &mut Context<ThroccApp>,
 ) -> AnyElement {
@@ -817,7 +858,7 @@ fn tile(
     if !t.shows_stream {
         return frame
             .bg(theme::surface())
-            .child(person_card(t, compact, cx))
+            .child(person_card(t, height, compact, cx))
             .into_any_element();
     }
     let config = t
@@ -827,7 +868,7 @@ fn tile(
         .unwrap_or_default();
     let label = div()
         .absolute()
-        .bottom_2()
+        .top_2()
         .left_2()
         .max_w(relative(0.9))
         .flex()
@@ -855,7 +896,7 @@ fn tile(
     let buttons = (!compact).then(|| {
         div()
             .absolute()
-            .top_2()
+            .bottom_2()
             .right_2()
             .flex()
             .gap_1()
@@ -894,6 +935,7 @@ fn tile(
                 ),
             )
     });
+    let overlay = app.shows_overlay(user);
     let radius = theme::RADIUS_TILE - px(1.);
     let picture = app
         .feeds
@@ -902,8 +944,9 @@ fn tile(
         .cursor_pointer()
         .bg(theme::surface())
         .child(picture)
-        .child(label)
-        .children(buttons)
+        .children(overlay.then_some(label))
+        .children(buttons.filter(|_| overlay))
+        .on_hover(cx.listener(move |app, hovered: &bool, _, cx| app.hover_tile(user, *hovered, cx)))
         .on_click(cx.listener(move |app, _, _, cx| {
             app.focus = (layout != Layout::Stage).then_some(user);
             cx.notify();
@@ -913,9 +956,24 @@ fn tile(
 
 /// A tile for someone whose share isn't shown here: their picture and name, and a way to
 /// watch it when they share.
-fn person_card(t: &Tile, compact: bool, cx: &mut Context<ThroccApp>) -> Div {
+/// Whether a person card `height` tall is compact, and how large its picture is, so that it
+/// fits whole.
+fn card_fit(height: Pixels, sharing: bool, compact: bool) -> (bool, Pixels) {
+    let full_rest = if sharing { px(126.) } else { px(56.) };
+    if !compact && height - full_rest >= px(32.) {
+        return (false, (height - full_rest).min(px(56.)).floor());
+    }
+    let compact_rest = if sharing { px(76.) } else { px(48.) };
+    (
+        true,
+        (height - compact_rest).clamp(px(16.), px(32.)).floor(),
+    )
+}
+
+fn person_card(t: &Tile, height: Pixels, compact: bool, cx: &mut Context<ThroccApp>) -> Div {
     let user = t.user;
     let person = &t.person;
+    let (compact, picture_size) = card_fit(height, person.sharing.is_some(), compact);
     let action = person.sharing.map(|_| {
         let (label, icon_name) = if t.popped {
             ("Bring back", "panel-top-open")
@@ -965,7 +1023,7 @@ fn person_card(t: &Tile, compact: bool, cx: &mut Context<ThroccApp>) -> Div {
             &person.name,
             user.0,
             t.picture.clone(),
-            if compact { px(32.) } else { px(56.) },
+            picture_size,
             person.speaking,
         ))
         .child(
@@ -1027,6 +1085,22 @@ mod tests {
         assert_eq!(fit(2, 600., 1000.).0, 1);
         assert_eq!(fit(4, 1610., 910.), (2, 800., 450.));
         assert_eq!(fit(5, 1610., 910.).0, 3);
+    }
+
+    #[test]
+    fn person_cards_fit_their_tile() {
+        for sharing in [false, true] {
+            for height in (112..400).map(|h| px(h as f32)) {
+                let (compact, picture) = card_fit(height, sharing, false);
+                let rest = match (compact, sharing) {
+                    (false, true) => 126.,
+                    (false, false) => 56.,
+                    (true, true) => 76.,
+                    (true, false) => 48.,
+                };
+                assert!(f32::from(picture) + rest <= f32::from(height), "{height:?}");
+            }
+        }
     }
 
     #[test]

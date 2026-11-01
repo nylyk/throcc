@@ -1,7 +1,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, StatefulInteractiveElement, Styled, div, px,
+    ParentElement, StatefulInteractiveElement, Styled, div, px, relative,
 };
 use gpui_component::Disableable;
 use gpui_component::input::Input;
@@ -62,7 +62,8 @@ pub fn render(app: &mut ThroccApp, dialog: Dialog, cx: &mut Context<ThroccApp>) 
             card()
                 .id("dialog")
                 .w(px(560.))
-                .max_h(px(720.))
+                .max_w(relative(0.9))
+                .max_h(relative(0.9))
                 .overflow_y_scroll()
                 .rounded(theme::RADIUS_DIALOG)
                 .border_color(theme::border_strong())

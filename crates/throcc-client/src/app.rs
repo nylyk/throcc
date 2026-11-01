@@ -134,6 +134,12 @@ pub enum Dialog {
     AddServer,
 }
 
+/// The widest the sidebar may be in `window` and still leave the room its minimum width.
+fn widest_sidebar(window: &Window) -> gpui::Pixels {
+    (window.viewport_size().width - theme::SERVER_BAR_WIDTH - theme::ROOM_MIN_WIDTH)
+        .clamp(theme::SIDEBAR_MIN_WIDTH, theme::SIDEBAR_MAX_WIDTH)
+}
+
 fn known_servers() -> Vec<(String, Fingerprint)> {
     Keystore::default_known_servers()
         .map(|k| k.iter().map(|(a, f)| (a.to_owned(), f)).collect())
@@ -192,6 +198,11 @@ pub struct ThroccApp {
     /// The whole window's focus, so its key bindings work when no field has focus.
     root_focus: gpui::FocusHandle,
     pub sidebar_width: gpui::Pixels,
+    /// The window's space around the room besides the sidebar, measured whenever the room is
+    /// drawn.
+    pub room_chrome: gpui::Size<gpui::Pixels>,
+    /// The tile whose overlay shows, and until when once the pointer has left it.
+    overlay: Option<(UserId, Option<std::time::Instant>)>,
     pub resizing_sidebar: bool,
     events: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -300,6 +311,11 @@ impl ThroccApp {
             made_window_fullscreen: false,
             root_focus: cx.focus_handle(),
             sidebar_width: theme::SIDEBAR_WIDTH,
+            room_chrome: gpui::size(
+                theme::SERVER_BAR_WIDTH,
+                theme::HEADER_HEIGHT + theme::FOOTER_HEIGHT,
+            ),
+            overlay: None,
             resizing_sidebar: false,
             events: None,
             _subscriptions: subscriptions,
@@ -522,6 +538,28 @@ impl ThroccApp {
         self.fullscreen = None;
         if std::mem::take(&mut self.made_window_fullscreen) && window.is_fullscreen() {
             window.toggle_fullscreen();
+        }
+        cx.notify();
+    }
+
+    pub fn shows_overlay(&self, user: UserId) -> bool {
+        self.overlay.is_some_and(|(shown, until)| {
+            shown == user && until.is_none_or(|until| std::time::Instant::now() < until)
+        })
+    }
+
+    /// Shows `user`'s tile overlay while the pointer is over it, and for a moment after.
+    pub fn hover_tile(&mut self, user: UserId, hovered: bool, cx: &mut Context<Self>) {
+        let linger = crate::views::common::OVERLAY_LINGER;
+        if hovered {
+            self.overlay = Some((user, None));
+        } else if self.overlay.is_some_and(|(shown, _)| shown == user) {
+            self.overlay = Some((user, Some(std::time::Instant::now() + linger)));
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(linger).await;
+                this.update(cx, |_, cx| cx.notify()).ok();
+            })
+            .detach();
         }
         cx.notify();
     }
@@ -1231,6 +1269,7 @@ impl ThroccApp {
 
 impl Render for ThroccApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sidebar_width = self.sidebar_width.min(widest_sidebar(window));
         let screen = match self.screen {
             Screen::Join => views::join::render(self, cx).into_any_element(),
             Screen::Main => views::main::render(self, window, cx).into_any_element(),
@@ -1271,18 +1310,20 @@ impl Render for ThroccApp {
             .relative()
             .bg(theme::window_bg())
             .text_color(theme::text())
-            .on_mouse_move(cx.listener(|app, event: &gpui::MouseMoveEvent, _, cx| {
-                if !app.resizing_sidebar {
-                    return;
-                }
-                if event.pressed_button == Some(gpui::MouseButton::Left) {
-                    app.sidebar_width = (event.position.x - theme::SERVER_BAR_WIDTH)
-                        .clamp(theme::SIDEBAR_MIN_WIDTH, theme::SIDEBAR_MAX_WIDTH);
-                } else {
-                    app.resizing_sidebar = false;
-                }
-                cx.notify();
-            }))
+            .on_mouse_move(
+                cx.listener(|app, event: &gpui::MouseMoveEvent, window, cx| {
+                    if !app.resizing_sidebar {
+                        return;
+                    }
+                    if event.pressed_button == Some(gpui::MouseButton::Left) {
+                        app.sidebar_width = (event.position.x - theme::SERVER_BAR_WIDTH)
+                            .clamp(theme::SIDEBAR_MIN_WIDTH, widest_sidebar(window));
+                    } else {
+                        app.resizing_sidebar = false;
+                    }
+                    cx.notify();
+                }),
+            )
             .on_mouse_up(
                 gpui::MouseButton::Left,
                 cx.listener(|app, _, _, _| app.resizing_sidebar = false),
