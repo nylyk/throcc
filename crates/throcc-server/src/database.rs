@@ -5,7 +5,9 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use throcc_proto::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
 use throcc_proto::messages::{PublicKey, ServerProfile, SignedEncKey, User};
 
-const USERS_COLUMNS: &str = "(
+const SCHEMA_VERSION: i64 = 1;
+const SCHEMA: &str = "
+CREATE TABLE users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pubkey BLOB NOT NULL UNIQUE,
     enc_key BLOB,
@@ -16,100 +18,38 @@ const USERS_COLUMNS: &str = "(
     role INTEGER NOT NULL,
     invited_by INTEGER NULL,
     created_at INTEGER NOT NULL
-)";
-const ROOMS_COLUMNS: &str =
-    "(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, epoch INTEGER NOT NULL)";
-const OTHER_TABLES_V1: &str = "
-CREATE TABLE IF NOT EXISTS rooms (id INTEGER PRIMARY KEY, name TEXT NOT NULL, epoch INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS invites (
+);
+CREATE TABLE rooms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    epoch INTEGER NOT NULL,
+    password_hash TEXT
+);
+CREATE TABLE invites (
     code_id TEXT PRIMARY KEY,
     secret TEXT NOT NULL,
     minted_by INTEGER NULL,
     expires_at INTEGER NOT NULL,
     failures INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS blobs (hash BLOB PRIMARY KEY, bytes BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS server_profile (id INTEGER PRIMARY KEY CHECK (id = 0), name TEXT, avatar_hash BLOB);
+CREATE TABLE blobs (hash BLOB PRIMARY KEY, bytes BLOB NOT NULL, uploaded_at INTEGER NOT NULL);
+CREATE TABLE counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
+CREATE TABLE server_profile (id INTEGER PRIMARY KEY CHECK (id = 0), name TEXT, avatar_hash BLOB);
 ";
 
-type Migration = fn(&Transaction) -> rusqlite::Result<()>;
-
-/// Migration `i` moves the schema from version `i` to `i + 1`, kept in `PRAGMA user_version`.
-const MIGRATIONS: [Migration; 3] = [to_v1, to_v2, to_v3];
-
-/// Creates the first versioned schema, or brings an unversioned database up to it.
-fn to_v1(tx: &Transaction) -> rusqlite::Result<()> {
-    tx.execute_batch(&format!(
-        "CREATE TABLE IF NOT EXISTS users {USERS_COLUMNS}; {OTHER_TABLES_V1}"
-    ))?;
-    add_missing_column(tx, "users", "enc_key_not_after", "INTEGER")?;
-    add_autoincrement(tx, "users", USERS_COLUMNS)
-}
-
-/// Makes room ids AUTOINCREMENT and records when each blob was uploaded.
-fn to_v2(tx: &Transaction) -> rusqlite::Result<()> {
-    add_autoincrement(tx, "rooms", ROOMS_COLUMNS)?;
-    add_missing_column(tx, "blobs", "uploaded_at", "INTEGER NOT NULL DEFAULT 0")
-}
-
-/// Lets rooms keep a password hash.
-fn to_v3(tx: &Transaction) -> rusqlite::Result<()> {
-    add_missing_column(tx, "rooms", "password_hash", "TEXT")
-}
-
-fn add_missing_column(
-    tx: &Transaction,
-    table: &str,
-    column: &str,
-    definition: &str,
-) -> rusqlite::Result<()> {
-    if !column_names(tx, table)?.iter().any(|c| c == column) {
-        tx.execute_batch(&format!(
-            "ALTER TABLE {table} ADD COLUMN {column} {definition}"
-        ))?;
-    }
-    Ok(())
-}
-
-/// Rebuilds `table` with `columns`, whose primary key is AUTOINCREMENT, keeping its rows.
-fn add_autoincrement(tx: &Transaction, table: &str, columns: &str) -> rusqlite::Result<()> {
-    let sql: String = tx.query_row(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
-        [table],
-        |r| r.get(0),
-    )?;
-    if sql.contains("AUTOINCREMENT") {
+/// Creates the schema in an empty database, and refuses one with any other schema version.
+fn create_schema(conn: &mut Connection) -> Result<()> {
+    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if version == SCHEMA_VERSION {
         return Ok(());
     }
-    let kept = column_names(tx, table)?.join(", ");
-    tx.execute_batch(&format!(
-        "CREATE TABLE {table}_new {columns};
-         INSERT INTO {table}_new ({kept}) SELECT {kept} FROM {table};
-         DROP TABLE {table};
-         ALTER TABLE {table}_new RENAME TO {table};"
-    ))
-}
-
-fn column_names(tx: &Transaction, table: &str) -> rusqlite::Result<Vec<String>> {
-    let mut stmt = tx.prepare(&format!("PRAGMA table_info({table})"))?;
-    let names = stmt.query_map([], |r| r.get::<_, String>(1))?;
-    names.collect()
-}
-
-fn migrate(conn: &mut Connection) -> Result<()> {
-    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    let current = MIGRATIONS.len() as i64;
-    if version > current {
-        bail!("the database has schema version {version}, newer than this server's {current}");
+    if version != 0 {
+        bail!("the database has schema version {version}; this server reads {SCHEMA_VERSION}");
     }
-    for (from, migration) in MIGRATIONS.iter().enumerate().skip(version as usize) {
-        let to = from as i64 + 1;
-        let tx = conn.transaction()?;
-        migration(&tx).with_context(|| format!("migrating the database to schema version {to}"))?;
-        tx.pragma_update(None, "user_version", to)?;
-        tx.commit()?;
-    }
+    let tx = conn.transaction()?;
+    tx.execute_batch(SCHEMA).context("creating the database")?;
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -174,7 +114,7 @@ impl Database {
     fn init(mut conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        migrate(&mut conn)?;
+        create_schema(&mut conn)?;
         Ok(Self { conn })
     }
 
@@ -693,82 +633,8 @@ mod tests {
         }
     }
 
-    /// The schema before versioning: no `enc_key_not_after`, no server profile, and ids
-    /// without AUTOINCREMENT.
-    const UNVERSIONED_SCHEMA: &str = "
-        CREATE TABLE users (
-            id INTEGER PRIMARY KEY,
-            pubkey BLOB NOT NULL UNIQUE,
-            enc_key BLOB,
-            enc_key_sig BLOB,
-            name TEXT NOT NULL,
-            avatar_hash BLOB,
-            role INTEGER NOT NULL,
-            invited_by INTEGER NULL,
-            created_at INTEGER NOT NULL
-        );
-        CREATE TABLE rooms (id INTEGER PRIMARY KEY, name TEXT NOT NULL, epoch INTEGER NOT NULL);
-        CREATE TABLE invites (
-            code_id TEXT PRIMARY KEY,
-            secret TEXT NOT NULL,
-            minted_by INTEGER NULL,
-            expires_at INTEGER NOT NULL,
-            failures INTEGER NOT NULL
-        );
-        CREATE TABLE blobs (hash BLOB PRIMARY KEY, bytes BLOB NOT NULL);
-        CREATE TABLE counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
-        INSERT INTO users (id, pubkey, name, role, created_at) VALUES (1, x'0101010101010101010101010101010101010101010101010101010101010101', 'Moss', 2, 5);
-        INSERT INTO users (id, pubkey, name, role, invited_by, created_at) VALUES (2, x'0202020202020202020202020202020202020202020202020202020202020202', 'Fern', 0, 1, 6);
-        INSERT INTO rooms (id, name, epoch) VALUES (1, 'General', 4), (2, 'Games', 9);
-        INSERT INTO blobs (hash, bytes) VALUES (x'03', x'00');
-        INSERT INTO counters (name, value) VALUES ('next_media_id', 40);
-    ";
-
     #[test]
-    fn an_unversioned_database_migrates_and_keeps_its_data() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("db");
-        Connection::open(&path)
-            .unwrap()
-            .execute_batch(UNVERSIONED_SCHEMA)
-            .unwrap();
-
-        let mut db = Database::open(&path).unwrap();
-        let version: i64 = db
-            .conn
-            .pragma_query_value(None, "user_version", |r| r.get(0))
-            .unwrap();
-        assert_eq!(version, MIGRATIONS.len() as i64);
-        let fern = db.user_by_pubkey(&[2; 32]).unwrap().unwrap();
-        assert_eq!((fern.id, fern.name.as_str()), (UserId(2), "Fern"));
-        assert_eq!(fern.invited_by, Some(UserId(1)));
-        assert_eq!(db.users().unwrap().len(), 2);
-        let rooms = db.rooms().unwrap();
-        assert_eq!(rooms[1].name, "Games");
-        assert_eq!(rooms[1].epoch, Epoch(9));
-        assert_eq!(rooms[1].password_hash, None);
-        assert_eq!(db.allocate_media_ids(3).unwrap(), Some(MediaId(40)));
-        assert_eq!(db.server_profile().unwrap(), ServerProfile::default());
-
-        let key = SignedEncKey {
-            key: [7; 32],
-            not_after: 99,
-            sig: [8; 64],
-        };
-        db.set_enc_key(fern.id, &key).unwrap();
-        assert_eq!(db.user(fern.id).unwrap().unwrap().enc_key, Some(key));
-        db.delete_room(RoomId(2)).unwrap();
-        assert_eq!(db.create_room("New", None).unwrap(), RoomId(3));
-        db.remove_users(&[fern.id]).unwrap();
-        assert_eq!(enroll(&mut db, 9, None), UserId(3));
-        assert_eq!(db.delete_unused_blobs(1).unwrap(), 1);
-
-        drop(db);
-        assert_eq!(Database::open(&path).unwrap().users().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn a_database_from_a_newer_server_is_refused() {
+    fn a_database_with_another_schema_version_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db");
         drop(Database::open(&path).unwrap());

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
 
-pub const PROTOCOL: u16 = 5;
+pub const PROTOCOL: u16 = 1;
 pub const MAX_AVATAR_BYTES: usize = 64 * 1024;
 pub const MAX_NAME_CHARS: usize = 32;
 pub const MAX_PASSWORD_CHARS: usize = 128;
