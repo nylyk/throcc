@@ -205,17 +205,17 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .flex_col()
         .gap_3()
         .child(section("Invite"))
-        .child(match &invite {
-            Some((code, _)) => mono(code.clone())
+        .children(invite.as_ref().map(|(code, _)| {
+            mono(code.clone())
                 .text_size(px(24.))
                 .font_weight(FontWeight::SEMIBOLD)
-                .into_any_element(),
-            None => div().into_any_element(),
-        })
-        .child(caption(if is_admin {
-            "Single use, expires in 24 h."
-        } else {
-            "Single use, expires in 24 h. You can make 3 a day."
+        }))
+        .children(invite.is_some().then(|| {
+            caption(if is_admin {
+                "Single use, expires in 24 h."
+            } else {
+                "Single use, expires in 24 h. You can make 3 a day."
+            })
         }))
         .child(
             div()
@@ -232,7 +232,7 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                         if invite.is_some() {
                             "New code"
                         } else {
-                            "Make a code"
+                            "Create a code"
                         },
                     )
                     .on_click(cx.listener(|app, _, _, _| app.command(Command::CreateInvite))),
