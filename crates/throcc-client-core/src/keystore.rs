@@ -44,7 +44,7 @@ impl Keystore {
     pub fn open_default() -> Result<Self> {
         let dir = default_dir()?;
         fs::create_dir_all(&dir)?;
-        let identity = match keychain_identity(&dir) {
+        let identity = match keychain_identity() {
             Err(e) if matches!(e.downcast_ref(), Some(keyring::Error::NoDefaultStore)) => {
                 warn!("no OS keychain ({e:#}); keeping the identity key in a file");
                 fallback_identity(&dir)?
@@ -147,25 +147,14 @@ fn new_enc_key(path: &Path, now: u64) -> Result<(EncKeyPair, u64)> {
     Ok((key, now))
 }
 
-/// The identity key in the OS keychain. When the keychain has none, a key kept in `dir` by an
-/// earlier run without a keychain moves into it, so the account stays the same.
-fn keychain_identity(dir: &Path) -> Result<IdentityKey> {
+/// The identity key in the OS keychain, created there when it has none.
+fn keychain_identity() -> Result<IdentityKey> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_IDENTITY)?;
     match entry.get_secret() {
         Ok(secret) => seed_to_key(&secret),
         Err(keyring::Error::NoEntry) => {
-            let file = dir.join(IDENTITY_FILE);
-            let kept = match fs::read(&file) {
-                Ok(bytes) => Some(seed_to_key(&Zeroizing::new(bytes))?),
-                Err(e) if e.kind() == ErrorKind::NotFound => None,
-                Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
-            };
-            let imported = kept.is_some();
-            let key = kept.unwrap_or_else(IdentityKey::generate);
+            let key = IdentityKey::generate();
             entry.set_secret(key.seed().as_slice())?;
-            if imported {
-                fs::remove_file(&file).with_context(|| format!("removing {}", file.display()))?;
-            }
             Ok(key)
         }
         Err(e) => Err(e.into()),
