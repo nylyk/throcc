@@ -25,6 +25,7 @@ const ENC_KEY_RENEW_BEFORE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// The install's identity key plus everything pinned per server.
 pub struct Keystore {
     dir: PathBuf,
+    cache: PathBuf,
     identity: IdentityKey,
     enc_key: EncKeyPair,
     enc_key_created: u64,
@@ -32,16 +33,16 @@ pub struct Keystore {
 }
 
 impl Keystore {
-    /// The pinned servers in the platform data directory, without touching the keychain.
+    /// The pinned servers in the platform config directory, without touching the keychain.
     pub fn default_known_servers() -> Result<KnownServers> {
-        KnownServers::load(&default_dir()?)
+        KnownServers::load(&config_dir()?)
     }
 
-    /// Opens the platform data directory, keeping the identity key in the OS keychain.
+    /// Opens the platform config directory, keeping the identity key in the OS keychain.
     /// Falls back to a 0600 file only on a platform without a keychain, and refuses to
     /// start a new identity there while servers are known.
     pub fn open_default() -> Result<Self> {
-        let dir = default_dir()?;
+        let dir = config_dir()?;
         fs::create_dir_all(&dir)?;
         let identity = match keychain_identity() {
             Err(e) if matches!(e.downcast_ref(), Some(keyring::Error::NoDefaultStore)) => {
@@ -50,21 +51,23 @@ impl Keystore {
             }
             other => other.context("reading the identity key from the OS keychain")?,
         };
-        Self::assemble(dir, identity)
+        Self::assemble(dir, cache_dir()?, identity)
     }
 
-    /// Opens `dir` with the identity key in a 0600 file. Used for profiles and tests.
+    /// Opens `dir` with the identity key in a 0600 file and the cache inside it. Used for
+    /// profiles and tests.
     pub fn open_in(dir: &Path) -> Result<Self> {
         fs::create_dir_all(dir)?;
         let identity = file_identity(dir)?;
-        Self::assemble(dir.to_owned(), identity)
+        Self::assemble(dir.to_owned(), dir.to_owned(), identity)
     }
 
-    fn assemble(dir: PathBuf, identity: IdentityKey) -> Result<Self> {
+    fn assemble(dir: PathBuf, cache: PathBuf, identity: IdentityKey) -> Result<Self> {
         let known_servers = KnownServers::load(&dir)?;
         let (enc_key, enc_key_created) = load_enc_key(&dir.join(ENC_KEY_FILE))?;
         Ok(Self {
             dir,
+            cache,
             identity,
             enc_key,
             enc_key_created,
@@ -102,16 +105,29 @@ impl Keystore {
         }
     }
 
+    /// Where the keys, pins and settings are kept.
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    pub fn cache_dir(&self) -> &Path {
+        &self.cache
     }
 }
 
 /// Where throcc keeps its keys, pins and settings on this machine.
-pub fn default_dir() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "", "throcc")
-        .context("no home directory to keep throcc's data in")?;
-    Ok(dirs.data_dir().to_owned())
+pub fn config_dir() -> Result<PathBuf> {
+    Ok(project_dirs()?.config_dir().to_owned())
+}
+
+/// Where throcc keeps what it can fetch again, such as server pictures.
+pub fn cache_dir() -> Result<PathBuf> {
+    Ok(project_dirs()?.cache_dir().to_owned())
+}
+
+fn project_dirs() -> Result<directories::ProjectDirs> {
+    directories::ProjectDirs::from("", "", "throcc")
+        .context("no home directory to keep throcc's data in")
 }
 
 fn unix_now() -> Result<u64> {

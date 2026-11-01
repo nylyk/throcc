@@ -19,12 +19,13 @@ pub struct ServerLook {
 }
 
 impl ServerLook {
-    /// The look kept for `server` in `dir`, empty when none was kept.
-    pub fn load(dir: &Path, server: &Fingerprint) -> Result<Self> {
+    /// The look kept for `server` in `dir`, with its picture in `cache`. Empty when none
+    /// was kept.
+    pub fn load(dir: &Path, cache: &Path, server: &Fingerprint) -> Result<Self> {
         let kept = Servers::load(dir)?.take(server);
         let avatar = kept.avatar.map(|Hex(hash)| Hash(hash));
         let picture = match avatar {
-            Some(_) => pictures::load(dir, &picture_name(server))?,
+            Some(_) => pictures::load(cache, &picture_name(server))?,
             None => None,
         };
         Ok(Self {
@@ -34,13 +35,13 @@ impl ServerLook {
         })
     }
 
-    pub fn save(&self, dir: &Path, server: &Fingerprint) -> Result<()> {
+    pub fn save(&self, dir: &Path, cache: &Path, server: &Fingerprint) -> Result<()> {
         Servers::update(dir, |s| {
             let kept = s.server_mut(server);
             kept.name.clone_from(&self.name);
             kept.avatar = self.avatar.map(|Hash(hash)| Hex(hash));
         })?;
-        pictures::save(dir, &picture_name(server), self.picture.as_deref())
+        pictures::save(cache, &picture_name(server), self.picture.as_deref())
     }
 }
 
@@ -56,9 +57,10 @@ mod tests {
     #[test]
     fn a_saved_look_loads_back_per_server() {
         let dir = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
         let server = Fingerprint([7; 32]);
         assert_eq!(
-            ServerLook::load(dir.path(), &server).unwrap(),
+            ServerLook::load(dir.path(), cache.path(), &server).unwrap(),
             ServerLook::default()
         );
         let look = ServerLook {
@@ -66,16 +68,21 @@ mod tests {
             avatar: Some(Hash([0xab; 32])),
             picture: Some(Arc::from(&b"png"[..])),
         };
-        look.save(dir.path(), &server).unwrap();
-        assert_eq!(ServerLook::load(dir.path(), &server).unwrap(), look);
+        look.save(dir.path(), cache.path(), &server).unwrap();
+        assert_eq!(
+            ServerLook::load(dir.path(), cache.path(), &server).unwrap(),
+            look
+        );
         let other = Fingerprint([8; 32]);
         assert_eq!(
-            ServerLook::load(dir.path(), &other).unwrap(),
+            ServerLook::load(dir.path(), cache.path(), &other).unwrap(),
             ServerLook::default()
         );
-        ServerLook::default().save(dir.path(), &server).unwrap();
+        ServerLook::default()
+            .save(dir.path(), cache.path(), &server)
+            .unwrap();
         assert_eq!(
-            ServerLook::load(dir.path(), &server).unwrap(),
+            ServerLook::load(dir.path(), cache.path(), &server).unwrap(),
             ServerLook::default()
         );
     }

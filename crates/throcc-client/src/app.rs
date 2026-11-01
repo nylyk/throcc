@@ -186,13 +186,13 @@ pub struct CachedLook {
 
 /// The kept looks of `known` servers, by address.
 fn cached_looks(known: &[(String, Fingerprint)]) -> HashMap<String, CachedLook> {
-    let Ok(dir) = keystore::default_dir() else {
+    let (Ok(dir), Ok(cache)) = (keystore::config_dir(), keystore::cache_dir()) else {
         return HashMap::new();
     };
     known
         .iter()
         .filter_map(|(address, fingerprint)| {
-            let look = ServerLook::load(&dir, fingerprint).ok()?;
+            let look = ServerLook::load(&dir, &cache, fingerprint).ok()?;
             let picture = look.picture.as_deref().and_then(crate::avatar::decode);
             Some((
                 address.clone(),
@@ -212,7 +212,7 @@ fn known_servers() -> Vec<(String, Fingerprint)> {
 }
 
 fn saved_cue_volume() -> f32 {
-    keystore::default_dir()
+    keystore::config_dir()
         .and_then(|dir| Settings::load(&dir))
         .map(|s| s.cue_volume.clamp(0.0, MAX_VOLUME))
         .unwrap_or_else(|e| {
@@ -1444,7 +1444,7 @@ impl ThroccApp {
     /// Keeps the cue volume on this computer and plays a cue at it.
     pub fn save_cue_volume(&mut self) {
         let volume = self.voice.cue_volume;
-        let saved = keystore::default_dir()
+        let saved = keystore::config_dir()
             .and_then(|dir| Settings::update(&dir, |s| s.cue_volume = volume));
         if let Err(e) = saved {
             tracing::warn!("could not save the cue volume: {e:#}");

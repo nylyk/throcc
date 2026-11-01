@@ -15,7 +15,7 @@ Once signed in, a `Call` (`call.rs`) ties the control `Link` (`control.rs`) to t
 | `client.rs`, `session.rs`, `state.rs` | The UI's API, the session task, and the state it publishes |
 | `account.rs`, `connection.rs`, `control.rs` | Sign-in and enrollment, the pinned QUIC connection, the control stream |
 | `keystore.rs`, `known_servers.rs`, `contacts.rs`, `profile.rs`, `playback.rs`, `server_look.rs` | What stays on this machine: our keys, pinned servers, pinned peers, our name and picture, how loud we play each person, each server's name and picture as last seen |
-| `settings.rs`, `servers.rs`, `json_file.rs`, `pictures.rs` | Where it stays: the keys as two binary files, app-wide settings in `settings.json`, everything per server in `servers.json`, and pictures under `pictures/`. Every JSON change locks and re-reads the file first, so no writer undoes another |
+| `settings.rs`, `servers.rs`, `json_file.rs`, `pictures.rs` | Where it stays: in the platform config directory, the keys as two binary files, app-wide settings in `settings.json`, everything per server in `servers.json` and our picture under `pictures/`; server pictures in the cache directory. Every JSON change locks and re-reads the file first, so no writer undoes another |
 | `keys.rs` | Sender secrets per epoch, wrapped to every trusted peer |
 | `call.rs` | A signed-in connection with its media engine |
 | `media/engine.rs`, `fragment.rs`, `reorder.rs` | Sending and receiving media datagrams: fragments, the replay window, the reorder window |

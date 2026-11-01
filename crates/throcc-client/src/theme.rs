@@ -190,12 +190,12 @@ pub fn palette() -> Palette {
 
 /// The palette chosen last time, if one was saved.
 pub fn saved() -> Option<Palette> {
-    let dir = throcc_client_core::keystore::default_dir().ok()?;
+    let dir = throcc_client_core::keystore::config_dir().ok()?;
     Palette::from_hex(&Settings::load(&dir).ok()?.palette?)
 }
 
 pub fn save(palette: Palette) {
-    let saved = throcc_client_core::keystore::default_dir()
+    let saved = throcc_client_core::keystore::config_dir()
         .and_then(|dir| Settings::update(&dir, |s| s.palette = Some(palette.to_hex())));
     if let Err(e) = saved {
         tracing::warn!("could not save the theme: {e:#}");

@@ -74,7 +74,7 @@ pub struct LinuxCapture {
 }
 
 pub fn start(config: CaptureConfig) -> Result<LinuxCapture, CaptureError> {
-    let dir = crate::keystore::default_dir().ok();
+    let dir = crate::keystore::config_dir().ok();
     let token = dir
         .as_deref()
         .and_then(|dir| Settings::load(dir).ok()?.screencast_restore_token);
@@ -1946,7 +1946,7 @@ mod tests {
                 "{share} share: only {} frames in 5 s",
                 timestamps.len()
             );
-            let dir = crate::keystore::default_dir().unwrap();
+            let dir = crate::keystore::config_dir().unwrap();
             let token = Settings::load(&dir).unwrap().screencast_restore_token;
             assert!(token.is_some(), "no restore token kept");
             println!("{share} share: {}×{}", frame.width, frame.height);

@@ -256,10 +256,11 @@ impl Session {
             warn!("no saved playback: {e:#}");
             SavedPlayback::empty(keystore.dir(), &server)
         });
-        let server_look = ServerLook::load(keystore.dir(), &server).unwrap_or_else(|e| {
-            warn!("no kept server look: {e:#}");
-            ServerLook::default()
-        });
+        let server_look = ServerLook::load(keystore.dir(), keystore.cache_dir(), &server)
+            .unwrap_or_else(|e| {
+                warn!("no kept server look: {e:#}");
+                ServerLook::default()
+            });
         let mut session = Self {
             shared,
             keystore,
@@ -1005,7 +1006,10 @@ impl Session {
             return;
         }
         self.server_look = look;
-        if let Err(e) = self.server_look.save(self.keystore.dir(), &self.server) {
+        if let Err(e) =
+            self.server_look
+                .save(self.keystore.dir(), self.keystore.cache_dir(), &self.server)
+        {
             warn!("keeping the server's name and picture: {e:#}");
         }
     }
