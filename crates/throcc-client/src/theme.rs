@@ -89,19 +89,6 @@ pub const PRESETS: [(&str, Palette); 7] = [
         },
     ),
     (
-        "Paper",
-        Palette {
-            bg: 0xF6F4EF,
-            panel: 0xFFFFFF,
-            text: 0x1C1B22,
-            muted: 0x6B6878,
-            accent: 0x5B4BDB,
-            warning: 0xD9822B,
-            good: 0x1F9D6A,
-            bad: 0xD9445E,
-        },
-    ),
-    (
         "Moss",
         Palette {
             bg: 0x0F1411,
@@ -141,19 +128,6 @@ pub const PRESETS: [(&str, Palette); 7] = [
         },
     ),
     (
-        "Sand",
-        Palette {
-            bg: 0xF3EEE4,
-            panel: 0xFBF8F2,
-            text: 0x24201A,
-            muted: 0x756C5F,
-            accent: 0x1E7F86,
-            warning: 0xC07A1F,
-            good: 0x4A8B3A,
-            bad: 0xC8414F,
-        },
-    ),
-    (
         "Ember",
         Palette {
             bg: 0x14100D,
@@ -164,6 +138,32 @@ pub const PRESETS: [(&str, Palette); 7] = [
             warning: 0xF5D06B,
             good: 0x8FD88A,
             bad: 0xFF6B6B,
+        },
+    ),
+    (
+        "Paper",
+        Palette {
+            bg: 0xF2F4F7,
+            panel: 0xFFFFFF,
+            text: 0x1C1B22,
+            muted: 0x6B6878,
+            accent: 0x5B4BDB,
+            warning: 0xD9822B,
+            good: 0x1F9D6A,
+            bad: 0xD9445E,
+        },
+    ),
+    (
+        "Sand",
+        Palette {
+            bg: 0xF4EEDB,
+            panel: 0xFCF9EE,
+            text: 0x24201A,
+            muted: 0x756C5F,
+            accent: 0x1E7F86,
+            warning: 0xC07A1F,
+            good: 0x4A8B3A,
+            bad: 0xC8414F,
         },
     ),
 ];

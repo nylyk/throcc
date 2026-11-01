@@ -893,6 +893,7 @@ fn theme_preview(palette: theme::Palette) -> Div {
             div()
                 .w(px(36.))
                 .h_full()
+                .rounded_l(px(5.))
                 .p(px(5.))
                 .flex()
                 .flex_col()
