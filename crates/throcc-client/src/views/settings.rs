@@ -570,11 +570,15 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .child(row(
                     "Output volume",
                     percent_slider(&controls.output_volume, cx),
-                ))
-                .child(row(
-                    "Sounds volume",
-                    percent_slider(&controls.cue_volume, cx),
                 )),
+        )
+        .child(
+            card()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(section("Sounds"))
+                .child(row("Volume", percent_slider(&controls.cue_volume, cx))),
         )
         .child(
             card()
