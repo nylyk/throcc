@@ -104,6 +104,27 @@ async fn an_admin_invite_minted_while_the_server_runs_enrolls_another_admin() {
     assert!(try_enroll(&server.addr, &minted.code).await.is_err());
 }
 
+#[tokio::test]
+async fn an_admin_invite_promotes_a_member_who_redeems_it() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let mut bob = invited(&server, &alice).await;
+    let bob_id = bob.link.welcome.me;
+
+    let minted = throcc_server::admin_invite(server.dir.path()).unwrap();
+    let link = account::enroll(&mut bob.keystore, &server.addr, &minted.code)
+        .await
+        .unwrap();
+    assert_eq!(link.welcome.me, bob_id);
+    assert_eq!(link.welcome.role, Role::Admin);
+    alice
+        .event(|e| {
+            matches!(e, Event::RoleChanged { user, role: Role::Admin } if *user == bob_id)
+                .then_some(())
+        })
+        .await;
+}
+
 #[test]
 fn an_admin_invite_needs_a_server_that_has_started_in_its_data_directory() {
     let dir = tempfile::tempdir().unwrap();

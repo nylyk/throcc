@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use rusqlite::{
@@ -52,10 +51,6 @@ fn to_v1(tx: &Transaction) -> rusqlite::Result<()> {
 }
 
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
-
-/// How long a write waits for another connection's, such as `throcc-server admin-invite`
-/// minting next to a running server.
-const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn schema_version(conn: &Connection) -> rusqlite::Result<i64> {
     conn.pragma_query_value(None, "user_version", |r| r.get(0))
@@ -121,6 +116,24 @@ pub struct InviteRow {
     pub failures: u32,
 }
 
+/// The user an enrollment signed in, and what it did to them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Enrolled {
+    Added(UserRow),
+    /// An existing user whom an admin invite made an admin.
+    Promoted(UserRow),
+    /// An existing user, left as they were.
+    Returning(UserRow),
+}
+
+impl Enrolled {
+    pub fn into_row(self) -> UserRow {
+        match self {
+            Self::Added(row) | Self::Promoted(row) | Self::Returning(row) => row,
+        }
+    }
+}
+
 pub struct Database {
     conn: Connection,
 }
@@ -164,8 +177,9 @@ impl Database {
         Ok(db)
     }
 
+    /// rusqlite already makes a write wait up to 5 s for another connection's, such as
+    /// `throcc-server admin-invite` minting next to a running server.
     fn init(conn: Connection) -> Result<Self> {
-        conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         // A commit is on disk before it returns, so a power loss never rolls back a room's
         // epoch or hands out a media id again.
@@ -236,14 +250,15 @@ impl Database {
 
     /// Consumes the invite and adds its user, in one transaction. Returns `None`, changing
     /// nothing, when the invite is gone or expired. An invite without a minter, from
-    /// `throcc-server admin-invite`, enrolls an admin; an existing key keeps its user and
-    /// role.
+    /// `throcc-server admin-invite`, enrolls an admin, and promotes an existing key to admin
+    /// so an owner who was demoted can recover; any other invite leaves an existing key's
+    /// user and role as they are.
     pub fn enroll(
         &mut self,
         pubkey: &PublicKey,
         code_id: &str,
         now: u64,
-    ) -> Result<Option<UserRow>> {
+    ) -> Result<Option<Enrolled>> {
         let tx = self.write()?;
         let minted_by: Option<Option<i64>> = tx
             .query_row(
@@ -270,8 +285,19 @@ impl Database {
                 |r| r.get(0),
             )
             .optional()?;
-        let id = match existing {
-            Some(id) => id,
+        let (id, enrolled): (i64, fn(UserRow) -> Enrolled) = match existing {
+            Some(id) => {
+                let promoted = tx.execute(
+                    "UPDATE users SET role = ?1 WHERE id = ?2 AND role < ?1",
+                    params![role.rank(), id],
+                )? == 1;
+                let enrolled = if promoted {
+                    Enrolled::Promoted
+                } else {
+                    Enrolled::Returning
+                };
+                (id, enrolled)
+            }
             None => {
                 tx.execute(
                     "INSERT INTO users (pubkey, name, role, invited_by, created_at) VALUES (?1, '', ?2, ?3, ?4)",
@@ -282,11 +308,11 @@ impl Database {
                     "UPDATE users SET name = ?1 WHERE id = ?2",
                     params![format!("user{id}"), id],
                 )?;
-                id
+                (id, Enrolled::Added)
             }
         };
         tx.commit()?;
-        self.user(UserId(id as u64))
+        Ok(self.user(UserId(id as u64))?.map(enrolled))
     }
 
     pub fn set_enc_key(&self, user: UserId, enc_key: &SignedEncKey) -> Result<()> {
@@ -646,7 +672,11 @@ mod tests {
             failures: 0,
         })
         .unwrap();
-        db.enroll(&[key; 32], &code, 100).unwrap().unwrap().id
+        db.enroll(&[key; 32], &code, 100)
+            .unwrap()
+            .unwrap()
+            .into_row()
+            .id
     }
 
     #[test]
@@ -788,7 +818,7 @@ mod tests {
         };
         assert!(side.insert_invite(&invite).unwrap());
         let user = server.enroll(&[1; 32], "ADM", 100).unwrap().unwrap();
-        assert_eq!(user.role, Role::Admin);
+        assert!(matches!(user, Enrolled::Added(row) if row.role == Role::Admin));
         assert!(server.allocate_media_ids(1).unwrap().is_some());
     }
 
@@ -833,6 +863,34 @@ mod tests {
         let again = enroll(&mut db, 2, Some(root));
         assert_eq!(again, first);
         assert_eq!(db.user(first).unwrap().unwrap().role, Role::Manager);
+    }
+
+    #[test]
+    fn an_admin_invite_promotes_an_existing_key() {
+        let mut db = Database::open_in_memory().unwrap();
+        let root = enroll(&mut db, 1, None);
+        let member = enroll(&mut db, 2, Some(root));
+        let mut redeem = |code: &str, by: Option<UserId>| {
+            db.insert_invite(&InviteRow {
+                code_id: code.into(),
+                secret: "S".into(),
+                minted_by: by,
+                expires_at: 1000,
+                failures: 0,
+            })
+            .unwrap();
+            db.enroll(&[2; 32], code, 100).unwrap().unwrap()
+        };
+
+        let returning = redeem("USR", Some(root));
+        assert!(matches!(&returning, Enrolled::Returning(row) if row.role == Role::User));
+
+        let promoted = redeem("ADM", None);
+        assert!(
+            matches!(&promoted, Enrolled::Promoted(row) if row.id == member && row.role == Role::Admin)
+        );
+
+        assert!(matches!(redeem("AD2", None), Enrolled::Returning(_)));
     }
 
     #[test]

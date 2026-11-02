@@ -222,12 +222,24 @@ pub struct AdminInvite {
 pub fn admin_invite(data_dir: &Path) -> Result<AdminInvite> {
     let database = data_dir.join(DATABASE_FILE);
     for file in [data_dir.join(identity::KEY_FILE), database.clone()] {
-        if !file.try_exists()? {
+        let exists = file.try_exists().with_context(|| {
+            format!(
+                "checking {}; run this as the user that owns {}",
+                file.display(),
+                data_dir.display()
+            )
+        })?;
+        if !exists {
             bail!(
                 "{} is missing; start the server with --data {} once before minting an invite",
                 file.display(),
                 data_dir.display()
             );
+        }
+        // Checked here because the server's own refusal of a foreign file would suggest
+        // handing the data directory to this user, which locks the real server out.
+        if let Some(owner) = files::other_owner(&file)? {
+            return Err(not_the_servers_user(&file, owner, data_dir));
         }
     }
     let fingerprint = ServerIdentity::load_or_create(data_dir)?.fingerprint;
@@ -238,6 +250,17 @@ pub fn admin_invite(data_dir: &Path) -> Result<AdminInvite> {
         expires_at,
         fingerprint,
     })
+}
+
+fn not_the_servers_user(file: &Path, owner: u32, data_dir: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{} belongs to uid {owner}, the user the server runs as, and admin-invite has to run \
+         as that user too. Run it as uid {owner}, for instance \
+         `sudo -u '#{owner}' throcc-server admin-invite --data {}`; in Docker, plain \
+         `docker exec` already does, so leave out `-u`",
+        file.display(),
+        data_dir.display()
+    )
 }
 
 async fn handle(shared: Arc<Shared>, connection: quinn::Connection, unauthenticated: Pass) {
@@ -261,4 +284,28 @@ pub fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admin_invite_as_another_user_says_to_run_it_as_the_servers_user() {
+        let dir = tempfile::tempdir().unwrap();
+        ServerIdentity::load_or_create(dir.path()).unwrap();
+        drop(Database::open(&dir.path().join(DATABASE_FILE)).unwrap());
+        let server_uid = 65532;
+        for file in [identity::KEY_FILE, DATABASE_FILE] {
+            if std::os::unix::fs::chown(dir.path().join(file), Some(server_uid), None).is_err() {
+                // Only root can hand a file to another user.
+                return;
+            }
+        }
+
+        let refusal = format!("{:#}", admin_invite(dir.path()).err().unwrap());
+        assert!(refusal.contains("Run it as uid 65532"), "{refusal}");
+        assert!(refusal.contains("sudo -u '#65532'"), "{refusal}");
+        assert!(!refusal.contains("chown"), "{refusal}");
+    }
 }

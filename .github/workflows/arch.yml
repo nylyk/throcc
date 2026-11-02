@@ -57,7 +57,9 @@ jobs:
           base="https://github.com/$GITHUB_REPOSITORY/releases/download/nightly"
           notes="Built from $GITHUB_SHA. Install on Arch: curl -LO $base/throcc-x86_64.pkg.tar.zst -LO $base/throcc-x86_64.pkg.tar.zst.sha256 && sha256sum -c throcc-x86_64.pkg.tar.zst.sha256 && sudo pacman -U throcc-x86_64.pkg.tar.zst"
           files=(out/throcc-x86_64.pkg.tar.zst out/throcc-x86_64.pkg.tar.zst.sha256)
-          # Updated in place, never deleted, so a failed run still leaves the previous nightly up.
+          # Updated in place, never deleted, so a failed run keeps the release and its tag. --clobber
+          # deletes each old asset before uploading the new one, so a failed upload can leave the
+          # package missing, or not matching its .sha256, until the next run.
           # The tag moves so it and the source archives point at the commit built.
           if gh release view nightly >/dev/null 2>&1; then
             gh release upload nightly "${files[@]}" --clobber

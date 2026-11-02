@@ -32,6 +32,21 @@ pub fn check_private_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The owner of `path`, if it isn't the user this process runs as.
+#[cfg(unix)]
+pub fn other_owner(path: &Path) -> Result<Option<u32>> {
+    use std::os::unix::fs::MetadataExt;
+    let owner = fs::metadata(path)
+        .with_context(|| format!("reading {}", path.display()))?
+        .uid();
+    Ok((owner != unix::effective_uid()).then_some(owner))
+}
+
+#[cfg(not(unix))]
+pub fn other_owner(_: &Path) -> Result<Option<u32>> {
+    Ok(None)
+}
+
 /// Creates `path` empty at mode 0600 if it doesn't exist yet.
 pub fn create_private_file(path: &Path) -> Result<()> {
     let mut options = fs::OpenOptions::new();
@@ -182,7 +197,7 @@ mod unix {
         usize::try_from(written).is_ok_and(|n| groups[..n.min(len)].contains(&gid))
     }
 
-    fn effective_uid() -> u32 {
+    pub fn effective_uid() -> u32 {
         // SAFETY: geteuid has no preconditions and cannot fail.
         unsafe { libc::geteuid() }
     }

@@ -8,7 +8,7 @@ use throcc_proto::invite::{self, ID_CHARS, SECRET_CHARS};
 use throcc_proto::messages::{AuthError, Event, Hello, PakeFinish, PakeReply, PakeStep, PublicKey};
 use tracing::{debug, info, warn};
 
-use crate::database::{InviteRow, UserRow};
+use crate::database::{Enrolled, InviteRow, UserRow};
 use crate::limits::SourceKey;
 use crate::session::{FrameStream, read_handshake, write_frame};
 use crate::{Shared, unix_now};
@@ -122,13 +122,18 @@ impl Enrollment<'_> {
         let enrolled = {
             let mut hub = self.shared.hub();
             let enrolled = hub.db.enroll(&self.pubkey, &self.code_id, now);
-            if let Ok(Some(row)) = &enrolled {
-                hub.emit_user_list_change(Event::UserAdded(row.to_user()));
+            match &enrolled {
+                Ok(Some(Enrolled::Added(row))) => {
+                    hub.emit_user_list_change(Event::UserAdded(row.to_user()));
+                }
+                Ok(Some(Enrolled::Promoted(row))) => hub.role_changed(row.id, row.role),
+                _ => {}
             }
             enrolled
         };
         match enrolled {
-            Ok(Some(row)) => {
+            Ok(Some(enrolled)) => {
+                let row = enrolled.into_row();
                 self.shared.limiter().forgive(self.source);
                 info!(user = row.id.0, role = ?row.role, "enrolled");
                 Ok(row)

@@ -1212,6 +1212,13 @@ impl Hub {
         let row = self.stored_user(target)?;
         require(permissions::can_set_role(actor, row.role, role))?;
         self.db.set_role(target, role).map_err(Refusal::internal)?;
+        self.role_changed(target, role);
+        Ok(Response::Ok)
+    }
+
+    /// Applies a role already stored for `target` to their session and tells everyone who
+    /// needs to know.
+    pub fn role_changed(&mut self, target: UserId, role: Role) {
         if let Some(session) = self.sessions.get_mut(&target) {
             session.row.role = role;
         }
@@ -1232,7 +1239,6 @@ impl Hub {
         if !permissions::can_list_users(role) {
             self.emit_to(target, event);
         }
-        Ok(Response::Ok)
     }
 
     fn kick_from_room(&mut self, user: UserId, target: UserId, room: RoomId) -> Outcome {
