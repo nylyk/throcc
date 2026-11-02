@@ -907,9 +907,15 @@ impl Session {
             .map_or_else(|| person_name(user, ""), |p| p.name.clone());
         let changed = self.trust.set_verified(user, key, verified, &name);
         if let Ok(false) = changed {
-            self.shared.notice(format!(
-                "{name}'s key changed before you confirmed, so nothing changed. Compare the new safety number."
-            ));
+            self.shared.notice(if self.trust.of(user).1.is_some() {
+                format!(
+                    "{name}'s key changed before you confirmed, so nothing changed. Compare the new safety number."
+                )
+            } else {
+                format!(
+                    "{name} isn't presenting a key right now, so nothing changed. Compare the safety number again once they're in a room with you."
+                )
+            });
             return;
         }
         self.after_trust_change(changed.map(drop));

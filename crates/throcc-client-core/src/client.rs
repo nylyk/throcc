@@ -470,6 +470,8 @@ impl ClientApi for MockClient {
                         servers: server.into_iter().collect(),
                     });
                     s.key_warnings.retain(|w| w.user != user);
+                } else {
+                    s.key_warnings.retain(|w| w.verified != key);
                 }
             }),
             Command::DismissKeyChange(user) => {

@@ -21,10 +21,14 @@ const MAX_SEEN: usize = 256;
 /// verified on every server that shows it. Each key also keeps the server and user pairs it
 /// was seen under, so a server later showing another key for one of them is noticed, and
 /// that change is kept until the user verifies the new key or dismisses it. Every change is
-/// written at once.
+/// written at once, except which key a recorded change now shows.
 pub(crate) struct VerifiedKeys {
     dir: PathBuf,
     file: VerifiedFile,
+    /// The key shown last where a change is recorded with an earlier one, written with the
+    /// next change: a server flipping between keys can't make each room state rewrite the
+    /// file.
+    shown_since: BTreeMap<SeenAs, PublicKey>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -94,6 +98,7 @@ impl VerifiedKeys {
         Self {
             dir: dir.to_owned(),
             file: VerifiedFile::default(),
+            shown_since: BTreeMap::new(),
         }
     }
 
@@ -101,6 +106,7 @@ impl VerifiedKeys {
         Ok(Self {
             dir: dir.to_owned(),
             file: json_file::load(&dir.join(FILE))?,
+            shown_since: BTreeMap::new(),
         })
     }
 
@@ -122,11 +128,14 @@ impl VerifiedKeys {
     /// before, until the user verifies it or dismisses the change. It outlives that key
     /// being shown again, so a server switching back and forth can't hide it.
     pub fn changed_at(&self, server: &Fingerprint, user: UserId) -> Option<PublicKey> {
-        self.file.changed_at(seen_as(server, user))
+        let at = seen_as(server, user);
+        let written = self.file.changed_at(at)?;
+        Some(self.shown_since.get(&at).copied().unwrap_or(written))
     }
 
     /// Notes that `server` shows `key`, validly signed, as `user`: where it is verified, or
-    /// where it replaces a verified key seen there. Written only when that is new.
+    /// where it replaces a verified key seen there. Written only when that is new, and not
+    /// for another replacing key where a change is already recorded.
     pub fn presented(&mut self, server: &Fingerprint, user: UserId, key: &PublicKey) -> Result<()> {
         let at = seen_as(server, user);
         let expected = self.verified_at(server, user);
@@ -139,7 +148,11 @@ impl VerifiedKeys {
                 file.forget_change(at);
             });
         }
-        if expected.is_none() || self.changed_at(server, user) == Some(*key) {
+        if expected.is_none() {
+            return Ok(());
+        }
+        if self.file.changed_at(at).is_some() {
+            self.shown_since.insert(at, *key);
             return Ok(());
         }
         self.change(|file| {
@@ -208,10 +221,17 @@ impl VerifiedKeys {
     /// includes changes other processes made.
     fn change(&mut self, change: impl FnOnce(&mut VerifiedFile)) -> Result<()> {
         let mut written = None;
+        let shown_since = &self.shown_since;
         json_file::update(&self.dir.join(FILE), |file: &mut VerifiedFile| {
+            for changed in &mut file.changed {
+                if let Some(key) = shown_since.get(&changed.at) {
+                    changed.now = Hex(*key);
+                }
+            }
             change(file);
             written = Some(file.clone());
         })?;
+        self.shown_since.clear();
         self.file = written.unwrap_or_default();
         Ok(())
     }
@@ -307,6 +327,37 @@ mod tests {
         verified.presented(&HERE, UserId(4), &[8; 32]).unwrap();
         verified.unverify(&[4; 32]).unwrap();
         assert_eq!(verified.changed_at(&HERE, UserId(4)), None);
+    }
+
+    #[test]
+    fn a_server_flipping_between_new_keys_does_not_rewrite_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut verified = VerifiedKeys::load(dir.path()).unwrap();
+        verified.verify(&HERE, UserId(4), &[4; 32], "Mara").unwrap();
+        verified.presented(&HERE, UserId(4), &[9; 32]).unwrap();
+        let written = std::fs::read(dir.path().join(FILE)).unwrap();
+        for _ in 0..10 {
+            verified.presented(&HERE, UserId(4), &[8; 32]).unwrap();
+            verified.presented(&HERE, UserId(4), &[9; 32]).unwrap();
+        }
+        verified.presented(&HERE, UserId(4), &[8; 32]).unwrap();
+        verified.presented(&HERE, UserId(4), &[4; 32]).unwrap();
+        assert_eq!(std::fs::read(dir.path().join(FILE)).unwrap(), written);
+        assert_eq!(verified.changed_at(&HERE, UserId(4)), Some([8; 32]));
+
+        verified.verify(&HERE, UserId(5), &[5; 32], "Teo").unwrap();
+        let reloaded = VerifiedKeys::load(dir.path()).unwrap();
+        assert_eq!(reloaded.changed_at(&HERE, UserId(4)), Some([8; 32]));
+
+        verified.presented(&HERE, UserId(4), &[9; 32]).unwrap();
+        verified
+            .verify(&THERE, UserId(2), &[9; 32], "Mara")
+            .unwrap();
+        assert_eq!(
+            verified.changed_at(&HERE, UserId(4)),
+            None,
+            "the key shown last verified"
+        );
     }
 
     #[test]

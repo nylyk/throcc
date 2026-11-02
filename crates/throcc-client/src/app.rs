@@ -204,7 +204,8 @@ pub enum Dialog {
     Connection,
     /// Comparing our safety number with `user`'s. `shown` is the identity key the number on
     /// screen is for, with the number, once they presented one; `key_changed` once another
-    /// key replaced it while open.
+    /// key replaced it while open, until the user goes on to compare the new number. Marking
+    /// waits for that, so a click meant for one number can't land on the next.
     Verify {
         user: UserId,
         shown: Option<(Fingerprint, String)>,
@@ -1082,6 +1083,15 @@ impl ThroccApp {
         cx.notify();
     }
 
+    /// Lets the user mark the person in the verify dialog again, now comparing the number
+    /// that replaced the one they had.
+    pub fn compare_again(&mut self, cx: &mut Context<Self>) {
+        if let Some(Dialog::Verify { key_changed, .. }) = &mut self.dialog {
+            *key_changed = false;
+            cx.notify();
+        }
+    }
+
     /// Keeps the verify dialog's number on the key its person presents now. Their key
     /// arrives with a room state, and the server may present another at any time, so this
     /// follows every event.
@@ -1641,10 +1651,10 @@ impl ThroccApp {
 
     /// Opens a screen of the mock client by name, for screenshots: welcome, join, joinfailed,
     /// lost, personmenu, addserver, removeserver, room, alone, emptylobby, focus, fullscreen,
-    /// popout, share, connection, verify, keychange, pinmismatch, settings, appearance,
-    /// servers, newroom, editroom, roompassword, deleteroom, profile, server, keys, members,
-    /// invites, removeuser, leaveserver, identitymissing or startedover. Any other name leaves
-    /// the lobby.
+    /// popout, share, connection, verify, verifychanged, keychange, pinmismatch, settings,
+    /// appearance, servers, newroom, editroom, roompassword, deleteroom, profile, server, keys,
+    /// members, invites, removeuser, leaveserver, identitymissing or startedover. Any other
+    /// name leaves the lobby.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         let room = RoomId(1);
         let joined = |app: &mut Self| {
@@ -1725,6 +1735,12 @@ impl ThroccApp {
                 self.dialog = Some(Dialog::Connection);
             }
             "verify" => self.open_verify(UserId(4), cx),
+            "verifychanged" => {
+                self.open_verify(UserId(4), cx);
+                if let Some(Dialog::Verify { key_changed, .. }) = &mut self.dialog {
+                    *key_changed = true;
+                }
+            }
             "keychange" => self.open_verify(UserId(3), cx),
             "pinmismatch" => {
                 offline(self);

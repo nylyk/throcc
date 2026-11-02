@@ -494,9 +494,16 @@ fn verify(
         );
     }
     if key_changed {
-        content = content.child(warning_box().child(format!(
-            "{name}’s key changed while this was open, so this is a new number. Compare it again before you mark them verified."
-        )));
+        content = content.child(
+            warning_box()
+                .child(format!(
+                    "{name}’s key changed while this was open, so this is a new number. Compare it again before you mark them verified."
+                ))
+                .child(div().flex().justify_end().child(
+                    secondary("compare-again", "Compare Again")
+                        .on_click(cx.listener(|app, _, _, cx| app.compare_again(cx))),
+                )),
+        );
     }
     let groups: Vec<String> = shown
         .as_ref()
@@ -539,7 +546,7 @@ fn verify(
         .child(
             buttons.child(
                 primary("mark-verified", if verified { "Mark as Not Verified" } else { "Mark as Verified" })
-                    .disabled(shown_key.is_none() || shown_key != presented)
+                    .disabled(key_changed || shown_key.is_none() || shown_key != presented)
                     .on_click(cx.listener(move |app, _, _, cx| {
                         if let Some(key) = shown_key {
                             app.command(Command::SetVerified { user, key, verified: !verified });
