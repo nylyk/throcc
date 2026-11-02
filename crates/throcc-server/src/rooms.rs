@@ -1498,7 +1498,7 @@ fn checked_name(name: &str) -> Result<String, Refusal> {
     valid_name(name).map(str::to_owned).ok_or_else(|| {
         Refusal::new(
             ErrorCode::Invalid,
-            format!("names are 1 to {MAX_NAME_CHARS} characters"),
+            format!("names are 1 to {MAX_NAME_CHARS} characters, with nothing hidden or reversed"),
         )
     })
 }

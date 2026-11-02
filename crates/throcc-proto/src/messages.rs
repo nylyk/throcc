@@ -12,9 +12,19 @@ pub const MAX_PASSWORD_CHARS: usize = 128;
 pub fn valid_name(name: &str) -> Option<&str> {
     let name = name.trim();
     let chars = name.chars().count();
-    let shown = name.chars().any(|c| !joins_text(c) && !c.is_whitespace());
+    let shown = name.chars().any(|c| !blank(c) && !c.is_whitespace());
     ((1..=MAX_NAME_CHARS).contains(&chars) && shown && !name.chars().any(hides_text))
         .then_some(name)
+}
+
+/// What two names are compared by to tell whether one poses as the other: lower case,
+/// without the characters that draw nothing.
+pub fn name_key(name: &str) -> String {
+    name.trim()
+        .chars()
+        .filter(|&c| !blank(c))
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 /// Control characters, and the invisible, bidi and line-breaking characters that let one
@@ -22,18 +32,24 @@ pub fn valid_name(name: &str) -> Option<&str> {
 fn hides_text(c: char) -> bool {
     c.is_control()
         || matches!(c,
-            '\u{200B}'
+            '\u{00AD}' | '\u{034F}' | '\u{061C}' | '\u{115F}' | '\u{1160}'
+            | '\u{17B4}' | '\u{17B5}' | '\u{180E}' | '\u{200B}'
             | '\u{200E}'..='\u{200F}'
             | '\u{2028}'..='\u{202E}'
-            | '\u{2060}'..='\u{2064}'
-            | '\u{2066}'..='\u{2069}'
-            | '\u{115F}' | '\u{1160}' | '\u{3164}' | '\u{FEFF}')
+            | '\u{2060}'..='\u{206F}'
+            | '\u{3164}' | '\u{FEFF}' | '\u{FFA0}'
+            | '\u{FFF9}'..='\u{FFFB}')
 }
 
-/// The zero-width joiners that Persian, Indic scripts and emoji sequences need inside a
-/// name, but that can't make up a name on their own.
-fn joins_text(c: char) -> bool {
-    matches!(c, '\u{200C}' | '\u{200D}')
+/// Characters a name may contain but that draw nothing on their own: the joiners Persian,
+/// Indic scripts and emoji sequences need, variation selectors, emoji tags and the blank
+/// braille pattern.
+fn blank(c: char) -> bool {
+    matches!(c,
+        '\u{200C}' | '\u{200D}' | '\u{2800}'
+        | '\u{FE00}'..='\u{FE0F}'
+        | '\u{E0000}'..='\u{E007F}'
+        | '\u{E0100}'..='\u{E01EF}')
 }
 
 pub fn valid_password(password: &str) -> bool {
@@ -426,7 +442,16 @@ mod tests {
         ] {
             assert_eq!(valid_name(bad), None, "{bad:?}");
         }
-        assert_eq!(valid_name("\u{200C}\u{200D}"), None);
+        for blank in [
+            "\u{200C}\u{200D}",
+            "\u{2800}",
+            "\u{FE0F}",
+            "\u{FFA0}",
+            "a\u{061C}b",
+            "a\u{00AD}b",
+        ] {
+            assert_eq!(valid_name(blank), None, "{blank:?}");
+        }
         for good in [
             "Zoë Ångström",
             "می\u{200C}خواهم",
@@ -436,6 +461,13 @@ mod tests {
         ] {
             assert_eq!(valid_name(good), Some(good), "{good:?}");
         }
+    }
+
+    #[test]
+    fn names_that_look_the_same_share_a_key() {
+        assert_eq!(name_key(" Bob "), name_key("bo\u{200C}b"));
+        assert_eq!(name_key("\u{200D}Admin"), "admin");
+        assert_ne!(name_key("Bob"), name_key("Rob"));
     }
 
     #[test]
