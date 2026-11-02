@@ -37,15 +37,18 @@ struct Tally {
     frames: u32,
     keyframes: u32,
     bytes: usize,
+    /// The capture's count of dropped frames and audio buffers at `since`.
+    dropped: u64,
 }
 
 impl Tally {
-    fn new() -> Self {
+    fn new(dropped: u64) -> Self {
         Self {
             since: Instant::now(),
             frames: 0,
             keyframes: 0,
             bytes: 0,
+            dropped,
         }
     }
 
@@ -57,7 +60,9 @@ impl Tally {
         }
     }
 
-    fn report_if_due(&mut self) {
+    /// Logs the tally if it is due. `dropped` is the capture's count of dropped frames and
+    /// audio buffers so far.
+    fn report_if_due(&mut self, dropped: u64) {
         let elapsed = self.since.elapsed();
         if elapsed < TALLY_EVERY {
             return;
@@ -69,9 +74,10 @@ impl Tally {
             fps = format!("{fps:.1}"),
             kbps = kbps.round(),
             keyframes = self.keyframes,
+            capture_dropped = dropped.saturating_sub(self.dropped),
             "share encoded"
         );
-        *self = Self::new();
+        *self = Self::new(dropped);
     }
 }
 
@@ -193,7 +199,7 @@ impl ShareSender {
                 sent: 0,
                 preview: preview.clone(),
             },
-            tally: Tally::new(),
+            tally: Tally::new(0),
             #[cfg(target_os = "macos")]
             pixel_buffers,
         };
@@ -264,7 +270,7 @@ impl Sending {
                 self.encoder.recover(kind);
             }
             self.send_audio(&mut sound);
-            self.tally.report_if_due();
+            self.tally.report_if_due(self.capture.dropped());
             #[cfg(target_os = "linux")]
             if self.send_dmabuf() {
                 continue;

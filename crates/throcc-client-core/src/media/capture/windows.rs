@@ -309,9 +309,9 @@ impl Capture for WinCapture {
     fn next_audio(&mut self, into: &mut [f32; STEREO_FRAME]) -> Option<u32> {
         let audio = self.audio.as_mut()?;
         self.clock.next_audio(into, |clock| {
-            let (at, samples) = audio.captured.pop()?;
-            clock.push_audio(at, samples);
-            Some(())
+            audio
+                .captured
+                .pop(|at, samples| clock.push_audio(at, samples))
         })
     }
 }

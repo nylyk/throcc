@@ -25,7 +25,7 @@ use pw::types::ObjectType;
 use super::{failed, pods, serialize, spawn_ready};
 use crate::media::audio::SAMPLE_RATE;
 use crate::media::capture::CaptureError;
-use crate::media::capture::audio_ring::{AudioConsumer, AudioProducer, audio_ring};
+use crate::media::capture::audio_ring::{AudioConsumer, AudioProducer, Samples, audio_ring};
 
 /// Everything the desktop plays except this process's own playback, mixed to 48 kHz stereo
 /// and stamped with PipeWire time in nanoseconds.
@@ -52,9 +52,9 @@ impl DesktopAudio {
         })
     }
 
-    /// The oldest captured buffer, interleaved stereo, with its PipeWire time in nanoseconds.
-    pub(super) fn pop(&mut self) -> Option<(i64, rtrb::chunks::ReadChunk<'_, f32>)> {
-        self.captured.pop()
+    /// Hands the oldest captured buffer to `consume`, with its PipeWire time in nanoseconds.
+    pub(super) fn pop<R>(&mut self, consume: impl FnOnce(i64, Samples<'_>) -> R) -> Option<R> {
+        self.captured.pop(consume)
     }
 }
 

@@ -12,15 +12,20 @@ use std::cell::{Cell, RefCell};
 use std::io::Cursor;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::path::Path;
+use std::pin::Pin;
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::task::{Context, Waker};
 use std::thread::JoinHandle;
 
 use ashpd::desktop::screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType};
 use ashpd::desktop::{PersistMode, ResponseError, Session};
+use ashpd::zbus::message::Type as MessageType;
+use ashpd::zbus::{MatchRule, MessageStream};
+use futures_core::Stream as _;
 use pipewire as pw;
 use pw::properties::properties;
 use pw::spa;
@@ -59,31 +64,36 @@ const DMABUF_FORMATS: [(VideoFormat, u32); 4] = [
 const MAX_SIDE: u32 = 8192;
 const NANOS: i64 = 1_000_000_000;
 
-/// Shows the portal's picker, or reuses the choice kept from last time, and reads the
-/// stream it shares.
-pub(super) fn start(config: CaptureConfig) -> Result<PipeWireCapture, CaptureError> {
-    let dir = crate::keystore::config_dir().ok();
-    let token = dir
-        .as_deref()
-        .and_then(|dir| Settings::load(dir).ok()?.screencast_restore_token);
+/// Shows the portal's picker, or reuses the choice kept in the settings in `settings` from
+/// last time, and reads the stream it shares.
+pub(super) fn start(
+    config: CaptureConfig,
+    settings: &Path,
+) -> Result<PipeWireCapture, CaptureError> {
+    let token = Settings::load(settings)
+        .ok()
+        .and_then(|s| s.screencast_restore_token);
     async_io::block_on(async {
         let portal = Screencast::new().await.map_err(portal_error)?;
         let session = portal
             .create_session(Default::default())
             .await
             .map_err(portal_error)?;
-        let started =
-            pick(&portal, &session, token.as_deref())
-                .await
-                .and_then(|(node, fd, kept)| {
-                    if let (Some(dir), Some(kept)) = (&dir, &kept) {
-                        save_token(dir, kept);
-                    }
-                    PipeWireCapture::start(node, Some(fd), config)
+        let started = async {
+            let closed = closed_signal(&portal, &session).await?;
+            let (node, fd, kept) = pick(&portal, &session, token.as_deref()).await?;
+            if let Some(kept) = &kept {
+                save_token(settings, kept);
+            }
+            let capture = PipeWireCapture::start(node, Some(fd), config)?;
+            Ok::<_, CaptureError>((capture, closed))
+        };
+        match started.await {
+            Ok((mut capture, closed)) => {
+                capture.portal = Some(PortalSession {
+                    session,
+                    closed: RefCell::new(closed),
                 });
-        match started {
-            Ok(mut capture) => {
-                capture.portal = Some(session);
                 Ok(capture)
             }
             Err(e) => {
@@ -92,6 +102,29 @@ pub(super) fn start(config: CaptureConfig) -> Result<PipeWireCapture, CaptureErr
             }
         }
     })
+}
+
+/// Subscribes to `session`'s Closed signal. Subscribing through the session itself would
+/// tie the subscription's lifetime to a borrow of it.
+async fn closed_signal(
+    portal: &Screencast,
+    session: &Session<Screencast>,
+) -> Result<MessageStream, CaptureError> {
+    // A session serializes as its object path, the only way ashpd gives it out.
+    let path = serde_json::to_value(session).map_err(failed)?;
+    let path = path
+        .as_str()
+        .ok_or_else(|| CaptureError::Failed("the portal session has no path".into()))?;
+    let rule = MatchRule::builder()
+        .msg_type(MessageType::Signal)
+        .interface("org.freedesktop.portal.Session")
+        .and_then(|rule| rule.member("Closed"))
+        .and_then(|rule| rule.path(path))
+        .map_err(failed)?
+        .build();
+    MessageStream::for_match_rule(rule, portal.connection(), None)
+        .await
+        .map_err(failed)
 }
 
 async fn pick(
@@ -153,6 +186,28 @@ fn save_token(dir: &Path, token: &str) {
     }
 }
 
+/// The portal session that shares the stream.
+struct PortalSession {
+    session: Session<Screencast>,
+    /// The session's Closed signal, which comes when the person or the system stops the
+    /// share outside throcc, as from the desktop's sharing indicator.
+    closed: RefCell<MessageStream>,
+}
+
+impl PortalSession {
+    /// Whether the session's Closed signal came. zbus reads signals on its own thread, so
+    /// one that came is already queued and a poll that never waits finds it.
+    fn closed(&self) -> bool {
+        let Ok(mut closed) = self.closed.try_borrow_mut() else {
+            return false;
+        };
+        let mut context = Context::from_waker(Waker::noop());
+        // An error or the end of the stream means the D-Bus connection, and with it the
+        // session, is gone.
+        Pin::new(&mut *closed).poll_next(&mut context).is_ready()
+    }
+}
+
 /// A PipeWire video stream read on its own thread and main loop, with the desktop's audio
 /// when the config asks for it.
 pub(super) struct PipeWireCapture {
@@ -163,7 +218,7 @@ pub(super) struct PipeWireCapture {
     control: pw::channel::Sender<Control>,
     thread: Option<JoinHandle<()>>,
     /// The portal session that shares the stream, closed when capturing stops.
-    portal: Option<Session<Screencast>>,
+    portal: Option<PortalSession>,
     /// The frame in GPU memory last handed out, held until the next one is asked for.
     current: Option<HeldDmaBuf>,
     /// Modifiers of frames in GPU memory the share refused, or `None` for all of them.
@@ -329,6 +384,9 @@ impl Capture for PipeWireCapture {
     }
 
     fn ended(&self) -> bool {
+        if self.portal.as_ref().is_some_and(PortalSession::closed) {
+            self.ended.store(true, Ordering::Relaxed);
+        }
         self.ended.load(Ordering::Relaxed)
     }
 
@@ -339,9 +397,7 @@ impl Capture for PipeWireCapture {
     fn next_audio(&mut self, into: &mut [f32; STEREO_FRAME]) -> Option<u32> {
         let audio = self.audio.as_mut()?;
         self.clock.next_audio(into, |clock| {
-            let (at, samples) = audio.pop()?;
-            clock.push_audio(at, samples);
-            Some(())
+            audio.pop(|at, samples| clock.push_audio(at, samples))
         })
     }
 }
@@ -360,7 +416,7 @@ fn monotonic_nanos() -> i64 {
 impl Drop for PipeWireCapture {
     fn drop(&mut self) {
         if let Some(portal) = self.portal.take() {
-            async_io::block_on(portal.close()).ok();
+            async_io::block_on(portal.session.close()).ok();
         }
         self.control.send(Control::Quit).ok();
         if let Some(thread) = self.thread.take() {
@@ -439,7 +495,9 @@ fn run(
         .connect(
             Direction::Input,
             Some(node),
-            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
+            // Once the shared source goes away, the session manager must not link the
+            // stream to another one.
+            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS | StreamFlags::DONT_RECONNECT,
             &mut pods(&formats)?,
         )
         .map_err(failed)?;
@@ -1838,8 +1896,9 @@ mod tests {
             fps: 30,
             audio: false,
         };
+        let settings = tempfile::tempdir().unwrap();
         for share in ["first", "second"] {
-            let mut capture = start(config).unwrap();
+            let mut capture = start(config, settings.path()).unwrap();
             let mut frame = VideoFrame::blank(1280, 720);
             let timestamps = frames_within(&mut capture, &mut frame, 10);
             assert!(
@@ -1847,8 +1906,9 @@ mod tests {
                 "{share} share: only {} frames in 5 s",
                 timestamps.len()
             );
-            let dir = crate::keystore::config_dir().unwrap();
-            let token = Settings::load(&dir).unwrap().screencast_restore_token;
+            let token = Settings::load(settings.path())
+                .unwrap()
+                .screencast_restore_token;
             assert!(token.is_some(), "no restore token kept");
             println!("{share} share: {}×{}", frame.width, frame.height);
         }

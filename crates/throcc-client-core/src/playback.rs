@@ -63,21 +63,23 @@ impl SavedPlayback {
         self.unsaved.insert(user);
     }
 
-    /// Writes the changes made since the last save.
+    /// Writes the changes made since the last save. Changes a failed save missed stay for
+    /// the next one.
     pub fn save(&mut self) -> Result<()> {
         if self.unsaved.is_empty() {
             return Ok(());
         }
-        let unsaved = std::mem::take(&mut self.unsaved);
         Servers::update(&self.dir, |s| {
             let kept = &mut s.server_mut(&self.server).playback;
-            for user in unsaved {
-                match self.people.get(&user) {
-                    Some(person) => kept.insert(user, *person),
-                    None => kept.remove(&user),
+            for user in &self.unsaved {
+                match self.people.get(user) {
+                    Some(person) => kept.insert(*user, *person),
+                    None => kept.remove(user),
                 };
             }
-        })
+        })?;
+        self.unsaved.clear();
+        Ok(())
     }
 }
 
@@ -126,6 +128,26 @@ mod tests {
         assert_eq!(saved.person(UserId(5)), PersonPlayback::default());
         let other = SavedPlayback::load(dir.path(), &Fingerprint([8; 32])).unwrap();
         assert_eq!(other.person(UserId(4)), PersonPlayback::default());
+    }
+
+    #[test]
+    fn a_failed_save_is_tried_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::write(&config, b"not a directory yet").unwrap();
+        let server = Fingerprint([7; 32]);
+        let mut saved = SavedPlayback::empty(&config, &server);
+        let quiet = Playback {
+            volume: 0.3,
+            muted: false,
+        };
+        saved.set(UserId(4), Sound::Voice, quiet);
+        assert!(saved.save().is_err());
+
+        std::fs::remove_file(&config).unwrap();
+        saved.save().unwrap();
+        let loaded = SavedPlayback::load(&config, &server).unwrap();
+        assert_eq!(loaded.person(UserId(4)).voice, quiet);
     }
 
     #[test]

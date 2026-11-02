@@ -13,6 +13,9 @@ use throcc_proto::{ALPN, DEFAULT_PORT, Fingerprint, SERVER_NAME};
 use crate::lock;
 
 const EXPORTER_LABEL: &[u8] = b"throcc/exporter/1";
+/// Kept small whatever the share's bitrate: voice queues behind video in this buffer, so a
+/// deeper one would delay voice during a share. Media waits for room rather than dropping.
+const DATAGRAM_SEND_BUFFER: usize = 64 * 1024;
 
 pub struct Connected {
     pub connection: quinn::Connection,
@@ -54,7 +57,7 @@ pub enum ConnectError {
 /// Connects to `address` (`host` or `host:port`) and checks the server's key against `pin`.
 /// With no pin, any key is accepted and returned in [`Connected::fingerprint`].
 pub async fn connect(address: &str, pin: Option<Fingerprint>) -> Result<Connected, ConnectError> {
-    let (config, verifier) = client_config(pin, transport_config(0))?;
+    let (config, verifier) = client_config(pin, transport_config())?;
     connect_with(address, config, &verifier).await
 }
 
@@ -123,12 +126,12 @@ pub fn client_config(
     Ok((config, verifier))
 }
 
-/// Transport settings for a client whose media sends at up to `send_kbps`.
-pub fn transport_config(send_kbps: u32) -> TransportConfig {
+/// The client's transport settings.
+pub fn transport_config() -> TransportConfig {
     let mut config = TransportConfig::default();
     config
         .keep_alive_interval(Some(transport::KEEP_ALIVE))
-        .datagram_send_buffer_size(transport::client_datagram_send_buffer(send_kbps))
+        .datagram_send_buffer_size(DATAGRAM_SEND_BUFFER)
         .packet_threshold(transport::REORDER_PACKETS)
         .time_threshold(transport::REORDER_RTT_FACTOR);
     if let Ok(idle) = IdleTimeout::try_from(transport::IDLE_TIMEOUT) {

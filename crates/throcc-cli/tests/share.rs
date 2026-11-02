@@ -249,7 +249,9 @@ async fn a_screen_share_runs_for_profiling() {
     let tracks = first_share(&bob, &alice).await;
     let wanted = throcc_client_core::state::ShareChoice::default().config(Codec::Av1, false);
     let config = CaptureConfig::for_share(&wanted);
-    let capture = tokio::task::spawn_blocking(move || capture::start(config))
+    let settings = tempfile::tempdir().unwrap();
+    let dir = settings.path().to_owned();
+    let capture = tokio::task::spawn_blocking(move || capture::start(config, &dir))
         .await
         .unwrap()
         .unwrap();

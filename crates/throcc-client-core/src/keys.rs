@@ -331,9 +331,7 @@ impl KeyManager {
                     continue;
                 }
                 ContactStatus::New => {
-                    if let Err(e) = contacts.pin(peer.user, peer.identity_key) {
-                        warn!("could not save a contact: {e:#}");
-                    }
+                    contacts.pin(peer.user, peer.identity_key);
                     notices.push(KeyNotice::NewContact { user: peer.user });
                 }
                 ContactStatus::Known { .. } => {
@@ -764,7 +762,7 @@ mod tests {
             now: b.identity.public()
         }));
 
-        a.contacts.pin(b.id, b.identity.public()).unwrap();
+        a.contacts.pin(b.id, b.identity.public());
         let (request, _) = a
             .keys
             .room_state(ROOM, Epoch(2), &peers, &mut a.contacts, now);

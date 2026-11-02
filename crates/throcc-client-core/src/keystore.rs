@@ -11,7 +11,7 @@ use throcc_proto::messages::SignedEncKey;
 use tracing::warn;
 use zeroize::Zeroizing;
 
-use crate::files::{read_if_exists, write_private};
+use crate::files::{read_if_exists, replace_file};
 use crate::known_servers::KnownServers;
 use crate::unix_now;
 
@@ -22,6 +22,9 @@ const ENC_KEY_FILE: &str = "enc_key";
 const ENC_KEY_LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// How long before it expires the encryption key is replaced.
 const ENC_KEY_RENEW_BEFORE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// How far in the future a key's creation time may lie before the key is replaced, as one
+/// made under a clock running ahead would otherwise stay valid far too long.
+const ENC_KEY_CLOCK_SKEW: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The install's identity key plus everything pinned per server.
 pub struct Keystore {
@@ -41,11 +44,12 @@ impl Keystore {
 
     /// Opens the platform config directory, keeping the identity key in the OS keychain.
     /// Falls back to a 0600 file only on a platform without a keychain, and refuses to
-    /// start a new identity there while servers are known.
+    /// start a new identity there while servers are known. An empty keychain takes the
+    /// identity from that file when there is one.
     pub fn open_default() -> Result<Self> {
         let dir = config_dir()?;
         fs::create_dir_all(&dir)?;
-        let identity = match keychain_identity() {
+        let identity = match keychain_identity(&dir) {
             Err(e) if matches!(e.downcast_ref(), Some(keyring::Error::NoDefaultStore)) => {
                 warn!("no OS keychain ({e:#}); keeping the identity key in a file");
                 fallback_identity(&dir)?
@@ -137,7 +141,9 @@ fn project_dirs() -> Result<directories::ProjectDirs> {
 }
 
 fn renewal_due(created: u64, now: u64) -> bool {
-    now.saturating_sub(created) + ENC_KEY_RENEW_BEFORE.as_secs() >= ENC_KEY_LIFETIME.as_secs()
+    created > now + ENC_KEY_CLOCK_SKEW.as_secs()
+        || now.saturating_sub(created) + ENC_KEY_RENEW_BEFORE.as_secs()
+            >= ENC_KEY_LIFETIME.as_secs()
 }
 
 /// Loads the encryption key, replacing it when it expires within a week.
@@ -160,22 +166,35 @@ fn new_enc_key(path: &Path, now: u64) -> Result<(EncKeyPair, u64)> {
     let key = EncKeyPair::generate();
     let mut bytes = Zeroizing::new(key.secret().to_vec());
     bytes.extend_from_slice(&now.to_be_bytes());
-    write_private(path, &bytes)?;
+    replace_file(path, &bytes)?;
     Ok((key, now))
 }
 
-/// The identity key in the OS keychain, created there when it has none.
-fn keychain_identity() -> Result<IdentityKey> {
+/// The identity key in the OS keychain, put there when it has none.
+fn keychain_identity(dir: &Path) -> Result<IdentityKey> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_IDENTITY)?;
     match entry.get_secret() {
         Ok(secret) => seed_to_key(&Zeroizing::new(secret)),
         Err(keyring::Error::NoEntry) => {
-            let key = IdentityKey::generate();
-            entry.set_secret(key.seed().as_slice())?;
-            Ok(key)
+            first_keychain_identity(dir, |seed| Ok(entry.set_secret(seed)?))
         }
         Err(e) => Err(e.into()),
     }
+}
+
+/// The identity to `store` in an empty keychain: the one a run without a keychain kept in
+/// `dir`, or else a new one. The file stays, so the identity also survives the keychain
+/// going away again.
+fn first_keychain_identity(
+    dir: &Path,
+    store: impl FnOnce(&[u8]) -> Result<()>,
+) -> Result<IdentityKey> {
+    let key = match read_if_exists(&dir.join(IDENTITY_FILE))? {
+        Some(bytes) => seed_to_key(&Zeroizing::new(bytes))?,
+        None => IdentityKey::generate(),
+    };
+    store(key.seed().as_slice())?;
+    Ok(key)
 }
 
 /// The identity key in `dir`. A missing one is created only while no server is known.
@@ -196,7 +215,7 @@ fn file_identity(dir: &Path) -> Result<IdentityKey> {
         Some(bytes) => seed_to_key(&Zeroizing::new(bytes)),
         None => {
             let key = IdentityKey::generate();
-            write_private(&path, key.seed().as_slice())?;
+            replace_file(&path, key.seed().as_slice())?;
             Ok(key)
         }
     }
@@ -238,6 +257,47 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_keychain_takes_the_identity_kept_in_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let kept = file_identity(dir.path()).unwrap();
+        let mut stored = Vec::new();
+        let key = first_keychain_identity(dir.path(), |seed| {
+            stored = seed.to_vec();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(key.public(), kept.public());
+        assert_eq!(stored, kept.seed().as_slice());
+        assert_eq!(file_identity(dir.path()).unwrap().public(), kept.public());
+
+        let empty = tempfile::tempdir().unwrap();
+        let new = first_keychain_identity(empty.path(), |_| Ok(())).unwrap();
+        assert_ne!(new.public(), kept.public());
+        assert!(!empty.path().join(IDENTITY_FILE).exists());
+    }
+
+    #[test]
+    fn a_corrupt_identity_file_is_never_replaced_in_the_keychain() {
+        let dir = tempfile::tempdir().unwrap();
+        replace_file(&dir.path().join(IDENTITY_FILE), b"short").unwrap();
+        let mut stored = false;
+        let opened = first_keychain_identity(dir.path(), |_| {
+            stored = true;
+            Ok(())
+        });
+        assert!(opened.is_err());
+        assert!(!stored);
+    }
+
+    #[test]
+    fn a_key_made_under_a_clock_running_ahead_is_renewed() {
+        let now = unix_now().unwrap();
+        assert!(!renewal_due(now + 60, now));
+        assert!(renewal_due(now + 2 * 24 * 60 * 60, now));
+        assert!(renewal_due(now - 24 * 24 * 60 * 60, now));
+    }
+
+    #[test]
     fn enc_key_persists_and_is_signed() {
         let dir = tempfile::tempdir().unwrap();
         let store = Keystore::open_in(dir.path()).unwrap();
@@ -274,7 +334,7 @@ mod tests {
 
         let mut old = Zeroizing::new(EncKeyPair::generate().secret().to_vec());
         old.extend_from_slice(&(now - 24 * 24 * 60 * 60).to_be_bytes());
-        write_private(&dir.path().join(ENC_KEY_FILE), &old).unwrap();
+        replace_file(&dir.path().join(ENC_KEY_FILE), &old).unwrap();
         let reopened = Keystore::open_in(dir.path()).unwrap();
         assert!(!renewal_due(reopened.enc_key_created, now));
     }

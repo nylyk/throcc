@@ -7769,6 +7769,7 @@ dependencies = [
  "bytes",
  "cpal",
  "directories",
+ "futures-core",
  "keyring",
  "libc",
  "pipewire",

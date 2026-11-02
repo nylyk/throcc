@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use throcc_proto::frame::{VIDEO_CLOCK_HZ, timestamp_before};
+use throcc_proto::frame::VIDEO_CLOCK_HZ;
 
 use crate::media::audio::{FRAME, SAMPLE_RATE};
 use crate::media::share_audio::STEREO_FRAME;
@@ -13,7 +13,9 @@ const SLIP: i64 = FRAME as i64 / 2;
 pub(super) struct ShareClock {
     zero: ShareZero,
     chunker: AudioChunker,
-    last_frame: Option<u32>,
+    /// The last picture's time in 90 kHz ticks from the zero, kept whole so a long pause
+    /// can't look like time going back once timestamps wrap.
+    last_frame: Option<i64>,
 }
 
 impl ShareClock {
@@ -32,10 +34,10 @@ impl ShareClock {
         if ticks < 0 {
             return None;
         }
+        let ticks = self.last_frame.map_or(ticks, |last| ticks.max(last + 1));
+        self.last_frame = Some(ticks);
         // Timestamps wrap after about 13 hours, so this truncates on purpose.
-        let timestamp = strictly_after(self.last_frame, ticks as u32);
-        self.last_frame = Some(timestamp);
-        Some(timestamp)
+        Some(ticks as u32)
     }
 
     /// Adds interleaved stereo whose first frame was taken at `at`.
@@ -63,14 +65,6 @@ impl ShareClock {
     }
 }
 
-/// `timestamp`, or the tick after `last` when it isn't later.
-fn strictly_after(last: Option<u32>, timestamp: u32) -> u32 {
-    match last {
-        Some(last) if !timestamp_before(last, timestamp) => last.wrapping_add(1),
-        _ => timestamp,
-    }
-}
-
 /// Lets captured frames through at no more than the share's frame rate on average,
 /// judged by their 90 kHz timestamps.
 #[cfg(any(windows, feature = "ffmpeg", test))]
@@ -88,21 +82,26 @@ impl FrameLimiter {
         }
     }
 
+    /// Whether to keep a frame stamped `timestamp`. Timestamps must never go back.
     pub(crate) fn admits(&mut self, timestamp: u32) -> bool {
+        let afresh = timestamp.wrapping_add(self.interval);
         let Some(next) = self.next else {
-            self.next = Some(timestamp.wrapping_add(self.interval));
+            self.next = Some(afresh);
             return true;
         };
-        // A frame up to a quarter interval early still counts, so a source running at
-        // exactly the share's rate loses nothing to capture jitter.
-        if timestamp_before(timestamp, next.wrapping_sub(self.interval / 4)) {
-            return false;
-        }
-        let on_schedule = next.wrapping_add(self.interval);
-        self.next = Some(if timestamp_before(timestamp, on_schedule) {
-            on_schedule
-        } else {
-            timestamp.wrapping_add(self.interval)
+        let interval = i64::from(self.interval);
+        // How far the frame is ahead of schedule, negative when it is late. Read as wrapping
+        // timestamps, so a frame after a pause of 6.6 to 13.3 hours looks far ahead.
+        let early = i64::from(next.wrapping_sub(timestamp) as i32);
+        self.next = Some(match early {
+            // Admitted frames leave the schedule at most 1¼ intervals ahead of the next
+            // one, so only a pause long enough to wrap gets this far.
+            early if early > 2 * interval => afresh,
+            // A frame up to a quarter interval early still counts, so a source running at
+            // exactly the share's rate loses nothing to capture jitter.
+            early if early > interval / 4 => return false,
+            early if early > -interval => next.wrapping_add(self.interval),
+            _ => afresh,
         });
         true
     }
@@ -292,11 +291,24 @@ mod tests {
 
     #[test]
     fn frame_timestamps_only_move_forward() {
-        assert_eq!(strictly_after(None, 0), 0);
-        assert_eq!(strictly_after(Some(0), 0), 1);
-        assert_eq!(strictly_after(Some(10), 4), 11);
-        assert_eq!(strictly_after(Some(10), 1500), 1500);
-        assert_eq!(strictly_after(Some(u32::MAX), 3), 3);
+        let mut clock = ShareClock::new(i64::from(VIDEO_CLOCK_HZ));
+        assert_eq!(clock.video(0), Some(0));
+        assert_eq!(clock.video(0), Some(1));
+        assert_eq!(clock.video(10), Some(10));
+        assert_eq!(clock.video(4), Some(11));
+        assert_eq!(clock.video(1500), Some(1500));
+        assert_eq!(clock.video(1 << 32), Some(0));
+        assert_eq!(clock.video(3), Some(1));
+    }
+
+    #[test]
+    fn frame_timestamps_keep_pace_after_a_pause_long_enough_to_wrap() {
+        let hz = i64::from(VIDEO_CLOCK_HZ);
+        let mut clock = ShareClock::new(hz);
+        assert_eq!(clock.video(0), Some(0));
+        let resumed = 8 * 3600 * hz;
+        assert_eq!(clock.video(resumed), Some(resumed as u32));
+        assert_eq!(clock.video(resumed + 1500), Some((resumed + 1500) as u32));
     }
 
     #[test]
@@ -357,6 +369,17 @@ mod tests {
             (60..=61).contains(&kept),
             "kept {kept} in the second after a pause"
         );
+    }
+
+    #[test]
+    fn frames_after_a_pause_long_enough_to_wrap_are_admitted() {
+        for hours in [7, 8, 13] {
+            let mut limiter = FrameLimiter::new(60);
+            admitted(&mut limiter, 0, 60, 60);
+            let resumed = (hours * 3600 * u64::from(VIDEO_CLOCK_HZ)) as u32;
+            let kept = admitted(&mut limiter, resumed, 60, 60);
+            assert_eq!(kept, 60, "after {hours} h");
+        }
     }
 
     #[test]

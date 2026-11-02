@@ -8,7 +8,7 @@ use throcc_client_core::call::CallEvent;
 use throcc_client_core::media::engine::{Kind, Outgoing};
 use throcc_proto::frame::VIDEO_CLOCK_HZ;
 use throcc_proto::messages::{Codec, Event, MediaState, Request, Response};
-use throcc_proto::transport::close;
+use throcc_proto::transport::{self, close};
 
 use common::unit::{unit, unit_index};
 use common::*;
@@ -214,12 +214,9 @@ async fn a_member_who_sends_too_fast_is_disconnected() {
     let server = start_server();
     let alice = admin(&server).await;
     let code = invite(&alice).await;
-    let bob = raw_enroll(
-        &server.addr,
-        &code,
-        throcc_client_core::connection::transport_config(100_000),
-    )
-    .await;
+    let mut config = throcc_client_core::connection::transport_config();
+    config.datagram_send_buffer_size(transport::client_datagram_send_buffer(100_000));
+    let bob = raw_enroll(&server.addr, &code, config).await;
     let connection = &bob.connected.connection;
 
     let datagram = Bytes::from(vec![0u8; 1100]);

@@ -15,7 +15,7 @@ use tracing::warn;
 
 use super::fragment::{Reassembler, ReplayWindow, Seen, Unit, fragment};
 use super::reorder::{Output, Reorder};
-use crate::contacts::Contacts;
+use crate::contacts::{Contacts, UnsavedPins};
 use crate::keys::{KeyManager, KeyNotice};
 use crate::lock;
 
@@ -117,6 +117,7 @@ struct Sink {
 /// Moves media between this client's tracks and the connection, end-to-end encrypted.
 pub struct MediaEngine {
     keys: Arc<Mutex<KeyState>>,
+    pins: Arc<UnsavedPins>,
     sinks: Arc<Mutex<HashMap<MediaId, Sink>>>,
     audio: mpsc::Sender<Outgoing>,
     video: mpsc::Sender<Outgoing>,
@@ -139,6 +140,7 @@ impl MediaEngine {
         mpsc::UnboundedReceiver<Request>,
         mpsc::Receiver<MediaId>,
     ) {
+        let pins = contacts.unsaved();
         let keys = Arc::new(Mutex::new(KeyState {
             keys: KeyManager::new(me, enc, server),
             contacts,
@@ -175,6 +177,7 @@ impl MediaEngine {
         (
             Self {
                 keys,
+                pins,
                 sinks,
                 audio,
                 video,
@@ -258,11 +261,29 @@ impl MediaEngine {
         notices
     }
 
-    /// Runs `f` on the key manager and contacts, holding the key lock only for it.
+    /// Marks `user`'s pinned key as checked by us, or not.
+    pub fn set_verified(&self, user: UserId, verified: bool) {
+        self.with_keys(|_, contacts, _| contacts.set_verified(user, verified));
+    }
+
+    /// Runs `f` on the key manager and contacts, holding the key lock only for it. Pins it
+    /// changes are written afterwards, beside the async workers, so media never waits on
+    /// the file.
     fn with_keys<R>(&self, f: impl FnOnce(&mut KeyManager, &mut Contacts, Instant) -> R) -> R {
-        let mut state = self.keys();
-        let KeyState { keys, contacts } = &mut *state;
-        f(keys, contacts, Instant::now())
+        let result = {
+            let mut state = self.keys();
+            let KeyState { keys, contacts } = &mut *state;
+            f(keys, contacts, Instant::now())
+        };
+        if !self.pins.is_empty() {
+            let pins = self.pins.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = pins.save() {
+                    warn!("could not save a contact: {e:#}");
+                }
+            });
+        }
+        result
     }
 
     fn send_requests(&self, requests: impl IntoIterator<Item = Request>) {

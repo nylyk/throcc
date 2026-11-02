@@ -1,4 +1,5 @@
-use rtrb::chunks::ReadChunk;
+use std::iter::{Chain, Copied};
+use std::slice;
 
 use crate::media::audio::SAMPLE_RATE;
 
@@ -35,7 +36,8 @@ pub(super) struct AudioProducer {
 }
 
 impl AudioProducer {
-    /// Queues `frames` frames of interleaved stereo from `samples`, captured at `at`.
+    /// Queues `frames` frames of interleaved stereo from `samples`, captured at `at`. Takes
+    /// at most `frames` frames and pads with silence when `samples` runs short.
     /// Never blocks or allocates; false when the rings are full and the buffer is dropped.
     pub(super) fn push(
         &mut self,
@@ -50,13 +52,9 @@ impl AudioProducer {
             Ok(slots) if !self.buffers.is_full() => slots,
             _ => return false,
         };
-        let written = slots.fill_from_iter(samples);
-        self.buffers
-            .push(Captured {
-                at,
-                frames: written / 2,
-            })
-            .is_ok()
+        // Filling every slot keeps the length in `buffers` true to the samples ring.
+        slots.fill_from_iter(samples.into_iter().chain(std::iter::repeat(0.0)));
+        self.buffers.push(Captured { at, frames }).is_ok()
     }
 }
 
@@ -65,12 +63,19 @@ pub(super) struct AudioConsumer {
     samples: rtrb::Consumer<f32>,
 }
 
+/// The interleaved stereo of one captured buffer.
+pub(super) type Samples<'a> = Copied<Chain<slice::Iter<'a, f32>, slice::Iter<'a, f32>>>;
+
 impl AudioConsumer {
-    /// The oldest captured buffer, interleaved stereo, with the time it was captured at.
-    pub(super) fn pop(&mut self) -> Option<(i64, ReadChunk<'_, f32>)> {
+    /// Hands the oldest captured buffer to `consume`, with the time it was captured at.
+    /// The whole buffer leaves the ring however much of it `consume` reads.
+    pub(super) fn pop<R>(&mut self, consume: impl FnOnce(i64, Samples<'_>) -> R) -> Option<R> {
         let Captured { at, frames } = self.buffers.pop().ok()?;
-        let samples = self.samples.read_chunk(frames * 2).ok()?;
-        Some((at, samples))
+        let chunk = self.samples.read_chunk(frames * 2).ok()?;
+        let (first, second) = chunk.as_slices();
+        let consumed = consume(at, first.iter().chain(second).copied());
+        chunk.commit_all();
+        Some(consumed)
     }
 }
 
@@ -78,19 +83,21 @@ impl AudioConsumer {
 mod tests {
     use super::*;
 
+    fn pop_all(consumer: &mut AudioConsumer) -> Option<(i64, Vec<f32>)> {
+        consumer.pop(|at, samples| (at, samples.collect()))
+    }
+
     #[test]
     fn buffers_arrive_whole_with_their_times() {
         let (mut producer, mut consumer) = audio_ring();
         assert!(producer.push(5, 3, (0..6).map(|i| i as f32)));
         assert!(producer.push(9, 1, [0.0; 2]));
-        let (at, samples) = consumer.pop().unwrap();
-        assert_eq!(at, 5);
         assert_eq!(
-            samples.into_iter().collect::<Vec<_>>(),
-            [0., 1., 2., 3., 4., 5.]
+            pop_all(&mut consumer),
+            Some((5, vec![0., 1., 2., 3., 4., 5.]))
         );
-        assert_eq!(consumer.pop().map(|(at, s)| (at, s.len())), Some((9, 2)));
-        assert!(consumer.pop().is_none());
+        assert_eq!(pop_all(&mut consumer), Some((9, vec![0.0; 2])));
+        assert!(pop_all(&mut consumer).is_none());
     }
 
     #[test]
@@ -98,7 +105,30 @@ mod tests {
         let (mut producer, mut consumer) = audio_ring();
         assert!(producer.push(0, SAMPLE_RING / 2, std::iter::repeat(0.5)));
         assert!(!producer.push(1, 1, [0.0; 2]));
-        assert_eq!(consumer.pop().map(|(at, _)| at), Some(0));
-        assert!(consumer.pop().is_none());
+        assert_eq!(consumer.pop(|at, _| at), Some(0));
+        assert!(consumer.pop(|at, _| at).is_none());
+    }
+
+    #[test]
+    fn a_buffer_read_in_part_still_leaves_whole() {
+        let (mut producer, mut consumer) = audio_ring();
+        assert!(producer.push(1, 2, [1.0, 2.0, 3.0, 4.0]));
+        assert!(producer.push(2, 1, [5.0, 6.0]));
+        assert_eq!(
+            consumer.pop(|_, mut samples| samples.next()),
+            Some(Some(1.0))
+        );
+        assert_eq!(pop_all(&mut consumer), Some((2, vec![5.0, 6.0])));
+    }
+
+    #[test]
+    fn a_short_buffer_is_padded_and_a_long_one_cut() {
+        let (mut producer, mut consumer) = audio_ring();
+        assert!(producer.push(1, 2, [1.0, 2.0, 3.0]));
+        assert!(producer.push(2, 1, [5.0, 6.0, 7.0]));
+        assert!(producer.push(3, 1, [8.0, 9.0]));
+        assert_eq!(pop_all(&mut consumer), Some((1, vec![1.0, 2.0, 3.0, 0.0])));
+        assert_eq!(pop_all(&mut consumer), Some((2, vec![5.0, 6.0])));
+        assert_eq!(pop_all(&mut consumer), Some((3, vec![8.0, 9.0])));
     }
 }

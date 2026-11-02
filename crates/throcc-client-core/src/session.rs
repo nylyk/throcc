@@ -92,7 +92,7 @@ impl Shared {
         }
     }
 
-    fn forget_avatar(&self, hash: Hash) {
+    pub fn forget_avatar(&self, hash: Hash) {
         lock(&self.avatars).remove(&hash);
     }
 
@@ -222,9 +222,65 @@ pub(crate) struct Session {
     avatar_fetches: Arc<Semaphore>,
     #[cfg(feature = "ffmpeg")]
     sharing: Option<crate::media::share::ShareSender>,
+    share_starts: ShareStarts,
     tracks: HashMap<MediaId, Watched>,
     dropped_for_you: u32,
     last: LastCounts,
+}
+
+/// The starts of our share. A capture starts beside the session loop, since picking what to
+/// share waits on the user; only the latest start is applied, and only while still wanted.
+#[cfg(feature = "ffmpeg")]
+struct ShareStarts {
+    /// The number of the start still wanted.
+    wanted: Option<u64>,
+    count: u64,
+    done: mpsc::Sender<StartedShare>,
+    started: mpsc::Receiver<StartedShare>,
+}
+
+#[cfg(feature = "ffmpeg")]
+type StartedShare = (u64, StartResult);
+
+#[cfg(feature = "ffmpeg")]
+type StartResult = Result<
+    Result<crate::media::share::ShareSender, crate::media::share::ShareError>,
+    tokio::task::JoinError,
+>;
+
+#[cfg(feature = "ffmpeg")]
+impl ShareStarts {
+    fn new() -> Self {
+        let (done, started) = mpsc::channel(4);
+        Self {
+            wanted: None,
+            count: 0,
+            done,
+            started,
+        }
+    }
+
+    async fn next(&mut self) -> Option<StartedShare> {
+        self.started.recv().await
+    }
+}
+
+/// Without ffmpeg nothing is shared, so no start ever ends.
+#[cfg(not(feature = "ffmpeg"))]
+struct ShareStarts;
+
+#[cfg(not(feature = "ffmpeg"))]
+type StartedShare = std::convert::Infallible;
+
+#[cfg(not(feature = "ffmpeg"))]
+impl ShareStarts {
+    fn new() -> Self {
+        Self
+    }
+
+    async fn next(&mut self) -> Option<StartedShare> {
+        std::future::pending().await
+    }
 }
 
 /// A share we receive: the tracks it comes on, and the config its decoder was set up for.
@@ -290,6 +346,7 @@ impl Session {
             avatar_fetches: Arc::new(Semaphore::new(AVATAR_FETCHES)),
             #[cfg(feature = "ffmpeg")]
             sharing: None,
+            share_starts: ShareStarts::new(),
             tracks: HashMap::new(),
             dropped_for_you: 0,
             last: LastCounts::default(),
@@ -455,6 +512,7 @@ impl Session {
                 }
                 _ = renewal.tick() => self.renew_enc_key().await,
                 Some(_) = self.call.recovery.recv() => self.recover_share(Recovery::Idr),
+                Some(started) = self.share_starts.next() => self.share_started(started).await,
             }
         }
     }
@@ -508,6 +566,7 @@ impl Session {
         let mut queued = Vec::new();
         let mut dropped_any = false;
         let mut want_room = self.room;
+        let (room_before, watching_before) = (self.room, self.watching.clone());
         for attempt in 1.. {
             self.shared.update(|s| {
                 s.connection = ConnectionStatus::Reconnecting {
@@ -526,6 +585,8 @@ impl Session {
                             return None;
                         }
                         Some(Command::Join(room)) => want_room = room,
+                        // Asked again on the next render once connected.
+                        Some(Command::FetchAvatar(hash)) => self.shared.forget_avatar(hash),
                         Some(command) => {
                             queued.retain(|older| !supersedes(&command, older));
                             if queued.len() < MAX_QUEUED_WHILE_RECONNECTING {
@@ -578,6 +639,10 @@ impl Session {
                     let welcome = self.call.welcome.clone();
                     self.apply_welcome(&welcome);
                     self.push_media().await;
+                    if self.room.is_some() && self.room == room_before {
+                        self.watching = watching_before;
+                        self.push_watching().await;
+                    }
                     return Some(queued);
                 }
                 Err(e) => warn!("reconnect: {e:#}"),
@@ -607,6 +672,7 @@ impl Session {
         self.my_tracks = None;
         self.peers.clear();
         self.tracks.clear();
+        self.last.sent_bytes.clear();
         self.watching.clear();
         self.show_shares();
     }
@@ -743,16 +809,19 @@ impl Session {
 
     /// Marks who is sharing: the peers in our room that say so, and us while we share.
     fn show_shares(&self) {
-        let me = self.call.me();
         self.shared.update(|s| {
             for (user, person) in &mut s.people {
-                person.sharing = if *user == me {
-                    self.media.share
-                } else {
-                    self.peers.get(user).and_then(|p| p.share)
-                };
+                person.sharing = self.sharing_of(*user);
             }
         });
+    }
+
+    fn sharing_of(&self, user: UserId) -> Option<ShareConfig> {
+        if user == self.call.me() {
+            self.media.share
+        } else {
+            self.peers.get(&user).and_then(|p| p.share)
+        }
     }
 
     async fn command(&mut self, command: Command) -> ControlFlow<()> {
@@ -784,7 +853,7 @@ impl Session {
                 set_deafened(&mut self.media, &mut self.mic_before_deafen, deafened);
                 self.push_media().await;
             }
-            Command::StartShare(config) => self.start_share(config).await,
+            Command::StartShare(config) => self.start_share(config),
             Command::StopShare => self.end_share().await,
             Command::Watch(user) => {
                 if !self.watching.contains(&user) {
@@ -857,15 +926,7 @@ impl Session {
                 self.list_users().await;
             }
             Command::SetVerified(user, verified) => {
-                if let Err(e) = self
-                    .call
-                    .engine
-                    .keys()
-                    .contacts
-                    .set_verified(user, verified)
-                {
-                    warn!("saving verification: {e:#}");
-                }
+                self.call.engine.set_verified(user, verified);
                 self.refresh_verified();
             }
             Command::Voice(settings) => {
@@ -1176,8 +1237,13 @@ impl Session {
         }
     }
 
+    /// Starts capturing for a share, unless one runs or is starting. The capture may wait on
+    /// the user picking what to share, so it reports back through [`ShareStarts`].
     #[cfg(feature = "ffmpeg")]
-    async fn start_share(&mut self, wanted: ShareConfig) {
+    fn start_share(&mut self, wanted: ShareConfig) {
+        if self.sharing.is_some() || self.share_starts.wanted.is_some() {
+            return;
+        }
         let Some(tracks) = self
             .my_tracks
             .as_ref()
@@ -1187,13 +1253,34 @@ impl Session {
             self.shared.notice("Join a room before sharing.");
             return;
         };
+        let starts = &mut self.share_starts;
+        starts.count += 1;
+        starts.wanted = Some(starts.count);
+        let number = starts.count;
+        let done = starts.done.clone();
         let engine = self.call.engine.clone();
-        let started = tokio::task::spawn_blocking(move || {
-            let config = crate::media::capture::CaptureConfig::for_share(&wanted);
-            let capture = crate::media::capture::start(config)?;
-            crate::media::share::ShareSender::start(engine, tracks, wanted, capture)
-        })
-        .await;
+        let settings = self.keystore.dir().to_owned();
+        tokio::spawn(async move {
+            let started = tokio::task::spawn_blocking(move || {
+                let config = crate::media::capture::CaptureConfig::for_share(&wanted);
+                let capture = crate::media::capture::start(config, &settings)?;
+                crate::media::share::ShareSender::start(engine, tracks, wanted, capture)
+            })
+            .await;
+            if let Err(mpsc::error::SendError((_, started))) = done.send((number, started)).await {
+                drop_unwanted_share(started);
+            }
+        });
+    }
+
+    /// Applies a share start that has finished, if it is still wanted.
+    #[cfg(feature = "ffmpeg")]
+    async fn share_started(&mut self, (number, started): StartedShare) {
+        if self.share_starts.wanted != Some(number) {
+            drop_unwanted_share(started);
+            return;
+        }
+        self.share_starts.wanted = None;
         match started {
             Ok(Ok(sender)) => {
                 self.media.share = Some(sender.config);
@@ -1211,18 +1298,27 @@ impl Session {
     }
 
     #[cfg(not(feature = "ffmpeg"))]
-    async fn start_share(&mut self, _wanted: ShareConfig) {
+    fn start_share(&mut self, _wanted: ShareConfig) {
         self.shared
             .notice("This build can't share video; it was built without ffmpeg.");
     }
 
+    #[cfg(not(feature = "ffmpeg"))]
+    async fn share_started(&mut self, started: StartedShare) {
+        match started {}
+    }
+
+    /// Stops our share, and any start of one.
     fn stop_share(&mut self) {
         self.media.share = None;
         #[cfg(feature = "ffmpeg")]
-        if let Some(sender) = self.sharing.take() {
-            tokio::task::spawn_blocking(move || drop(sender));
-            self.shared.set_picture(self.call.me(), None);
-            *lock(&self.shared.preview) = None;
+        {
+            self.share_starts.wanted = None;
+            if let Some(sender) = self.sharing.take() {
+                tokio::task::spawn_blocking(move || drop(sender));
+                self.shared.set_picture(self.call.me(), None);
+                *lock(&self.shared.preview) = None;
+            }
         }
     }
 
@@ -1372,11 +1468,13 @@ impl Session {
                 let contact = self.call.engine.keys().contacts.get(p.user);
                 let verified = contact.is_some_and(|c| c.verified);
                 let saved = &self.saved_playback;
+                let sharing = self.sharing_of(p.user);
                 self.shared.update(|s| {
                     let speaking = s.people.get(&p.user).is_some_and(|old| old.speaking);
                     let updated = Person {
                         verified,
                         speaking,
+                        sharing,
                         ..person(&p, saved)
                     };
                     s.people.insert(p.user, updated);
@@ -1532,7 +1630,8 @@ impl Session {
         };
         let mut wanted = Vec::new();
         if self.media.mic {
-            wanted.push(("mic", VOICE_DETAIL.into(), tracks.mic, MIC_KBPS, None));
+            let kbps = self.options.voice.kbps;
+            wanted.push(("mic", VOICE_DETAIL.into(), tracks.mic, kbps, None));
         }
         if let (Some(config), Some(share)) = (self.media.share, tracks.shares.first()) {
             let detail = self
@@ -1564,6 +1663,15 @@ impl Session {
                 }
             })
             .collect()
+    }
+}
+
+/// Drops a share that started after it was no longer wanted, off the async workers, since
+/// stopping it joins its threads.
+#[cfg(feature = "ffmpeg")]
+fn drop_unwanted_share(started: StartResult) {
+    if let Ok(Ok(sender)) = started {
+        tokio::task::spawn_blocking(move || drop(sender));
     }
 }
 
@@ -1606,7 +1714,7 @@ fn percent(part: u64, whole: u64) -> f32 {
     }
 }
 
-/// The cue for turning the mic `on`, which also undeafens, if it changes anything.
+/// The cue for someone starting or stopping a share, if they did.
 fn share_cue(was_sharing: bool, sharing: bool) -> Option<Cue> {
     match (was_sharing, sharing) {
         (false, true) => Some(Cue::ShareStart),
@@ -1615,6 +1723,7 @@ fn share_cue(was_sharing: bool, sharing: bool) -> Option<Cue> {
     }
 }
 
+/// The cue for turning the mic `on`, which also undeafens, if it changes anything.
 fn mic_cue(media: &MediaState, on: bool) -> Option<Cue> {
     match on {
         _ if on == media.mic => None,

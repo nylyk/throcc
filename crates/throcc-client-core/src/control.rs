@@ -44,6 +44,8 @@ pub enum LinkError {
     Closed,
     #[error("request ids are exhausted; reconnect")]
     IdsExhausted,
+    #[error("that can't be sent: {0}")]
+    Unsendable(FrameError),
 }
 
 /// An authenticated control stream.
@@ -254,7 +256,8 @@ pub fn refusal(response: Response) -> String {
 /// Sends requests on the control stream. Cheap to clone; many requests may be in flight.
 #[derive(Clone)]
 pub struct Requester {
-    outgoing: mpsc::Sender<ClientMessage>,
+    /// Encoded frames, so a request that can't be encoded fails alone.
+    outgoing: mpsc::Sender<Vec<u8>>,
     pending: Arc<Mutex<Pending>>,
     connection: quinn::Connection,
 }
@@ -268,8 +271,15 @@ impl Requester {
                 .close(close::PROTOCOL_ERROR.into(), b"request ids exhausted");
         }
         let id = registered?;
+        let frame = match framing::encode(&ClientMessage::Request { id, req }) {
+            Ok(frame) => frame,
+            Err(e) => {
+                lock(&self.pending).waiting.remove(&id);
+                return Err(LinkError::Unsendable(e));
+            }
+        };
         self.outgoing
-            .send(ClientMessage::Request { id, req })
+            .send(frame)
             .await
             .map_err(|_| LinkError::Closed)?;
         rx.await.map_err(|_| LinkError::Closed)
@@ -281,14 +291,14 @@ fn spawn_link(
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
 ) -> (Requester, mpsc::Receiver<Event>) {
-    let (outgoing, mut outgoing_rx) = mpsc::channel::<ClientMessage>(OUTGOING_QUEUE);
+    let (outgoing, mut outgoing_rx) = mpsc::channel::<Vec<u8>>(OUTGOING_QUEUE);
     let (events_tx, events) = mpsc::channel(EVENT_QUEUE);
     let pending = Arc::new(Mutex::new(Pending::default()));
 
     let writer_pending = pending.clone();
     tokio::spawn(async move {
-        while let Some(message) = outgoing_rx.recv().await {
-            if write_frame(&mut send, &message).await.is_err() {
+        while let Some(frame) = outgoing_rx.recv().await {
+            if send.write_all(&frame).await.is_err() {
                 lock(&writer_pending).close();
                 return;
             }

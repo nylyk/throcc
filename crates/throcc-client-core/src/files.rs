@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::{ErrorKind, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 
@@ -22,9 +23,10 @@ pub fn remove_if_exists(path: &Path) -> Result<()> {
     }
 }
 
-pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+/// Writes `bytes` to a new 0600 file at `path`.
+fn write_new_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     let mut file = options
@@ -35,9 +37,41 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Replaces the contents of `path` with `bytes` in one step, as a 0600 file.
+/// Replaces the contents of `path` with `bytes` in one step, as a 0600 file. Every write
+/// goes through a fresh temporary file, so two writers never mix their bytes and a file
+/// left by someone else never lends its permissions.
 pub fn replace_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("tmp");
-    write_private(&tmp, bytes)?;
-    fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    let mut tmp = path.as_os_str().to_owned();
+    let write = WRITES.fetch_add(1, Ordering::Relaxed);
+    tmp.push(format!(".{}.{write}.tmp", std::process::id()));
+    let tmp = Path::new(&tmp);
+    let written = write_new_private(tmp, bytes).and_then(|()| {
+        fs::rename(tmp, path).with_context(|| format!("writing {}", path.display()))
+    });
+    if written.is_err() {
+        fs::remove_file(tmp).ok();
+    }
+    written
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_replaced_file_is_private_and_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("enc_key");
+        fs::write(&path, b"old").unwrap();
+        replace_file(&path, b"new").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
 }

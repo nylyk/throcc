@@ -246,6 +246,93 @@ fn a_share_started_mid_call_shows_without_rejoining() {
 }
 
 #[test]
+fn a_sharer_changing_their_mic_never_shows_as_not_sharing() {
+    let (address, bootstrap, _server) = server();
+    let (alice, _a) = client(&address, &bootstrap);
+    wait_connected(&alice, "connected");
+    let room = create_room(&alice);
+    alice.command(Command::Join(Some(room)));
+    wait_for(&alice, "alice in the room", |s| s.current.is_some());
+
+    let code = invite(&alice);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let bob = runtime.block_on(async {
+        let mut keystore = Keystore::open_in(dir.path()).unwrap();
+        let link = account::enroll(&mut keystore, &address, &code)
+            .await
+            .unwrap();
+        let bob = Call::start(link, &keystore).unwrap();
+        bob.join(Some(room), None).await.unwrap();
+        bob
+    });
+    let bob_id = bob.me();
+    let share = share_1080p60(Codec::Vp9, 6000);
+    let reply = runtime.block_on(bob.request(Request::SetMedia(sharing(share))));
+    assert_eq!(reply.unwrap(), Response::Ok);
+    wait_for(&alice, "bob's share", |s| {
+        s.person(bob_id).is_some_and(|p| p.sharing == Some(share))
+    });
+
+    let mut events = alice.events();
+    let media = MediaState {
+        mic: true,
+        ..sharing(share)
+    };
+    let reply = runtime.block_on(bob.request(Request::SetMedia(media)));
+    assert_eq!(reply.unwrap(), Response::Ok);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(Instant::now() < deadline, "bob's mic never came on");
+        let Ok(Event::State(state)) = events.try_recv() else {
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        };
+        let bob = state.person(bob_id).unwrap();
+        assert_eq!(bob.sharing, Some(share), "bob shown as not sharing");
+        if bob.mic {
+            break;
+        }
+    }
+}
+
+#[test]
+fn a_request_too_large_to_send_fails_alone() {
+    let (address, bootstrap, _server) = server();
+    let (alice, _a) = client(&address, &bootstrap);
+    wait_connected(&alice, "connected");
+    let command = Command::SetServerProfile {
+        name: None,
+        picture: Some(Some(vec![0; 2 << 20])),
+    };
+    command_then(&alice, command, "no refusal", |e| match e {
+        Event::ServerProfileRefused(_) => Some(()),
+        _ => None,
+    });
+    invite(&alice);
+}
+
+#[test]
+fn a_dropped_client_leaves_at_once() {
+    let (address, bootstrap, _server) = server();
+    let (alice, _a) = client(&address, &bootstrap);
+    wait_connected(&alice, "connected");
+    let room = create_room(&alice);
+    let code = invite(&alice);
+    let (bob, _b) = client(&address, &code);
+    let bob_id = bob.state().me.unwrap();
+    bob.command(Command::Join(Some(room)));
+    wait_for(&alice, "bob in the room", |s| {
+        s.person(bob_id).is_some_and(|p| p.room == Some(room))
+    });
+
+    drop(bob);
+    wait_for(&alice, "bob gone well before the idle timeout", |s| {
+        s.person(bob_id).is_none()
+    });
+}
+
+#[test]
 fn the_profile_follows_us_to_the_next_server() {
     let dir = tempfile::tempdir().unwrap();
     let (first, first_invite, _first) = server();

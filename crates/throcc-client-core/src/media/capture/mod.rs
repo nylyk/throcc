@@ -21,6 +21,7 @@ pub use macos::PixelBuffer;
 #[cfg(windows)]
 mod windows;
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use throcc_proto::frame::VIDEO_CLOCK_HZ;
@@ -138,23 +139,26 @@ pub trait Capture: Send {
 }
 
 /// Asks the person what to share with the system's own picker, then starts capturing it.
-/// Blocks until the picker closes.
-pub fn start(config: CaptureConfig) -> Result<Box<dyn Capture>, CaptureError> {
+/// Blocks until the picker closes. `settings` is the directory of the settings file, where
+/// the Linux portal's token for sharing the same thing again is kept.
+pub fn start(config: CaptureConfig, settings: &Path) -> Result<Box<dyn Capture>, CaptureError> {
     #[cfg(target_os = "macos")]
     {
+        let _ = settings;
         macos::start(config).map(|c| Box::new(c) as Box<dyn Capture>)
     }
     #[cfg(windows)]
     {
+        let _ = settings;
         windows::start(config).map(|c| Box::new(c) as Box<dyn Capture>)
     }
     #[cfg(target_os = "linux")]
     {
-        linux::start(config).map(|c| Box::new(c) as Box<dyn Capture>)
+        linux::start(config, settings).map(|c| Box::new(c) as Box<dyn Capture>)
     }
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
-        let _ = config;
+        let _ = (config, settings);
         Err(CaptureError::Unsupported)
     }
 }
@@ -230,12 +234,18 @@ fn ticks(elapsed: Duration, hz: u32) -> u64 {
     (elapsed.as_micros() * u128::from(hz) / 1_000_000) as u64
 }
 
-/// The timestamps of up to `want` frames captured within five seconds, the last in `frame`.
+/// The timestamps of up to `want` frames captured within five seconds, the last copied
+/// one in `frame`. Frames in GPU memory count but aren't copied.
 #[cfg(test)]
 fn frames_within(capture: &mut dyn Capture, frame: &mut VideoFrame, want: usize) -> Vec<u32> {
     let mut timestamps = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline && timestamps.len() < want {
+        #[cfg(target_os = "linux")]
+        if let Some(dmabuf) = capture.next_dmabuf() {
+            timestamps.push(dmabuf.timestamp);
+            continue;
+        }
         if capture.next_frame(frame) {
             timestamps.push(frame.timestamp);
         } else {

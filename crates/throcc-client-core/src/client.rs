@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use throcc_crypto::safety;
 use throcc_proto::Fingerprint;
@@ -140,6 +140,8 @@ pub trait ClientApi: Send + Sync {
 }
 
 const COMMANDS: usize = 64;
+/// How long dropping a client waits for its session to say goodbye to the server.
+const CLOSE_WAIT: Duration = Duration::from_secs(2);
 
 /// A live client: tokio runs on its own threads, and a session task keeps [`State`]
 /// current, drives media and reconnects with the room it was in.
@@ -150,6 +152,7 @@ pub struct Client {
     dir: PathBuf,
     server: Fingerprint,
     runtime: Option<tokio::runtime::Runtime>,
+    session: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Client {
@@ -189,7 +192,7 @@ impl Client {
             let call = Call::start(link, &keystore).map_err(SignInError::Store)?;
             Session::new(shared.clone(), keystore, address.to_owned(), options, call)
         };
-        runtime.spawn(session.run(commands_rx));
+        let session = runtime.spawn(session.run(commands_rx));
         Ok(Self {
             commands,
             shared,
@@ -197,15 +200,22 @@ impl Client {
             dir,
             server,
             runtime: Some(runtime),
+            session: Some(session),
         })
     }
 }
 
 impl Drop for Client {
+    /// Closes the connection before stopping the runtime: shutting down cancels every task
+    /// at once, so the server would otherwise keep us present until the idle timeout.
     fn drop(&mut self) {
-        self.commands.try_send(Command::Disconnect).ok();
+        // Closing the channel makes the session disconnect once it has run what was queued.
+        drop(std::mem::replace(&mut self.commands, mpsc::channel(1).0));
         if let Some(runtime) = self.runtime.take() {
-            runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+            if let Some(session) = self.session.take() {
+                runtime.block_on(async { tokio::time::timeout(CLOSE_WAIT, session).await.ok() });
+            }
+            runtime.shutdown_timeout(Duration::from_secs(1));
         }
     }
 }
@@ -243,8 +253,8 @@ impl ClientApi for Client {
 
     fn avatar(&self, hash: Hash) -> Option<Arc<[u8]>> {
         let (bytes, fetch) = self.shared.avatar(hash);
-        if fetch {
-            self.command(Command::FetchAvatar(hash));
+        if fetch && self.commands.try_send(Command::FetchAvatar(hash)).is_err() {
+            self.shared.forget_avatar(hash);
         }
         bytes
     }

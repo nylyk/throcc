@@ -59,7 +59,7 @@ async fn server_refuses_client_without_datagrams() {
     let dir = tempfile::tempdir().unwrap();
     let (addr, _) = start_in(dir.path());
 
-    let mut transport = connection::transport_config(0);
+    let mut transport = connection::transport_config();
     transport.datagram_receive_buffer_size(None);
     let connected = connect_with_transport(&addr, transport).await;
 
@@ -100,7 +100,7 @@ async fn payload_floor_matches_quinn_at_1200_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let (addr, _) = start_in(dir.path());
 
-    let mut transport = connection::transport_config(0);
+    let mut transport = connection::transport_config();
     transport
         .initial_mtu(1200)
         .min_mtu(1200)
