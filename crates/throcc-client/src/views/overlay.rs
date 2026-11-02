@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use gpui::{
     Div, FontWeight, InteractiveElement, ParentElement, Pixels, RenderImage, SharedString,
-    Stateful, StatefulInteractiveElement, Styled, div, px, relative,
+    Stateful, StatefulInteractiveElement, Styled, div, px,
 };
 use gpui_component::button::Button;
 use gpui_component::tooltip::Tooltip;
@@ -29,8 +29,7 @@ pub enum Place {
 struct Metrics {
     /// Distance of each label from the picture's edges.
     inset: Pixels,
-    /// Height of the name and warning labels.
-    label: Pixels,
+    label_height: Pixels,
     avatar: Pixels,
     name: theme::TextStyle,
     button: Size,
@@ -42,7 +41,7 @@ impl Place {
         match self {
             Place::Strip | Place::Tile => Metrics {
                 inset: px(8.),
-                label: px(28.),
+                label_height: px(28.),
                 avatar: px(18.),
                 name: theme::CALLOUT,
                 button: Size::Medium,
@@ -50,7 +49,7 @@ impl Place {
             },
             Place::Player => Metrics {
                 inset: px(16.),
-                label: px(32.),
+                label_height: px(32.),
                 avatar: px(24.),
                 name: theme::BODY,
                 button: Size::Large,
@@ -80,16 +79,18 @@ impl ShareOverlay {
     pub fn render(self) -> Vec<Div> {
         let m = self.place.metrics();
         let mut labels = Vec::new();
-        if self.controls {
-            labels.push(self.title(&m));
-        }
-        if self.too_slow {
+        if self.controls || self.too_slow {
             labels.push(
                 div()
                     .absolute()
                     .top(m.inset)
+                    .left(m.inset + self.title_inset)
                     .right(m.inset)
-                    .child(self.warning(&m)),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .children(self.controls.then(|| self.title(&m)))
+                    .children(self.too_slow.then(|| self.warning(&m))),
             );
         }
         if self.controls && !self.buttons.is_empty() {
@@ -112,22 +113,13 @@ impl ShareOverlay {
 
     fn title(&self, m: &Metrics) -> Div {
         let details = (self.place != Place::Strip && !self.details.is_empty())
-            .then(|| caption(self.details.clone()).flex_none());
+            .then(|| caption(self.details.clone()).min_w_0().truncate());
         pill()
-            .absolute()
-            .top(m.inset)
-            .left(m.inset + self.title_inset)
-            .max_w(relative(if self.too_slow { 0.6 } else { 0.9 }))
+            .min_w_0()
             .gap_2()
             .px_2()
-            .h(m.label)
-            .child(avatar(
-                &self.name,
-                self.seed,
-                self.picture.clone(),
-                m.avatar,
-                false,
-            ))
+            .h(m.label_height)
+            .child(avatar(&self.name, self.seed, self.picture.clone(), m.avatar, false).flex_none())
             .child(
                 div()
                     .min_w_0()
@@ -153,9 +145,11 @@ impl ShareOverlay {
         });
         pill()
             .id("too-slow")
+            .ml_auto()
+            .flex_none()
             .gap_1p5()
             .px(if label.is_some() { px(8.) } else { px(4.) })
-            .h(m.label)
+            .h(m.label_height)
             .child(
                 icon("triangle-alert")
                     .size(m.warning_icon)
