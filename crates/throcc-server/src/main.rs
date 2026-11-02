@@ -47,9 +47,8 @@ fn main() -> Result<()> {
         None => {
             init_logging(std::io::stdout);
             serve(Config {
-                data_dir: args.data,
-                listen: args.listen,
                 congestion: args.congestion,
+                ..Config::new(args.data, args.listen)
             })
         }
     }

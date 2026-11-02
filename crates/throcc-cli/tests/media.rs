@@ -270,7 +270,8 @@ async fn a_member_flooding_their_mic_is_held_to_its_allowance_and_stays_connecte
     let flooded_for = flooding.elapsed().as_secs_f64();
 
     let mut forwarded = 0;
-    let quiet = Duration::from_secs(5);
+    // The server reports link stats every 2 s, so a second more without one means it is done.
+    let quiet = Duration::from_secs(3);
     while let Ok(Some(event)) = tokio::time::timeout(quiet, bob.link.events.recv()).await {
         if let Event::LinkStats { tracks } = event {
             forwarded += tracks

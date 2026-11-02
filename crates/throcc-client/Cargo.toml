@@ -17,7 +17,8 @@ throcc-proto.workspace = true
 anyhow.workspace = true
 global-hotkey.workspace = true
 gpui.workspace = true
-image.workspace = true
+# The decoders for the formats a chosen picture may come in, `avatar::CHOSEN_FORMATS`.
+image = { workspace = true, features = ["gif", "bmp", "webp"] }
 smallvec.workspace = true
 gpui-component.workspace = true
 gpui-kit-assets.workspace = true
@@ -27,13 +28,11 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2.workspace = true
 objc2-app-kit.workspace = true
 raw-window-handle.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 gpui-wgpu = { package = "gpui-pre-wgpu", version = "=0.3.10", features = ["test-support"] }
-libc.workspace = true
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 gpui-windows = { package = "gpui-pre-windows", version = "=0.3.10", features = ["test-support"] }

@@ -1,13 +1,10 @@
 #![cfg(target_os = "linux")]
 
-use std::borrow::Cow;
 use std::sync::Arc;
-use std::time::Duration;
 
 use gpui::{
-    AtlasKey, Bounds, ContentMask, Corners, DevicePixels, Nv12Frame, Nv12Planes, PaintSurface,
-    PlatformHeadlessRenderer, PolychromeSprite, RenderImage, RenderImageParams, ScaledPixels,
-    Scene, Size, SurfaceId, point, size,
+    Bounds, ContentMask, Corners, DevicePixels, Nv12Frame, Nv12Planes, PaintSurface,
+    PlatformHeadlessRenderer, ScaledPixels, Scene, Size, SurfaceId, point, size,
 };
 use gpui_wgpu::WgpuHeadlessRenderer;
 use throcc_client_core::media::video::frame::VideoFrame;
@@ -176,107 +173,4 @@ fn short_planes_draw_nothing() {
         .render_scene_to_image(&scene, device_size(32, 32))
         .unwrap();
     assert_rgb(&image, 16, 16, [0, 0, 0]);
-}
-
-fn cpu_time() -> (Duration, Duration) {
-    let read = |clock| {
-        let mut now = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        // SAFETY: `now` is a valid timespec for clock_gettime to write.
-        unsafe { libc::clock_gettime(clock, &mut now) };
-        Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
-    };
-    (
-        read(libc::CLOCK_THREAD_CPUTIME_ID),
-        read(libc::CLOCK_PROCESS_CPUTIME_ID),
-    )
-}
-
-/// CPU time per frame for a moving 2560×1440 share, through the old BGRA image path and
-/// through the NV12 surface. `thread` is the calling (UI) thread; `process` adds every other
-/// thread, which under lavapipe includes the software rasteriser. Run with
-/// `cargo test --release -p throcc-client --test surface -- --ignored --nocapture`.
-#[test]
-#[ignore]
-fn bench_bgra_image_against_nv12_surface() {
-    const FRAMES: u32 = 60;
-    let (width, height) = (2560, 1440);
-    let frames: Vec<_> = (0..4)
-        .map(|n| Arc::new(VideoFrame::test_pattern(width, height, n, 0)))
-        .collect();
-    let target = device_size(width as i32, height as i32);
-    let at = bounds(0.0, 0.0, width as f32, height as f32);
-    let mut renderer = renderer();
-
-    let mut measure = |name: &str, show: &mut dyn FnMut(&mut WgpuHeadlessRenderer, u32)| {
-        renderer
-            .render_scene_to_image(&Scene::default(), target)
-            .unwrap();
-        let (thread, process) = cpu_time();
-        for n in 0..FRAMES {
-            show(&mut renderer, n);
-        }
-        renderer
-            .render_scene_to_image(&Scene::default(), target)
-            .unwrap();
-        let (thread_end, process_end) = cpu_time();
-        println!(
-            "{name}: {:.1} ms on the calling thread, {:.1} ms in the process, per frame",
-            ((thread_end - thread) / FRAMES).as_secs_f64() * 1e3,
-            ((process_end - process) / FRAMES).as_secs_f64() * 1e3,
-        );
-    };
-
-    let mut previous: Option<AtlasKey> = None;
-    measure("bgra image", &mut |renderer, n| {
-        let frame = &frames[n as usize % frames.len()];
-        let buffer =
-            image::RgbaImage::from_raw(width as u32, height as u32, frame.to_bgra()).unwrap();
-        let image = RenderImage::new(smallvec::smallvec![image::Frame::new(buffer)]);
-        let key = AtlasKey::Image(RenderImageParams {
-            image_id: image.id,
-            frame_index: 0,
-        });
-        let atlas = renderer.sprite_atlas();
-        let tile = atlas
-            .get_or_insert_with(key.clone(), &mut || {
-                Ok(Some((
-                    image.size(0),
-                    Cow::Borrowed(image.as_bytes(0).unwrap()),
-                )))
-            })
-            .unwrap()
-            .unwrap();
-        let mut scene = Scene::default();
-        scene.insert_primitive(PolychromeSprite {
-            order: 0,
-            pad: 0,
-            tile,
-            grayscale: false.into(),
-            opacity: 1.0,
-            bounds: at,
-            content_mask: ContentMask { bounds: at },
-            corner_radii: Corners::default(),
-        });
-        scene.finish();
-        renderer.render_scene(&scene, target).unwrap();
-        if let Some(previous) = previous.replace(key) {
-            atlas.remove(&previous);
-        }
-    });
-
-    let id = SurfaceId::new();
-    measure("nv12 surface", &mut |renderer, n| {
-        let frame = Nv12Frame {
-            id,
-            generation: u64::from(n),
-            width: width as u32,
-            height: height as u32,
-            planes: Arc::new(Planes(frames[n as usize % frames.len()].clone())),
-        };
-        let scene = scene_of([surface(frame, at, 0.0)]);
-        renderer.render_scene(&scene, target).unwrap();
-    });
 }

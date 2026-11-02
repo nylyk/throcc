@@ -26,8 +26,9 @@ use throcc_proto::messages::{
     AuthResult, Codec, ErrorCode, Event, Hello, MediaState, PakeFinish, PakeReply, PakeStep,
     Placed, Request, Response, ServerHello, Share, ShareConfig, Tracks, Welcome,
 };
+use throcc_server::database::Database;
 use throcc_server::identity::ServerIdentity;
-use throcc_server::{Config, Congestion, Server, Shared, tls};
+use throcc_server::{Config, DATABASE_FILE, Server, Shared, tls};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
@@ -44,12 +45,7 @@ pub fn bind_server(data_dir: &Path) -> Server {
 }
 
 pub fn bind_server_at(data_dir: &Path, listen: SocketAddr) -> Server {
-    Server::bind(&Config {
-        data_dir: data_dir.to_owned(),
-        listen,
-        congestion: Congestion::Cubic,
-    })
-    .unwrap()
+    Server::bind(&Config::new(data_dir.to_owned(), listen)).unwrap()
 }
 
 /// Mints an admin invite into `data_dir` the way `throcc-server admin-invite` does.
@@ -58,8 +54,15 @@ pub fn mint_admin_invite(data_dir: &Path) -> InviteCode {
 }
 
 pub fn start_server() -> TestServer {
+    start_server_with(|_| {})
+}
+
+/// A server whose settings `adjust` changes from the defaults.
+pub fn start_server_with(adjust: impl FnOnce(&mut Config)) -> TestServer {
     let dir = tempfile::tempdir().unwrap();
-    let server = bind_server(dir.path());
+    let mut config = Config::new(dir.path().to_owned(), "127.0.0.1:0".parse().unwrap());
+    adjust(&mut config);
+    let server = Server::bind(&config).unwrap();
     let addr = server.local_addr().unwrap().to_string();
     let admin_invite = mint_admin_invite(dir.path());
     let shared = server.shared();
@@ -124,6 +127,19 @@ impl ProcessLikeServer {
 
     pub fn stop(self) {
         drop(self);
+    }
+
+    /// Stops the server, lets `change` edit its database while it is down, and starts it
+    /// again at the same address.
+    pub fn restart(mut self, change: impl FnOnce(&mut Database)) -> Self {
+        let (data_dir, addr, temp) = (self.data_dir.clone(), self.addr, self.dir.take());
+        self.stop();
+        let mut database = Database::open(&data_dir.join(DATABASE_FILE)).unwrap();
+        change(&mut database);
+        drop(database);
+        let mut server = Self::start(&data_dir, addr);
+        server.dir = temp;
+        server
     }
 }
 

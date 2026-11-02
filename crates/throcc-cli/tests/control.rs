@@ -11,7 +11,7 @@ use throcc_proto::messages::{
     AuthResult, Hello, PROTOCOL, Placed, Request, Response, ServerHello, ServerMessage,
     ServerProfile, Welcome,
 };
-use throcc_proto::transport::close;
+use throcc_proto::transport::{IDLE_TIMEOUT, close};
 use throcc_server::{Congestion, tls};
 use tokio::task::JoinSet;
 
@@ -70,7 +70,7 @@ async fn unknown_reply_id_closes_the_connection() {
     let dir = tempfile::tempdir().unwrap();
     let endpoint = bare_endpoint(
         dir.path(),
-        tls::transport_config(Congestion::Cubic).unwrap(),
+        tls::transport_config(Congestion::Cubic, IDLE_TIMEOUT).unwrap(),
     );
     let addr = endpoint.local_addr().unwrap().to_string();
     let fake = tokio::spawn(async move {

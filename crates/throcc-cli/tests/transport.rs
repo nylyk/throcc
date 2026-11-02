@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use throcc_client_core::connection::{self, ConnectError};
 use throcc_proto::frame::DATAGRAM_PAYLOAD_FLOOR;
 use throcc_proto::messages::{Request, Response};
-use throcc_proto::transport::{DatagramError, close};
+use throcc_proto::transport::{DatagramError, IDLE_TIMEOUT, close};
 use throcc_server::{Congestion, TLS_TIMEOUT, UNAUTHENTICATED, tls};
 
 use common::{
@@ -79,7 +79,7 @@ async fn server_refuses_client_without_datagrams() {
 #[tokio::test]
 async fn client_refuses_server_without_datagrams() {
     let dir = tempfile::tempdir().unwrap();
-    let mut transport = tls::transport_config(Congestion::Cubic).unwrap();
+    let mut transport = tls::transport_config(Congestion::Cubic, IDLE_TIMEOUT).unwrap();
     transport.datagram_receive_buffer_size(None);
     let endpoint = bare_endpoint(dir.path(), transport);
     let addr = endpoint.local_addr().unwrap().to_string();
@@ -119,16 +119,12 @@ async fn clients_cannot_open_streams() {
     let (addr, _) = start_in(dir.path());
     let connected = connection::connect(&addr, None).await.unwrap();
     let wait = Duration::from_millis(300);
-    assert!(
-        tokio::time::timeout(wait, connected.connection.open_bi())
-            .await
-            .is_err()
+    let (bi, uni) = tokio::join!(
+        tokio::time::timeout(wait, connected.connection.open_bi()),
+        tokio::time::timeout(wait, connected.connection.open_uni()),
     );
-    assert!(
-        tokio::time::timeout(wait, connected.connection.open_uni())
-            .await
-            .is_err()
-    );
+    assert!(bi.is_err(), "a client opened a bidirectional stream");
+    assert!(uni.is_err(), "a client opened a unidirectional stream");
 }
 
 #[tokio::test]

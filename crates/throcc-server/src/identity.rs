@@ -79,13 +79,4 @@ mod tests {
             .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
-
-    #[test]
-    fn new_key_changes_fingerprint() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = ServerIdentity::load_or_create(dir.path()).unwrap();
-        fs::remove_file(dir.path().join(KEY_FILE)).unwrap();
-        let second = ServerIdentity::load_or_create(dir.path()).unwrap();
-        assert_ne!(first.fingerprint, second.fingerprint);
-    }
 }

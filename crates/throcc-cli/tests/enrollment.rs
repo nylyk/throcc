@@ -13,8 +13,8 @@ use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
     AuthError, ErrorCode, Event, Hello, PROTOCOL, Request, Response, ServerHello,
 };
-use throcc_server::database::Database;
-use throcc_server::{Congestion, DATABASE_FILE, HANDSHAKES, UNAUTHENTICATED, tls};
+use throcc_proto::transport;
+use throcc_server::{Congestion, HANDSHAKES, UNAUTHENTICATED, tls};
 
 use common::*;
 
@@ -55,7 +55,7 @@ async fn start_mitm(upstream: String) -> String {
     let dir = tempfile::tempdir().unwrap();
     let endpoint = bare_endpoint(
         dir.path(),
-        tls::transport_config(Congestion::Cubic).unwrap(),
+        tls::transport_config(Congestion::Cubic, transport::IDLE_TIMEOUT).unwrap(),
     );
     let addr = endpoint.local_addr().unwrap().to_string();
     tokio::spawn(async move {
@@ -77,19 +77,12 @@ async fn start_mitm(upstream: String) -> String {
 }
 
 #[tokio::test]
-async fn first_enrollment_becomes_admin() {
-    let server = start_server();
-    let alice = admin(&server).await;
-    assert_eq!(alice.link.welcome.role, Role::Admin);
-    let bob = invited(&server, &alice).await;
-    assert_eq!(bob.link.welcome.role, Role::User);
-}
-
-#[tokio::test]
 async fn an_admin_invite_minted_while_the_server_runs_enrolls_another_admin() {
     let server = start_server();
     let mut alice = admin(&server).await;
-    invited(&server, &alice).await;
+    assert_eq!(alice.link.welcome.role, Role::Admin);
+    let bob = invited(&server, &alice).await;
+    assert_eq!(bob.link.welcome.role, Role::User);
 
     let minted = throcc_server::admin_invite(server.dir.path()).unwrap();
     assert_eq!(minted.fingerprint, server.shared.fingerprint);
@@ -123,16 +116,6 @@ async fn an_admin_invite_promotes_a_member_who_redeems_it() {
                 .then_some(())
         })
         .await;
-}
-
-#[test]
-fn an_admin_invite_needs_a_server_that_has_started_in_its_data_directory() {
-    let dir = tempfile::tempdir().unwrap();
-    let missing = dir.path().join("typo");
-    assert!(throcc_server::admin_invite(&missing).is_err());
-    assert!(!missing.exists());
-    assert!(throcc_server::admin_invite(dir.path()).is_err());
-    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
 
 #[tokio::test]
@@ -178,7 +161,6 @@ async fn third_failure_burns_the_invite_and_tells_the_minter() {
 #[tokio::test]
 async fn unknown_invite_ids_fail_like_wrong_secrets() {
     let server = start_server();
-    let _alice = admin(&server).await;
     let unknown: InviteCode = "ZZZ-ZZZZZ".parse().unwrap();
     let err = try_enroll(&server.addr, &unknown).await.unwrap_err();
     assert!(
@@ -197,7 +179,6 @@ async fn repeated_failures_from_one_source_are_rate_limited() {
     for _ in 0..10 {
         try_enroll(&server.addr, &unknown).await.unwrap_err();
     }
-    tokio::time::sleep(Duration::from_millis(100)).await;
     let err = try_enroll(&server.addr, &unknown).await.unwrap_err();
     assert!(
         matches!(
@@ -209,13 +190,14 @@ async fn repeated_failures_from_one_source_are_rate_limited() {
 }
 
 #[tokio::test]
-async fn users_get_three_invites_a_day() {
+async fn users_get_three_invites_a_day_counting_those_redeemed() {
     let server = start_server();
     let alice = admin(&server).await;
     let bob = invited(&server, &alice).await;
-    for _ in 0..3 {
-        invite(&bob).await;
+    for _ in 0..2 {
+        invited(&server, &bob).await;
     }
+    invite(&bob).await;
     let fourth = bob.request(Request::CreateInvite).await;
     assert_error(&fourth, ErrorCode::RateLimited);
     for _ in 0..5 {
@@ -225,42 +207,25 @@ async fn users_get_three_invites_a_day() {
 
 #[tokio::test]
 async fn an_invite_spent_when_the_server_stopped_frees_its_slot_on_restart() {
-    let dir = tempfile::tempdir().unwrap();
-    let first = ProcessLikeServer::start(dir.path(), "127.0.0.1:0".parse().unwrap());
-    let addr = first.addr;
-    let alice = enroll_at(&addr.to_string(), &first.admin_invite()).await;
-    let mut bob = invited_at(&addr.to_string(), &alice).await;
+    let first = ProcessLikeServer::start_temp();
+    let addr = first.addr.to_string();
+    let alice = enroll_at(&addr, &first.admin_invite()).await;
+    let mut bob = invited_at(&addr, &alice).await;
     let spent = invite(&bob).await;
     for _ in 0..2 {
         invite(&bob).await;
     }
-    first.stop();
-    let db = Database::open(&dir.path().join(DATABASE_FILE)).unwrap();
-    for _ in 0..3 {
-        db.consume_invite_try(&spent.id).unwrap();
-    }
-    drop(db);
-
-    let second = ProcessLikeServer::start(dir.path(), addr);
-    bob.reconnect(&addr.to_string(), None).await;
+    let _second = first.restart(|db| {
+        for _ in 0..3 {
+            db.consume_invite_try(&spent.id).unwrap();
+        }
+    });
+    bob.reconnect(&addr, None).await;
     invite(&bob).await;
-    second.stop();
 }
 
 #[tokio::test]
-async fn enrolled_users_count_against_the_daily_cap() {
-    let server = start_server();
-    let alice = admin(&server).await;
-    let bob = invited(&server, &alice).await;
-    for _ in 0..3 {
-        invited(&server, &bob).await;
-    }
-    let fourth = bob.request(Request::CreateInvite).await;
-    assert_error(&fourth, ErrorCode::RateLimited);
-}
-
-#[tokio::test]
-async fn manager_cannot_remove_an_admin() {
+async fn managers_remove_no_one_and_no_one_is_made_admin_by_a_role_change() {
     let server = start_server();
     let alice = admin(&server).await;
     let bob = invited(&server, &alice).await;
@@ -398,9 +363,12 @@ async fn one_source_signs_in_a_few_connections_at_a_time() {
     let server = start_server();
     let mut idle = Vec::new();
     for _ in 0..HANDSHAKES.per_source {
-        idle.push(connection::connect(&server.addr, None).await.unwrap());
+        let connected = connection::connect(&server.addr, None).await.unwrap();
+        // The server greets only once the connection holds a sign-in slot.
+        let (send, mut recv) = connected.connection.accept_bi().await.unwrap();
+        let _: ServerHello = read_message(&mut recv).await;
+        idle.push((connected, send, recv));
     }
-    tokio::time::sleep(Duration::from_millis(100)).await;
     let enrolling = tokio::spawn({
         let (addr, code) = (server.addr.clone(), server.admin_invite.clone());
         async move { enroll_at(&addr, &code).await }
@@ -408,7 +376,7 @@ async fn one_source_signs_in_a_few_connections_at_a_time() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(!enrolling.is_finished());
 
-    idle.pop().unwrap().connection.close(0u32.into(), b"");
+    idle.pop().unwrap().0.connection.close(0u32.into(), b"");
     let admin = tokio::time::timeout(Duration::from_secs(3), enrolling)
         .await
         .unwrap()

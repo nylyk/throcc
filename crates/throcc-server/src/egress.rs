@@ -623,6 +623,10 @@ mod tests {
         }
     }
 
+    fn audio(media: u32, seq: u32) -> Packet {
+        packet(TrackKind::Audio, media, seq, Flags::FIRST | Flags::LAST, 10)
+    }
+
     fn fragment_flags(i: u32, count: u32, discardable: bool) -> Flags {
         Flags::default()
             .with(Flags::FIRST, i == 0)
@@ -656,10 +660,7 @@ mod tests {
         let now = Instant::now();
         let mut queues = Queues::default();
         unit(&mut queues, 1, 0, 2, false, now);
-        queues.push(
-            packet(TrackKind::Audio, 2, 0, Flags::FIRST | Flags::LAST, 10),
-            now,
-        );
+        queues.push(audio(2, 0), now);
         assert_eq!(queues.pop().unwrap().len(), 10);
         assert_eq!(queues.pop().unwrap().len(), 1000);
     }
@@ -825,10 +826,7 @@ mod tests {
         let now = Instant::now();
         let mut queues = Queues::default();
         for seq in 0..MAX_QUEUED_AUDIO as u32 + 10 {
-            queues.push(
-                packet(TrackKind::Audio, 2, seq, Flags::FIRST | Flags::LAST, 10),
-                now,
-            );
+            queues.push(audio(2, seq), now);
         }
         assert_eq!(queues.audio.len, MAX_QUEUED_AUDIO);
         let stats = queues.take_stats();
@@ -912,10 +910,6 @@ mod tests {
             now,
         );
         assert!(queues.pop().is_none());
-    }
-
-    fn audio(media: u32, seq: u32) -> Packet {
-        packet(TrackKind::Audio, media, seq, Flags::FIRST | Flags::LAST, 10)
     }
 
     #[test]
@@ -1004,10 +998,7 @@ mod tests {
         let now = Instant::now();
         let mut queues = Queues::default();
         for seq in 0..500 {
-            queues.push(
-                packet(TrackKind::Audio, 2, seq, Flags::FIRST | Flags::LAST, 100),
-                now,
-            );
+            queues.push(audio(2, seq), now);
         }
         queues.enforce_budget(now + Duration::from_secs(5));
         assert_eq!(std::iter::from_fn(|| queues.pop()).count(), 500);

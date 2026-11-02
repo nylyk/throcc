@@ -12,9 +12,8 @@ use throcc_proto::messages::{
     ClientMessage, Codec, ErrorCode, Event, MAX_AVATAR_BYTES, MediaState, Presence, Request,
     Response, ServerMessage, SignedEncKey, Welcome,
 };
-use throcc_server::database::Database;
 use throcc_server::rooms::{Handled, MAX_ROOMS, PasswordWork};
-use throcc_server::{DATABASE_FILE, unix_now};
+use throcc_server::unix_now;
 
 use common::*;
 
@@ -40,12 +39,35 @@ impl View {
     }
 }
 
-async fn settle(client: &mut TestClient, view: &mut View) {
-    while let Ok(Some(event)) =
-        tokio::time::timeout(Duration::from_millis(200), client.link.events.recv()).await
-    {
-        view.apply(&event);
+/// Applies `client`'s events to `view` until it shows `expected`.
+async fn see(client: &mut TestClient, view: &mut View, expected: &View) {
+    if view != expected {
+        client
+            .event(|e| {
+                view.apply(e);
+                (view == expected).then_some(())
+            })
+            .await;
     }
+}
+
+/// Has `admin` create a room locked with "hunter2" and waits for `watcher` to hear of it.
+async fn create_locked_room(admin: &TestClient, watcher: &mut TestClient) -> RoomId {
+    let create = Request::CreateRoom {
+        name: "Private".into(),
+        password: Some("hunter2".into()),
+    };
+    assert_eq!(admin.request(create).await, Response::Ok);
+    watcher
+        .event(|e| match e {
+            Event::RoomCreated(room) => {
+                assert_eq!(room.name, "Private", "another room was created");
+                assert!(room.locked);
+                Some(room.id)
+            }
+            _ => None,
+        })
+        .await
 }
 
 #[tokio::test]
@@ -80,18 +102,15 @@ async fn three_clients_see_consistent_presence() {
     assert_eq!(bob_state, (carol_placed.epoch, 2));
 
     bob.join(Some(gaming)).await;
-    for (client, view) in [&mut alice, &mut bob, &mut carol]
-        .into_iter()
-        .zip(views.iter_mut())
-    {
-        settle(client, view).await;
-    }
     let expected = View(BTreeMap::from([
         (bob_id, Some(gaming)),
         (carol_id, Some(general)),
     ]));
-    for view in &views {
-        assert_eq!(view, &expected);
+    for (client, view) in [&mut alice, &mut bob, &mut carol]
+        .into_iter()
+        .zip(views.iter_mut())
+    {
+        see(client, view, &expected).await;
     }
 
     carol.disconnect();
@@ -160,29 +179,13 @@ async fn a_room_created_with_a_password_is_locked_from_the_start() {
     let server = start_server();
     let alice = admin(&server).await;
     let mut bob = invited(&server, &alice).await;
-    let create = |name: &str, password: &str| Request::CreateRoom {
-        name: name.into(),
-        password: Some(password.to_owned()),
+    let empty = Request::CreateRoom {
+        name: "Empty".into(),
+        password: Some(String::new()),
     };
 
-    assert_error(
-        &alice.request(create("Empty", "")).await,
-        ErrorCode::Invalid,
-    );
-    assert_eq!(
-        alice.request(create("Private", "hunter2")).await,
-        Response::Ok
-    );
-    let private = bob
-        .event(|e| match e {
-            Event::RoomCreated(room) => {
-                assert_eq!(room.name, "Private", "the refused room was created");
-                assert!(room.locked);
-                Some(room.id)
-            }
-            _ => None,
-        })
-        .await;
+    assert_error(&alice.request(empty).await, ErrorCode::Invalid);
+    let private = create_locked_room(&alice, &mut bob).await;
     assert_error(
         &bob.set_room(Some(private), None).await,
         ErrorCode::WrongPassword,
@@ -258,24 +261,17 @@ async fn a_password_checked_outside_the_hub_is_checked_again_before_it_counts() 
 
 #[tokio::test]
 async fn a_join_that_cannot_bump_the_new_rooms_epoch_leaves_the_old_room_alone() {
-    let dir = tempfile::tempdir().unwrap();
-    let first = ProcessLikeServer::start(dir.path(), "127.0.0.1:0".parse().unwrap());
-    let addr = first.addr;
-    let mut alice = enroll_at(&addr.to_string(), &first.admin_invite()).await;
+    let first = ProcessLikeServer::start_temp();
+    let addr = first.addr.to_string();
+    let mut alice = enroll_at(&addr, &first.admin_invite()).await;
     let general = create_room(&mut alice, "General").await;
     let full = create_room(&mut alice, "Full").await;
-    first.stop();
-    Database::open(&dir.path().join(DATABASE_FILE))
-        .unwrap()
-        .set_epoch(full, Epoch(u32::MAX))
-        .unwrap();
+    let _second = first.restart(|db| db.set_epochs(&[(full, Epoch(u32::MAX))]).unwrap());
 
-    let second = ProcessLikeServer::start(dir.path(), addr);
-    alice.reconnect(&addr.to_string(), None).await;
+    alice.reconnect(&addr, None).await;
     let epoch = alice.join(Some(general)).await.epoch;
     assert_error(&alice.set_room(Some(full), None).await, ErrorCode::Internal);
     assert_eq!(alice.join(Some(general)).await.epoch, epoch);
-    second.stop();
 }
 
 #[tokio::test]
@@ -328,16 +324,14 @@ async fn profile_changes_are_rate_limited_and_avatars_capped() {
 
 #[tokio::test]
 async fn media_ids_never_repeat_across_a_restart() {
-    let dir = tempfile::tempdir().unwrap();
-    let first = ProcessLikeServer::start(dir.path(), "127.0.0.1:0".parse().unwrap());
-    let addr = first.addr;
-    let mut alice = enroll_at(&addr.to_string(), &first.admin_invite()).await;
+    let first = ProcessLikeServer::start_temp();
+    let addr = first.addr.to_string();
+    let mut alice = enroll_at(&addr, &first.admin_invite()).await;
     let general = create_room(&mut alice, "General").await;
     let before = alice.join(Some(general)).await.tracks.unwrap();
-    first.stop();
+    let _second = first.restart(|_| {});
 
-    let second = ProcessLikeServer::start(dir.path(), addr);
-    alice.reconnect(&addr.to_string(), Some(general)).await;
+    alice.reconnect(&addr, Some(general)).await;
     let placed = &alice.link.welcome.placed;
     let after = placed.tracks.as_ref().unwrap();
     assert!(
@@ -345,7 +339,6 @@ async fn media_ids_never_repeat_across_a_restart() {
         "{before:?} then {after:?}"
     );
     assert!(placed.epoch > Epoch(1));
-    second.stop();
 }
 
 /// A relay that forwards both ways until the returned flag is set.
@@ -358,7 +351,8 @@ async fn cuttable_relay(server: &str) -> (String, Arc<AtomicBool>) {
 
 #[tokio::test]
 async fn killed_connection_retracts_presence_within_the_idle_timeout() {
-    let server = start_server();
+    const IDLE_TIMEOUT: Duration = Duration::from_secs(3);
+    let server = start_server_with(|config| config.idle_timeout = IDLE_TIMEOUT);
     let mut alice = admin(&server).await;
     let general = create_room(&mut alice, "General").await;
     let code = invite(&alice).await;
@@ -373,7 +367,7 @@ async fn killed_connection_retracts_presence_within_the_idle_timeout() {
 
     cut.store(true, Ordering::Relaxed);
     let started = Instant::now();
-    tokio::time::timeout(Duration::from_secs(40), async {
+    tokio::time::timeout(IDLE_TIMEOUT * 3, async {
         loop {
             if let Some(Event::PresenceEnded(user)) = alice.link.events.recv().await
                 && user == bob_id
@@ -385,7 +379,10 @@ async fn killed_connection_retracts_presence_within_the_idle_timeout() {
     .await
     .expect("presence was not retracted");
     let elapsed = started.elapsed();
-    assert!(elapsed <= Duration::from_secs(31), "took {elapsed:?}");
+    assert!(
+        elapsed <= IDLE_TIMEOUT + Duration::from_secs(1),
+        "took {elapsed:?}"
+    );
     drop(bob);
 }
 
@@ -552,21 +549,15 @@ async fn exhausted_media_ids_refuse_joins_but_keep_the_server_up() {
 
 #[tokio::test]
 async fn a_leave_that_cannot_bump_the_epoch_still_ends_presence() {
-    let dir = tempfile::tempdir().unwrap();
-    let first = ProcessLikeServer::start(dir.path(), "127.0.0.1:0".parse().unwrap());
-    let addr = first.addr;
-    let mut alice = enroll_at(&addr.to_string(), &first.admin_invite()).await;
+    let first = ProcessLikeServer::start_temp();
+    let addr = first.addr.to_string();
+    let mut alice = enroll_at(&addr, &first.admin_invite()).await;
     let general = create_room(&mut alice, "General").await;
-    let mut bob = invited_at(&addr.to_string(), &alice).await;
-    first.stop();
-    Database::open(&dir.path().join(DATABASE_FILE))
-        .unwrap()
-        .set_epoch(general, Epoch(u32::MAX - 1))
-        .unwrap();
+    let mut bob = invited_at(&addr, &alice).await;
+    let _second = first.restart(|db| db.set_epochs(&[(general, Epoch(u32::MAX - 1))]).unwrap());
 
-    let second = ProcessLikeServer::start(dir.path(), addr);
-    alice.reconnect(&addr.to_string(), None).await;
-    bob.reconnect(&addr.to_string(), None).await;
+    alice.reconnect(&addr, None).await;
+    bob.reconnect(&addr, None).await;
     let alice_id = alice.link.welcome.me;
     assert_eq!(alice.join(Some(general)).await.epoch, Epoch(u32::MAX));
     bob.event(|e| matches!(e, Event::PresenceChanged(p) if p.user == alice_id).then_some(()))
@@ -575,24 +566,20 @@ async fn a_leave_that_cannot_bump_the_epoch_still_ends_presence() {
     alice.disconnect();
     bob.event(|e| matches!(e, Event::PresenceEnded(u) if *u == alice_id).then_some(()))
         .await;
-    second.stop();
 }
 
 #[tokio::test]
 async fn a_server_holds_a_bounded_number_of_rooms() {
-    let dir = tempfile::tempdir().unwrap();
-    let first = ProcessLikeServer::start(dir.path(), "127.0.0.1:0".parse().unwrap());
-    let addr = first.addr;
-    let mut alice = enroll_at(&addr.to_string(), &first.admin_invite()).await;
-    first.stop();
-    let db = Database::open(&dir.path().join(DATABASE_FILE)).unwrap();
-    for i in 0..MAX_ROOMS {
-        db.create_room(&format!("Room {i}"), None).unwrap();
-    }
-    drop(db);
+    let first = ProcessLikeServer::start_temp();
+    let addr = first.addr.to_string();
+    let mut alice = enroll_at(&addr, &first.admin_invite()).await;
+    let _second = first.restart(|db| {
+        for i in 0..MAX_ROOMS {
+            db.create_room(&format!("Room {i}"), None).unwrap();
+        }
+    });
 
-    let second = ProcessLikeServer::start(dir.path(), addr);
-    alice.reconnect(&addr.to_string(), None).await;
+    alice.reconnect(&addr, None).await;
     assert_eq!(alice.link.welcome.rooms.len(), MAX_ROOMS);
     let res = alice
         .request(Request::CreateRoom {
@@ -601,7 +588,6 @@ async fn a_server_holds_a_bounded_number_of_rooms() {
         })
         .await;
     assert_error(&res, ErrorCode::TooLarge);
-    second.stop();
 }
 
 #[tokio::test]
@@ -785,44 +771,27 @@ async fn only_a_new_encryption_key_rekeys_the_room_and_new_keys_are_rate_limited
 }
 
 #[tokio::test]
-async fn hopping_between_rooms_is_rate_limited() {
+async fn hopping_between_rooms_is_rate_limited_but_a_reconnect_returns_to_the_last_room() {
     let server = start_server();
     let mut alice = admin(&server).await;
     let one = create_room(&mut alice, "One").await;
     let two = create_room(&mut alice, "Two").await;
-    let mut hops = 0;
+    let (mut hops, mut last) = (0, None);
     let refused = loop {
         let room = if hops % 2 == 0 { one } else { two };
         match alice.set_room(Some(room), None).await {
-            Response::Placed(_) if hops < 100 => hops += 1,
+            Response::Placed(_) if hops < 100 => (hops, last) = (hops + 1, Some(room)),
             other => break other,
         }
     };
     assert_error(&refused, ErrorCode::RateLimited);
     assert_eq!(hops, 5);
-    assert_eq!(alice.join(None).await.room, None);
-}
-
-#[tokio::test]
-async fn a_reconnect_returns_to_the_room_it_left_even_after_hopping() {
-    let server = start_server();
-    let mut alice = admin(&server).await;
-    let one = create_room(&mut alice, "One").await;
-    let two = create_room(&mut alice, "Two").await;
-    let mut last = None;
-    for room in [one, two].into_iter().cycle().take(100) {
-        match alice.set_room(Some(room), None).await {
-            Response::Placed(_) => last = Some(room),
-            other => {
-                assert_error(&other, ErrorCode::RateLimited);
-                break;
-            }
-        }
-    }
     for _ in 0..3 {
         alice.reconnect(&server.addr, last).await;
         assert_eq!(alice.link.welcome.placed.room, last);
     }
+    // Last, since moving to the lobby changes the room a reconnect returns to.
+    assert_eq!(alice.join(None).await.room, None);
 }
 
 #[tokio::test]
@@ -868,17 +837,7 @@ async fn a_reconnect_does_not_return_to_a_locked_room_one_was_kicked_from() {
     let server = start_server();
     let alice = admin(&server).await;
     let mut bob = invited(&server, &alice).await;
-    let create = Request::CreateRoom {
-        name: "Private".into(),
-        password: Some("hunter2".into()),
-    };
-    assert_eq!(alice.request(create).await, Response::Ok);
-    let private = bob
-        .event(|e| match e {
-            Event::RoomCreated(room) => Some(room.id),
-            _ => None,
-        })
-        .await;
+    let private = create_locked_room(&alice, &mut bob).await;
     let joined = bob.set_room(Some(private), Some("hunter2")).await;
     assert!(matches!(joined, Response::Placed(_)), "{joined:?}");
     let kick = Request::KickFromRoom {
@@ -890,6 +849,20 @@ async fn a_reconnect_does_not_return_to_a_locked_room_one_was_kicked_from() {
     assert_eq!(bob.link.welcome.placed.room, None);
 }
 
+/// Sends requests until the server refuses one, leaving `client` no allowance.
+async fn use_up_requests(client: &TestClient) {
+    for _ in 0..1000 {
+        if let Response::Err {
+            code: ErrorCode::RateLimited,
+            ..
+        } = client.request(Request::ListUsers).await
+        {
+            return;
+        }
+    }
+    panic!("requests were never rate-limited");
+}
+
 #[tokio::test]
 async fn sender_keys_for_the_current_epoch_need_no_request_allowance() {
     let server = start_server();
@@ -898,13 +871,7 @@ async fn sender_keys_for_the_current_epoch_need_no_request_allowance() {
     let bob = invited(&server, &alice).await;
     alice.join(Some(general)).await;
     let epoch = bob.join(Some(general)).await.epoch;
-    while !matches!(
-        bob.request(Request::ListUsers).await,
-        Response::Err {
-            code: ErrorCode::RateLimited,
-            ..
-        }
-    ) {}
+    use_up_requests(&bob).await;
 
     let publish = || Request::PublishKey {
         epoch,
@@ -912,6 +879,8 @@ async fn sender_keys_for_the_current_epoch_need_no_request_allowance() {
     };
     assert_eq!(bob.request(publish()).await, Response::Ok);
     assert_eq!(bob.request(publish()).await, Response::Ok);
+    // The allowance refills a request every 50 ms, which a loaded runner can take above.
+    use_up_requests(&bob).await;
     assert_error(&bob.request(publish()).await, ErrorCode::RateLimited);
     let from = alice
         .event(|e| match e {
@@ -928,17 +897,7 @@ async fn wrong_room_passwords_make_that_guesser_wait() {
     let alice = admin(&server).await;
     let mut bob = invited(&server, &alice).await;
     let carol = invited(&server, &alice).await;
-    let create = Request::CreateRoom {
-        name: "Private".into(),
-        password: Some("hunter2".into()),
-    };
-    assert_eq!(alice.request(create).await, Response::Ok);
-    let private = bob
-        .event(|e| match e {
-            Event::RoomCreated(room) => Some(room.id),
-            _ => None,
-        })
-        .await;
+    let private = create_locked_room(&alice, &mut bob).await;
     for _ in 0..5 {
         assert_error(
             &bob.set_room(Some(private), Some("guess")).await,
@@ -962,17 +921,7 @@ async fn joins_waiting_for_the_password_workers_all_finish() {
     let carol = invited(&server, &alice).await;
     let dave = invited(&server, &alice).await;
     let erin = invited(&server, &alice).await;
-    let create = Request::CreateRoom {
-        name: "Private".into(),
-        password: Some("hunter2".into()),
-    };
-    assert_eq!(alice.request(create).await, Response::Ok);
-    let private = bob
-        .event(|e| match e {
-            Event::RoomCreated(room) => Some(room.id),
-            _ => None,
-        })
-        .await;
+    let private = create_locked_room(&alice, &mut bob).await;
     let (b, c, d, e) = tokio::join!(
         bob.set_room(Some(private), Some("hunter2")),
         carol.set_room(Some(private), Some("hunter2")),
@@ -1042,17 +991,7 @@ async fn a_demoted_manager_needs_the_password_to_return_to_a_locked_room() {
     let bob_id = bob.link.welcome.me;
     let set_role = |role| Request::SetRole { user: bob_id, role };
     assert_eq!(alice.request(set_role(Role::Manager)).await, Response::Ok);
-    let create = Request::CreateRoom {
-        name: "Private".into(),
-        password: Some("hunter2".into()),
-    };
-    assert_eq!(alice.request(create).await, Response::Ok);
-    let private = bob
-        .event(|e| match e {
-            Event::RoomCreated(room) => Some(room.id),
-            _ => None,
-        })
-        .await;
+    let private = create_locked_room(&alice, &mut bob).await;
     assert_eq!(bob.join(Some(private)).await.room, Some(private));
 
     assert_eq!(alice.request(set_role(Role::User)).await, Response::Ok);

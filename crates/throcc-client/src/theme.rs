@@ -637,7 +637,9 @@ mod tests {
             palette: Some(custom.to_hex()),
             ..Settings::default()
         };
-        assert_eq!(picked(&settings), Some(PRESETS[5]));
+        let paper = PRESETS.iter().find(|(name, _)| *name == "Paper").copied();
+        assert!(paper.is_some());
+        assert_eq!(picked(&settings), paper);
         settings.theme = Some(CUSTOM.into());
         assert_eq!(picked(&settings), Some((CUSTOM, custom)));
         settings.theme = None;

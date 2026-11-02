@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use quinn::congestion::{BbrConfig, CubicConfig};
@@ -38,11 +39,12 @@ pub fn server_config(
     Ok(config)
 }
 
-pub fn transport_config(congestion: Congestion) -> Result<TransportConfig> {
+pub fn transport_config(congestion: Congestion, idle_timeout: Duration) -> Result<TransportConfig> {
     let mut config = TransportConfig::default();
     config
-        .keep_alive_interval(Some(transport::KEEP_ALIVE))
-        .max_idle_timeout(Some(IdleTimeout::try_from(transport::IDLE_TIMEOUT)?))
+        // A lost ping or two must not end a live connection.
+        .keep_alive_interval(Some(transport::KEEP_ALIVE.min(idle_timeout / 3)))
+        .max_idle_timeout(Some(IdleTimeout::try_from(idle_timeout)?))
         .max_concurrent_bidi_streams(VarInt::from_u32(0))
         .max_concurrent_uni_streams(VarInt::from_u32(0))
         .stream_receive_window(VarInt::from_u32(CONTROL_WINDOW))

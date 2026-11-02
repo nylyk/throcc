@@ -413,10 +413,6 @@ impl Database {
         Ok(())
     }
 
-    pub fn set_epoch(&mut self, room: RoomId, epoch: Epoch) -> Result<()> {
-        self.set_epochs(&[(room, epoch)])
-    }
-
     /// Sets the epochs of several rooms, all or none.
     pub fn set_epochs(&mut self, epochs: &[(RoomId, Epoch)]) -> Result<()> {
         let tx = self.write()?;
@@ -663,16 +659,19 @@ fn remove_one(tx: &Transaction, id: i64) -> rusqlite::Result<()> {
 mod tests {
     use super::*;
 
+    fn invite(code: &str, minted_by: Option<UserId>, expires_at: u64, failures: u32) -> InviteRow {
+        InviteRow {
+            code_id: code.into(),
+            secret: "S".into(),
+            minted_by,
+            expires_at,
+            failures,
+        }
+    }
+
     fn enroll(db: &mut Database, key: u8, by: Option<UserId>) -> UserId {
         let code = format!("C{key:02}");
-        db.insert_invite(&InviteRow {
-            code_id: code.clone(),
-            secret: "S".into(),
-            minted_by: by,
-            expires_at: 1000,
-            failures: 0,
-        })
-        .unwrap();
+        db.insert_invite(&invite(&code, by, 1000, 0)).unwrap();
         db.enroll(&[key; 32], &code, 100)
             .unwrap()
             .unwrap()
@@ -691,7 +690,6 @@ mod tests {
             avatar: Some(Hash([7; 32])),
         };
         db.set_server_avatar(profile.avatar).unwrap();
-        db.set_server_name(profile.name.as_deref()).unwrap();
         db.set_server_name(profile.name.as_deref()).unwrap();
         drop(db);
         assert_eq!(
@@ -810,14 +808,7 @@ mod tests {
         let path = dir.path().join("db");
         let mut server = Database::open(&path).unwrap();
         let side = Database::open_existing(&path).unwrap();
-        let invite = InviteRow {
-            code_id: "ADM".into(),
-            secret: "S".into(),
-            minted_by: None,
-            expires_at: 1000,
-            failures: 0,
-        };
-        assert!(side.insert_invite(&invite).unwrap());
+        assert!(side.insert_invite(&invite("ADM", None, 1000, 0)).unwrap());
         let user = server.enroll(&[1; 32], "ADM", 100).unwrap().unwrap();
         assert!(matches!(user, Enrolled::Added(row) if row.role == Role::Admin));
         assert!(server.allocate_media_ids(1).unwrap().is_some());
@@ -872,14 +863,7 @@ mod tests {
         let root = enroll(&mut db, 1, None);
         let member = enroll(&mut db, 2, Some(root));
         let mut redeem = |code: &str, by: Option<UserId>| {
-            db.insert_invite(&InviteRow {
-                code_id: code.into(),
-                secret: "S".into(),
-                minted_by: by,
-                expires_at: 1000,
-                failures: 0,
-            })
-            .unwrap();
+            db.insert_invite(&invite(code, by, 1000, 0)).unwrap();
             db.enroll(&[2; 32], code, 100).unwrap().unwrap()
         };
 
@@ -895,24 +879,20 @@ mod tests {
     }
 
     #[test]
-    fn an_invite_enrolls_once() {
+    fn used_or_expired_invites_do_not_enroll() {
         let mut db = Database::open_in_memory().unwrap();
         enroll(&mut db, 1, None);
         assert_eq!(db.enroll(&[9; 32], "C01", 100).unwrap(), None);
+        db.insert_invite(&invite("OLD", None, 50, 0)).unwrap();
+        assert_eq!(db.enroll(&[2; 32], "OLD", 100).unwrap(), None);
     }
 
     #[test]
     fn spent_invites_are_deleted() {
         let db = Database::open_in_memory().unwrap();
         for (code_id, failures) in [("ONE", 2), ("TWO", 3)] {
-            db.insert_invite(&InviteRow {
-                code_id: code_id.into(),
-                secret: "S".into(),
-                minted_by: None,
-                expires_at: 1000,
-                failures,
-            })
-            .unwrap();
+            db.insert_invite(&invite(code_id, None, 1000, failures))
+                .unwrap();
         }
         db.delete_spent_invites(3).unwrap();
         assert!(db.invite("ONE").unwrap().is_some());
@@ -929,19 +909,5 @@ mod tests {
         db.set_epochs(&[(a, Epoch(4)), (b, Epoch(9))]).unwrap();
         let epochs: Vec<_> = db.rooms().unwrap().iter().map(|r| r.epoch).collect();
         assert_eq!(epochs, vec![Epoch(4), Epoch(9)]);
-    }
-
-    #[test]
-    fn expired_invites_do_not_enroll() {
-        let mut db = Database::open_in_memory().unwrap();
-        let invite = InviteRow {
-            code_id: "OLD".into(),
-            secret: "S".into(),
-            minted_by: None,
-            expires_at: 50,
-            failures: 0,
-        };
-        db.insert_invite(&invite).unwrap();
-        assert_eq!(db.enroll(&[1; 32], "OLD", 100).unwrap(), None);
     }
 }

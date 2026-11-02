@@ -436,7 +436,10 @@ mod tests {
             let gate = gate.clone();
             async move { gate.enter(source("192.0.2.1")).await }
         });
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // The test runtime has one thread, so this runs the waiting task up to its wait.
+        for _ in 0..2 {
+            tokio::task::yield_now().await;
+        }
         assert!(!waiting.is_finished());
         drop(held);
         tokio::time::timeout(Duration::from_secs(1), waiting)

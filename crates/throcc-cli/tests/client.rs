@@ -19,9 +19,6 @@ use tokio::runtime::Runtime;
 
 use common::{ProcessLikeServer, share_1080p60, sharing};
 
-/// The server takes one profile change per 10 s.
-const PROFILE_INTERVAL: Duration = Duration::from_millis(10_500);
-
 /// A server's address and an admin invite. It runs until the returned handle drops.
 fn server() -> (String, InviteCode, ProcessLikeServer) {
     let server = ProcessLikeServer::start_temp();
@@ -210,7 +207,7 @@ fn mic_and_deafen_set_outside_a_room_carry_into_it() {
 }
 
 #[test]
-fn two_clients_see_each_other_join_and_unmute() {
+fn two_clients_see_each_others_presence_media_and_safety_number() {
     let (address, admin_invite, _server) = server();
     let (alice, _a) = client(&address, &admin_invite);
     wait_connected(&alice, "connected");
@@ -252,7 +249,7 @@ fn two_clients_see_each_other_join_and_unmute() {
 #[test]
 fn a_picture_chosen_in_the_lobby_reaches_others_and_survives_a_rename() {
     let (address, admin_invite, _server) = server();
-    let (alice, _a) = client(&address, &admin_invite);
+    let (alice, alice_dir) = client(&address, &admin_invite);
     wait_connected(&alice, "connected");
     let picture: Vec<u8> = (0..2000u32).map(|i| (i * 7) as u8).collect();
     alice.command(Command::SetProfile {
@@ -274,7 +271,13 @@ fn a_picture_chosen_in_the_lobby_reaches_others_and_survives_a_rename() {
     wait_for(&bob, "alice's picture", |_| bob.avatar(hash).is_some());
     assert_eq!(&*bob.avatar(hash).unwrap(), picture.as_slice());
 
-    std::thread::sleep(PROFILE_INTERVAL);
+    // The server takes one profile change per session every 10 s, so rename in a new one.
+    drop(alice);
+    let alice = client_in(alice_dir.path(), &address, None);
+    alice.command(Command::Join(Some(room)));
+    wait_for(&alice, "alice back in the room", |s| {
+        s.person(alice_id).is_some_and(|p| p.avatar == Some(hash))
+    });
     alice.command(Command::SetProfile {
         name: Some("Alice".into()),
         picture: None,
@@ -286,7 +289,7 @@ fn a_picture_chosen_in_the_lobby_reaches_others_and_survives_a_rename() {
 }
 
 #[test]
-fn a_share_started_mid_call_shows_without_rejoining() {
+fn a_share_started_mid_call_shows_and_stays_while_the_mic_changes() {
     let (address, admin_invite, _server) = server();
     let (alice, _a) = client(&address, &admin_invite);
     wait_connected(&alice, "connected");
@@ -294,60 +297,14 @@ fn a_share_started_mid_call_shows_without_rejoining() {
     alice.command(Command::Join(Some(room)));
     wait_for(&alice, "alice in the room", |s| s.current.is_some());
 
-    let code = invite(&alice);
-    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let runtime = Runtime::new().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let bob = runtime.block_on(async {
-        let mut keystore = Keystore::open_in(dir.path()).unwrap();
-        let link = account::enroll(&mut keystore, &address, &code)
-            .await
-            .unwrap();
-        let bob = Call::start(link, &keystore).unwrap();
-        bob.join(Some(room), None).await.unwrap();
-        bob
-    });
+    let bob = call_in(&runtime, dir.path(), &address, &invite(&alice), room);
     let bob_id = bob.me();
     wait_for(&alice, "bob in the room", |s| {
         s.person(bob_id).is_some_and(|p| p.room == Some(room))
     });
 
-    let share = share_1080p60(Codec::Vp9, 6000);
-    let media = MediaState {
-        mic: true,
-        ..sharing(share)
-    };
-    let reply = runtime.block_on(bob.request(Request::SetMedia(media)));
-    assert_eq!(reply.unwrap(), Response::Ok);
-    wait_for(&alice, "bob's share", |s| {
-        s.person(bob_id)
-            .is_some_and(|p| p.mic && p.sharing == Some(share))
-    });
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(alice.state().person(bob_id).unwrap().sharing, Some(share));
-}
-
-#[test]
-fn a_sharer_changing_their_mic_never_shows_as_not_sharing() {
-    let (address, admin_invite, _server) = server();
-    let (alice, _a) = client(&address, &admin_invite);
-    wait_connected(&alice, "connected");
-    let room = create_room(&alice);
-    alice.command(Command::Join(Some(room)));
-    wait_for(&alice, "alice in the room", |s| s.current.is_some());
-
-    let code = invite(&alice);
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let bob = runtime.block_on(async {
-        let mut keystore = Keystore::open_in(dir.path()).unwrap();
-        let link = account::enroll(&mut keystore, &address, &code)
-            .await
-            .unwrap();
-        let bob = Call::start(link, &keystore).unwrap();
-        bob.join(Some(room), None).await.unwrap();
-        bob
-    });
-    let bob_id = bob.me();
     let share = share_1080p60(Codec::Vp9, 6000);
     let reply = runtime.block_on(bob.request(Request::SetMedia(sharing(share))));
     assert_eq!(reply.unwrap(), Response::Ok);
@@ -375,6 +332,8 @@ fn a_sharer_changing_their_mic_never_shows_as_not_sharing() {
             break;
         }
     }
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(alice.state().person(bob_id).unwrap().sharing, Some(share));
 }
 
 #[test]
@@ -510,7 +469,7 @@ fn only_admins_name_the_server_and_everyone_sees_it() {
 }
 
 #[test]
-fn a_verified_contact_stays_verified_in_the_next_session() {
+fn only_the_compared_key_is_verified_and_it_stays_verified_in_the_next_session() {
     let (address, admin_invite, _server) = server();
     let (alice, _a) = client(&address, &admin_invite);
     wait_connected(&alice, "connected");
@@ -521,10 +480,23 @@ fn a_verified_contact_stays_verified_in_the_next_session() {
     alice.command(Command::Join(Some(room)));
     bob.command(Command::Join(Some(room)));
     let alice_id = alice.state().me.unwrap();
-    bob.command(verify(alice_id, key_of(&bob, alice_id)));
+    let presented = key_of(&bob, alice_id);
+
+    let compared = [9; 32];
+    command_then(&bob, verify(alice_id, compared), "no notice", refused);
+    assert!(bob.state().verified.is_empty());
+    assert!(!bob.state().person(alice_id).unwrap().verified);
+    bob.command(verify(alice_id, presented));
     wait_for(&bob, "alice verified", |s| {
         s.person(alice_id).is_some_and(|p| p.verified)
     });
+    let unverify = Command::SetVerified {
+        user: alice_id,
+        key: Fingerprint(compared),
+        verified: false,
+    };
+    command_then(&bob, unverify, "no notice", refused);
+    assert!(bob.state().person(alice_id).unwrap().verified);
     drop(bob);
 
     let bob = client_in(bob_dir.path(), &address, None);
@@ -539,36 +511,6 @@ fn a_verified_contact_stays_verified_in_the_next_session() {
     wait_for(&bob, "alice still verified", |s| {
         s.person(alice_id).is_some_and(|p| p.verified)
     });
-}
-
-#[test]
-fn only_the_key_whose_number_was_compared_is_verified() {
-    let (address, admin_invite, _server) = server();
-    let (alice, _a) = client(&address, &admin_invite);
-    wait_connected(&alice, "connected");
-    let room = create_room(&alice);
-    let (bob, _b) = client(&address, &invite(&alice));
-    let bob_id = bob.state().me.unwrap();
-    alice.command(Command::Join(Some(room)));
-    bob.command(Command::Join(Some(room)));
-    let presented = key_of(&alice, bob_id);
-
-    let compared = [9; 32];
-    command_then(&alice, verify(bob_id, compared), "no notice", refused);
-    assert!(alice.state().verified.is_empty());
-    assert!(!alice.state().person(bob_id).unwrap().verified);
-
-    alice.command(verify(bob_id, presented));
-    wait_for(&alice, "bob verified", |s| {
-        s.person(bob_id).is_some_and(|p| p.verified)
-    });
-    let unverify = Command::SetVerified {
-        user: bob_id,
-        key: Fingerprint(compared),
-        verified: false,
-    };
-    command_then(&alice, unverify, "no notice", refused);
-    assert!(alice.state().person(bob_id).unwrap().verified);
 }
 
 fn refused(event: Event) -> Option<()> {

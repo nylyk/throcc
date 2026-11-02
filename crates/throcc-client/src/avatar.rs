@@ -135,8 +135,8 @@ mod tests {
     #[test]
     fn any_picture_becomes_a_small_square() {
         for (width, height, format) in [
-            (1600, 900, ImageFormat::Png),
-            (300, 2000, ImageFormat::Jpeg),
+            (400, 225, ImageFormat::Png),
+            (150, 1000, ImageFormat::Jpeg),
             (64, 64, ImageFormat::Png),
         ] {
             let prepared = prepare(&encoded(width, height, format)).unwrap();
@@ -203,7 +203,8 @@ mod tests {
         ));
         assert!(decode(&bomb).is_none());
         assert!(prepare(&bomb).unwrap_err().contains("too large"));
-        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        // Decoding 20000×20000 pixels would take far longer, even in a debug build.
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
     #[test]

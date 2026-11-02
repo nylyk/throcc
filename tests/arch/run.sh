@@ -47,8 +47,12 @@ docker run --rm --platform linux/amd64 "${mounts[@]}" archlinux:latest bash -euo
         export XDG_RUNTIME_DIR=/tmp/xdg-builder WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman
         mkdir -p -m 700 \$XDG_RUNTIME_DIR
         sway-nocaps -c /dev/null >/tmp/sway.log 2>&1 &
-        sleep 3
-        export WAYLAND_DISPLAY=\$(ls \$XDG_RUNTIME_DIR | grep -E \"^wayland-[0-9]+\$\" | head -1)
+        for _ in \$(seq 50); do
+            WAYLAND_DISPLAY=\$(ls \$XDG_RUNTIME_DIR | grep -E \"^wayland-[0-9]+\$\" | head -1)
+            [ -n \"\$WAYLAND_DISPLAY\" ] && break
+            sleep 0.2
+        done
+        export WAYLAND_DISPLAY
         WAYLAND_DEBUG=1 timeout 15 throcc --mock >/tmp/throcc.log 2>&1 || true
     "
     if ! grep -Eq "xdg_toplevel(#[0-9]+)?\.set_title\(\"throcc\"\)" /tmp/throcc.log; then

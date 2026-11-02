@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -12,7 +13,7 @@ use throcc_client_core::media::engine::Kind;
 use throcc_client_core::media::reorder::REORDER_WINDOW;
 use throcc_client_core::media::share::{self, ShareSender};
 use throcc_client_core::media::share_audio::audio_to_video;
-use throcc_client_core::media::video::decode::{Decoder, MAX_PIXELS};
+use throcc_client_core::media::video::decode::{Decoder, MAX_SIDE, MaxSize};
 use throcc_proto::frame::{Flags, VIDEO_CLOCK_HZ};
 use throcc_proto::messages::{Codec, Event, Request, Response, Share, ShareConfig};
 use tokio::sync::{Mutex, mpsc};
@@ -22,8 +23,17 @@ use common::*;
 const WANTED: ShareConfig = share_1080p60(Codec::H264, 8000);
 const WATCH_UNITS: usize = 256;
 
+/// Says why a test checked nothing. Written past the test harness's capture, so a run
+/// without an encoder doesn't read as a quiet pass.
+fn skip(why: impl std::fmt::Display) {
+    let thread = std::thread::current();
+    let test = thread.name().unwrap_or("a test");
+    writeln!(std::io::stderr(), "{test}: skipped: {why}").ok();
+}
+
 /// Starts Alice sharing a test pattern stamped with milliseconds since `epoch`, and
-/// forwards the server's keyframe requests to her encoder. `None` without an encoder.
+/// forwards the server's keyframe requests to her encoder. `None`, reported as a skip,
+/// without an encoder.
 async fn share_pattern(
     alice: &mut Call,
     bob: &Call,
@@ -35,7 +45,7 @@ async fn share_pattern(
     let sender = match ShareSender::start(alice.engine.clone(), tracks, wanted, capture) {
         Ok(sender) => Arc::new(sender),
         Err(e) => {
-            eprintln!("skipped: {e}");
+            skip(format_args!("no encoder: {e}"));
             return None;
         }
     };
@@ -112,7 +122,7 @@ async fn two_percent_loss_brings_a_refresh_within_a_second() {
         return;
     };
     let mut units = watch(&bob, tracks.video, WATCH_UNITS).await;
-    let mut decoder = Decoder::new(sender.config.codec, MAX_PIXELS).unwrap();
+    let mut decoder = Decoder::new(sender.config.codec, MaxSize::new(MAX_SIDE, MAX_SIDE)).unwrap();
 
     let mut keyframes = Vec::new();
     let mut pictures = Vec::new();
@@ -229,8 +239,11 @@ async fn a_sixteen_by_ten_screen_is_sent_at_its_own_shape() {
     let capture = Box::new(TestPattern::new(screen, Instant::now()));
     let sender = match ShareSender::start(alice.engine.clone(), tracks, WANTED, capture) {
         Ok(sender) => sender,
+        // Every macOS has VideoToolbox, and the encoder ladder ends in software libvpx,
+        // which Homebrew's ffmpeg carries, so CI's macOS run always gets an encoder.
+        Err(e) if cfg!(target_os = "macos") => panic!("no encoder started: {e}"),
         Err(e) => {
-            eprintln!("skipped: {e}");
+            skip(format_args!("no encoder: {e}"));
             return;
         }
     };

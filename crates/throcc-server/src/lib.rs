@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use throcc_proto::Fingerprint;
 use throcc_proto::invite::InviteCode;
-use throcc_proto::transport::{check_datagrams, close};
+use throcc_proto::transport::{self, check_datagrams, close};
 use tokio::sync::Semaphore;
 use tracing::debug;
 
@@ -62,6 +62,20 @@ pub struct Config {
     pub data_dir: PathBuf,
     pub listen: SocketAddr,
     pub congestion: Congestion,
+    /// How long a connection may go without a packet before it is closed; QUIC uses the
+    /// shorter of this and the client's. Tests shorten it.
+    pub idle_timeout: Duration,
+}
+
+impl Config {
+    pub fn new(data_dir: PathBuf, listen: SocketAddr) -> Self {
+        Self {
+            data_dir,
+            listen,
+            congestion: Congestion::default(),
+            idle_timeout: transport::IDLE_TIMEOUT,
+        }
+    }
 }
 
 /// State shared by every connection.
@@ -107,8 +121,10 @@ impl Server {
         )?;
         // No enrollment run is in flight yet, so invites a stop left spent can go now.
         hub.db.delete_spent_invites(auth::INVITE_TRIES)?;
-        let server_config =
-            tls::server_config(&identity, tls::transport_config(config.congestion)?)?;
+        let server_config = tls::server_config(
+            &identity,
+            tls::transport_config(config.congestion, config.idle_timeout)?,
+        )?;
         let endpoint = quinn::Endpoint::server(server_config, config.listen)
             .with_context(|| format!("binding {}", config.listen))?;
         let shared = Arc::new(Shared {
@@ -286,26 +302,51 @@ pub fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn the_server_times_out_idle_connections_as_clients_do() {
+        let config = Config::new(PathBuf::from("data"), "[::]:8476".parse().unwrap());
+        assert_eq!(config.idle_timeout, transport::IDLE_TIMEOUT);
+    }
+
+    #[test]
+    fn an_admin_invite_needs_a_server_that_has_started_in_its_data_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("typo");
+        assert!(admin_invite(&missing).is_err());
+        assert!(!missing.exists());
+        assert!(admin_invite(dir.path()).is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn running_admin_invite_as_another_user_says_which_user_to_run_it_as() {
+        let refusal = format!(
+            "{:#}",
+            not_the_servers_user(Path::new("/data/server_key"), 65532, Path::new("/data"))
+        );
+        assert!(refusal.contains("Run it as uid 65532"), "{refusal}");
+        assert!(refusal.contains("sudo -u '#65532'"), "{refusal}");
+        assert!(!refusal.contains("chown"), "{refusal}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "needs root to hand the data files to another user"]
     fn admin_invite_as_another_user_says_to_run_it_as_the_servers_user() {
         let dir = tempfile::tempdir().unwrap();
         ServerIdentity::load_or_create(dir.path()).unwrap();
         drop(Database::open(&dir.path().join(DATABASE_FILE)).unwrap());
         let server_uid = 65532;
         for file in [identity::KEY_FILE, DATABASE_FILE] {
-            if std::os::unix::fs::chown(dir.path().join(file), Some(server_uid), None).is_err() {
-                // Only root can hand a file to another user.
-                return;
-            }
+            std::os::unix::fs::chown(dir.path().join(file), Some(server_uid), None)
+                .expect("only root can hand a file to another user");
         }
 
         let refusal = format!("{:#}", admin_invite(dir.path()).err().unwrap());
         assert!(refusal.contains("Run it as uid 65532"), "{refusal}");
-        assert!(refusal.contains("sudo -u '#65532'"), "{refusal}");
-        assert!(!refusal.contains("chown"), "{refusal}");
     }
 }
