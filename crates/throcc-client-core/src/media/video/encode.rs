@@ -827,7 +827,11 @@ fn open_candidate(
     ctx.set_bit_rate(bitrate);
     ctx.set_max_b_frames(0);
     ctx.set_gop_size(config.fps as i32 * GOP_SECONDS);
-    ctx.set_flags(ctx.flags | ffi::AV_CODEC_FLAG_LOW_DELAY as i32);
+    // VideoToolbox's low-latency mode holds 2 to 4 frames when the height isn't a multiple
+    // of 16, where its normal mode holds one.
+    if candidate.backend != Backend::VideoToolbox || config.height.is_multiple_of(16) {
+        ctx.set_flags(ctx.flags | ffi::AV_CODEC_FLAG_LOW_DELAY as i32);
+    }
     let maxrate = cstring(&bitrate.to_string());
     let bufsize = cstring(&(bitrate * 2 / i64::from(config.fps.max(1))).to_string());
     let common = [
