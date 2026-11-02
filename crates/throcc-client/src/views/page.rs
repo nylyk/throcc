@@ -5,6 +5,7 @@ use gpui::{
 };
 use gpui_component::Disableable;
 use gpui_component::button::Button;
+use gpui_component::switch::Switch;
 use throcc_proto::ids::Hash;
 
 use super::common::{Typeset, avatar, caption, ghost_icon, icon, secondary, top_bar};
@@ -234,6 +235,15 @@ pub fn row(label: &str, control: impl IntoElement) -> Div {
                 .child(label.to_owned()),
         )
         .child(div().flex_1().min_w(px(200.)).child(control))
+}
+
+/// A switch at the height of a [`row`].
+pub fn switch_row(switch: Switch) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .min_h(theme::TOUCH)
+        .child(switch)
 }
 
 /// A row of mutually exclusive choices, the picked one raised.

@@ -21,7 +21,7 @@ use super::common::{
     Typeset, caption, card, field_error, ghost_icon, key_cap, mono, primary, section, slider_gain,
     slider_value, volume_slider,
 };
-use super::page::{field, frame, nav, picture_editor, row, save_line, segmented};
+use super::page::{field, frame, nav, picture_editor, row, save_line, segmented, switch_row};
 use crate::app::{PictureFor, Screen, SettingsPage, ThroccApp, typed_name};
 use crate::hotkey::DEFAULT_KEY_LABEL;
 use crate::theme;
@@ -396,15 +396,6 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .flex_col()
                 .gap_2()
                 .child(section("Processing"))
-                .child(
-                    Switch::new("aec")
-                        .checked(voice.echo_cancellation)
-                        .label("Echo cancellation")
-                        .on_click(cx.listener(|app, on: &bool, _, cx| {
-                            set_voice(app, |v| v.echo_cancellation = *on);
-                            cx.notify();
-                        })),
-                )
                 .child(row(
                     "Noise suppression",
                     segmented(
@@ -420,7 +411,16 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                         |app, level, _| set_voice(app, |v| v.noise_suppression = level),
                     ),
                 ))
-                .child(
+                .child(switch_row(
+                    Switch::new("aec")
+                        .checked(voice.echo_cancellation)
+                        .label("Echo cancellation")
+                        .on_click(cx.listener(|app, on: &bool, _, cx| {
+                            set_voice(app, |v| v.echo_cancellation = *on);
+                            cx.notify();
+                        })),
+                ))
+                .child(switch_row(
                     Switch::new("agc")
                         .checked(voice.automatic_gain)
                         .label("Automatic gain")
@@ -428,7 +428,7 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                             set_voice(app, |v| v.automatic_gain = *on);
                             cx.notify();
                         })),
-                ),
+                )),
         )
         .child(
             div().flex().child(
@@ -589,9 +589,9 @@ fn appearance(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             card()
                 .flex()
                 .flex_col()
-                .gap_1()
+                .gap_2()
                 .child(section("Sidebar"))
-                .child(
+                .child(switch_row(
                     Switch::new("translucent-sidebar")
                         .checked(theme::translucent_sidebar())
                         .label("Translucent")
@@ -599,7 +599,7 @@ fn appearance(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                             app.use_translucent_sidebar(*on);
                             cx.notify();
                         })),
-                ),
+                )),
         )
         .into_any_element()
 }
