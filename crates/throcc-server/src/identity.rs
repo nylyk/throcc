@@ -9,7 +9,7 @@ use throcc_proto::{Fingerprint, SERVER_NAME};
 
 use crate::files;
 
-const KEY_FILE: &str = "server_key";
+pub const KEY_FILE: &str = "server_key";
 
 pub struct ServerIdentity {
     key: KeyPair,

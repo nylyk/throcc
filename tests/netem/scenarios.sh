@@ -60,11 +60,11 @@ cli() {
 start_server() {
     ip netns exec srv throcc-server --data "$WORK/srv" --listen "$SERVER" --congestion "${CONGESTION:-cubic}" >"$WORK/server.log" 2>&1 &
     for _ in $(seq 50); do
-        grep -q "becomes admin" "$WORK/server.log" 2>/dev/null && break
+        grep -q "server fingerprint" "$WORK/server.log" 2>/dev/null && break
         sleep 0.1
     done
     local code
-    code=$(sed 's/\x1b\[[0-9;]*m//g' "$WORK/server.log" | grep -o 'invite [0-9A-Z]\{3\}-[0-9A-Z]\{5\}' | cut -d' ' -f2)
+    code=$(throcc-server admin-invite --data "$WORK/srv" | awk '$1 == "invite" {print $2}')
     cli s enroll "$SERVER" "$code" >/dev/null
     cli s name "$SERVER" Sender >/dev/null
     cli s create-room "$SERVER" General >/dev/null

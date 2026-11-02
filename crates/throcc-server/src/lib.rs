@@ -12,11 +12,11 @@ mod sfu;
 pub mod tls;
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use throcc_proto::Fingerprint;
 use throcc_proto::invite::InviteCode;
 use throcc_proto::transport::{check_datagrams, close};
@@ -92,7 +92,6 @@ impl Shared {
 pub struct Server {
     endpoint: quinn::Endpoint,
     shared: Arc<Shared>,
-    bootstrap: Option<InviteCode>,
 }
 
 impl Server {
@@ -101,19 +100,13 @@ impl Server {
         files::prepare_data_dir(&config.data_dir)?;
         let identity = ServerIdentity::load_or_create(&config.data_dir)?;
         let sfu = Arc::new(Sfu::default());
-        let mut hub = Hub::new(
+        let hub = Hub::new(
             Database::open(&config.data_dir.join(DATABASE_FILE))?,
             sfu.clone(),
             identity.fingerprint,
         )?;
         // No enrollment run is in flight yet, so invites a stop left spent can go now.
         hub.db.delete_spent_invites(auth::INVITE_TRIES)?;
-        let bootstrap = if hub.db.user_count()? == 0 {
-            hub.db.delete_bootstrap_invites()?;
-            Some(hub.mint_invite(None, unix_now())?.0)
-        } else {
-            None
-        };
         let server_config =
             tls::server_config(&identity, tls::transport_config(config.congestion)?)?;
         let endpoint = quinn::Endpoint::server(server_config, config.listen)
@@ -130,11 +123,7 @@ impl Server {
             handshakes: Gate::new(HANDSHAKES),
             password_work: Semaphore::new(PASSWORD_WORKERS),
         });
-        Ok(Self {
-            endpoint,
-            shared,
-            bootstrap,
-        })
+        Ok(Self { endpoint, shared })
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr> {
@@ -143,11 +132,6 @@ impl Server {
 
     pub fn fingerprint(&self) -> Fingerprint {
         self.shared.fingerprint
-    }
-
-    /// The invite that makes its user the first admin. Present only while no user exists.
-    pub fn bootstrap_invite(&self) -> Option<&InviteCode> {
-        self.bootstrap.as_ref()
     }
 
     pub fn shared(&self) -> Arc<Shared> {
@@ -220,6 +204,40 @@ impl Server {
         }
         Ok(())
     }
+}
+
+/// An invite whose user becomes an admin.
+pub struct AdminInvite {
+    pub code: InviteCode,
+    /// Unix seconds.
+    pub expires_at: u64,
+    pub fingerprint: Fingerprint,
+}
+
+/// Mints a single-use admin invite that lasts a day into `data_dir`, for
+/// `throcc-server admin-invite`. It works whether the server is running or not, and while
+/// users exist, so an admin who lost their identity can get back in. The data directory
+/// must hold a server that has started once: minting into a fresh directory, say after a
+/// mistyped `--data`, would print an invite and a fingerprint no running server knows.
+pub fn admin_invite(data_dir: &Path) -> Result<AdminInvite> {
+    let database = data_dir.join(DATABASE_FILE);
+    for file in [data_dir.join(identity::KEY_FILE), database.clone()] {
+        if !file.try_exists()? {
+            bail!(
+                "{} is missing; start the server with --data {} once before minting an invite",
+                file.display(),
+                data_dir.display()
+            );
+        }
+    }
+    let fingerprint = ServerIdentity::load_or_create(data_dir)?.fingerprint;
+    let db = Database::open_existing(&database)?;
+    let (code, expires_at) = rooms::mint_invite(&db, None, unix_now())?;
+    Ok(AdminInvite {
+        code,
+        expires_at,
+        fingerprint,
+    })
 }
 
 async fn handle(shared: Arc<Shared>, connection: quinn::Connection, unauthenticated: Pass) {

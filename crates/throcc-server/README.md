@@ -10,18 +10,30 @@ The server: sign-in, rooms and presence, the key relay, and an SFU that forwards
 
 | Module | Holds |
 | --- | --- |
-| `main.rs`, `lib.rs` | Command-line arguments, binding, the accept loop and connection caps |
+| `main.rs`, `lib.rs` | Command-line arguments, binding, the accept loop and connection caps, and `admin_invite` behind `throcc-server admin-invite` |
 | `files.rs` | The data directory and its private files: created at 0700 and 0600, tightened if they are looser, refused if another user owns them |
 | `identity.rs`, `tls.rs` | `server_key`, the certificate derived from it, and the QUIC configuration |
 | `session.rs` | One connection: handshake, control-stream read and write loops |
 | `auth.rs` | Sign-in for known keys, and enrollment with an invite through the PAKE |
 | `rooms.rs` | The `Hub`: rooms, membership, presence, invites, profiles, key relay, request handling |
 | `room_password.rs` | Argon2id hashes of room passwords, which run on the blocking pool, a few at a time, never under the hub lock; and the backoff for wrong guesses |
-| `limits.rs` | Token buckets, per-source connection caps, the new-connection rate and the enrollment limiter |
+| `limits.rs` | Token buckets, per-source connection caps, the new-connection rate and the enrollment limiter, which counts failed runs per source, network and region |
 | `refusals.rs` | Counts of connections refused or failed before sign-in, logged every 10 s instead of one line each |
 | `sfu.rs` | Ingress: the per-connection rate limits, the per-track audio allowance, the ownership check, the forwarding table and keyframe-request merging |
 | `egress.rs` | One task per receiver: audio first, a turn per track, then video in whole units within a 150 ms budget; link stats |
-| `database.rs` | The SQLite schema, its migrations and every query |
+| `database.rs` | The SQLite schema, its migrations and every query. WAL with `synchronous=FULL`, so a commit survives a power loss and a room's epoch never rolls back |
+
+## Admin invites
+
+The server never mints an invite by itself. `throcc-server admin-invite [--data <dir>]` calls `admin_invite` in `lib.rs`, which opens the data directory's `server_key` and database next to a server that may be running, stores an invite without a minter, and prints:
+
+```
+invite       MNR-WFFAV
+expires      2026-11-03 09:39 UTC
+fingerprint  69bc f041 9c8c ad2a 61dc e085 1c32 e666 6dc3 b538 dcdc bf42 840d bcce ed7e fbb4
+```
+
+An invite without a minter enrolls an admin; it works once, lasts a day and has the usual three tries and rate limits. The running server reads invites from the database at each enrollment, so it accepts the invite without a restart. The command refuses a data directory where the server hasn't started yet instead of creating one: a mistyped `--data` would otherwise print an invite and a fingerprint no server knows. It never creates or migrates the database, and refuses one whose schema version differs from its own. Both connections wait up to 5 s for each other's writes, and write transactions take the write lock up front, so neither fails on the other's commit.
 
 ## Media limits
 

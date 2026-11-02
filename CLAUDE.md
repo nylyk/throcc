@@ -13,6 +13,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cargo deny check
 ./scripts/check-server-deps.sh
+throcc-server admin-invite --data <dir>   # single-use admin invite, works while the server runs
 throcc-client --mock --screen <name>   # sample data, no server; names in `ThroccApp::show_sample`
 ./scripts/screens.sh                   # macOS: README screenshots into docs/screens/
 ```

@@ -1190,37 +1190,11 @@ impl Hub {
                 ));
             }
         }
-        let (code, expires) = self
-            .mint_invite(Some(user), now)
-            .map_err(Refusal::internal)?;
+        let (code, expires) = mint_invite(&self.db, Some(user), now).map_err(Refusal::internal)?;
         Ok(Response::Invite {
             code: code.to_string(),
             expires,
         })
-    }
-
-    /// Mints and stores a fresh invite. `minted_by` is `None` only for the bootstrap invite.
-    pub fn mint_invite(
-        &mut self,
-        minted_by: Option<UserId>,
-        now: u64,
-    ) -> anyhow::Result<(InviteCode, u64)> {
-        self.db.purge_expired_invites(now)?;
-        let expires_at = now + INVITE_LIFETIME.as_secs();
-        for _ in 0..MINT_ATTEMPTS {
-            let code = InviteCode::from_random(random());
-            let row = InviteRow {
-                code_id: code.id.clone(),
-                secret: code.secret.clone(),
-                minted_by,
-                expires_at,
-                failures: 0,
-            };
-            if self.db.insert_invite(&row)? {
-                return Ok((code, expires_at));
-            }
-        }
-        anyhow::bail!("no free invite id; too many live invites")
     }
 
     fn list_users(&mut self, user: UserId) -> Outcome {
@@ -1480,6 +1454,31 @@ fn no_such_room() -> Refusal {
 
 fn delete_unused_blobs(db: &Database, now: u64) -> anyhow::Result<usize> {
     db.delete_unused_blobs(now.saturating_sub(UNUSED_BLOB_GRACE.as_secs()))
+}
+
+/// Mints and stores a fresh single-use invite that lasts a day. One without a minter
+/// enrolls an admin; only `throcc-server admin-invite` mints those.
+pub fn mint_invite(
+    db: &Database,
+    minted_by: Option<UserId>,
+    now: u64,
+) -> anyhow::Result<(InviteCode, u64)> {
+    db.purge_expired_invites(now)?;
+    let expires_at = now + INVITE_LIFETIME.as_secs();
+    for _ in 0..MINT_ATTEMPTS {
+        let code = InviteCode::from_random(random());
+        let row = InviteRow {
+            code_id: code.id.clone(),
+            secret: code.secret.clone(),
+            minted_by,
+            expires_at,
+            failures: 0,
+        };
+        if db.insert_invite(&row)? {
+            return Ok((code, expires_at));
+        }
+    }
+    anyhow::bail!("no free invite id; too many live invites")
 }
 
 fn send(session: &Session, event: Event) {

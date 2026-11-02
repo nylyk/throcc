@@ -1,7 +1,10 @@
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 use throcc_proto::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
 use throcc_proto::messages::{PublicKey, ServerProfile, SignedEncKey, User};
 
@@ -48,11 +51,22 @@ fn to_v1(tx: &Transaction) -> rusqlite::Result<()> {
     tx.execute_batch(SCHEMA_V1)
 }
 
+const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
+
+/// How long a write waits for another connection's, such as `throcc-server admin-invite`
+/// minting next to a running server.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn schema_version(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.pragma_query_value(None, "user_version", |r| r.get(0))
+}
+
 fn migrate(conn: &mut Connection) -> Result<()> {
-    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    let current = MIGRATIONS.len() as i64;
-    if version > current {
-        bail!("the database has schema version {version}, newer than this server's {current}");
+    let version = schema_version(conn)?;
+    if version > SCHEMA_VERSION {
+        bail!(
+            "the database has schema version {version}, newer than this server's {SCHEMA_VERSION}"
+        );
     }
     for (from, migration) in MIGRATIONS.iter().enumerate().skip(version as usize) {
         let to = from as i64 + 1;
@@ -115,34 +129,61 @@ impl Database {
     /// Opens the database at `path`, creating it at mode 0600. SQLite gives its journal
     /// files the database's mode. Files another user owns are refused.
     pub fn open(path: &Path) -> Result<Self> {
-        for suffix in ["", "-wal", "-shm", "-journal"] {
-            let mut file = path.as_os_str().to_owned();
-            file.push(suffix);
-            files::check_private_file(Path::new(&file))?;
-        }
+        check_private_files(path)?;
         files::create_private_file(path)?;
         let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
-        Self::init(conn)
+        let mut db = Self::init(conn)?;
+        migrate(&mut db.conn)?;
+        Ok(db)
+    }
+
+    /// Opens the database of a server that may be running, without creating or migrating
+    /// it, so a running server never sees its schema change underneath it. The schema
+    /// must be the one this binary uses.
+    pub fn open_existing(path: &Path) -> Result<Self> {
+        check_private_files(path)?;
+        let flags = OpenFlags::default() - OpenFlags::SQLITE_OPEN_CREATE;
+        let conn = Connection::open_with_flags(path, flags)
+            .with_context(|| format!("opening {}", path.display()))?;
+        let db = Self::init(conn)?;
+        let version = schema_version(&db.conn)?;
+        if version != SCHEMA_VERSION {
+            bail!(
+                "{} has schema version {version}, but this throcc-server uses {SCHEMA_VERSION}; \
+                 start this version of the server on it first",
+                path.display()
+            );
+        }
+        Ok(db)
     }
 
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
-        Self::init(Connection::open_in_memory()?)
+        let mut db = Self::init(Connection::open_in_memory()?)?;
+        migrate(&mut db.conn)?;
+        Ok(db)
     }
 
-    fn init(mut conn: Connection) -> Result<Self> {
+    fn init(conn: Connection) -> Result<Self> {
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
-        migrate(&mut conn)?;
+        // A commit is on disk before it returns, so a power loss never rolls back a room's
+        // epoch or hands out a media id again.
+        conn.pragma_update(None, "synchronous", "FULL")?;
         Ok(Self { conn })
     }
 
+    /// Starts a write transaction holding the write lock from its first statement, so
+    /// another connection's commit can't invalidate what it read.
+    fn write(&mut self) -> rusqlite::Result<Transaction<'_>> {
+        self.conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+    }
+
     /// Reserves `count` consecutive media ids, or returns `None` once they are exhausted.
-    /// Ids are never handed out twice across process restarts. With `synchronous=NORMAL`
-    /// an OS crash or power loss can roll back the last allocations; clients draw a fresh
-    /// sender secret on every placement, so a repeated id never repeats a track key.
+    /// Ids are never handed out twice, across restarts and power loss alike.
     pub fn allocate_media_ids(&mut self, count: u32) -> Result<Option<MediaId>> {
-        let tx = self.conn.transaction()?;
+        let tx = self.write()?;
         let first = next_media_id(&tx)?;
         let next = first + i64::from(count);
         if next - 1 > i64::from(u32::MAX) {
@@ -155,12 +196,6 @@ impl Database {
         )?;
         tx.commit()?;
         Ok(Some(MediaId(first as u32)))
-    }
-
-    pub fn user_count(&self) -> Result<u64> {
-        Ok(self
-            .conn
-            .query_row("SELECT COUNT(*) FROM users", [], |r| r.get::<_, i64>(0))? as u64)
     }
 
     pub fn admin_count(&self) -> Result<u64> {
@@ -200,15 +235,16 @@ impl Database {
     }
 
     /// Consumes the invite and adds its user, in one transaction. Returns `None`, changing
-    /// nothing, when the invite is gone or expired. The bootstrap invite enrolls an admin;
-    /// an existing key keeps its user and role.
+    /// nothing, when the invite is gone or expired. An invite without a minter, from
+    /// `throcc-server admin-invite`, enrolls an admin; an existing key keeps its user and
+    /// role.
     pub fn enroll(
         &mut self,
         pubkey: &PublicKey,
         code_id: &str,
         now: u64,
     ) -> Result<Option<UserRow>> {
-        let tx = self.conn.transaction()?;
+        let tx = self.write()?;
         let minted_by: Option<Option<i64>> = tx
             .query_row(
                 "SELECT minted_by FROM invites WHERE code_id = ?1 AND expires_at > ?2",
@@ -297,7 +333,7 @@ impl Database {
 
     /// Removes these users in one transaction, clearing `invited_by` on anyone they invited.
     pub fn remove_users(&mut self, users: &[UserId]) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.write()?;
         for user in users {
             remove_one(&tx, user.0 as i64)?;
         }
@@ -356,7 +392,7 @@ impl Database {
 
     /// Sets the epochs of several rooms, all or none.
     pub fn set_epochs(&mut self, epochs: &[(RoomId, Epoch)]) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.write()?;
         for (room, epoch) in epochs {
             tx.execute(
                 "UPDATE rooms SET epoch = ?1 WHERE id = ?2",
@@ -410,13 +446,6 @@ impl Database {
     pub fn delete_invite(&self, code_id: &str) -> Result<()> {
         self.conn
             .execute("DELETE FROM invites WHERE code_id = ?1", [code_id])?;
-        Ok(())
-    }
-
-    /// Deletes bootstrap invites, which have no minter.
-    pub fn delete_bootstrap_invites(&self) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM invites WHERE minted_by IS NULL", [])?;
         Ok(())
     }
 
@@ -530,6 +559,15 @@ impl Database {
             )
             .optional()?)
     }
+}
+
+fn check_private_files(database: &Path) -> Result<()> {
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut file = database.as_os_str().to_owned();
+        file.push(suffix);
+        files::check_private_file(Path::new(&file))?;
+    }
+    Ok(())
 }
 
 const USER_SELECT: &str = "SELECT id, pubkey, enc_key, enc_key_sig, enc_key_not_after, name, avatar_hash, role, invited_by, created_at FROM users";
@@ -719,6 +757,39 @@ mod tests {
         for kept in [used, server, fresh] {
             assert!(db.blob(&kept).unwrap().is_some());
         }
+    }
+
+    #[test]
+    fn opening_an_existing_database_neither_creates_nor_migrates_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        assert!(Database::open_existing(&path).is_err());
+        assert!(!path.exists());
+        drop(Database::open(&path).unwrap());
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", 0)
+            .unwrap();
+        assert!(Database::open_existing(&path).is_err());
+    }
+
+    #[test]
+    fn a_second_connection_writes_next_to_the_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let mut server = Database::open(&path).unwrap();
+        let side = Database::open_existing(&path).unwrap();
+        let invite = InviteRow {
+            code_id: "ADM".into(),
+            secret: "S".into(),
+            minted_by: None,
+            expires_at: 1000,
+            failures: 0,
+        };
+        assert!(side.insert_invite(&invite).unwrap());
+        let user = server.enroll(&[1; 32], "ADM", 100).unwrap().unwrap();
+        assert_eq!(user.role, Role::Admin);
+        assert!(server.allocate_media_ids(1).unwrap().is_some());
     }
 
     #[test]
