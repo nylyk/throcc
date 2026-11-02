@@ -255,6 +255,8 @@ struct ShareStarts {
     /// The number of the start still wanted.
     wanted: Option<u64>,
     count: u64,
+    /// What the picker chose for the current share.
+    picked: crate::media::capture::PickedSource,
     done: mpsc::Sender<StartedShare>,
     started: mpsc::Receiver<StartedShare>,
 }
@@ -275,6 +277,7 @@ impl ShareStarts {
         Self {
             wanted: None,
             count: 0,
+            picked: Default::default(),
             done,
             started,
         }
@@ -1442,12 +1445,12 @@ impl Session {
         starts.wanted = Some(starts.count);
         let number = starts.count;
         let done = starts.done.clone();
+        let picked = starts.picked.clone();
         let engine = self.call.engine.clone();
-        let settings = self.keystore.dir().to_owned();
         tokio::spawn(async move {
             let started = tokio::task::spawn_blocking(move || {
                 let config = crate::media::capture::CaptureConfig::for_share(&wanted);
-                let capture = crate::media::capture::start(config, &settings)?;
+                let capture = crate::media::capture::start(config, &picked)?;
                 crate::media::share::ShareSender::start(engine, tracks, wanted, capture)
             })
             .await;
@@ -1498,6 +1501,8 @@ impl Session {
         #[cfg(feature = "ffmpeg")]
         {
             self.share_starts.wanted = None;
+            // A fresh one, not a cleared one, so a start still under way can't fill it in.
+            self.share_starts.picked = Default::default();
             if let Some(sender) = self.sharing.take() {
                 tokio::task::spawn_blocking(move || drop(sender));
                 self.shared.set_picture(self.call.me(), None);

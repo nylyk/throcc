@@ -6,7 +6,7 @@ use throcc_proto::messages::Request;
 use crate::connection::{self, ConnectError};
 use crate::control::{self, Link, LinkError, LoginError, Requester};
 use crate::floors::EpochFloors;
-use crate::keystore::Keystore;
+use crate::keystore::{IdentityMissing, Keystore};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SignInError {
@@ -33,6 +33,11 @@ impl SignInError {
             }
             _ => None,
         }
+    }
+
+    /// Whether the identity the known servers know us by is gone from the keychain.
+    pub fn identity_missing(&self) -> bool {
+        matches!(self, Self::Store(e) if e.is::<IdentityMissing>())
     }
 }
 

@@ -26,6 +26,16 @@ const ENC_KEY_RENEW_BEFORE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// made under a clock running ahead would otherwise stay valid far too long.
 const ENC_KEY_CLOCK_SKEW: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// The keychain has no identity key and there is no file holding one, yet servers are known,
+/// so the identity they know us by is gone. A new one is started only once the user agrees,
+/// with [`Keystore::start_over`].
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "your identity is missing from this computer's keychain, so your servers won't know you; \
+     joining them again needs new invites"
+)]
+pub struct IdentityMissing;
+
 /// The install's identity key and encryption key, plus the pinned servers.
 pub struct Keystore {
     dir: PathBuf,
@@ -43,9 +53,9 @@ impl Keystore {
     }
 
     /// Opens the platform config directory, keeping the identity key in the OS keychain.
-    /// Falls back to a 0600 file only on a platform without a keychain, and refuses to
-    /// start a new identity there while servers are known. An empty keychain takes the
-    /// identity from that file when there is one.
+    /// Falls back to a 0600 file only on a platform without a keychain. An empty keychain
+    /// takes the identity from that file when there is one. Neither starts a new identity
+    /// while servers are known; an empty keychain then fails with [`IdentityMissing`].
     pub fn open_default() -> Result<Self> {
         let dir = config_dir()?;
         fs::create_dir_all(&dir)?;
@@ -57,6 +67,13 @@ impl Keystore {
             other => other.context("reading the identity key from the OS keychain")?,
         };
         Self::assemble(dir, cache_dir()?, identity)
+    }
+
+    /// Forgets every known server, then opens the platform config directory, which starts a
+    /// new identity where none is kept. For after [`IdentityMissing`], once the user agreed.
+    pub fn start_over() -> Result<Self> {
+        KnownServers::load(&config_dir()?)?.forget_all()?;
+        Self::open_default()
     }
 
     /// Opens `dir` with the identity key in a 0600 file and the cache inside it. Used for
@@ -183,14 +200,15 @@ fn keychain_identity(dir: &Path) -> Result<IdentityKey> {
 }
 
 /// The identity to `store` in an empty keychain: the one a run without a keychain kept in
-/// `dir`, or else a new one. The file stays, so the identity also survives the keychain
-/// going away again.
+/// `dir`, or else a new one while no server is known. The file stays, so the identity also
+/// survives the keychain going away again.
 fn first_keychain_identity(
     dir: &Path,
     store: impl FnOnce(&[u8]) -> Result<()>,
 ) -> Result<IdentityKey> {
     let key = match read_if_exists(&dir.join(IDENTITY_FILE))? {
         Some(bytes) => seed_to_key(&Zeroizing::new(bytes))?,
+        None if knows_servers(dir)? => return Err(IdentityMissing.into()),
         None => IdentityKey::generate(),
     };
     store(key.seed().as_slice())?;
@@ -199,14 +217,17 @@ fn first_keychain_identity(
 
 /// The identity key in `dir`. A missing one is created only while no server is known.
 fn fallback_identity(dir: &Path) -> Result<IdentityKey> {
-    let known_servers = KnownServers::load(dir)?;
-    if known_servers.iter().next().is_some() && !dir.join(IDENTITY_FILE).exists() {
+    if knows_servers(dir)? && !dir.join(IDENTITY_FILE).exists() {
         bail!(
             "the OS keychain holding your identity key can't be reached; unlock or start your \
              keyring (Secret Service) and try again"
         );
     }
     file_identity(dir)
+}
+
+fn knows_servers(dir: &Path) -> Result<bool> {
+    Ok(KnownServers::load(dir)?.iter().next().is_some())
 }
 
 fn file_identity(dir: &Path) -> Result<IdentityKey> {
@@ -274,6 +295,42 @@ mod tests {
         let new = first_keychain_identity(empty.path(), |_| Ok(())).unwrap();
         assert_ne!(new.public(), kept.public());
         assert!(!empty.path().join(IDENTITY_FILE).exists());
+    }
+
+    #[test]
+    fn an_empty_keychain_starts_no_identity_while_servers_are_known() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut known = KnownServers::load(dir.path()).unwrap();
+        known
+            .trust("voice.example.net:8476", Fingerprint([3; 32]))
+            .unwrap();
+        let mut stored = false;
+        let opened = first_keychain_identity(dir.path(), |_| {
+            stored = true;
+            Ok(())
+        });
+        let Err(missing) = opened else {
+            panic!("started an identity while servers are known");
+        };
+        let missing = missing.context("reading the identity key from the OS keychain");
+        assert!(crate::account::SignInError::Store(missing).identity_missing());
+        assert!(!stored);
+        assert!(!dir.path().join(IDENTITY_FILE).exists());
+
+        let kept = file_identity(dir.path()).unwrap();
+        let key = first_keychain_identity(dir.path(), |_| Ok(())).unwrap();
+        assert_eq!(key.public(), kept.public());
+
+        fs::remove_file(dir.path().join(IDENTITY_FILE)).unwrap();
+        known.forget_all().unwrap();
+        let mut stored = Vec::new();
+        let new = first_keychain_identity(dir.path(), |seed| {
+            stored = seed.to_vec();
+            Ok(())
+        })
+        .unwrap();
+        assert_ne!(new.public(), kept.public());
+        assert_eq!(stored, new.seed().as_slice());
     }
 
     #[test]

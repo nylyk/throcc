@@ -18,6 +18,7 @@ use super::common::{
     Typeset, caption, card, chip, danger, description, error_box, field_error, mono, primary, rate,
     secondary, section, title,
 };
+use super::page::{field, field_label, segmented};
 use crate::app::{Dialog, ThroccApp, typed_name, typed_password};
 use crate::theme;
 
@@ -44,6 +45,7 @@ pub fn render(app: &mut ThroccApp, dialog: Dialog, cx: &mut Context<ThroccApp>) 
         Dialog::LeaveServer => leave_server(app, cx),
         Dialog::AddServer => add_server(app, cx),
         Dialog::RemoveServer(address) => remove_server(app, address, cx),
+        Dialog::IdentityMissing => identity_missing(cx),
     };
     div()
         .id("scrim")
@@ -122,12 +124,7 @@ fn new_room(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     body("New Room")
         .child(room_name(app, cx))
         .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(section("Password"))
-                .child(Input::new(&app.room_password))
+            field("Password", Input::new(&app.room_password))
                 .children(room_password_error(app, cx))
                 .child(caption("Leave it empty to let anyone join.")),
         )
@@ -166,31 +163,27 @@ fn edit_room(app: &mut ThroccApp, room: RoomId, cx: &mut Context<ThroccApp>) -> 
     body("Edit Room")
         .child(room_name(app, cx))
         .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(section("Password"))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(div().flex_1().child(Input::new(&app.room_password)))
-                        .children(locked.then(|| {
-                            sends(
-                                secondary("unlock-room", "Remove"),
-                                move |_| Command::SetRoomPassword(room, None),
-                                cx,
-                            )
-                        })),
-                )
-                .children(room_password_error(app, cx))
-                .child(caption(if locked {
-                    "Members need the password to join. Type a new one to change it."
-                } else {
-                    "Anyone can join. Type a password to lock the room."
-                })),
+            field(
+                "Password",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().child(Input::new(&app.room_password)))
+                    .children(locked.then(|| {
+                        sends(
+                            secondary("unlock-room", "Remove"),
+                            move |_| Command::SetRoomPassword(room, None),
+                            cx,
+                        )
+                    })),
+            )
+            .children(room_password_error(app, cx))
+            .child(caption(if locked {
+                "Members need the password to join. Type a new one to change it."
+            } else {
+                "Anyone can join. Type a password to lock the room."
+            })),
         )
         .child(
             actions("Cancel", cx).child(
@@ -232,42 +225,6 @@ fn close_button(label: &'static str, cx: &mut Context<ThroccApp>) -> impl IntoEl
     secondary("close-dialog", label).on_click(cx.listener(|app, _, _, cx| app.set_dialog(None, cx)))
 }
 
-/// A row of mutually exclusive choices.
-fn choices<T: Copy + PartialEq + 'static>(
-    id: &'static str,
-    options: impl IntoIterator<Item = (T, String)>,
-    selected: T,
-    cx: &mut Context<ThroccApp>,
-    on_pick: impl Fn(&mut ThroccApp, T, &mut Context<ThroccApp>) + Clone + 'static,
-) -> Div {
-    div()
-        .flex()
-        .gap_1()
-        .p_1()
-        .rounded(theme::RADIUS_BUTTON)
-        .bg(theme::raised())
-        .children(options.into_iter().enumerate().map(|(i, (value, label))| {
-            let on_pick = on_pick.clone();
-            let picked = value == selected;
-            div()
-                .id((id, i))
-                .flex_1()
-                .flex()
-                .justify_center()
-                .py_1()
-                .rounded(theme::RADIUS_ROW)
-                .cursor_pointer()
-                .when(picked, |s| s.bg(theme::surface()))
-                .text_color(if picked {
-                    theme::text()
-                } else {
-                    theme::text_3()
-                })
-                .child(label)
-                .on_click(cx.listener(move |app, _, _, cx| on_pick(app, value, cx)))
-        }))
-}
-
 fn warning_box() -> Div {
     callout(theme::warn_bg(), theme::warn_border(), theme::warn_text())
 }
@@ -301,16 +258,16 @@ fn share(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let choice = app.share_choice;
     let audio = app.share_audio;
     let offered = choice.bitrates();
-    let resolutions = choices(
+    let resolutions = segmented(
         "resolution",
-        Resolution::ALL.map(|r| (r, r.label().to_owned())),
+        Resolution::ALL.map(|r| (r, r.label())),
         choice.resolution,
         cx,
         |app, resolution, cx| {
             app.set_share_choice(app.share_choice.with_resolution(resolution), cx)
         },
     );
-    let frame_rates = choices(
+    let frame_rates = segmented(
         "fps",
         FRAME_RATES.map(|fps| (fps, format!("{fps} fps"))),
         choice.fps,
@@ -326,7 +283,7 @@ fn share(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .flex()
                 .items_center()
                 .justify_between()
-                .child(section("Bitrate"))
+                .child(field_label("Bitrate"))
                 .child(mono(mbps(choice.kbps)).font_weight(FontWeight::SEMIBOLD)),
         )
         .child(Slider::new(&app.bitrate))
@@ -341,10 +298,8 @@ fn share(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .child(caption(mbps(choice.max_kbps())).font_family(theme::mono_font())),
         );
     body("Share Your Screen")
-        .child(section("Resolution"))
-        .child(resolutions)
-        .child(section("Frame rate"))
-        .child(frame_rates)
+        .child(field("Resolution", resolutions))
+        .child(field("Frame rate", frame_rates))
         .child(bitrate)
         .child(
             Switch::new("share-audio")
@@ -500,7 +455,7 @@ fn verify(
     } else if verified {
         chip("Verified", theme::ok_bg(), theme::ok_text())
     } else {
-        chip("Not verified", theme::raised(), theme::text_2())
+        chip("Not verified", theme::raised(), theme::text_3())
     }));
     let key = |label: &'static str, key: String| {
         div()
@@ -607,22 +562,16 @@ fn remove(user: UserId, name: &str, cascade: bool, cx: &mut Context<ThroccApp>) 
 
 fn add_server(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     body("Add Server")
+        .child(field(
+            "Address",
+            Input::new(&app.address).font_family(theme::mono_font()),
+        ))
         .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(section("Address"))
-                .child(Input::new(&app.address).font_family(theme::mono_font())),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(section("Invite code"))
-                .child(Input::new(&app.code).font_family(theme::mono_font()))
-                .child(caption("The code also proves you reached the real server. Leave it empty for a server you’ve joined before.")),
+            field(
+                "Invite code",
+                Input::new(&app.code).font_family(theme::mono_font()),
+            )
+            .child(caption("The code also proves you reached the real server. Leave it empty for a server you’ve joined before.")),
         )
         .children(app.join_error.clone().map(error_box))
         .child(
@@ -667,6 +616,23 @@ fn remove_server(app: &ThroccApp, address: String, cx: &mut Context<ThroccApp>) 
                 danger("confirm-remove-server", "Remove").on_click(cx.listener(
                     move |app, _, window, cx| app.remove_server(&address, window, cx),
                 )),
+            ),
+        )
+        .into_any_element()
+}
+
+fn identity_missing(cx: &mut Context<ThroccApp>) -> AnyElement {
+    body("Your identity is missing")
+        .child(description(
+            "Your identity is missing from this computer’s keychain, so your servers won’t know it’s you. If you can restore the keychain from a backup, do that and try again.",
+        ))
+        .child(description(
+            "Starting over makes a new identity and takes every server off your list. Joining your servers again needs new invites, and anyone who verified you needs to verify you again.",
+        ))
+        .child(
+            actions("Cancel", cx).child(
+                danger("start-over", "Start Over")
+                    .on_click(cx.listener(|app, _, _, cx| app.start_over(cx))),
             ),
         )
         .into_any_element()

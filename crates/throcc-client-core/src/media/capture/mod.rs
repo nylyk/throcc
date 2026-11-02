@@ -21,7 +21,8 @@ pub use macos::PixelBuffer;
 #[cfg(windows)]
 mod windows;
 
-use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use throcc_proto::frame::VIDEO_CLOCK_HZ;
@@ -138,27 +139,39 @@ pub trait Capture: Send {
     }
 }
 
-/// Asks the person what to share with the system's own picker, then starts capturing it.
-/// Blocks until the picker closes. `settings` is the directory of the settings file, where
-/// the Linux portal's token for sharing the same thing again is kept.
-pub fn start(config: CaptureConfig, settings: &Path) -> Result<Box<dyn Capture>, CaptureError> {
+/// What the system's picker chose for one share, so a capture started again within that
+/// share takes the same thing without asking. Only the Linux portal hands out such a choice,
+/// as a restore token. It stays in memory, never on disk, and each new share starts from an
+/// empty one, so every share after a stop asks again.
+#[derive(Clone, Default)]
+pub struct PickedSource {
+    #[cfg(target_os = "linux")]
+    token: Arc<Mutex<Option<String>>>,
+}
+
+/// Asks the person what to share with the system's own picker, unless `picked` holds what
+/// they chose already, then starts capturing it. Blocks until the picker closes.
+pub fn start(
+    config: CaptureConfig,
+    picked: &PickedSource,
+) -> Result<Box<dyn Capture>, CaptureError> {
     #[cfg(target_os = "macos")]
     {
-        let _ = settings;
+        let _ = picked;
         macos::start(config).map(|c| Box::new(c) as Box<dyn Capture>)
     }
     #[cfg(windows)]
     {
-        let _ = settings;
+        let _ = picked;
         windows::start(config).map(|c| Box::new(c) as Box<dyn Capture>)
     }
     #[cfg(target_os = "linux")]
     {
-        linux::start(config, settings).map(|c| Box::new(c) as Box<dyn Capture>)
+        linux::start(config, picked).map(|c| Box::new(c) as Box<dyn Capture>)
     }
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
-        let _ = (config, settings);
+        let _ = (config, picked);
         Err(CaptureError::Unsupported)
     }
 }

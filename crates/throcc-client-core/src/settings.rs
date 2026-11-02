@@ -18,8 +18,6 @@ pub struct Settings {
     /// The gain on cues, where 1 plays them as recorded.
     pub cue_volume: f32,
     pub profile_name: Option<String>,
-    /// The desktop portal's token for sharing the same screen again without asking.
-    pub screencast_restore_token: Option<String>,
 }
 
 impl Default for Settings {
@@ -29,7 +27,6 @@ impl Default for Settings {
             palette: None,
             cue_volume: 1.0,
             profile_name: None,
-            screencast_restore_token: None,
         }
     }
 }

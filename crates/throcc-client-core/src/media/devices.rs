@@ -93,18 +93,31 @@ fn pick<D: Iterator<Item = Device>, E: std::fmt::Display>(
 /// The sample formats the callbacks take, best first.
 const HANDLED: [SampleFormat; 3] = [SampleFormat::F32, SampleFormat::I16, SampleFormat::I32];
 
-/// The configs to open a device with, best first: one at [`SAMPLE_RATE`], so no
-/// resampling is needed, in a sample format the callbacks take, preferring the default's
-/// channel count and then F32; then the default config as it is.
+/// The rate to open a device whose default config is `default` at. CoreAudio sets a
+/// device's rate for every app to the one a stream opens at, so on macOS devices open at the
+/// rate they run at and the audio thread resamples. Elsewhere they open at [`SAMPLE_RATE`]
+/// where they can, so nothing needs resampling.
+fn open_rate(default: &SupportedStreamConfig) -> u32 {
+    if cfg!(target_os = "macos") {
+        default.sample_rate()
+    } else {
+        SAMPLE_RATE
+    }
+}
+
+/// The configs to open a device with, best first: one at `rate` in a sample format the
+/// callbacks take, preferring the default's channel count and then F32; then the default
+/// config as it is.
 fn configs<E>(
     default: SupportedStreamConfig,
     supported: Result<impl Iterator<Item = SupportedStreamConfigRange>, E>,
+    rate: u32,
 ) -> Vec<SupportedStreamConfig> {
     let rank = |format: SampleFormat| HANDLED.iter().position(|handled| *handled == format);
-    let at_sample_rate = supported
+    let at_rate = supported
         .into_iter()
         .flatten()
-        .filter_map(|range| range.try_with_sample_rate(SAMPLE_RATE))
+        .filter_map(|range| range.try_with_sample_rate(rate))
         .filter_map(|config| {
             Some((
                 config.channels() != default.channels(),
@@ -114,7 +127,7 @@ fn configs<E>(
         })
         .min_by_key(|(other_channels, rank, _)| (*other_channels, *rank))
         .map(|(.., config)| config);
-    let mut configs = Vec::from_iter(at_sample_rate);
+    let mut configs = Vec::from_iter(at_rate);
     if !configs.contains(&default) {
         configs.push(default);
     }
@@ -156,9 +169,11 @@ pub fn open(input: Option<&str>, output: Option<&str>) -> Result<Devices, Device
     )?;
     let counters = Arc::new(DeviceCounters::default());
 
+    let input_default = input_device.default_input_config().map_err(cpal_error)?;
     let input_configs = configs(
-        input_device.default_input_config().map_err(cpal_error)?,
+        input_default,
         input_device.supported_input_configs(),
+        open_rate(&input_default),
     );
     let (input_stream, input_rate, capture) = open_first(input_configs, |config| {
         let rate = config.sample_rate();
@@ -175,9 +190,11 @@ pub fn open(input: Option<&str>, output: Option<&str>) -> Result<Devices, Device
         Ok((stream, rate, capture))
     })?;
 
+    let output_default = output_device.default_output_config().map_err(cpal_error)?;
     let output_configs = configs(
-        output_device.default_output_config().map_err(cpal_error)?,
+        output_default,
         output_device.supported_output_configs(),
+        open_rate(&output_default),
     );
     let (output_stream, output_rate, playback) = open_first(output_configs, |config| {
         let rate = config.sample_rate();
@@ -307,7 +324,7 @@ mod tests {
         default: SupportedStreamConfig,
         ranges: &[SupportedStreamConfigRange],
     ) -> Vec<SupportedStreamConfig> {
-        configs::<()>(default, Ok(ranges.iter().copied()))
+        configs::<()>(default, Ok(ranges.iter().copied()), SAMPLE_RATE)
     }
 
     #[test]
@@ -341,6 +358,37 @@ mod tests {
             [default]
         );
         let unknown: Result<std::iter::Empty<_>, ()> = Err(());
-        assert_eq!(configs(default, unknown), [default]);
+        assert_eq!(configs(default, unknown, SAMPLE_RATE), [default]);
+    }
+
+    #[test]
+    fn a_device_kept_at_its_rate_opens_at_that_rate_only() {
+        use SampleFormat::{F32, I16};
+        let default = config(2, 44_100, I16);
+        let ranges = [
+            range(2, (8_000, 192_000), I16),
+            range(2, (8_000, 192_000), F32),
+            range(1, (48_000, 48_000), F32),
+        ];
+        let kept = configs::<()>(default, Ok(ranges.iter().copied()), 44_100);
+        assert_eq!(kept, [config(2, 44_100, F32), default]);
+        assert!(kept.iter().all(|c| c.sample_rate() == 44_100));
+
+        let only_48k = [range(2, (48_000, 48_000), F32)];
+        assert_eq!(
+            configs::<()>(default, Ok(only_48k.iter().copied()), 44_100),
+            [default]
+        );
+    }
+
+    #[test]
+    fn only_macos_keeps_the_device_rate() {
+        let default = config(2, 44_100, SampleFormat::F32);
+        let expected = if cfg!(target_os = "macos") {
+            44_100
+        } else {
+            SAMPLE_RATE
+        };
+        assert_eq!(open_rate(&default), expected);
     }
 }

@@ -51,6 +51,13 @@ impl KnownServers {
         })
     }
 
+    /// Takes every server off the list, as when starting over with a new identity they don't
+    /// know. What is kept for their keys stays.
+    pub fn forget_all(&mut self) -> Result<()> {
+        self.pins.clear();
+        Servers::update(&self.dir, |s| s.known.clear())
+    }
+
     /// Takes `address` off the list after the user left that server. What is kept for its
     /// key goes too unless another address still uses it.
     pub fn leave(&mut self, address: &str) -> Result<()> {

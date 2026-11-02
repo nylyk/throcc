@@ -139,7 +139,7 @@ fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                             .child(div().flex_1().child(person.name.clone()))
                             .child(match trust(&state, user) {
                                 Trust::KeyChanged => {
-                                    chip("Key changed", theme::warn_bg(), theme::warn_text())
+                                    chip("Key changed", theme::danger_bg(), theme::danger_text())
                                 }
                                 Trust::Verified => {
                                     chip("Verified", theme::ok_bg(), theme::ok_text())

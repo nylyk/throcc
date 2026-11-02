@@ -1,7 +1,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Context, Div, ElementId, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Pixels, Stateful, StatefulInteractiveElement, Styled, div, px,
+    ParentElement, Pixels, SharedString, Stateful, StatefulInteractiveElement, Styled, div, px,
 };
 use gpui_component::Disableable;
 use gpui_component::button::Button;
@@ -201,13 +201,16 @@ pub fn field(label: &str, control: impl IntoElement) -> Div {
         .flex()
         .flex_col()
         .gap_1p5()
-        .child(
-            div()
-                .typeset(theme::CALLOUT)
-                .text_color(theme::text_2())
-                .child(label.to_owned()),
-        )
+        .child(field_label(label))
         .child(control)
+}
+
+/// A field's label, for one laid out by hand.
+pub fn field_label(label: &str) -> Div {
+    div()
+        .typeset(theme::CALLOUT)
+        .text_color(theme::text_2())
+        .child(label.to_owned())
 }
 
 /// A labelled control, the label to its left.
@@ -228,10 +231,10 @@ pub fn row(label: &str, control: impl IntoElement) -> Div {
         .child(div().flex_1().min_w(px(200.)).child(control))
 }
 
-/// A row of mutually exclusive choices.
+/// A row of mutually exclusive choices, the picked one raised.
 pub fn segmented<T: Copy + PartialEq + 'static>(
     id: impl Into<ElementId>,
-    options: impl IntoIterator<Item = (T, &'static str)>,
+    options: impl IntoIterator<Item = (T, impl Into<SharedString>)>,
     selected: T,
     cx: &mut Context<ThroccApp>,
     on_pick: impl Fn(&mut ThroccApp, T, &mut Context<ThroccApp>) + Clone + 'static,
@@ -257,7 +260,7 @@ pub fn segmented<T: Copy + PartialEq + 'static>(
                 } else {
                     theme::text_3()
                 })
-                .child(label)
+                .child(label.into())
                 .on_click(cx.listener(move |app, _, _, cx| {
                     on_pick(app, value, cx);
                     cx.notify();

@@ -228,6 +228,8 @@ pub enum Dialog {
     DeleteRoom(RoomId),
     /// Takes the server at this address off our list, keeping our membership.
     RemoveServer(String),
+    /// The keychain lost the identity our servers know us by; offers to start over.
+    IdentityMissing,
 }
 
 /// The widest the sidebar may be in `window` and still leave the room its minimum width.
@@ -1449,6 +1451,9 @@ impl ThroccApp {
                                         actual,
                                     });
                                 }
+                                None if e.identity_missing() => {
+                                    app.dialog = Some(Dialog::IdentityMissing);
+                                }
                                 None => app.join_error = Some(views::join::explain(&e, &address)),
                             }
                         }
@@ -1478,6 +1483,32 @@ impl ThroccApp {
             self.set_dialog(None, cx);
             self.join(window, cx);
         }
+    }
+
+    /// Forgets every known server and starts a new identity, as the human chose to after the
+    /// keychain lost the old one.
+    pub fn start_over(&mut self, cx: &mut Context<Self>) {
+        if self.mock {
+            self.known_servers.clear();
+            self.set_dialog(None, cx);
+            return;
+        }
+        let starting = cx
+            .background_executor()
+            .spawn(async { Keystore::start_over().map(drop) });
+        cx.spawn(async move |this, cx| {
+            let started = starting.await;
+            this.update(cx, |app, cx| {
+                app.reload_known_servers();
+                app.dialog = None;
+                if let Err(e) = started {
+                    app.join_error = Some(format!("Couldn’t start over: {e:#}"));
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Disconnects from the server, keeping our membership.
@@ -1548,7 +1579,7 @@ impl ThroccApp {
     /// lost, personmenu, addserver, removeserver, room, alone, emptylobby, focus, fullscreen,
     /// popout, share, connection, verify, keychange, pinmismatch, settings, appearance,
     /// servers, newroom, editroom, roompassword, deleteroom, profile, server, keys, members,
-    /// invites, removeuser or leaveserver. Any other name leaves the lobby.
+    /// invites, removeuser, leaveserver or identitymissing. Any other name leaves the lobby.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         let room = RoomId(1);
         let joined = |app: &mut Self| {
@@ -1683,6 +1714,10 @@ impl ThroccApp {
                 });
             }
             "leaveserver" => self.dialog = Some(Dialog::LeaveServer),
+            "identitymissing" => {
+                offline(self);
+                self.dialog = Some(Dialog::IdentityMissing);
+            }
             _ => {}
         }
         if let Some(client) = &self.client {
