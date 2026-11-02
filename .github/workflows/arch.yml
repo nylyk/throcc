@@ -9,30 +9,54 @@ on:
       - '*.md'
   workflow_dispatch:
 
-concurrency:
-  group: ${{ github.workflow }}
-  cancel-in-progress: true
-
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  arch:
+  build:
     runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-build-${{ github.ref }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
       - run: ./scripts/ci-run.sh tests/arch/run.sh out
         shell: bash
+      - run: sha256sum throcc-x86_64.pkg.tar.zst >throcc-x86_64.pkg.tar.zst.sha256
+        working-directory: out
+      - uses: actions/upload-artifact@v7
+        with:
+          name: arch-package
+          path: out/throcc-x86_64.pkg.tar.zst*
+          retention-days: 1
+
+  # Only main publishes: a dispatch on another branch builds and checks, nothing more.
+  publish:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # Never cancelled halfway, which could leave no nightly release at all.
+    concurrency:
+      group: ${{ github.workflow }}-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: arch-package
+          path: out
       - name: Publish to the nightly release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          notes="Built from $GITHUB_SHA. Install on Arch: curl -LO https://github.com/$GITHUB_REPOSITORY/releases/download/nightly/throcc-x86_64.pkg.tar.zst && sudo pacman -U throcc-x86_64.pkg.tar.zst"
-          if gh release view nightly >/dev/null 2>&1; then
-            gh release edit nightly --notes "$notes"
-          else
-            gh release create nightly --prerelease --title "Nightly" --target "$GITHUB_SHA" --notes "$notes"
-          fi
-          gh release upload nightly out/throcc-x86_64.pkg.tar.zst --clobber
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/nightly"
+          notes="Built from $GITHUB_SHA. Install on Arch: curl -LO $base/throcc-x86_64.pkg.tar.zst -LO $base/throcc-x86_64.pkg.tar.zst.sha256 && sha256sum -c throcc-x86_64.pkg.tar.zst.sha256 && sudo pacman -U throcc-x86_64.pkg.tar.zst"
+          # Recreated so the nightly tag and its source archives point at the commit built.
+          gh release delete nightly --cleanup-tag --yes || true
+          gh release create nightly --prerelease --title "Nightly" --target "$GITHUB_SHA" --notes "$notes" \
+            out/throcc-x86_64.pkg.tar.zst out/throcc-x86_64.pkg.tar.zst.sha256

@@ -6,8 +6,8 @@ COPY . .
 # Built apart: one build would unify features and give the server throcc-crypto's media feature.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p throcc-server \
-    && cargo build --release -p throcc-cli \
+    cargo build --locked --release -p throcc-server \
+    && cargo build --locked --release -p throcc-cli \
     && cp target/release/throcc-server target/release/throcc-cli /usr/local/bin/
 
 FROM debian:bookworm-slim

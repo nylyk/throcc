@@ -12,7 +12,7 @@ COPY --from=planner /src/recipe.json recipe.json
 COPY third_party third_party
 RUN cargo chef cook --release --recipe-path recipe.json -p throcc-server
 COPY . .
-RUN cargo build --release -p throcc-server \
+RUN cargo build --release --locked -p throcc-server \
     && mkdir -p /data \
     && chown 65532:65532 /data \
     && chmod 0700 /data

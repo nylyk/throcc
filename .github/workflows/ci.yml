@@ -8,6 +8,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -16,6 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - run: rustup toolchain install
       - run: cargo fmt --all --check
       - run: ./scripts/check-server-deps.sh
@@ -36,6 +41,8 @@ jobs:
       FFMPEG_PKG_CONFIG_PATH: ${{ matrix.ffmpeg_pkg_config }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - if: runner.os == 'macOS'
         run: brew update && brew install ffmpeg@8
       - if: runner.os == 'Linux'
@@ -47,9 +54,9 @@ jobs:
             libegl-dev libssl-dev libzstd-dev pkg-config mesa-vulkan-drivers
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - run: ./scripts/ci-run.sh cargo clippy --workspace --all-targets ${{ matrix.features }} -- -D warnings
+      - run: ./scripts/ci-run.sh cargo clippy --locked --workspace --all-targets ${{ matrix.features }} -- -D warnings
         shell: bash
-      - run: ./scripts/ci-run.sh cargo test --workspace --no-fail-fast ${{ matrix.features }}
+      - run: ./scripts/ci-run.sh cargo test --locked --workspace --no-fail-fast ${{ matrix.features }}
         shell: bash
       # libtest passes when a filter matches nothing, so check the test ran.
       - run: |
@@ -68,6 +75,8 @@ jobs:
       LD_LIBRARY_PATH: ${{ github.workspace }}/deps/ffmpeg-lgpl/lib
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
@@ -104,6 +113,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
@@ -125,5 +136,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - run: ./scripts/ci-run.sh tests/netem/run.sh
         shell: bash

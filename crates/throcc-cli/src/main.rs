@@ -1,7 +1,10 @@
 mod synthetic;
 mod unit;
 
+use std::borrow::Cow;
+use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -27,7 +30,14 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Joins a server with an invite code and pins its key.
-    Enroll { address: String, code: String },
+    ///
+    /// Without CODE the code comes from THROCC_INVITE, or else from stdin; `-` reads stdin.
+    Enroll {
+        address: String,
+        /// The invite code. Given here, other local users can read it (`ps`, /proc) and it
+        /// lands in shell history; prefer THROCC_INVITE or stdin.
+        code: Option<String>,
+    },
     /// Connects and reads commands from stdin, printing events as they arrive.
     Connect { address: String },
     /// Lists rooms and who is in them.
@@ -102,13 +112,22 @@ enum Command {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .init();
-    let cli = Cli::parse();
+    match run(Cli::parse()).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: {}", shown(&format!("{e:#}")));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run(cli: Cli) -> Result<()> {
     let mut keystore = match (&cli.command, &cli.profile) {
         (Command::Devices, _) => {
             let (inputs, outputs) = throcc_client_core::media::devices::list();
@@ -122,7 +141,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Enroll { address, code } => {
-            let code: InviteCode = code.parse()?;
+            let code = invite_code(code).await?;
             let link = account::enroll(&mut keystore, &address, &code).await?;
             println!(
                 "enrolled as user {} ({:?})",
@@ -252,15 +271,42 @@ fn voice_call(
                     .collect();
                 if now != speaking {
                     let names: Vec<&str> = now.iter().map(String::as_str).collect();
-                    println!("speaking: {}", names.join(", "));
+                    println!("speaking: {}", shown(&names.join(", ")));
                     speaking = now;
                 }
             }
-            Ok(ClientEvent::Notice(notice)) => println!("* {notice}"),
+            Ok(ClientEvent::Notice(notice)) => println!("* {}", shown(&notice)),
             Ok(ClientEvent::Kicked(reason)) => bail!("disconnected: {reason}"),
             Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
             Err(_) => return Ok(()),
         }
+    }
+}
+
+/// The invite code from the argument, else THROCC_INVITE, else a line of stdin.
+async fn invite_code(arg: Option<String>) -> Result<InviteCode> {
+    let code = match given_code(arg, std::env::var("THROCC_INVITE").ok()) {
+        Some(code) => code,
+        None => {
+            if std::io::stdin().is_terminal() {
+                eprint!("invite code: ");
+            }
+            let mut line = String::new();
+            BufReader::new(tokio::io::stdin())
+                .read_line(&mut line)
+                .await?;
+            line
+        }
+    };
+    Ok(code.parse()?)
+}
+
+/// The code given without reading stdin: the argument unless it is `-`, else the environment.
+fn given_code(arg: Option<String>, env: Option<String>) -> Option<String> {
+    match arg {
+        Some(arg) if arg == "-" => None,
+        Some(arg) => Some(arg),
+        None => env,
     }
 }
 
@@ -311,7 +357,7 @@ async fn read_commands(link: &mut Link) -> Result<()> {
                     return Ok(());
                 }
                 if !line.is_empty() && let Err(e) = run_command(&link.requester, &link.welcome, line).await {
-                    println!("error: {e:#}");
+                    println!("error: {}", shown(&format!("{e:#}")));
                 }
             }
             event = link.events.recv() => {
@@ -367,7 +413,7 @@ async fn run_command(requester: &Requester, welcome: &Welcome, line: &str) -> Re
             None => println!("in the lobby"),
         },
         Response::Invite { code, expires } => {
-            println!("invite {code} (expires at unix time {expires})")
+            println!("invite {} (expires at unix time {expires})", shown(&code))
         }
         Response::Users(users) => {
             for user in users {
@@ -375,7 +421,7 @@ async fn run_command(requester: &Requester, welcome: &Welcome, line: &str) -> Re
                 println!(
                     "{:>4} {:<20} {:<8} invited by {invited_by}",
                     user.id.0,
-                    user.name,
+                    shown(&user.name),
                     format!("{:?}", user.role)
                 );
             }
@@ -416,7 +462,12 @@ fn print_rooms(rooms: &[Room], presence: &[Presence]) {
             .filter(|p| p.room == Some(room.id))
             .map(|p| p.name.as_str())
             .collect();
-        println!("{:>4} {:<20} {}", room.id.0, room.name, people.join(", "));
+        println!(
+            "{:>4} {:<20} {}",
+            room.id.0,
+            shown(&room.name),
+            shown(&people.join(", "))
+        );
     }
 }
 
@@ -450,15 +501,19 @@ fn print_event(event: &Event) {
     match event {
         Event::PresenceChanged(p) => println!(
             "* {} is in room {} (mic {}, deafened {}, sharing {})",
-            p.name,
+            shown(&p.name),
             p.room.map_or(0, |r| r.0),
             p.mic,
             p.deafened,
             p.sharing
         ),
         Event::PresenceEnded(user) => println!("* user {} left", user.0),
-        Event::RoomCreated(room) => println!("* room {} created: {}", room.id.0, room.name),
-        Event::RoomRenamed { room, name } => println!("* room {} renamed to {name}", room.0),
+        Event::RoomCreated(room) => {
+            println!("* room {} created: {}", room.id.0, shown(&room.name))
+        }
+        Event::RoomRenamed { room, name } => {
+            println!("* room {} renamed to {}", room.0, shown(name))
+        }
         Event::RoomDeleted(room) => println!("* room {} deleted", room.0),
         Event::RoomLocked { room, locked } => println!("* room {} locked: {locked}", room.0),
         Event::RoomState { room, epoch, peers } => {
@@ -470,11 +525,37 @@ fn print_event(event: &Event) {
             )
         }
         Event::InviteBurned { code_id } => {
-            println!("* invite {code_id}-… was burned after 3 wrong tries")
+            println!(
+                "* invite {}-… was burned after 3 wrong tries",
+                shown(code_id)
+            )
         }
-        Event::Kicked { reason } => println!("* disconnected: {reason}"),
+        Event::Kicked { reason } => println!("* disconnected: {}", shown(reason)),
         other => println!("* {other:?}"),
     }
+}
+
+/// `text` from the server, made safe to print: control characters (escape sequences
+/// included), bidi overrides and line separators become `\u{..}`, so a server can neither
+/// drive the terminal nor fake or hide lines of output.
+fn shown(text: &str) -> Cow<'_, str> {
+    if !text.chars().any(moves_terminal) {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if moves_terminal(c) {
+            out.extend(c.escape_unicode());
+        } else {
+            out.push(c);
+        }
+    }
+    Cow::Owned(out)
+}
+
+fn moves_terminal(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{200E}' | '\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
 #[cfg(test)]
@@ -538,6 +619,27 @@ mod tests {
 
         follow(&mut welcome, &Event::RoomDeleted(RoomId(7)));
         assert!(find_room(room_names(&welcome.rooms), "7").is_err());
+    }
+
+    #[test]
+    fn server_text_cannot_reach_the_terminal() {
+        assert!(matches!(shown("Room 1 — ok"), Cow::Borrowed("Room 1 — ok")));
+        assert_eq!(shown("\x1b]52;c;cm0=\x07x"), "\\u{1b}]52;c;cm0=\\u{7}x");
+        assert_eq!(shown("a\u{9b}2Jb"), "a\\u{9b}2Jb");
+        assert_eq!(shown("a\nb\rc\u{7f}"), "a\\u{a}b\\u{d}c\\u{7f}");
+        assert_eq!(shown("x\u{202E}y\u{2028}z"), "x\\u{202e}y\\u{2028}z");
+    }
+
+    #[test]
+    fn invite_code_prefers_the_argument_then_the_environment() {
+        let env = || Some("ENV-CODE".to_owned());
+        assert_eq!(
+            given_code(Some("ARG".into()), env()).as_deref(),
+            Some("ARG")
+        );
+        assert_eq!(given_code(None, env()).as_deref(), Some("ENV-CODE"));
+        assert_eq!(given_code(Some("-".into()), env()), None);
+        assert_eq!(given_code(None, None), None);
     }
 
     #[test]

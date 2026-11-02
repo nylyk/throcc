@@ -18,6 +18,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -26,6 +29,8 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - run: brew install dav1d libvpx pkgconf
       - id: dav1d
         run: echo "version=$(brew list --versions dav1d libvpx | tr ' \n' '--')" >>"$GITHUB_OUTPUT"
@@ -47,12 +52,14 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: ilammy/msvc-dev-cmd@v1
       - id: deps
         uses: actions/cache/restore@v6
         with:
           path: deps
-          key: windows-deps-nv13.0.19.0-${{ hashFiles('packaging/ffmpeg/build.sh', 'packaging/ffmpeg/patches/*', 'packaging/ffmpeg/bindings.sh', 'packaging/windows/build-deps.sh') }}
+          key: windows-deps-nv13.0.19.0-${{ hashFiles('packaging/ffmpeg/build.sh', 'packaging/ffmpeg/patches/*', 'packaging/ffmpeg/bindings.sh', 'packaging/windows/build-deps.sh', 'packaging/windows/requirements.txt') }}
       - if: steps.deps.outputs.cache-hit != 'true'
         run: choco install nasm --no-progress -y
       - if: steps.deps.outputs.cache-hit != 'true'
@@ -73,6 +80,7 @@ jobs:
         run: |
           rm -f /usr/bin/link.exe
           git clone --depth 1 --branch n13.0.19.0 https://github.com/FFmpeg/nv-codec-headers target/nv-codec-headers
+          test "$(git -C target/nv-codec-headers rev-parse HEAD)" = e844e5b26f46bb77479f063029595293aa8f812d
           make -C target/nv-codec-headers install PREFIX="$(cygpath -m "$PWD/deps")"
           export PKG_CONFIG_PATH="$(cygpath -m "$PWD/deps/lib/pkgconfig")"
           ./scripts/ci-run.sh packaging/ffmpeg/build.sh deps/ffmpeg-lgpl
