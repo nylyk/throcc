@@ -34,7 +34,6 @@ libc = "0.2.191"
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSButton", "NSControl", "NSResponder", "NSView", "NSWindow"] }
 raw-window-handle = "0.6.2"
-hex = "0.4.3"
 global-hotkey = "0.8.0"
 gpui = { package = "gpui-pre", version = "=0.3.10" }
 gpui-component = "=0.8.1"

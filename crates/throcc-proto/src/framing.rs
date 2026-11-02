@@ -2,7 +2,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 pub const MAX_FRAME_BYTES: usize = 1 << 20;
-pub const HEADER_BYTES: usize = 4;
+pub const LEN_BYTES: usize = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FrameError {
@@ -16,17 +16,19 @@ pub enum FrameError {
 
 /// A big-endian `u32` length followed by the postcard body.
 pub fn encode<T: Serialize>(message: &T) -> Result<Vec<u8>, FrameError> {
-    let mut out = postcard::to_extend(message, vec![0u8; HEADER_BYTES])?;
-    let len = out.len() - HEADER_BYTES;
+    let mut buf = Vec::with_capacity(LEN_BYTES + 256);
+    buf.extend_from_slice(&[0; LEN_BYTES]);
+    let mut out = postcard::to_extend(message, buf)?;
+    let len = out.len() - LEN_BYTES;
     if len > MAX_FRAME_BYTES {
         return Err(FrameError::TooLarge(len));
     }
-    out[..HEADER_BYTES].copy_from_slice(&(len as u32).to_be_bytes());
+    out[..LEN_BYTES].copy_from_slice(&(len as u32).to_be_bytes());
     Ok(out)
 }
 
 /// Reads a frame header. Callers allocate the body only after this succeeds.
-pub fn body_len(header: [u8; HEADER_BYTES]) -> Result<usize, FrameError> {
+pub fn body_len(header: [u8; LEN_BYTES]) -> Result<usize, FrameError> {
     let len = u32::from_be_bytes(header) as usize;
     if len > MAX_FRAME_BYTES {
         return Err(FrameError::TooLarge(len));
@@ -47,7 +49,7 @@ pub type BodyAndRest<'a> = (&'a [u8], &'a [u8]);
 /// Splits one complete frame off the front of `buf`, returning its body and the remainder.
 /// Returns `None` while the frame is incomplete.
 pub fn split(buf: &[u8]) -> Result<Option<BodyAndRest<'_>>, FrameError> {
-    let Some((header, rest)) = buf.split_first_chunk::<HEADER_BYTES>() else {
+    let Some((header, rest)) = buf.split_first_chunk::<LEN_BYTES>() else {
         return Ok(None);
     };
     let len = body_len(*header)?;
@@ -105,7 +107,7 @@ mod tests {
         })
         .unwrap();
         frame.push(0);
-        let body = &frame[HEADER_BYTES..];
+        let body = &frame[LEN_BYTES..];
         assert!(matches!(
             decode::<ClientMessage>(body),
             Err(FrameError::Trailing(1))

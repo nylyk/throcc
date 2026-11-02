@@ -14,18 +14,18 @@ impl Fingerprint {
 
     /// First 8 hex digits, as two groups of 4.
     pub fn short(&self) -> String {
-        let full = self.to_string();
-        full[..9].to_owned()
+        let [a, b, c, d, ..] = self.0;
+        format!("{a:02x}{b:02x} {c:02x}{d:02x}")
     }
 }
 
 impl fmt::Display for Fingerprint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, pair) in self.0.chunks(2).enumerate() {
+        for (i, [high, low]) in self.0.as_chunks::<2>().0.iter().enumerate() {
             if i > 0 {
                 f.write_str(" ")?;
             }
-            write!(f, "{:02x}{:02x}", pair[0], pair[1])?;
+            write!(f, "{high:02x}{low:02x}")?;
         }
         Ok(())
     }

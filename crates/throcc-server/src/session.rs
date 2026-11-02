@@ -4,7 +4,7 @@ use std::time::Duration;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use throcc_crypto::identity::random;
-use throcc_proto::framing::{self, FrameError, HEADER_BYTES};
+use throcc_proto::framing::{self, FrameError, LEN_BYTES};
 use throcc_proto::messages::{
     AuthError, AuthResult, ClientMessage, Event, Hello, PROTOCOL, PakeStep, Response, ServerHello,
     ServerMessage,
@@ -60,7 +60,7 @@ async fn read_capped<T: DeserializeOwned>(
     recv: &mut quinn::RecvStream,
     cap: usize,
 ) -> Result<T, ReadError> {
-    let mut header = [0u8; HEADER_BYTES];
+    let mut header = [0u8; LEN_BYTES];
     recv.read_exact(&mut header)
         .await
         .map_err(|_| ReadError::Closed)?;

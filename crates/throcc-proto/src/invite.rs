@@ -19,18 +19,16 @@ pub struct BadInviteCode;
 impl InviteCode {
     /// Builds a code from 8 random bytes, one character per byte.
     pub fn from_random(bytes: [u8; ID_CHARS + SECRET_CHARS]) -> Self {
-        let chars: String = bytes
-            .iter()
-            .map(|b| ALPHABET[(b & 31) as usize] as char)
-            .collect();
-        Self::from_chars(&chars)
-    }
-
-    fn from_chars(chars: &str) -> Self {
-        let (id, secret) = chars.split_at(ID_CHARS);
+        let encode = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|b| ALPHABET[(b & 31) as usize] as char)
+                .collect()
+        };
+        let (id, secret) = bytes.split_at(ID_CHARS);
         Self {
-            id: id.to_owned(),
-            secret: secret.to_owned(),
+            id: encode(id),
+            secret: encode(secret),
         }
     }
 }
@@ -39,11 +37,20 @@ impl FromStr for InviteCode {
     type Err = BadInviteCode;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        let chars = normalize(input);
-        if chars.len() != ID_CHARS + SECRET_CHARS || !input.chars().all(is_code_char) {
+        let chars: String = input
+            .chars()
+            .filter(|&c| c != '-' && !c.is_ascii_whitespace())
+            .map(normalize_char)
+            .collect::<Option<_>>()
+            .ok_or(BadInviteCode)?;
+        if chars.len() != ID_CHARS + SECRET_CHARS {
             return Err(BadInviteCode);
         }
-        Ok(Self::from_chars(&chars))
+        let (id, secret) = chars.split_at(ID_CHARS);
+        Ok(Self {
+            id: id.to_owned(),
+            secret: secret.to_owned(),
+        })
     }
 }
 
@@ -81,10 +88,6 @@ fn normalize_char(c: char) -> Option<char> {
         c if c.is_ascii() && ALPHABET.contains(&(c as u8)) => Some(c),
         _ => None,
     }
-}
-
-fn is_code_char(c: char) -> bool {
-    c == '-' || c.is_ascii_whitespace() || normalize_char(c).is_some()
 }
 
 #[cfg(test)]

@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
-use sha2::{Digest, Sha256};
 use throcc_proto::ids::Hash;
 
 use crate::keystore::replace_file;
@@ -15,7 +14,7 @@ const DIR: &str = "avatars";
 const KEPT_UNUSED: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 pub fn matches(bytes: &[u8], hash: Hash) -> bool {
-    Sha256::digest(bytes).as_slice() == hash.0
+    Hash::of(bytes) == hash
 }
 
 /// The cached picture behind `hash`, marked as used. A file that doesn't match its hash is
@@ -60,22 +59,17 @@ pub fn prune(cache: &Path, now: SystemTime) -> Result<usize> {
 }
 
 fn path(cache: &Path, hash: Hash) -> PathBuf {
-    let hex: String = hash.0.iter().map(|b| format!("{b:02x}")).collect();
-    cache.join(DIR).join(hex)
+    cache.join(DIR).join(hash.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn hash_of(bytes: &[u8]) -> Hash {
-        Hash(Sha256::digest(bytes).into())
-    }
-
     #[test]
     fn a_cached_picture_loads_back_only_while_it_matches() {
         let cache = tempfile::tempdir().unwrap();
-        let hash = hash_of(b"png");
+        let hash = Hash::of(b"png");
         assert_eq!(load(cache.path(), hash), None);
         save(cache.path(), hash, b"png").unwrap();
         assert_eq!(load(cache.path(), hash).as_deref(), Some(&b"png"[..]));
@@ -87,7 +81,7 @@ mod tests {
     #[test]
     fn pruning_removes_only_pictures_unused_for_a_month() {
         let cache = tempfile::tempdir().unwrap();
-        let (old, fresh) = (hash_of(b"old"), hash_of(b"fresh"));
+        let (old, fresh) = (Hash::of(b"old"), Hash::of(b"fresh"));
         save(cache.path(), old, b"old").unwrap();
         save(cache.path(), fresh, b"fresh").unwrap();
         let month_ago = SystemTime::now() - KEPT_UNUSED - Duration::from_secs(60);
@@ -106,7 +100,7 @@ mod tests {
     #[test]
     fn loading_marks_a_picture_used() {
         let cache = tempfile::tempdir().unwrap();
-        let hash = hash_of(b"png");
+        let hash = Hash::of(b"png");
         save(cache.path(), hash, b"png").unwrap();
         let month_ago = SystemTime::now() - KEPT_UNUSED - Duration::from_secs(60);
         fs::File::options()

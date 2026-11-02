@@ -1,4 +1,7 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct UserId(pub u64);
@@ -18,20 +21,30 @@ pub struct Epoch(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Hash(pub [u8; 32]);
 
+impl Hash {
+    pub fn of(bytes: &[u8]) -> Self {
+        Self(Sha256::digest(bytes).into())
+    }
+}
+
+/// 64 lowercase hex digits.
+impl fmt::Display for Hash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.iter().try_for_each(|b| write!(f, "{b:02x}"))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[repr(u8)]
 pub enum Role {
-    User,
-    Manager,
-    Admin,
+    User = 0,
+    Manager = 1,
+    Admin = 2,
 }
 
 impl Role {
     pub fn rank(self) -> u8 {
-        match self {
-            Role::User => 0,
-            Role::Manager => 1,
-            Role::Admin => 2,
-        }
+        self as u8
     }
 
     pub fn from_rank(rank: u8) -> Option<Self> {

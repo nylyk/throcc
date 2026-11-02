@@ -15,7 +15,6 @@ The server: sign-in, rooms and presence, the key relay, and an SFU that forwards
 | `session.rs` | One connection: handshake, control-stream read and write loops |
 | `auth.rs` | Sign-in for known keys, and enrollment with an invite through the PAKE |
 | `rooms.rs` | The `Hub`: rooms, membership, presence, invites, profiles, key relay, request handling |
-| `permissions.rs` | What each role may do to which other roles |
 | `room_password.rs` | Argon2id hashes of room passwords |
 | `limits.rs` | Token buckets and per-source connection caps |
 | `sfu.rs` | Ingress: the per-connection rate limit, the ownership check, the forwarding table and keyframe-request merging |

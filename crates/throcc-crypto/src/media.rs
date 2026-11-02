@@ -96,7 +96,7 @@ mod tests {
             media_id: MediaId(7),
             epoch: Epoch(3),
             seq,
-            flags: Flags::FIRST.with(Flags::LAST, true),
+            flags: Flags::FIRST | Flags::LAST,
         }
     }
 

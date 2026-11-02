@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use sha2::{Digest, Sha256};
 use throcc_crypto::identity::{self, random};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
@@ -10,8 +9,9 @@ use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
     ErrorCode, Event, MAX_AVATAR_BYTES, MAX_NAME_CHARS, MAX_PASSWORD_CHARS, MediaState, Placed,
     Presence, Recovery, Request, Response, Room, RoomPeer, ServerMessage, ServerProfile, Share,
-    SignedEncKey, Tracks, Welcome,
+    SignedEncKey, Tracks, Welcome, valid_name, valid_password,
 };
+use throcc_proto::permissions;
 use throcc_proto::transport::close;
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tracing::{info, warn};
@@ -20,7 +20,6 @@ use crate::auth::InviteRuns;
 use crate::database::{Database, InviteRow, UserRow};
 use crate::egress::{EgressHandle, TrackKind};
 use crate::limits::Buckets;
-use crate::permissions;
 use crate::room_password;
 use crate::sfu::{ForwardingTable, KeyframeAggregator, Route, Sfu};
 
@@ -577,7 +576,7 @@ impl Hub {
     }
 
     fn set_profile(&mut self, user: UserId, name: String, avatar: Option<Hash>) -> Outcome {
-        let name = valid_name(&name)?;
+        let name = checked_name(&name)?;
         if let Some(hash) = &avatar
             && self.db.blob(hash).map_err(Refusal::internal)?.is_none()
         {
@@ -608,7 +607,7 @@ impl Hub {
         self.require(permissions::can_edit_server(self.role(user)?))?;
         let name = match name.as_deref().map(str::trim) {
             None | Some("") => None,
-            Some(name) => Some(valid_name(name)?),
+            Some(name) => Some(checked_name(name)?),
         };
         self.db
             .set_server_name(name.as_deref())
@@ -653,7 +652,7 @@ impl Hub {
         self.db
             .delete_unused_blobs(now.saturating_sub(UNUSED_BLOB_GRACE.as_secs()))
             .map_err(Refusal::internal)?;
-        let hash = Hash(Sha256::digest(&bytes).into());
+        let hash = Hash::of(&bytes);
         self.db
             .put_blob(&hash, &bytes, now)
             .map_err(Refusal::internal)?;
@@ -716,7 +715,7 @@ impl Hub {
 
     fn create_room(&mut self, user: UserId, name: String, password: Option<String>) -> Outcome {
         self.require(permissions::can_manage_rooms(self.role(user)?))?;
-        let name = valid_name(&name)?;
+        let name = checked_name(&name)?;
         if self.rooms.len() >= MAX_ROOMS {
             return Err(Refusal::new(
                 ErrorCode::TooLarge,
@@ -744,7 +743,7 @@ impl Hub {
 
     fn rename_room(&mut self, user: UserId, room: RoomId, name: String) -> Outcome {
         self.require(permissions::can_manage_rooms(self.role(user)?))?;
-        let name = valid_name(&name)?;
+        let name = checked_name(&name)?;
         let entry = self
             .rooms
             .get_mut(&room)
@@ -1140,21 +1139,17 @@ fn lobby() -> Placed {
     }
 }
 
-fn valid_name(name: &str) -> Result<String, Refusal> {
-    let name = name.trim();
-    let chars = name.chars().count();
-    if chars == 0 || chars > MAX_NAME_CHARS || name.chars().any(char::is_control) {
-        return Err(Refusal::new(
+fn checked_name(name: &str) -> Result<String, Refusal> {
+    valid_name(name).map(str::to_owned).ok_or_else(|| {
+        Refusal::new(
             ErrorCode::Invalid,
             format!("names are 1 to {MAX_NAME_CHARS} characters"),
-        ));
-    }
-    Ok(name.to_owned())
+        )
+    })
 }
 
 fn hash_password(password: &str) -> Result<String, Refusal> {
-    let chars = password.chars().count();
-    if chars == 0 || chars > MAX_PASSWORD_CHARS {
+    if !valid_password(password) {
         return Err(Refusal::new(
             ErrorCode::Invalid,
             format!("passwords are 1 to {MAX_PASSWORD_CHARS} characters"),

@@ -52,7 +52,7 @@ impl EgressHandle {
             kind: packet.kind,
             media_id: packet.header.media_id,
             seq: packet.header.seq,
-            first: packet.header.flags.defined().contains(Flags::FIRST),
+            first: packet.header.flags.contains(Flags::FIRST),
         };
         if self.inbox.try_send(packet).is_err() {
             self.inbox_drops
@@ -159,7 +159,6 @@ impl Queues {
             flags,
             ..
         } = packet.header;
-        let flags = flags.defined();
         if flags.contains(Flags::FIRST) {
             let id = self.next_id;
             self.next_id += 1;
@@ -508,13 +507,7 @@ mod tests {
         let mut queues = Queues::default();
         unit(&mut queues, 1, 0, 2, false, now);
         queues.push(
-            packet(
-                TrackKind::Audio,
-                2,
-                0,
-                Flags::FIRST.with(Flags::LAST, true),
-                10,
-            ),
+            packet(TrackKind::Audio, 2, 0, Flags::FIRST | Flags::LAST, 10),
             now,
         );
         assert_eq!(queues.pop().unwrap().len(), 10);
@@ -654,13 +647,7 @@ mod tests {
         let mut queues = Queues::default();
         for seq in 0..MAX_QUEUED_AUDIO as u32 + 10 {
             queues.push(
-                packet(
-                    TrackKind::Audio,
-                    2,
-                    seq,
-                    Flags::FIRST.with(Flags::LAST, true),
-                    10,
-                ),
+                packet(TrackKind::Audio, 2, seq, Flags::FIRST | Flags::LAST, 10),
                 now,
             );
         }
@@ -754,13 +741,7 @@ mod tests {
         let mut queues = Queues::default();
         for seq in 0..500 {
             queues.push(
-                packet(
-                    TrackKind::Audio,
-                    2,
-                    seq,
-                    Flags::FIRST.with(Flags::LAST, true),
-                    100,
-                ),
+                packet(TrackKind::Audio, 2, seq, Flags::FIRST | Flags::LAST, 100),
                 now,
             );
         }

@@ -6,7 +6,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use throcc_crypto::identity::{self, IdentityKey, random};
 use throcc_crypto::pake::{ClientPake, PakeError, Transcript};
-use throcc_proto::framing::{self, FrameError, HEADER_BYTES};
+use throcc_proto::framing::{self, FrameError, LEN_BYTES};
 use throcc_proto::ids::RoomId;
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
@@ -189,7 +189,7 @@ enum ReadError {
 
 /// Reads one frame. The body is allocated only after its length passes the cap.
 async fn read_frame<T: DeserializeOwned>(recv: &mut quinn::RecvStream) -> Result<T, ReadError> {
-    let mut header = [0u8; HEADER_BYTES];
+    let mut header = [0u8; LEN_BYTES];
     recv.read_exact(&mut header)
         .await
         .map_err(|_| ReadError::Closed)?;

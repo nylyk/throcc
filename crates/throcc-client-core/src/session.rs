@@ -3,7 +3,6 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use sha2::{Digest, Sha256};
 use throcc_crypto::hpke::EncKeyPair;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, MediaId, RoomId, UserId};
@@ -306,7 +305,7 @@ impl Session {
 
     fn show_profile(&self) {
         let picture = self.profile.picture.clone().map(|bytes| {
-            let hash = Hash(Sha256::digest(&bytes).into());
+            let hash = Hash::of(&bytes);
             self.shared.set_avatar(hash, AvatarSlot::Ready(bytes));
             hash
         });

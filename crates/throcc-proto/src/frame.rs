@@ -38,13 +38,16 @@ impl Flags {
         }
     }
 
-    /// The four defined bits; reserved bits cleared.
-    pub fn defined(self) -> Self {
-        Self(self.0 & Self::DEFINED)
-    }
-
     pub fn has_reserved(self) -> bool {
         self.0 & !Self::DEFINED != 0
+    }
+}
+
+impl std::ops::BitOr for Flags {
+    type Output = Self;
+
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
     }
 }
 
@@ -121,7 +124,7 @@ mod tests {
             media_id: MediaId(0x0102_0304),
             epoch: Epoch(0x0506_0708),
             seq: 0x090a_0b0c,
-            flags: Flags::FIRST.with(Flags::LAST, true),
+            flags: Flags::FIRST | Flags::LAST,
         };
         assert_eq!(header.encode(), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 6]);
         assert_eq!(header.nonce(), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
@@ -132,7 +135,7 @@ mod tests {
         let mut bytes = [0u8; HEADER_BYTES];
         bytes[12] = 0x80 | Flags::KEYFRAME.0;
         let header = Header::parse(&bytes).unwrap();
-        assert_eq!(header.flags.defined(), Flags::KEYFRAME);
+        assert!(header.flags.contains(Flags::KEYFRAME) && header.flags.has_reserved());
         assert_eq!(
             Header::parse_strict(&bytes),
             Err(HeaderError::ReservedFlags)

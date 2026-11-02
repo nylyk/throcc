@@ -1,4 +1,6 @@
-use throcc_proto::ids::Role;
+//! Who may do what. The server enforces these; clients use them to offer only allowed actions.
+
+use crate::ids::Role;
 
 pub const DAILY_INVITES: u32 = 3;
 

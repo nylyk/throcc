@@ -276,7 +276,7 @@ impl Default for MockClient {
 impl MockClient {
     /// Keeps `bytes` as a picture, as the server would, and returns its hash.
     fn keep_avatar(&self, bytes: Vec<u8>) -> Hash {
-        let hash = Hash(<sha2::Sha256 as sha2::Digest>::digest(&bytes).into());
+        let hash = Hash::of(&bytes);
         lock(&self.avatars).insert(hash, bytes.into());
         hash
     }

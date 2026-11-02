@@ -7,6 +7,18 @@ pub const MAX_AVATAR_BYTES: usize = 64 * 1024;
 pub const MAX_NAME_CHARS: usize = 32;
 pub const MAX_PASSWORD_CHARS: usize = 128;
 
+/// `name` without surrounding whitespace, if that is 1 to [`MAX_NAME_CHARS`] characters
+/// and has no control characters.
+pub fn valid_name(name: &str) -> Option<&str> {
+    let name = name.trim();
+    let chars = name.chars().count();
+    ((1..=MAX_NAME_CHARS).contains(&chars) && !name.chars().any(char::is_control)).then_some(name)
+}
+
+pub fn valid_password(password: &str) -> bool {
+    (1..=MAX_PASSWORD_CHARS).contains(&password.chars().count())
+}
+
 pub type PublicKey = [u8; 32];
 pub type Signature = [u8; 64];
 

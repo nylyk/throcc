@@ -4,6 +4,7 @@ pub mod framing;
 pub mod ids;
 pub mod invite;
 pub mod messages;
+pub mod permissions;
 pub mod transport;
 
 pub use fingerprint::Fingerprint;

@@ -28,7 +28,7 @@ pub fn fragment(unit: &Bytes, timestamp: u32, keyframe: bool, discardable: bool)
         .with(Flags::DISCARDABLE, discardable);
     let first_len = unit.len().min(BODY_BYTES - TIMESTAMP_BYTES);
     let mut fragments = vec![Fragment {
-        flags: base.with(Flags::FIRST, true),
+        flags: base | Flags::FIRST,
         timestamp: Some(timestamp.to_be_bytes()),
         body: unit.slice(..first_len),
     }];
@@ -43,7 +43,7 @@ pub fn fragment(unit: &Bytes, timestamp: u32, keyframe: bool, discardable: bool)
         at = end;
     }
     if let Some(last) = fragments.last_mut() {
-        last.flags = last.flags.with(Flags::LAST, true);
+        last.flags = last.flags | Flags::LAST;
     }
     fragments
 }
@@ -185,7 +185,7 @@ impl Reassembler {
             let body = if s == first {
                 let (ts, rest) = body.split_first_chunk::<TIMESTAMP_BYTES>()?;
                 timestamp = Some(u32::from_be_bytes(*ts));
-                unit_flags = flags.defined().with(Flags::LAST, true);
+                unit_flags = flags | Flags::LAST;
                 rest.to_vec()
             } else {
                 body
