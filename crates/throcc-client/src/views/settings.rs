@@ -502,9 +502,6 @@ fn verified_people(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .flex_col()
         .gap_1()
         .child(section("People that you have verified"))
-        .child(caption(
-            "Verified on this computer, so they show as verified on every server where they use the same key.",
-        ))
         .children(rows)
         .children(
             app.state
