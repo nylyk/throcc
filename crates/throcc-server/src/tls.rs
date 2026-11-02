@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use quinn::congestion::{BbrConfig, CubicConfig};
 use quinn::crypto::rustls::QuicServerConfig;
 use quinn::{IdleTimeout, TransportConfig, VarInt};
@@ -39,7 +39,14 @@ pub fn server_config(
     Ok(config)
 }
 
+/// Shorter idle timeouts round to "none" in QUIC or make keep-alives spin.
+const MIN_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
+
 pub fn transport_config(congestion: Congestion, idle_timeout: Duration) -> Result<TransportConfig> {
+    ensure!(
+        idle_timeout >= MIN_IDLE_TIMEOUT,
+        "the idle timeout must be at least {MIN_IDLE_TIMEOUT:?}"
+    );
     let mut config = TransportConfig::default();
     config
         // A lost ping or two must not end a live connection.

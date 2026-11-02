@@ -48,14 +48,16 @@ impl VideoFrame {
         frame
     }
 
-    /// Draws `number` as 16 black-or-white blocks across the top.
+    /// Draws `number` as 16 dark-or-light blocks across the top. The levels are 16 and 235
+    /// rather than 0 and 255 so the surface test can tell a correct full-range picture from
+    /// one wrongly expanded as limited range, which would show them as 0 and 255.
     pub fn stamp_number(&mut self, number: u16) {
         let block = self.width / 16;
         for bit in 0..16 {
             let value = if number >> (15 - bit) & 1 == 1 {
-                255
+                235
             } else {
-                0
+                16
             };
             for row in 0..block.min(self.height) {
                 let start = row * self.width + bit * block;

@@ -63,7 +63,7 @@ pub struct Config {
     pub listen: SocketAddr,
     pub congestion: Congestion,
     /// How long a connection may go without a packet before it is closed; QUIC uses the
-    /// shorter of this and the client's. Tests shorten it.
+    /// shorter of this and the client's. At least a second. Tests shorten it.
     pub idle_timeout: Duration,
 }
 
