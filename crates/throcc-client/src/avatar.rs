@@ -17,11 +17,20 @@ const MAX_SHOWN_BYTES: u64 = 4 * 1024 * 1024;
 /// The formats [`prepare`] writes, and so the only ones pictures from others are read in.
 /// gpui turns on many more of `image`'s decoders.
 const STORED_FORMATS: &[ImageFormat] = &[ImageFormat::Png, ImageFormat::Jpeg];
+/// The everyday formats a chosen picture may come in. The rarer decoders gpui turns on stay
+/// unused, so a stray file can't reach them.
+const CHOSEN_FORMATS: &[ImageFormat] = &[
+    ImageFormat::Png,
+    ImageFormat::Jpeg,
+    ImageFormat::Gif,
+    ImageFormat::Bmp,
+    ImageFormat::WebP,
+];
 
-/// Turns a picture the user chose, in any format `image` reads, into a centred 128 px PNG
+/// Turns a picture the user chose, in one of [`CHOSEN_FORMATS`], into a centred 128 px PNG
 /// or JPEG square that fits the server's size cap.
 pub fn prepare(file: &[u8]) -> Result<Vec<u8>, String> {
-    let picture = decode_within(file, MAX_CHOSEN_SIDE, MAX_CHOSEN_BYTES, None).map_err(|e| {
+    let picture = decode_within(file, MAX_CHOSEN_SIDE, MAX_CHOSEN_BYTES, CHOSEN_FORMATS).map_err(|e| {
         match e {
             ImageError::Limits(_) => format!(
                 "That picture is too large. Pick one up to {MAX_CHOSEN_SIDE}×{MAX_CHOSEN_SIDE} pixels."
@@ -67,8 +76,7 @@ pub fn sample() -> Vec<u8> {
 /// A picture over 512 px a side is refused before its pixels are allocated, and one over
 /// the 128 px every picture is prepared at is shrunk to it, so each one kept stays small.
 pub fn decode(bytes: &[u8]) -> Option<Arc<RenderImage>> {
-    let mut picture =
-        decode_within(bytes, MAX_SHOWN_SIDE, MAX_SHOWN_BYTES, Some(STORED_FORMATS)).ok()?;
+    let mut picture = decode_within(bytes, MAX_SHOWN_SIDE, MAX_SHOWN_BYTES, STORED_FORMATS).ok()?;
     if picture.width().max(picture.height()) > SIDE {
         picture = picture.thumbnail(SIDE, SIDE);
     }
@@ -81,20 +89,22 @@ pub fn decode(bytes: &[u8]) -> Option<Arc<RenderImage>> {
     ])))
 }
 
-/// Decodes `bytes` within the size limits, in one of `formats` if given.
+/// Decodes `bytes` within the size limits, if it is in one of `formats`.
 fn decode_within(
     bytes: &[u8],
     max_side: u32,
     max_bytes: u64,
-    formats: Option<&[ImageFormat]>,
+    formats: &[ImageFormat],
 ) -> ImageResult<DynamicImage> {
     let mut limits = Limits::default();
     limits.max_image_width = Some(max_side);
     limits.max_image_height = Some(max_side);
     limits.max_alloc = Some(max_bytes);
     let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
-    let refused = |format| formats.is_some_and(|allowed| !allowed.contains(&format));
-    if reader.format().is_none_or(refused) {
+    if reader
+        .format()
+        .is_none_or(|format| !formats.contains(&format))
+    {
         let hint = reader
             .format()
             .map_or(ImageFormatHint::Unknown, ImageFormatHint::Exact);
@@ -184,11 +194,11 @@ mod tests {
         assert!(bomb.len() < 100);
         let started = std::time::Instant::now();
         assert!(matches!(
-            decode_within(&bomb, MAX_SHOWN_SIDE, MAX_SHOWN_BYTES, Some(STORED_FORMATS)),
+            decode_within(&bomb, MAX_SHOWN_SIDE, MAX_SHOWN_BYTES, STORED_FORMATS),
             Err(ImageError::Limits(_))
         ));
         assert!(matches!(
-            decode_within(&bomb, MAX_CHOSEN_SIDE, MAX_CHOSEN_BYTES, None),
+            decode_within(&bomb, MAX_CHOSEN_SIDE, MAX_CHOSEN_BYTES, CHOSEN_FORMATS),
             Err(ImageError::Limits(_))
         ));
         assert!(decode(&bomb).is_none());
@@ -219,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn only_png_and_jpeg_are_decoded_from_others_but_any_picture_can_be_chosen() {
+    fn only_png_and_jpeg_are_decoded_from_others_and_everyday_formats_can_be_chosen() {
         for format in [
             ImageFormat::Bmp,
             ImageFormat::Gif,
@@ -232,8 +242,12 @@ mod tests {
                 "{format:?} can be decoded at all"
             );
             assert!(decode(&other).is_none(), "{format:?}");
-            let prepared = prepare(&other).unwrap();
-            assert!(decode(&prepared).is_some(), "{format:?} prepared");
+            let chosen = prepare(&other);
+            if CHOSEN_FORMATS.contains(&format) {
+                assert!(decode(&chosen.unwrap()).is_some(), "{format:?} prepared");
+            } else {
+                assert!(chosen.is_err(), "{format:?} chosen");
+            }
         }
     }
 
