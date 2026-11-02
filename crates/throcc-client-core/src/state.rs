@@ -150,6 +150,8 @@ pub struct Person {
     pub mic: bool,
     pub deafened: bool,
     pub sharing: Option<ShareConfig>,
+    /// How many people in our room watch their share.
+    pub audience: usize,
     pub speaking: bool,
     pub playback: PersonPlayback,
     /// Whether the user verified the identity key they presented this session.
@@ -435,6 +437,7 @@ mod tests {
             mic: false,
             deafened: false,
             sharing: None,
+            audience: 0,
             speaking: false,
             playback: PersonPlayback::default(),
             verified: false,

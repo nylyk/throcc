@@ -1738,9 +1738,9 @@ impl ThroccApp {
     }
 
     /// Opens a screen of the mock client by name, for screenshots: welcome, join, joinfailed,
-    /// lost, personmenu, addserver, removeserver, room, alone, emptylobby, focus, fullscreen,
-    /// popout, share, connection, person, personverified, personchanged, keychange, ownprofile,
-    /// pinmismatch, settings, appearance, verified, newroom, editroom, roompassword,
+    /// lost, personmenu, addserver, removeserver, room, unwatched, alone, emptylobby, focus,
+    /// fullscreen, popout, share, connection, person, personverified, personchanged, keychange,
+    /// ownprofile, pinmismatch, settings, appearance, verified, newroom, editroom, roompassword,
     /// deleteroom, profile, server, keys, members, invites, removeuser, leaveserver,
     /// identitymissing, identityback or startedover. Any other name leaves the lobby.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1797,6 +1797,10 @@ impl ThroccApp {
                 self.dialog = Some(Dialog::RemoveServer("lan.example.org".into()));
             }
             "room" => joined(self),
+            "unwatched" => {
+                joined(self);
+                self.command(Command::Unwatch(UserId(4)));
+            }
             "alone" => self.command(Command::Join(Some(RoomId(3)))),
             "emptylobby" => {
                 if let Some(client) = &self.client {

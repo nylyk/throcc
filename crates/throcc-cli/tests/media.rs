@@ -4,11 +4,11 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use throcc_client_core::call::CallEvent;
+use throcc_client_core::call::{Call, CallEvent};
 use throcc_client_core::media::engine::{Kind, Outgoing};
 use throcc_proto::frame::{Flags, Header, TAG_BYTES, VIDEO_CLOCK_HZ};
-use throcc_proto::ids::Epoch;
-use throcc_proto::messages::{Codec, Event, MediaState, Request, Response};
+use throcc_proto::ids::{Epoch, MediaId, UserId};
+use throcc_proto::messages::{Audience, Codec, Event, MediaState, Request, Response};
 use throcc_proto::transport::close;
 use throcc_server::{AUDIO_BURST_PACKETS, AUDIO_PACKETS_PER_SECOND};
 
@@ -117,6 +117,44 @@ async fn watching_a_share_asks_its_sender_for_an_idr() {
     .await
     .unwrap();
     assert_eq!(wanted, (video_id, throcc_proto::messages::Recovery::Idr));
+}
+
+#[tokio::test]
+async fn the_room_learns_who_watches_a_share() {
+    let server = start_server();
+    let (mut alice, bob, room) = room_with_two(&server).await;
+    let video = first_share(&bob, &alice).await.video;
+    let watching = Request::SetWatching(vec![video]);
+    assert_eq!(bob.request(watching).await.unwrap(), Response::Ok);
+    assert_eq!(audience(&mut alice, video).await, vec![bob.me()]);
+
+    let carol = enroll(&server, &mint_admin_invite(server.dir.path())).await;
+    let carol = Call::start(carol.link, &carol.keystore).unwrap();
+    let (placed, _) = carol.join(Some(room), None).await.unwrap();
+    let expected = Audience {
+        video,
+        watchers: vec![bob.me()],
+    };
+    assert_eq!(placed.audiences, vec![expected]);
+
+    bob.join(None, None).await.unwrap();
+    assert_eq!(audience(&mut alice, video).await, vec![]);
+}
+
+/// Waits for the next change in who watches `video`.
+async fn audience(call: &mut Call, video: MediaId) -> Vec<UserId> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(CallEvent::Server(Event::AudiencesChanged(changed))) =
+                call.events.recv().await
+                && let Some(a) = changed.into_iter().find(|a| a.video == video)
+            {
+                return a.watchers;
+            }
+        }
+    })
+    .await
+    .unwrap()
 }
 
 #[tokio::test]

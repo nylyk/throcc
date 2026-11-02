@@ -189,6 +189,7 @@ impl Render for PopOut {
                     width: window.viewport_size().width,
                     title_inset: if fullscreen { px(0.) } else { TRAFFIC_LIGHTS },
                     buttons,
+                    audience: person.map_or(0, |p| p.audience),
                     controls,
                     too_slow: config.is_some() && state.health.slow_shares.contains(&user),
                 }

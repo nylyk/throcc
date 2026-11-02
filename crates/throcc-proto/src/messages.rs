@@ -274,6 +274,8 @@ pub enum Event {
         by: UserId,
         room: RoomId,
     },
+    /// The audiences in our room that changed together.
+    AudiencesChanged(Vec<Audience>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,6 +302,15 @@ pub struct Placed {
     pub epoch: Epoch,
     pub tracks: Option<Tracks>,
     pub peers: Vec<RoomPeer>,
+    /// Who watches each share in the room that anyone watches.
+    pub audiences: Vec<Audience>,
+}
+
+/// The room members who watch the share sent on `video`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Audience {
+    pub video: MediaId,
+    pub watchers: Vec<UserId>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

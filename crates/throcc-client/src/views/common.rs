@@ -204,6 +204,19 @@ pub fn sharing_icon(size: Pixels) -> Icon {
     icon("monitor").size(size).text_color(theme::danger_text())
 }
 
+pub fn audience(count: usize, icon_size: Pixels) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .child(
+            icon("user")
+                .size(icon_size)
+                .text_color(theme::danger_text()),
+        )
+        .child(mono(count.to_string()))
+}
+
 pub fn caption(text: impl Into<SharedString>) -> Div {
     div()
         .typeset(theme::CAPTION)

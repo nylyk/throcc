@@ -383,11 +383,19 @@ impl ClientApi for MockClient {
                     && !c.watching.contains(&user)
                 {
                     c.watching.push(user);
+                    if let Some(p) = s.people.get_mut(&user) {
+                        p.audience += 1;
+                    }
                 }
             }),
             Command::Unwatch(user) => self.update(|s| {
-                if let Some(c) = s.current.as_mut() {
+                if let Some(c) = s.current.as_mut()
+                    && c.watching.contains(&user)
+                {
                     c.watching.retain(|u| *u != user);
+                    if let Some(p) = s.people.get_mut(&user) {
+                        p.audience = p.audience.saturating_sub(1);
+                    }
                 }
             }),
             Command::SetPlayback(user, sound, playback) => self.update(|s| {
@@ -568,6 +576,7 @@ fn person(name: &str, room: Option<u64>) -> Person {
         mic: room.is_some(),
         deafened: false,
         sharing: None,
+        audience: 0,
         speaking: false,
         playback: PersonPlayback::default(),
         verified: false,
@@ -613,6 +622,7 @@ fn sample_state() -> State {
     }
     if let Some(p) = people.get_mut(&UserId(4)) {
         p.sharing = Some(ilse_share);
+        p.audience = 2;
     }
     if let Some(p) = people.get_mut(&UserId(7)) {
         p.deafened = true;

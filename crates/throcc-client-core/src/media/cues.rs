@@ -14,11 +14,13 @@ pub enum Cue {
     Undeafen,
     ConnectionLost,
     Reconnected,
-    ShareStart,
-    ShareStop,
+    StreamStart,
+    StreamStop,
+    StreamJoin,
+    StreamLeave,
 }
 
-const CUES: [Cue; 10] = [
+const CUES: [Cue; 12] = [
     Cue::Join,
     Cue::Leave,
     Cue::Mute,
@@ -27,14 +29,18 @@ const CUES: [Cue; 10] = [
     Cue::Undeafen,
     Cue::ConnectionLost,
     Cue::Reconnected,
-    Cue::ShareStart,
-    Cue::ShareStop,
+    Cue::StreamStart,
+    Cue::StreamStop,
+    Cue::StreamJoin,
+    Cue::StreamLeave,
 ];
 
 const A4: f32 = 440.0;
 const D5: f32 = 587.33;
 const F4: f32 = 349.23;
 const FS4: f32 = 369.99;
+const D4: f32 = 293.66;
+const B3: f32 = 246.94;
 /// Each note's harmonics as multiples of its frequency, with their amplitudes.
 const PARTIALS: [(f32, f32); 3] = [(1.0, 1.0), (2.0, 0.18), (3.0, 0.06)];
 /// The harmonics of a soft note, nearly a pure sine.
@@ -96,6 +102,15 @@ impl Cue {
             decay: 0.1,
             peak: SOFT_PEAK,
         };
+        let swell = |notes| Shape {
+            notes,
+            partials: &SOFT_PARTIALS,
+            gap: 0.0,
+            attack: 0.04,
+            length: 0.3,
+            decay: 0.09,
+            peak: SOFT_PEAK,
+        };
         match self {
             Cue::Join | Cue::Reconnected => chime(&[A4, D5]),
             Cue::Leave => chime(&[D5, A4]),
@@ -104,8 +119,10 @@ impl Cue {
             Cue::Deafen => tap(&[A4, A4]),
             Cue::Undeafen => tap(&[D5, D5]),
             Cue::ConnectionLost => chime(&[D5, A4, F4]),
-            Cue::ShareStart => soft(&[FS4, D5]),
-            Cue::ShareStop => soft(&[D5, FS4]),
+            Cue::StreamStart => soft(&[FS4, D5]),
+            Cue::StreamStop => soft(&[D5, FS4]),
+            Cue::StreamJoin => swell(&[D4, FS4]),
+            Cue::StreamLeave => swell(&[B3, D4]),
         }
     }
 

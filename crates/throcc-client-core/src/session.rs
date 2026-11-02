@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use throcc_crypto::identity::random;
 use throcc_proto::ids::{Hash, MediaId, RoomId, UserId};
 use throcc_proto::messages::{
-    AuthError, ErrorCode, Event as ServerEvent, MediaState, Placed, Presence, PublicKey, Recovery,
-    Request, Response, RoomPeer, Share, ShareConfig, User, Welcome,
+    Audience, AuthError, ErrorCode, Event as ServerEvent, MediaState, Placed, Presence, PublicKey,
+    Recovery, Request, Response, RoomPeer, Share, ShareConfig, Tracks, User, Welcome,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{Semaphore, broadcast, mpsc, watch};
@@ -48,6 +48,8 @@ const SLOW_SHARE_DROPS: u64 = 2;
 const SLOW_SHARE_LOSS_PERCENT: u64 = 1;
 /// Health refreshes a share stays marked too slow, counting its last lossy one.
 const SLOW_SHARE_HOLD: u8 = 3;
+/// The shortest time between two cues for others joining or leaving an audience.
+const AUDIENCE_CUE_GAP: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(15);
 /// Each reconnect wait is spread over this fraction either side of the backoff, so clients
 /// that lost the same server don't all come back in the same instant.
@@ -253,6 +255,9 @@ pub(crate) struct Session {
     peers: BTreeMap<UserId, RoomPeer>,
     trust: Trust,
     watching: Vec<UserId>,
+    /// Who watches each watched share in our room, by its video.
+    audiences: HashMap<MediaId, Vec<UserId>>,
+    last_audience_cue: Option<Instant>,
     /// The shares we receive, by who shares them.
     watched_shares: HashMap<UserId, WatchedShare>,
     mic_test: bool,
@@ -386,6 +391,8 @@ impl Session {
             peers: BTreeMap::new(),
             trust: Trust::new(server, verified),
             watching: Vec::new(),
+            audiences: HashMap::new(),
+            last_audience_cue: None,
             watched_shares: HashMap::new(),
             mic_test: false,
             mic_before_deafen: false,
@@ -506,6 +513,13 @@ impl Session {
         let gain = self.options.voice.cue_volume;
         if gain > 0.0 {
             self.voice(VoiceCommand::Cue(cue, gain));
+        }
+    }
+
+    /// Plays `cue` for us joining or leaving `user`'s share, while they share.
+    fn stream_cue(&self, user: UserId, cue: Cue) {
+        if user != self.call.me() && self.sharing_of(user).is_some() {
+            self.cue(cue);
         }
     }
 
@@ -737,6 +751,7 @@ impl Session {
             epoch: throcc_proto::ids::Epoch(0),
             tracks: None,
             peers: vec![],
+            audiences: Vec::new(),
         });
         self.reset_room();
         self.voice(VoiceCommand::ForgetAll);
@@ -755,6 +770,7 @@ impl Session {
         self.tracks.clear();
         self.last.sent_bytes.clear();
         self.watching.clear();
+        self.audiences.clear();
         self.show_shares();
     }
 
@@ -816,6 +832,11 @@ impl Session {
         self.reset_room();
         self.room = placed.room;
         self.my_tracks = placed.tracks.clone();
+        self.audiences = placed
+            .audiences
+            .iter()
+            .map(|a| (a.video, a.watchers.clone()))
+            .collect();
         self.voice(VoiceCommand::ForgetAll);
         self.sync_voice();
         self.sync_peers();
@@ -1004,6 +1025,7 @@ impl Session {
         self.shared.update(|s| {
             for (user, person) in &mut s.people {
                 person.sharing = self.sharing_of(*user);
+                person.audience = self.audience_of(*user);
             }
         });
     }
@@ -1014,6 +1036,56 @@ impl Session {
         } else {
             self.peers.get(&user).and_then(|p| p.share)
         }
+    }
+
+    fn tracks_of(&self, user: UserId) -> Option<&Tracks> {
+        if user == self.call.me() {
+            self.my_tracks.as_ref()
+        } else {
+            self.peers.get(&user).map(|p| &p.tracks)
+        }
+    }
+
+    fn audience_of(&self, user: UserId) -> usize {
+        self.tracks_of(user)
+            .and_then(|t| t.shares.first())
+            .and_then(|share| self.audiences.get(&share.video))
+            .map_or(0, Vec::len)
+    }
+
+    /// Notes who watches the shares in our room. Plays one join or leave when someone joins
+    /// or leaves the audience of our live share, at most once per [`AUDIENCE_CUE_GAP`].
+    fn audiences_changed(&mut self, changed: Vec<Audience>) {
+        let room = self.room;
+        let state = self.shared.state();
+        let mut cue = None;
+        for Audience { video, watchers } in changed {
+            let ours = self.media.share.is_some()
+                && self
+                    .my_tracks
+                    .as_ref()
+                    .is_some_and(|t| t.shares.iter().any(|s| s.video == video));
+            let before = self.audiences.remove(&video).unwrap_or_default();
+            if ours {
+                let still_here: Vec<UserId> = before
+                    .into_iter()
+                    .filter(|user| state.person(*user).is_some_and(|p| p.room == room))
+                    .collect();
+                cue = cue.or(audience_cue(&still_here, &watchers));
+            }
+            if !watchers.is_empty() {
+                self.audiences.insert(video, watchers);
+            }
+        }
+        if let Some(cue) = cue
+            && self
+                .last_audience_cue
+                .is_none_or(|at| at.elapsed() >= AUDIENCE_CUE_GAP)
+        {
+            self.last_audience_cue = Some(Instant::now());
+            self.cue(cue);
+        }
+        self.show_shares();
     }
 
     async fn command(&mut self, command: Command) -> ControlFlow<()> {
@@ -1050,11 +1122,15 @@ impl Session {
             Command::Watch(user) => {
                 if !self.watching.contains(&user) {
                     self.watching.push(user);
+                    self.stream_cue(user, Cue::StreamJoin);
                 }
                 self.push_watching().await;
             }
             Command::Unwatch(user) => {
-                self.watching.retain(|u| *u != user);
+                if self.watching.contains(&user) {
+                    self.watching.retain(|u| *u != user);
+                    self.stream_cue(user, Cue::StreamLeave);
+                }
                 self.push_watching().await;
             }
             Command::SetPlayback(user, sound, playback) => {
@@ -1537,7 +1613,7 @@ impl Session {
                 *lock(&self.shared.preview) = Some((self.call.me(), sender.preview.clone()));
                 info!(encoder = sender.encoder, "sharing");
                 self.sharing = Some(sender);
-                self.cue(Cue::ShareStart);
+                self.cue(Cue::StreamStart);
                 self.push_media().await;
             }
             Ok(Err(e)) => self.shared.notice(format!("Couldn't start sharing: {e}")),
@@ -1585,7 +1661,7 @@ impl Session {
     /// Stops our share, with its cue if one ran, and tells the server.
     async fn end_share(&mut self) {
         if self.media.share.is_some() {
-            self.cue(Cue::ShareStop);
+            self.cue(Cue::StreamStop);
         }
         self.stop_share();
         self.push_media().await;
@@ -1690,6 +1766,7 @@ impl Session {
                 let (verified, identity_key) = self.trust.of(p.user);
                 let playback = self.playback_of(p.user);
                 let sharing = self.sharing_of(p.user);
+                let audience = self.audience_of(p.user);
                 self.shared.update(|s| {
                     let speaking = s.people.get(&p.user).is_some_and(|old| old.speaking);
                     let updated = Person {
@@ -1697,6 +1774,7 @@ impl Session {
                         identity_key,
                         speaking,
                         sharing,
+                        audience,
                         ..person(&p, playback)
                     };
                     s.add_person(p.user, updated);
@@ -1734,6 +1812,7 @@ impl Session {
                     self.follow_room().await;
                 }
             }
+            ServerEvent::AudiencesChanged(changed) => self.audiences_changed(changed),
             ServerEvent::LinkStats { tracks } => {
                 self.dropped_for_you = tracks.iter().fold(self.dropped_for_you, |sum, t| {
                     sum.saturating_add(t.dropped_units)
@@ -1932,6 +2011,7 @@ fn person(p: &Presence, playback: PersonPlayback) -> Person {
         mic: p.mic,
         deafened: p.deafened,
         sharing: None,
+        audience: 0,
         speaking: false,
         playback,
         verified: false,
@@ -1980,11 +2060,23 @@ fn percent(part: u64, whole: u64) -> f32 {
     }
 }
 
+/// The cue for someone joining or leaving a share's audience, if anyone did.
+fn audience_cue(before: &[UserId], after: &[UserId]) -> Option<Cue> {
+    let arrived = |from: &[UserId], to: &[UserId]| to.iter().any(|u| !from.contains(u));
+    if arrived(before, after) {
+        Some(Cue::StreamJoin)
+    } else if arrived(after, before) {
+        Some(Cue::StreamLeave)
+    } else {
+        None
+    }
+}
+
 /// The cue for someone starting or stopping a share, if they did.
 fn share_cue(was_sharing: bool, sharing: bool) -> Option<Cue> {
     match (was_sharing, sharing) {
-        (false, true) => Some(Cue::ShareStart),
-        (true, false) => Some(Cue::ShareStop),
+        (false, true) => Some(Cue::StreamStart),
+        (true, false) => Some(Cue::StreamStop),
         _ => None,
     }
 }
@@ -2182,6 +2274,14 @@ mod tests {
             &Command::Watch(UserId(1)),
             &Command::Watch(UserId(2))
         ));
+    }
+
+    #[test]
+    fn joining_or_leaving_an_audience_cues() {
+        let (bob, eve) = (UserId(2), UserId(3));
+        assert_eq!(audience_cue(&[], &[bob]), Some(Cue::StreamJoin));
+        assert_eq!(audience_cue(&[bob, eve], &[bob]), Some(Cue::StreamLeave));
+        assert_eq!(audience_cue(&[bob], &[bob]), None);
     }
 
     #[test]

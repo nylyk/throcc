@@ -8,7 +8,7 @@ use gpui_component::button::Button;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Sizable, Size};
 
-use super::common::{Typeset, avatar, caption, icon};
+use super::common::{Typeset, audience, avatar, caption, icon};
 use crate::theme;
 
 const TOO_SLOW: &str = "Connection too slow";
@@ -31,8 +31,8 @@ struct Metrics {
     avatar: Pixels,
     name: theme::TextStyle,
     button: Size,
-    warning_icon: Pixels,
-    warning_text: theme::TextStyle,
+    badge_icon: Pixels,
+    badge_text: theme::TextStyle,
     details_min_width: Pixels,
     warning_text_min_width: Pixels,
 }
@@ -46,8 +46,8 @@ impl Place {
                 avatar: px(18.),
                 name: theme::CALLOUT,
                 button: Size::Medium,
-                warning_icon: px(14.),
-                warning_text: theme::CAPTION,
+                badge_icon: px(14.),
+                badge_text: theme::CAPTION,
                 details_min_width: px(240.),
                 warning_text_min_width: px(360.),
             },
@@ -57,8 +57,8 @@ impl Place {
                 avatar: px(24.),
                 name: theme::BODY,
                 button: Size::Large,
-                warning_icon: px(16.),
-                warning_text: theme::CALLOUT,
+                badge_icon: px(16.),
+                badge_text: theme::CALLOUT,
                 details_min_width: px(320.),
                 warning_text_min_width: px(520.),
             },
@@ -78,7 +78,9 @@ pub struct ShareOverlay {
     /// Room kept clear left of the name, for the macOS traffic lights.
     pub title_inset: Pixels,
     pub buttons: Vec<Button>,
-    /// Whether the name and buttons show. The slow-connection warning shows regardless.
+    /// How many people watch the share.
+    pub audience: usize,
+    /// Whether the name, audience and buttons show. The slow-connection warning shows regardless.
     pub controls: bool,
     pub too_slow: bool,
 }
@@ -100,6 +102,18 @@ impl ShareOverlay {
                     .gap_2()
                     .children(self.controls.then(|| self.title(&m)))
                     .children(self.too_slow.then(|| self.warning(&m))),
+            );
+        }
+        if self.controls {
+            labels.push(
+                pill()
+                    .absolute()
+                    .bottom(m.inset)
+                    .left(m.inset)
+                    .px_2()
+                    .h(m.label_height)
+                    .typeset(m.badge_text)
+                    .child(audience(self.audience, m.badge_icon)),
             );
         }
         if self.controls && !self.buttons.is_empty() {
@@ -143,7 +157,7 @@ impl ShareOverlay {
     fn warning(&self, m: &Metrics) -> Stateful<Div> {
         let label = (self.width >= m.warning_text_min_width).then(|| {
             div()
-                .typeset(m.warning_text)
+                .typeset(m.badge_text)
                 .font_weight(FontWeight::MEDIUM)
                 .whitespace_nowrap()
                 .child(TOO_SLOW)
@@ -157,7 +171,7 @@ impl ShareOverlay {
             .h(m.label_height)
             .child(
                 icon("triangle-alert")
-                    .size(m.warning_icon)
+                    .size(m.badge_icon)
                     .text_color(theme::warn_text()),
             )
             .children(label)

@@ -16,9 +16,9 @@ use throcc_client_core::state::{Person, State, share_label};
 use throcc_proto::ids::{RoomId, UserId};
 
 use super::common::{
-    CONTROLS_LINGER, TRAFFIC_LIGHTS, Trust, Typeset, avatar, bottom_bar, caption, danger_menu_item,
-    description, ghost_icon, icon, primary, rate, section, sharing_icon, toggle_icon, top_bar,
-    trust,
+    CONTROLS_LINGER, TRAFFIC_LIGHTS, Trust, Typeset, audience, avatar, bottom_bar, caption,
+    danger_menu_item, description, ghost_icon, icon, primary, rate, section, sharing_icon,
+    toggle_icon, top_bar, trust,
 };
 use super::mascot;
 use super::overlay::{Place, ShareOverlay};
@@ -90,6 +90,7 @@ fn fullscreen(
             TRAFFIC_LIGHTS
         },
         buttons,
+        audience: person.map_or(0, |p| p.audience),
         controls: std::time::Instant::now() < app.controls_until,
         too_slow: state.health.slow_shares.contains(&user),
     };
@@ -930,6 +931,7 @@ fn tile(
         width: size.width,
         title_inset: px(0.),
         buttons,
+        audience: t.person.audience,
         controls: app.shows_overlay(user),
         too_slow: app.state.health.slow_shares.contains(&user),
     };
@@ -984,13 +986,18 @@ fn person_card(t: &Tile, height: Pixels, compact: bool, cx: &mut Context<ThroccA
         } else {
             ("Watch Stream", "eye")
         };
-        Button::new(("watch", user.0 as usize))
+        let button = Button::new(("watch", user.0 as usize))
             .label(label)
             .icon(icon(icon_name))
             .primary()
             .rounded(theme::RADIUS_BUTTON)
             .with_size(if compact { Size::Small } else { Size::Medium })
-            .on_click(cx.listener(move |app, _, _, cx| app.watch(user, cx)))
+            .on_click(cx.listener(move |app, _, _, cx| app.watch(user, cx)));
+        div().flex().items_center().gap_3().child(button).child(
+            audience(person.audience, px(14.))
+                .typeset(theme::CAPTION)
+                .text_color(theme::text_2()),
+        )
     });
     let status = person.sharing.map(|config| {
         div()
