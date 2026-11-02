@@ -59,17 +59,10 @@ pub enum SettingsPage {
     Audio,
     Appearance,
     Verified,
-    Servers,
 }
 
 impl SettingsPage {
-    pub const ALL: [Self; 5] = [
-        Self::Profile,
-        Self::Audio,
-        Self::Appearance,
-        Self::Verified,
-        Self::Servers,
-    ];
+    pub const ALL: [Self; 4] = [Self::Profile, Self::Audio, Self::Appearance, Self::Verified];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -77,7 +70,6 @@ impl SettingsPage {
             Self::Audio => "Audio",
             Self::Appearance => "Appearance",
             Self::Verified => "Verified People",
-            Self::Servers => "Servers",
         }
     }
 
@@ -87,7 +79,6 @@ impl SettingsPage {
             Self::Audio => "audio-lines",
             Self::Appearance => "palette",
             Self::Verified => "shield-check",
-            Self::Servers => "server",
         }
     }
 }
@@ -1696,7 +1687,7 @@ impl ThroccApp {
     /// Opens a screen of the mock client by name, for screenshots: welcome, join, joinfailed,
     /// lost, personmenu, addserver, removeserver, room, alone, emptylobby, focus, fullscreen,
     /// popout, share, connection, person, personverified, personchanged, keychange, ownprofile,
-    /// pinmismatch, settings, appearance, servers, verified, newroom, editroom, roompassword,
+    /// pinmismatch, settings, appearance, verified, newroom, editroom, roompassword,
     /// deleteroom, profile, server, keys, members, invites, removeuser, leaveserver,
     /// identitymissing, identityback or startedover. Any other name leaves the lobby.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1841,7 +1832,6 @@ impl ThroccApp {
             }
             "settings" => self.screen = Screen::Settings(SettingsPage::Audio),
             "appearance" => self.screen = Screen::Settings(SettingsPage::Appearance),
-            "servers" => self.screen = Screen::Settings(SettingsPage::Servers),
             "verified" => self.screen = Screen::Settings(SettingsPage::Verified),
             "newroom" => self.dialog = Some(Dialog::NewRoom),
             "editroom" => self.dialog = Some(Dialog::EditRoom(room)),

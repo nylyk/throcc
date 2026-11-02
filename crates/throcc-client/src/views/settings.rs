@@ -18,8 +18,8 @@ use throcc_client_core::media::audio::{
 use throcc_proto::Fingerprint;
 
 use super::common::{
-    Typeset, avatar, caption, card, chip, field_error, ghost_icon, key_cap, mono, primary, section,
-    server_seed, slider_gain, slider_value, volume_slider,
+    Typeset, caption, card, field_error, ghost_icon, key_cap, mono, primary, section, slider_gain,
+    slider_value, volume_slider,
 };
 use super::page::{field, frame, nav, picture_editor, row, save_line, segmented};
 use crate::app::{PictureFor, Screen, SettingsPage, ThroccApp, typed_name};
@@ -42,7 +42,6 @@ pub fn render(
         SettingsPage::Audio => audio(app, cx),
         SettingsPage::Appearance => appearance(app, cx),
         SettingsPage::Verified => verified_people(app, cx),
-        SettingsPage::Servers => servers(app),
     };
     frame(
         app.sidebar_width,
@@ -504,49 +503,9 @@ fn verified_people(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .child(section("People that you have verified"))
         .children(rows)
         .children(
-            app.state
-                .verified
-                .is_empty()
-                .then(|| caption("Nobody yet. Compare safety numbers with someone to verify them.")),
-        )
-        .into_any_element()
-}
-
-fn servers(app: &ThroccApp) -> AnyElement {
-    let current = app.connected_server().map(|s| s.address.as_str());
-    div()
-        .flex()
-        .flex_col()
-        .gap_6()
-        .child(
-            card()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .children(app.known_servers.iter().map(|(address, fingerprint)| {
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .min_h(theme::TOUCH)
-                        .child(avatar(address, server_seed(address), None, px(28.), false))
-                        .child(
-                            div()
-                                .flex_1()
-                                .flex()
-                                .flex_col()
-                                .child(mono(address.clone()))
-                                .child(
-                                    mono(fingerprint.short())
-                                        .typeset(theme::CAPTION)
-                                        .text_color(theme::text_3()),
-                                ),
-                        )
-                        .children(
-                            (current == Some(address.as_str()))
-                                .then(|| chip("Connected", theme::ok_bg(), theme::ok_text())),
-                        )
-                })),
+            app.state.verified.is_empty().then(|| {
+                caption("Nobody yet. Compare safety numbers with someone to verify them.")
+            }),
         )
         .into_any_element()
 }
