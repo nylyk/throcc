@@ -95,11 +95,13 @@ const HANDLED: [SampleFormat; 3] = [SampleFormat::F32, SampleFormat::I16, Sample
 
 /// The rate to open a device whose default config is `default` at. CoreAudio sets a
 /// device's rate for every app to the one a stream opens at, so on macOS devices open at the
-/// rate they run at and the audio thread resamples. Elsewhere they open at [`SAMPLE_RATE`]
-/// where they can, so nothing needs resampling.
+/// rate they run at and the audio thread resamples. Elsewhere, and at a rate the audio
+/// thread's 10 ms pulls don't divide into whole frames, they open at [`SAMPLE_RATE`] where
+/// they can.
 fn open_rate(default: &SupportedStreamConfig) -> u32 {
-    if cfg!(target_os = "macos") {
-        default.sample_rate()
+    let rate = default.sample_rate();
+    if cfg!(target_os = "macos") && rate.is_multiple_of(100) {
+        rate
     } else {
         SAMPLE_RATE
     }
@@ -382,13 +384,16 @@ mod tests {
     }
 
     #[test]
-    fn only_macos_keeps_the_device_rate() {
-        let default = config(2, 44_100, SampleFormat::F32);
-        let expected = if cfg!(target_os = "macos") {
+    fn only_macos_keeps_the_device_rate_and_only_in_whole_10_ms_pulls() {
+        let kept = if cfg!(target_os = "macos") {
             44_100
         } else {
             SAMPLE_RATE
         };
-        assert_eq!(open_rate(&default), expected);
+        assert_eq!(open_rate(&config(2, 44_100, SampleFormat::F32)), kept);
+        assert_eq!(
+            open_rate(&config(2, 22_050, SampleFormat::F32)),
+            SAMPLE_RATE
+        );
     }
 }

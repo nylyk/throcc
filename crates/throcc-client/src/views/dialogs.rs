@@ -9,6 +9,7 @@ use gpui_component::input::Input;
 use gpui_component::slider::Slider;
 use gpui_component::switch::Switch;
 use throcc_client_core::client::Command;
+use throcc_client_core::keystore::StartedOver;
 use throcc_client_core::state::{FRAME_RATES, Resolution};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{RoomId, UserId};
@@ -19,7 +20,7 @@ use super::common::{
     secondary, section, title, verified_as,
 };
 use super::page::{field, field_label, segmented};
-use crate::app::{Dialog, ThroccApp, typed_name, typed_password};
+use crate::app::{Dialog, StartOver, ThroccApp, typed_name, typed_password};
 use crate::theme;
 
 /// The modal for `dialog`, over a dimmed window.
@@ -49,7 +50,7 @@ pub fn render(app: &mut ThroccApp, dialog: Dialog, cx: &mut Context<ThroccApp>) 
         Dialog::LeaveServer => leave_server(app, cx),
         Dialog::AddServer => add_server(app, cx),
         Dialog::RemoveServer(address) => remove_server(app, address, cx),
-        Dialog::IdentityMissing => identity_missing(cx),
+        Dialog::IdentityMissing => identity_missing(app, cx),
     };
     div()
         .id("scrim")
@@ -59,7 +60,7 @@ pub fn render(app: &mut ThroccApp, dialog: Dialog, cx: &mut Context<ThroccApp>) 
         .bg(theme::scrim())
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(|app, _, _, cx| app.set_dialog(None, cx)),
+            cx.listener(|app, _, _, cx| app.dismiss_dialog(cx)),
         )
         .flex()
         .items_center()
@@ -225,8 +226,8 @@ fn room_password(
         .into_any_element()
 }
 
-fn close_button(label: &'static str, cx: &mut Context<ThroccApp>) -> impl IntoElement {
-    secondary("close-dialog", label).on_click(cx.listener(|app, _, _, cx| app.set_dialog(None, cx)))
+fn close_button(label: &'static str, cx: &mut Context<ThroccApp>) -> Button {
+    secondary("close-dialog", label).on_click(cx.listener(|app, _, _, cx| app.dismiss_dialog(cx)))
 }
 
 fn warning_box() -> Div {
@@ -647,19 +648,57 @@ fn remove_server(app: &ThroccApp, address: String, cx: &mut Context<ThroccApp>) 
         .into_any_element()
 }
 
-fn identity_missing(cx: &mut Context<ThroccApp>) -> AnyElement {
+fn identity_missing(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
+    let (heading, outcome) = match &app.start_over {
+        StartOver::Done(StartedOver::Recovered) => (
+            "Your identity is back",
+            "Your keychain had it after all. Your servers are still on your list.",
+        ),
+        StartOver::Done(StartedOver::NewIdentity) => (
+            "You have a new identity",
+            "Your servers have left your list. Add each one again with a new invite.",
+        ),
+        _ => return identity_still_missing(app, cx),
+    };
+    body(heading)
+        .child(description(outcome))
+        .child(actions("Close", cx))
+        .into_any_element()
+}
+
+fn identity_still_missing(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
+    let running = app.start_over == StartOver::Running;
+    let failed = match &app.start_over {
+        StartOver::Failed(error) => Some(error.clone()),
+        _ => None,
+    };
     body("Your identity is missing")
         .child(description(
-            "Your identity is missing from this computer’s keychain, so your servers won’t know it’s you. If you can restore the keychain from a backup, do that and try again.",
+            "Your identity is missing from this computer’s keychain, so your servers won’t know it’s you. If your keychain or password manager is locked or hasn’t started yet, unlock or start it and choose Try Again. If it still isn’t found, restart throcc, or restore the keychain from a backup.",
         ))
         .child(description(
             "Starting over makes a new identity and takes every server off your list. Joining your servers again needs new invites, and anyone who verified you needs to verify you again.",
         ))
+        .children(failed.map(error_box))
         .child(
-            actions("Cancel", cx).child(
-                danger("start-over", "Start Over")
+            div()
+                .flex()
+                .justify_end()
+                .gap_2()
+                .child(close_button("Cancel", cx).disabled(running))
+                .child(
+                    primary("try-again", "Try Again")
+                        .disabled(running)
+                        .on_click(cx.listener(|app, _, window, cx| app.try_again(window, cx))),
+                )
+                .child(
+                    danger(
+                        "start-over",
+                        if running { "Starting Over…" } else { "Start Over" },
+                    )
+                    .disabled(running)
                     .on_click(cx.listener(|app, _, _, cx| app.start_over(cx))),
-            ),
+                ),
         )
         .into_any_element()
 }

@@ -27,14 +27,24 @@ const ENC_KEY_RENEW_BEFORE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const ENC_KEY_CLOCK_SKEW: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The keychain has no identity key and there is no file holding one, yet servers are known,
-/// so the identity they know us by is gone. A new one is started only once the user agrees,
-/// with [`Keystore::start_over`].
+/// so the identity they know us by is gone, or hidden in a keychain that is locked or hasn't
+/// started yet. A new one is started only once the user agrees, with [`Keystore::start_over`].
 #[derive(Debug, thiserror::Error)]
 #[error(
     "your identity is missing from this computer's keychain, so your servers won't know you; \
-     joining them again needs new invites"
+     if your keychain or password manager is locked or hasn't started yet, unlock or start it \
+     and try again, restarting throcc if it still isn't found"
 )]
 pub struct IdentityMissing;
+
+/// What [`Keystore::start_over`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartedOver {
+    /// The keychain held the identity after all, so nothing was forgotten.
+    Recovered,
+    /// A new identity was started, and the known servers and the encryption key dropped.
+    NewIdentity,
+}
 
 /// The install's identity key and encryption key, plus the pinned servers.
 pub struct Keystore {
@@ -57,23 +67,34 @@ impl Keystore {
     /// takes the identity from that file when there is one. Neither starts a new identity
     /// while servers are known; an empty keychain then fails with [`IdentityMissing`].
     pub fn open_default() -> Result<Self> {
+        Ok(Self::open_platform(WhenMissing::Refuse)?.0)
+    }
+
+    /// Opens the platform config directory like [`Self::open_default`]. Where the identity
+    /// is still missing, it forgets every known server and the encryption key and starts a
+    /// new identity. For after [`IdentityMissing`], once the user agreed.
+    pub fn start_over() -> Result<(Self, StartedOver)> {
+        let (store, new) = Self::open_platform(WhenMissing::StartOver)?;
+        let started_over = if new {
+            StartedOver::NewIdentity
+        } else {
+            StartedOver::Recovered
+        };
+        Ok((store, started_over))
+    }
+
+    /// The store, and whether its identity was started just now.
+    fn open_platform(when_missing: WhenMissing) -> Result<(Self, bool)> {
         let dir = config_dir()?;
         fs::create_dir_all(&dir)?;
-        let identity = match keychain_identity(&dir) {
+        let found = match keychain_identity(&dir, when_missing) {
             Err(e) if matches!(e.downcast_ref(), Some(keyring::Error::NoDefaultStore)) => {
                 warn!("no OS keychain ({e:#}); keeping the identity key in a file");
-                fallback_identity(&dir)?
+                Found::kept(fallback_identity(&dir)?)
             }
             other => other.context("reading the identity key from the OS keychain")?,
         };
-        Self::assemble(dir, cache_dir()?, identity)
-    }
-
-    /// Forgets every known server, then opens the platform config directory, which starts a
-    /// new identity where none is kept. For after [`IdentityMissing`], once the user agreed.
-    pub fn start_over() -> Result<Self> {
-        KnownServers::load(&config_dir()?)?.forget_all()?;
-        Self::open_default()
+        Ok((Self::assemble(dir, cache_dir()?, found.key)?, found.new))
     }
 
     /// Opens `dir` with the identity key in a 0600 file and the cache inside it. Used for
@@ -193,32 +214,98 @@ fn new_enc_key(path: &Path, now: u64) -> Result<(EncKeyPair, u64)> {
     Ok((key, now))
 }
 
-/// The identity key in the OS keychain, put there when it has none.
-fn keychain_identity(dir: &Path) -> Result<IdentityKey> {
-    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_IDENTITY)?;
-    match entry.get_secret() {
-        Ok(secret) => seed_to_key(&Zeroizing::new(secret)),
-        Err(keyring::Error::NoEntry) => {
-            first_keychain_identity(dir, |seed| Ok(entry.set_secret(seed)?))
-        }
-        Err(e) => Err(e.into()),
+/// Whether an empty keychain may start a new identity while servers are known.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WhenMissing {
+    Refuse,
+    /// The user agreed to start over: the servers and the encryption key go first.
+    StartOver,
+}
+
+/// An identity key, and whether it was started just now.
+struct Found {
+    key: IdentityKey,
+    new: bool,
+}
+
+impl Found {
+    fn kept(key: IdentityKey) -> Self {
+        Self { key, new: false }
     }
 }
 
-/// The identity to `store` in an empty keychain: the one a run without a keychain kept in
-/// `dir`, or else a new one while no server is known. The file stays, so the identity also
-/// survives the keychain going away again.
+/// Where the keychain keeps the identity key's seed.
+trait SeedEntry {
+    /// The seed, or `None` while the keychain holds none.
+    fn read(&self) -> Result<Option<Zeroizing<Vec<u8>>>>;
+    fn write(&self, seed: &[u8]) -> Result<()>;
+}
+
+impl SeedEntry for keyring::Entry {
+    fn read(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        match self.get_secret() {
+            Ok(secret) => Ok(Some(Zeroizing::new(secret))),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn write(&self, seed: &[u8]) -> Result<()> {
+        Ok(self.set_secret(seed)?)
+    }
+}
+
+/// The identity key in the OS keychain, put there when it has none.
+fn keychain_identity(dir: &Path, when_missing: WhenMissing) -> Result<Found> {
+    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_IDENTITY)?;
+    identity_in(&entry, dir, when_missing)
+}
+
+fn identity_in(keychain: &impl SeedEntry, dir: &Path, when_missing: WhenMissing) -> Result<Found> {
+    match keychain.read()? {
+        Some(seed) => Ok(Found::kept(seed_to_key(&seed)?)),
+        None => first_keychain_identity(keychain, dir, when_missing),
+    }
+}
+
+/// The identity to put in an empty keychain: the one a run without a keychain kept in
+/// `dir`, or else a new one while no server is known or once the user chose to start over.
+/// The file stays, so the identity also survives the keychain going away again.
 fn first_keychain_identity(
+    keychain: &impl SeedEntry,
     dir: &Path,
-    store: impl FnOnce(&[u8]) -> Result<()>,
-) -> Result<IdentityKey> {
-    let key = match read_if_exists(&dir.join(IDENTITY_FILE))? {
-        Some(bytes) => seed_to_key(&Zeroizing::new(bytes))?,
-        None if knows_servers(dir)? => return Err(IdentityMissing.into()),
-        None => IdentityKey::generate(),
+    when_missing: WhenMissing,
+) -> Result<Found> {
+    let found = match read_if_exists(&dir.join(IDENTITY_FILE))? {
+        Some(bytes) => Found::kept(seed_to_key(&Zeroizing::new(bytes))?),
+        None if when_missing == WhenMissing::Refuse && knows_servers(dir)? => {
+            return Err(IdentityMissing.into());
+        }
+        None => Found {
+            key: IdentityKey::generate(),
+            new: true,
+        },
     };
-    store(key.seed().as_slice())?;
-    Ok(key)
+    // A keychain that read empty may only have been locked, or not yet the user's own, and
+    // been unlocked or started at a prompt since. What it holds then is used, not
+    // overwritten. The write itself searches once more and, on Secret Service, replaces what
+    // that search finds, so an identity unlocked at exactly that prompt is still lost.
+    if let Some(seed) = keychain.read()? {
+        return Ok(Found::kept(seed_to_key(&seed)?));
+    }
+    if found.new && when_missing == WhenMissing::StartOver {
+        forget_old_identity(dir)?;
+    }
+    keychain.write(found.key.seed().as_slice())?;
+    Ok(found)
+}
+
+/// Drops what belongs to an identity being replaced: the servers that knew it, and the
+/// encryption key it signed, which would tie the new identity to the old one.
+fn forget_old_identity(dir: &Path) -> Result<()> {
+    KnownServers::load(dir)?.forget_all()?;
+    new_enc_key(&dir.join(ENC_KEY_FILE), unix_now()?)?;
+    Ok(())
 }
 
 /// The identity key in `dir`. A missing one is created only while no server is known.
@@ -226,7 +313,7 @@ fn fallback_identity(dir: &Path) -> Result<IdentityKey> {
     if knows_servers(dir)? && !dir.join(IDENTITY_FILE).exists() {
         bail!(
             "the OS keychain holding your identity key can't be reached; unlock or start your \
-             keyring (Secret Service) and try again"
+             keyring (Secret Service), then restart throcc"
         );
     }
     file_identity(dir)
@@ -257,6 +344,8 @@ fn seed_to_key(bytes: &[u8]) -> Result<IdentityKey> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::{Cell, RefCell};
+
     use super::*;
 
     #[test]
@@ -283,73 +372,154 @@ mod tests {
         assert!(!dir.path().join(IDENTITY_FILE).exists());
     }
 
+    /// A keychain entry in memory. `hidden` is a seed the first read misses, as a locked
+    /// password manager's is until the user unlocks it at the next prompt.
+    #[derive(Default)]
+    struct FakeEntry {
+        held: RefCell<Option<Vec<u8>>>,
+        hidden: RefCell<Option<Vec<u8>>>,
+        writes: Cell<usize>,
+    }
+
+    impl FakeEntry {
+        fn hiding(seed: &[u8]) -> Self {
+            let entry = Self::default();
+            *entry.hidden.borrow_mut() = Some(seed.to_vec());
+            entry
+        }
+
+        fn held(&self) -> Option<Vec<u8>> {
+            self.held.borrow().clone()
+        }
+    }
+
+    impl SeedEntry for FakeEntry {
+        fn read(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
+            let held = self.held();
+            if let Some(hidden) = self.hidden.take() {
+                *self.held.borrow_mut() = Some(hidden);
+            }
+            Ok(held.map(Zeroizing::new))
+        }
+
+        fn write(&self, seed: &[u8]) -> Result<()> {
+            self.writes.set(self.writes.get() + 1);
+            *self.held.borrow_mut() = Some(seed.to_vec());
+            Ok(())
+        }
+    }
+
+    fn knowing_a_server(dir: &Path) -> KnownServers {
+        let mut known = KnownServers::load(dir).unwrap();
+        known
+            .trust("voice.example.net:8476", Fingerprint([3; 32]))
+            .unwrap();
+        known
+    }
+
+    fn enc_key_file(dir: &Path) -> Vec<u8> {
+        fs::read(dir.join(ENC_KEY_FILE)).unwrap()
+    }
+
     #[test]
     fn an_empty_keychain_takes_the_identity_kept_in_a_file() {
         let dir = tempfile::tempdir().unwrap();
         let kept = file_identity(dir.path()).unwrap();
-        let mut stored = Vec::new();
-        let key = first_keychain_identity(dir.path(), |seed| {
-            stored = seed.to_vec();
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(key.public(), kept.public());
-        assert_eq!(stored, kept.seed().as_slice());
+        let entry = FakeEntry::default();
+        let found = identity_in(&entry, dir.path(), WhenMissing::Refuse).unwrap();
+        assert_eq!(found.key.public(), kept.public());
+        assert!(!found.new);
+        assert_eq!(entry.held().unwrap(), kept.seed().as_slice());
         assert_eq!(file_identity(dir.path()).unwrap().public(), kept.public());
 
         let empty = tempfile::tempdir().unwrap();
-        let new = first_keychain_identity(empty.path(), |_| Ok(())).unwrap();
-        assert_ne!(new.public(), kept.public());
+        let found = identity_in(&FakeEntry::default(), empty.path(), WhenMissing::Refuse).unwrap();
+        assert_ne!(found.key.public(), kept.public());
+        assert!(found.new);
         assert!(!empty.path().join(IDENTITY_FILE).exists());
     }
 
     #[test]
     fn an_empty_keychain_starts_no_identity_while_servers_are_known() {
         let dir = tempfile::tempdir().unwrap();
-        let mut known = KnownServers::load(dir.path()).unwrap();
-        known
-            .trust("voice.example.net:8476", Fingerprint([3; 32]))
-            .unwrap();
-        let mut stored = false;
-        let opened = first_keychain_identity(dir.path(), |_| {
-            stored = true;
-            Ok(())
-        });
-        let Err(missing) = opened else {
+        let mut known = knowing_a_server(dir.path());
+        let entry = FakeEntry::default();
+        let Err(missing) = identity_in(&entry, dir.path(), WhenMissing::Refuse) else {
             panic!("started an identity while servers are known");
         };
         let missing = missing.context("reading the identity key from the OS keychain");
         assert!(crate::account::SignInError::Store(missing).identity_missing());
-        assert!(!stored);
+        assert_eq!(entry.writes.get(), 0);
         assert!(!dir.path().join(IDENTITY_FILE).exists());
 
         let kept = file_identity(dir.path()).unwrap();
-        let key = first_keychain_identity(dir.path(), |_| Ok(())).unwrap();
-        assert_eq!(key.public(), kept.public());
+        let found = identity_in(&FakeEntry::default(), dir.path(), WhenMissing::Refuse).unwrap();
+        assert_eq!(found.key.public(), kept.public());
 
         fs::remove_file(dir.path().join(IDENTITY_FILE)).unwrap();
         known.forget_all().unwrap();
-        let mut stored = Vec::new();
-        let new = first_keychain_identity(dir.path(), |seed| {
-            stored = seed.to_vec();
-            Ok(())
-        })
-        .unwrap();
-        assert_ne!(new.public(), kept.public());
-        assert_eq!(stored, new.seed().as_slice());
+        let entry = FakeEntry::default();
+        let found = identity_in(&entry, dir.path(), WhenMissing::Refuse).unwrap();
+        assert_ne!(found.key.public(), kept.public());
+        assert_eq!(entry.held().unwrap(), found.key.seed().as_slice());
+    }
+
+    #[test]
+    fn starting_over_forgets_the_servers_and_the_enc_key_only_for_a_new_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        knowing_a_server(dir.path());
+        load_enc_key(&dir.path().join(ENC_KEY_FILE)).unwrap();
+        let old_enc_key = enc_key_file(dir.path());
+
+        let old = IdentityKey::generate();
+        let entry = FakeEntry::default();
+        entry.write(old.seed().as_slice()).unwrap();
+        let found = identity_in(&entry, dir.path(), WhenMissing::StartOver).unwrap();
+        assert_eq!(found.key.public(), old.public());
+        assert!(!found.new);
+        assert!(knows_servers(dir.path()).unwrap());
+        assert_eq!(enc_key_file(dir.path()), old_enc_key);
+
+        let entry = FakeEntry::default();
+        let found = identity_in(&entry, dir.path(), WhenMissing::StartOver).unwrap();
+        assert!(found.new);
+        assert_ne!(found.key.public(), old.public());
+        assert_eq!(entry.held().unwrap(), found.key.seed().as_slice());
+        assert!(!knows_servers(dir.path()).unwrap());
+        assert_ne!(enc_key_file(dir.path()), old_enc_key);
+    }
+
+    #[test]
+    fn an_identity_that_shows_up_before_the_write_is_never_overwritten() {
+        let old = IdentityKey::generate();
+        for when_missing in [WhenMissing::Refuse, WhenMissing::StartOver] {
+            let dir = tempfile::tempdir().unwrap();
+            if when_missing == WhenMissing::StartOver {
+                knowing_a_server(dir.path());
+            }
+            load_enc_key(&dir.path().join(ENC_KEY_FILE)).unwrap();
+            let old_enc_key = enc_key_file(dir.path());
+            let entry = FakeEntry::hiding(old.seed().as_slice());
+            let found = identity_in(&entry, dir.path(), when_missing).unwrap();
+            assert_eq!(found.key.public(), old.public());
+            assert!(!found.new);
+            assert_eq!(entry.writes.get(), 0);
+            assert_eq!(entry.held().unwrap(), old.seed().as_slice());
+            assert_eq!(
+                knows_servers(dir.path()).unwrap(),
+                when_missing == WhenMissing::StartOver
+            );
+            assert_eq!(enc_key_file(dir.path()), old_enc_key);
+        }
     }
 
     #[test]
     fn a_corrupt_identity_file_is_never_replaced_in_the_keychain() {
         let dir = tempfile::tempdir().unwrap();
         replace_file(&dir.path().join(IDENTITY_FILE), b"short").unwrap();
-        let mut stored = false;
-        let opened = first_keychain_identity(dir.path(), |_| {
-            stored = true;
-            Ok(())
-        });
-        assert!(opened.is_err());
-        assert!(!stored);
+        let entry = FakeEntry::default();
+        assert!(identity_in(&entry, dir.path(), WhenMissing::StartOver).is_err());
+        assert_eq!(entry.writes.get(), 0);
     }
 
     #[test]

@@ -14,7 +14,7 @@ use gpui_component::{Root, WindowExt};
 use throcc_client_core::account::SignInError;
 use throcc_client_core::avatars;
 use throcc_client_core::client::{Client, ClientApi, ClientOptions, Command, Event, MockClient};
-use throcc_client_core::keystore::{self, Keystore};
+use throcc_client_core::keystore::{self, Keystore, StartedOver};
 use throcc_client_core::media::audio::{Transmit, VoiceSettings};
 use throcc_client_core::media::cues::Cue;
 use throcc_client_core::media::devices;
@@ -235,6 +235,17 @@ pub enum Dialog {
     IdentityMissing,
 }
 
+/// How starting over after a lost identity goes, shown in its dialog.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum StartOver {
+    #[default]
+    NotStarted,
+    /// Holds the dialog open until it finishes, as the keychain may be showing a prompt.
+    Running,
+    Done(StartedOver),
+    Failed(String),
+}
+
 /// The widest the sidebar may be in `window` and still leave the room its minimum width.
 fn widest_sidebar(window: &Window) -> gpui::Pixels {
     (window.viewport_size().width - theme::SERVER_BAR_WIDTH - theme::ROOM_MIN_WIDTH)
@@ -396,6 +407,7 @@ pub struct ThroccApp {
     /// Counts joins started, so a join that was overtaken by a newer one is ignored.
     join_attempt: u64,
     pub join_error: Option<String>,
+    pub start_over: StartOver,
     pub profile_form: PictureForm,
     pub known_servers: Vec<(String, Fingerprint)>,
     pub server_looks: HashMap<String, CachedLook>,
@@ -542,6 +554,7 @@ impl ThroccApp {
             mascot: views::mascot::Shown::default(),
             join_attempt: 0,
             join_error: None,
+            start_over: StartOver::NotStarted,
             profile_form: PictureForm::default(),
             known_servers,
             server_looks,
@@ -1046,6 +1059,18 @@ impl ThroccApp {
         cx.notify();
     }
 
+    /// Closes the dialog the user dismissed, unless it waits for starting over to finish.
+    pub fn dismiss_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.start_over != StartOver::Running {
+            self.set_dialog(None, cx);
+        }
+    }
+
+    fn show_identity_missing(&mut self) {
+        self.start_over = StartOver::NotStarted;
+        self.dialog = Some(Dialog::IdentityMissing);
+    }
+
     /// Opens the dialog comparing our safety number with `user`'s.
     pub fn open_verify(&mut self, user: UserId, cx: &mut Context<Self>) {
         self.dialog = Some(Dialog::Verify {
@@ -1479,9 +1504,7 @@ impl ThroccApp {
                                         actual,
                                     });
                                 }
-                                None if e.identity_missing() => {
-                                    app.dialog = Some(Dialog::IdentityMissing);
-                                }
+                                None if e.identity_missing() => app.show_identity_missing(),
                                 None => app.join_error = Some(views::join::explain(&e, &address)),
                             }
                         }
@@ -1513,25 +1536,38 @@ impl ThroccApp {
         }
     }
 
+    /// Looks for the identity again after the keychain seemed to have lost it, as the human
+    /// may have unlocked or started their keychain since.
+    pub fn try_again(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_dialog(None, cx);
+        self.join(window, cx);
+    }
+
     /// Forgets every known server and starts a new identity, as the human chose to after the
-    /// keychain lost the old one.
+    /// keychain lost the old one, unless the keychain holds it again by now.
     pub fn start_over(&mut self, cx: &mut Context<Self>) {
-        if self.mock {
-            self.known_servers.clear();
-            self.set_dialog(None, cx);
+        if self.start_over == StartOver::Running {
             return;
         }
+        if self.mock {
+            self.known_servers.clear();
+            self.start_over = StartOver::Done(StartedOver::NewIdentity);
+            cx.notify();
+            return;
+        }
+        self.start_over = StartOver::Running;
+        cx.notify();
         let starting = cx
             .background_executor()
-            .spawn(async { Keystore::start_over().map(drop) });
+            .spawn(async { Keystore::start_over().map(|(_, started)| started) });
         cx.spawn(async move |this, cx| {
             let started = starting.await;
             this.update(cx, |app, cx| {
                 app.reload_known_servers();
-                app.dialog = None;
-                if let Err(e) = started {
-                    app.join_error = Some(format!("Couldn’t start over: {e:#}"));
-                }
+                app.start_over = match started {
+                    Ok(started) => StartOver::Done(started),
+                    Err(e) => StartOver::Failed(format!("Couldn’t start over: {e:#}")),
+                };
                 cx.notify();
             })
             .ok();
@@ -1607,7 +1643,8 @@ impl ThroccApp {
     /// lost, personmenu, addserver, removeserver, room, alone, emptylobby, focus, fullscreen,
     /// popout, share, connection, verify, keychange, pinmismatch, settings, appearance,
     /// servers, newroom, editroom, roompassword, deleteroom, profile, server, keys, members,
-    /// invites, removeuser, leaveserver or identitymissing. Any other name leaves the lobby.
+    /// invites, removeuser, leaveserver, identitymissing or startedover. Any other name leaves
+    /// the lobby.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         let room = RoomId(1);
         let joined = |app: &mut Self| {
@@ -1744,7 +1781,13 @@ impl ThroccApp {
             "leaveserver" => self.dialog = Some(Dialog::LeaveServer),
             "identitymissing" => {
                 offline(self);
-                self.dialog = Some(Dialog::IdentityMissing);
+                self.show_identity_missing();
+            }
+            "startedover" => {
+                offline(self);
+                self.known_servers.clear();
+                self.show_identity_missing();
+                self.start_over = StartOver::Done(StartedOver::NewIdentity);
             }
             _ => {}
         }
@@ -1842,7 +1885,7 @@ impl ThroccApp {
         if self.dialog.is_none() && self.fullscreen.is_some() {
             self.exit_fullscreen(window, cx);
         }
-        self.set_dialog(None, cx);
+        self.dismiss_dialog(cx);
     }
 }
 

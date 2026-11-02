@@ -41,8 +41,7 @@ use pw::stream::{Stream, StreamBox, StreamFlags};
 use tracing::warn;
 
 use super::clock::ShareClock;
-use super::{Capture, CaptureConfig, CaptureError, PickedSource, copy_nv12, failed, resize};
-use crate::lock;
+use super::{Capture, CaptureConfig, CaptureError, copy_nv12, failed, resize};
 use crate::media::share_audio::STEREO_FRAME;
 use crate::media::video::frame::VideoFrame;
 use desktop_audio::DesktopAudio;
@@ -63,13 +62,8 @@ const DMABUF_FORMATS: [(VideoFormat, u32); 4] = [
 const MAX_SIDE: u32 = 8192;
 const NANOS: i64 = 1_000_000_000;
 
-/// Shows the portal's picker, or reuses the choice in `picked`, and reads the stream it
-/// shares. Keeps the portal's token for the choice in `picked`.
-pub(super) fn start(
-    config: CaptureConfig,
-    picked: &PickedSource,
-) -> Result<PipeWireCapture, CaptureError> {
-    let token = lock(&picked.token).clone();
+/// Shows the portal's picker and reads the stream it shares.
+pub(super) fn start(config: CaptureConfig) -> Result<PipeWireCapture, CaptureError> {
     async_io::block_on(async {
         let portal = Screencast::new().await.map_err(portal_error)?;
         let session = portal
@@ -83,9 +77,7 @@ pub(super) fn start(
                 .await
                 .inspect_err(|e| warn!("not watching for the share being stopped elsewhere: {e}"))
                 .ok();
-            let (node, fd, kept) = pick(&portal, &session, token.as_deref()).await?;
-            // The portal takes each token once, handing out the next with the stream.
-            *lock(&picked.token) = kept;
+            let (node, fd) = pick(&portal, &session).await?;
             let capture = PipeWireCapture::start(node, Some(fd), config)?;
             Ok::<_, CaptureError>((capture, closed))
         };
@@ -131,8 +123,7 @@ async fn closed_signal(
 async fn pick(
     portal: &Screencast,
     session: &Session<Screencast>,
-    token: Option<&str>,
-) -> Result<(u32, OwnedFd, Option<String>), CaptureError> {
+) -> Result<(u32, OwnedFd), CaptureError> {
     let sources = portal
         .available_source_types()
         .await
@@ -149,8 +140,8 @@ async fn pick(
         .set_sources(sources)
         .set_cursor_mode(cursor)
         .set_multiple(false)
-        .set_persist_mode(PersistMode::ExplicitlyRevoked)
-        .set_restore_token(token);
+        // Nothing of the choice is kept anywhere, so every share shows the picker.
+        .set_persist_mode(PersistMode::DoNot);
     portal
         .select_sources(session, options)
         .await
@@ -170,7 +161,7 @@ async fn pick(
         .open_pipe_wire_remote(session, Default::default())
         .await
         .map_err(portal_error)?;
-    Ok((node, fd, streams.restore_token().map(str::to_owned)))
+    Ok((node, fd))
 }
 
 fn portal_error(e: ashpd::Error) -> CaptureError {
@@ -1884,32 +1875,26 @@ mod tests {
         assert!(worst_skew < 0.2, "audio and video {worst_skew} s apart");
     }
 
-    /// The picker shows for the first capture and for the new share, not for the restart.
+    /// The picker shows for every capture, as nothing of the last choice is kept.
     #[test]
     #[ignore = "needs a desktop session with xdg-desktop-portal and someone to pick a screen"]
-    fn portal_share_delivers_frames_and_reuses_the_choice_only_within_a_share() {
+    fn portal_share_delivers_frames_and_asks_every_time() {
         let config = CaptureConfig {
             width: 1280,
             height: 720,
             fps: 30,
             audio: false,
         };
-        let share = PickedSource::default();
-        for (capture_of, picked) in [
-            ("first", &share),
-            ("restarted", &share),
-            ("new share's", &PickedSource::default()),
-        ] {
-            let mut capture = start(config, picked).unwrap();
+        for share in ["first", "second"] {
+            let mut capture = start(config).unwrap();
             let mut frame = VideoFrame::blank(1280, 720);
             let timestamps = frames_within(&mut capture, &mut frame, 10);
             assert!(
                 timestamps.len() >= 10,
-                "{capture_of} capture: only {} frames in 5 s",
+                "{share} share: only {} frames in 5 s",
                 timestamps.len()
             );
-            assert!(lock(&picked.token).is_some(), "no restore token kept");
-            println!("{capture_of} capture: {}×{}", frame.width, frame.height);
+            println!("{share} share: {}×{}", frame.width, frame.height);
         }
     }
 }

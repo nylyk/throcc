@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use throcc_client_core::account;
 use throcc_client_core::call::Call;
 use throcc_client_core::control::{Link, Requester};
-use throcc_client_core::keystore::Keystore;
+use throcc_client_core::keystore::{IdentityMissing, Keystore, StartedOver};
 use throcc_proto::ids::RoomId;
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{Event, Presence, Request, Response, Room, Welcome};
@@ -23,6 +23,10 @@ struct Cli {
     /// Directory holding this client's keys. Defaults to the platform data directory.
     #[arg(long, global = true)]
     profile: Option<PathBuf>,
+    /// Starts a new identity after the keychain lost yours, forgetting every server: joining
+    /// them again needs new invites. Keeps the identity instead if the keychain has it again.
+    #[arg(long, global = true, conflicts_with = "profile")]
+    start_over: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -136,7 +140,8 @@ async fn run(cli: Cli) -> Result<()> {
             return Ok(());
         }
         (_, Some(dir)) => Keystore::open_in(dir)?,
-        (_, None) => Keystore::open_default()?,
+        (_, None) if cli.start_over => start_over()?,
+        (_, None) => Keystore::open_default().map_err(offer_start_over)?,
     };
 
     match cli.command {
@@ -571,6 +576,29 @@ fn print_event(event: &Event) {
         Event::Kicked { reason } => println!("* disconnected: {}", shown(reason)),
         other => println!("* {other:?}"),
     }
+}
+
+fn start_over() -> Result<Keystore> {
+    let (keystore, started) = Keystore::start_over()?;
+    eprintln!(
+        "{}",
+        match started {
+            StartedOver::Recovered => "your identity is back; your servers are kept",
+            StartedOver::NewIdentity =>
+                "started a new identity and forgot every server; join them again with new invites",
+        }
+    );
+    Ok(keystore)
+}
+
+fn offer_start_over(e: anyhow::Error) -> anyhow::Error {
+    if !e.is::<IdentityMissing>() {
+        return e;
+    }
+    anyhow::anyhow!(
+        "{e:#}. If it is gone for good, run again with --start-over: that starts a new identity \
+         and forgets every server, and joining them again needs new invites"
+    )
 }
 
 /// `text` from the server, made safe to print: control characters (escape sequences
