@@ -1,4 +1,5 @@
 mod synthetic;
+mod unit;
 
 use std::path::PathBuf;
 
@@ -108,9 +109,15 @@ async fn main() -> Result<()> {
         )
         .init();
     let cli = Cli::parse();
-    let mut keystore = match &cli.profile {
-        Some(dir) => Keystore::open_in(dir)?,
-        None => Keystore::open_default()?,
+    let mut keystore = match (&cli.command, &cli.profile) {
+        (Command::Devices, _) => {
+            let (inputs, outputs) = throcc_client_core::media::devices::list();
+            println!("inputs:\n  {}", inputs.join("\n  "));
+            println!("outputs:\n  {}", outputs.join("\n  "));
+            return Ok(());
+        }
+        (_, Some(dir)) => Keystore::open_in(dir)?,
+        (_, None) => Keystore::open_default()?,
     };
 
     match cli.command {
@@ -132,8 +139,7 @@ async fn main() -> Result<()> {
         Command::Rooms { address } => one_shot(&keystore, &address, "rooms").await?,
         Command::Join { address, room } => {
             let link = sign_in(&keystore, &address).await?;
-            let room = find_room(&link.welcome.rooms, &room)?;
-            run_command(&link.requester, &link.welcome, &format!("join {}", room.0)).await?;
+            run_command(&link.requester, &link.welcome, &format!("join {room}")).await?;
             interactive(link).await?;
         }
         Command::Leave { address } => one_shot(&keystore, &address, "leave").await?,
@@ -158,11 +164,7 @@ async fn main() -> Result<()> {
             })
             .await??;
         }
-        Command::Devices => {
-            let (inputs, outputs) = throcc_client_core::media::devices::list();
-            println!("inputs:\n  {}", inputs.join("\n  "));
-            println!("outputs:\n  {}", outputs.join("\n  "));
-        }
+        Command::Devices => unreachable!("listed before the keystore opens"),
         Command::SendSynthetic {
             address,
             room,
@@ -172,6 +174,7 @@ async fn main() -> Result<()> {
             count,
             with_audio,
         } => {
+            track.check_with_audio(with_audio)?;
             let (mut call, room) = start_call(&keystore, &address, &room).await?;
             let options = synthetic::SendOptions {
                 track,
@@ -193,6 +196,7 @@ async fn main() -> Result<()> {
             with_audio,
             idle,
         } => {
+            track.check_with_audio(with_audio)?;
             let (mut call, room) = start_call(&keystore, &address, &room).await?;
             let options = synthetic::RecvOptions {
                 from: &from,
@@ -209,7 +213,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Runs a call with the real client until stdin closes or Ctrl-C.
+/// Runs a call with the real client until the connection ends or Ctrl-C.
 fn voice_call(
     address: &str,
     room: &str,
@@ -230,18 +234,8 @@ fn voice_call(
     };
     let client = Client::connect(address, keystore, None, options)?;
     let state = client.state();
-    let room = find_room(
-        &state
-            .rooms
-            .iter()
-            .map(|r| Room {
-                id: r.id,
-                name: r.name.clone(),
-                locked: r.locked,
-            })
-            .collect::<Vec<_>>(),
-        room,
-    )?;
+    let rooms = state.rooms.iter().map(|r| (r.id, r.name.as_str()));
+    let room = find_room(rooms, room)?;
     let mut events = client.events();
     client.command(ClientCommand::Join(Some(room)));
     client.command(ClientCommand::SetMic(!muted));
@@ -264,8 +258,7 @@ fn voice_call(
             }
             Ok(ClientEvent::Notice(notice)) => println!("* {notice}"),
             Ok(ClientEvent::Kicked(reason)) => bail!("disconnected: {reason}"),
-            Ok(_) => {}
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+            Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
             Err(_) => return Ok(()),
         }
     }
@@ -287,7 +280,7 @@ async fn sign_in(keystore: &Keystore, address: &str) -> Result<Link> {
 
 async fn start_call(keystore: &Keystore, address: &str, room: &str) -> Result<(Call, RoomId)> {
     let link = sign_in(keystore, address).await?;
-    let room = find_room(&link.welcome.rooms, room)?;
+    let room = find_room(room_names(&link.welcome.rooms), room)?;
     Ok((Call::start(link, keystore)?, room))
 }
 
@@ -340,7 +333,7 @@ async fn run_command(requester: &Requester, welcome: &Welcome, line: &str) -> Re
             return Ok(());
         }
         "join" => Request::SetRoom {
-            room: Some(find_room(&welcome.rooms, rest)?),
+            room: Some(find_room(room_names(&welcome.rooms), rest)?),
             password: None,
         },
         "leave" => Request::SetRoom {
@@ -391,12 +384,24 @@ async fn run_command(requester: &Requester, welcome: &Welcome, line: &str) -> Re
     Ok(())
 }
 
-fn find_room(rooms: &[Room], query: &str) -> Result<RoomId> {
+/// Whether `query` is `name`, ignoring case, or the numeric `id`.
+fn names(query: &str, name: &str, id: u64) -> bool {
+    name.eq_ignore_ascii_case(query) || id.to_string() == query
+}
+
+fn room_names(rooms: &[Room]) -> impl Iterator<Item = (RoomId, &str)> {
+    rooms.iter().map(|r| (r.id, r.name.as_str()))
+}
+
+fn find_room<'a>(
+    rooms: impl IntoIterator<Item = (RoomId, &'a str)>,
+    query: &str,
+) -> Result<RoomId> {
     let query = query.trim();
     rooms
-        .iter()
-        .find(|r| r.name.eq_ignore_ascii_case(query) || r.id.0.to_string() == query)
-        .map(|r| r.id)
+        .into_iter()
+        .find(|(id, name)| names(query, name, id.0))
+        .map(|(id, _)| id)
         .with_context(|| format!("no room called {query}"))
 }
 

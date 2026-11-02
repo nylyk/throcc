@@ -9,7 +9,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, SampleFormat, SizedSample, Stream, StreamConfig};
+use cpal::{
+    Device, FromSample, SampleFormat, SizedSample, Stream, StreamConfig, SupportedStreamConfig,
+    SupportedStreamConfigRange,
+};
+
+use super::audio::SAMPLE_RATE;
 
 /// Ring capacity in seconds of audio, at the device rate.
 const RING_SECONDS: u32 = 1;
@@ -66,49 +71,66 @@ pub fn list() -> (Vec<String>, Vec<String>) {
     (inputs, outputs)
 }
 
-fn find(devices: impl Iterator<Item = Device>, name: &str) -> Option<Device> {
-    devices
-        .into_iter()
+/// The device called `name` among `all`, or with no name the `default` one.
+fn pick<D: Iterator<Item = Device>, E: std::fmt::Display>(
+    name: Option<&str>,
+    all: impl FnOnce() -> Result<D, E>,
+    default: impl FnOnce() -> Option<Device>,
+    which: &'static str,
+) -> Result<Device, DeviceError> {
+    let Some(name) = name else {
+        return default().ok_or(DeviceError::Missing(which));
+    };
+    all()
+        .map_err(cpal_error)?
         .find(|d| d.description().is_ok_and(|desc| desc.name() == name))
+        .ok_or_else(|| DeviceError::NotFound(name.to_owned()))
+}
+
+/// `default` at [`SAMPLE_RATE`] if the device supports it, so no resampling is needed.
+fn stream_config<E>(
+    default: &SupportedStreamConfig,
+    supported: Result<impl Iterator<Item = SupportedStreamConfigRange>, E>,
+) -> StreamConfig {
+    let at_sample_rate = supported.is_ok_and(|mut ranges| {
+        ranges.any(|r| (r.min_sample_rate()..=r.max_sample_rate()).contains(&SAMPLE_RATE))
+    });
+    StreamConfig {
+        channels: default.channels(),
+        sample_rate: if at_sample_rate {
+            SAMPLE_RATE
+        } else {
+            default.sample_rate()
+        },
+        buffer_size: cpal::BufferSize::Default,
+    }
 }
 
 /// Opens the named devices, or the system defaults.
 pub fn open(input: Option<&str>, output: Option<&str>) -> Result<Devices, DeviceError> {
     let host = cpal::default_host();
-    let input_device = match input {
-        Some(name) => find(host.input_devices().map_err(cpal_error)?, name)
-            .ok_or_else(|| DeviceError::NotFound(name.to_owned()))?,
-        None => host
-            .default_input_device()
-            .ok_or(DeviceError::Missing("input"))?,
-    };
-    let output_device = match output {
-        Some(name) => find(host.output_devices().map_err(cpal_error)?, name)
-            .ok_or_else(|| DeviceError::NotFound(name.to_owned()))?,
-        None => host
-            .default_output_device()
-            .ok_or(DeviceError::Missing("output"))?,
-    };
+    let input_device = pick(
+        input,
+        || host.input_devices(),
+        || host.default_input_device(),
+        "input",
+    )?;
+    let output_device = pick(
+        output,
+        || host.output_devices(),
+        || host.default_output_device(),
+        "output",
+    )?;
 
     let input_config = input_device.default_input_config().map_err(cpal_error)?;
     let output_config = output_device.default_output_config().map_err(cpal_error)?;
-    let input_rate = prefer_48k(&input_device, true).unwrap_or(input_config.sample_rate());
-    let output_rate = prefer_48k(&output_device, false).unwrap_or(output_config.sample_rate());
+    let in_config = stream_config(&input_config, input_device.supported_input_configs());
+    let out_config = stream_config(&output_config, output_device.supported_output_configs());
+    let (input_rate, output_rate) = (in_config.sample_rate, out_config.sample_rate);
 
     let counters = Arc::new(DeviceCounters::default());
     let (capture_tx, capture) = rtrb::RingBuffer::new((input_rate * RING_SECONDS) as usize);
     let (playback, playback_rx) = rtrb::RingBuffer::new((output_rate * RING_SECONDS) as usize * 2);
-
-    let in_config = StreamConfig {
-        channels: input_config.channels(),
-        sample_rate: input_rate,
-        buffer_size: cpal::BufferSize::Default,
-    };
-    let out_config = StreamConfig {
-        channels: output_config.channels(),
-        sample_rate: output_rate,
-        buffer_size: cpal::BufferSize::Default,
-    };
     let input_stream = match input_config.sample_format() {
         SampleFormat::F32 => {
             build_input::<f32>(&input_device, &in_config, capture_tx, counters.clone())
@@ -140,60 +162,24 @@ pub fn open(input: Option<&str>, output: Option<&str>) -> Result<Devices, Device
     })
 }
 
-/// 48 kHz if the device supports it, so no resampling is needed.
-fn prefer_48k(device: &Device, input: bool) -> Option<u32> {
-    let supports = |min: u32, max: u32| (min..=max).contains(&48_000);
-    let found = if input {
-        device
-            .supported_input_configs()
-            .ok()?
-            .any(|c| supports(c.min_sample_rate(), c.max_sample_rate()))
-    } else {
-        device
-            .supported_output_configs()
-            .ok()?
-            .any(|c| supports(c.min_sample_rate(), c.max_sample_rate()))
-    };
-    found.then_some(48_000)
-}
-
-trait ToF32: SizedSample + Send + 'static {
-    fn to_f32(self) -> f32;
-    fn from_f32(sample: f32) -> Self;
-}
-
-impl ToF32 for f32 {
-    fn to_f32(self) -> f32 {
-        self
-    }
-    fn from_f32(sample: f32) -> Self {
-        sample
-    }
-}
-
-impl ToF32 for i16 {
-    fn to_f32(self) -> f32 {
-        f32::from(self) / 32768.0
-    }
-    fn from_f32(sample: f32) -> Self {
-        (sample.clamp(-1.0, 1.0) * 32767.0) as i16
-    }
-}
-
 /// The callback downmixes to mono into the ring. It never blocks, allocates or panics.
-fn build_input<T: ToF32>(
+fn build_input<T>(
     device: &Device,
     config: &StreamConfig,
     mut ring: rtrb::Producer<f32>,
     counters: Arc<DeviceCounters>,
-) -> Result<Stream, DeviceError> {
+) -> Result<Stream, DeviceError>
+where
+    T: SizedSample + Send + 'static,
+    f32: FromSample<T>,
+{
     let channels = usize::from(config.channels.max(1));
     device
         .build_input_stream::<T, _, _>(
             *config,
             move |data: &[T], _| {
                 for frame in data.chunks(channels) {
-                    let sum: f32 = frame.iter().map(|s| s.to_f32()).sum();
+                    let sum: f32 = frame.iter().map(|s| s.to_sample::<f32>()).sum();
                     if ring.push(sum / channels as f32).is_err() {
                         counters.overruns.fetch_add(1, Ordering::Relaxed);
                     }
@@ -205,14 +191,18 @@ fn build_input<T: ToF32>(
         .map_err(cpal_error)
 }
 
-/// The callback copies mono samples from the ring to every channel. It never blocks,
-/// allocates or panics; an empty ring plays silence.
-fn build_output<T: ToF32>(
+/// The callback plays interleaved stereo from the ring: left and right on the first two
+/// channels, their mean on any others. It never blocks, allocates or panics; an empty ring
+/// plays silence.
+fn build_output<T>(
     device: &Device,
     config: &StreamConfig,
     mut ring: rtrb::Consumer<f32>,
     counters: Arc<DeviceCounters>,
-) -> Result<Stream, DeviceError> {
+) -> Result<Stream, DeviceError>
+where
+    T: SizedSample + FromSample<f32> + Send + 'static,
+{
     let channels = usize::from(config.channels.max(1));
     device
         .build_output_stream::<T, _, _>(
@@ -225,11 +215,10 @@ fn build_output<T: ToF32>(
                         counters.underruns.fetch_add(1, Ordering::Relaxed);
                         (0.0, 0.0)
                     };
-                    let both = T::from_f32((left + right) * 0.5);
-                    frame.fill(both);
+                    frame.fill(T::from_sample((left + right) * 0.5));
                     if let [first, second, ..] = frame {
-                        *first = T::from_f32(left);
-                        *second = T::from_f32(right);
+                        *first = T::from_sample(left);
+                        *second = T::from_sample(right);
                     }
                 }
             },

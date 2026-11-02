@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::media::jitter::FRAME;
+use crate::media::audio::FRAME;
 use crate::media::share_audio::STEREO_FRAME;
 
 /// An audio buffer further than this from where the previous one ended starts afresh.

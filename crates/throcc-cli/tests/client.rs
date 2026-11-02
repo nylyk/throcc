@@ -10,49 +10,46 @@ use throcc_client_core::keystore::Keystore;
 use throcc_client_core::state::{ConnectionStatus, State};
 use throcc_proto::ids::RoomId;
 use throcc_proto::invite::InviteCode;
-use throcc_proto::messages::{Codec, MediaState, Request, Response, ShareConfig};
+use throcc_proto::messages::{Codec, MediaState, Request, Response};
 
-use common::bind_server;
+use common::{ProcessLikeServer, share_1080p60, sharing};
 
 /// The server takes one profile change per 10 s.
 const PROFILE_INTERVAL: Duration = Duration::from_millis(10_500);
 
-/// Runs a server on its own runtime thread, as the blocking client API expects.
-fn server() -> (String, InviteCode) {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let dir = tempfile::tempdir().unwrap();
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime.block_on(async {
-            let server = bind_server(dir.path());
-            tx.send((
-                server.local_addr().unwrap().to_string(),
-                server.bootstrap_invite().unwrap().clone(),
-            ))
-            .unwrap();
-            server.run().await.unwrap();
-        });
-    });
-    rx.recv().unwrap()
+/// A server's address and bootstrap invite. It runs until the returned handle drops.
+fn server() -> (String, InviteCode, ProcessLikeServer) {
+    let server = ProcessLikeServer::start_temp();
+    let bootstrap = server.bootstrap.clone().unwrap();
+    (server.addr.to_string(), bootstrap, server)
 }
 
 fn client(address: &str, invite: &InviteCode) -> (Client, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    (client_in(dir.path(), address, invite), dir)
+    (client_in(dir.path(), address, Some(invite)), dir)
 }
 
-/// A client keeping its keys and profile in `dir`.
-fn client_in(dir: &Path, address: &str, invite: &InviteCode) -> Client {
+/// A client keeping its keys and profile in `dir`, enrolling with `invite` if given.
+fn client_in(dir: &Path, address: &str, invite: Option<&InviteCode>) -> Client {
     let keystore = Keystore::open_in(dir).unwrap();
     let options = ClientOptions {
         audio: false,
         ..Default::default()
     };
-    Client::connect(address, keystore, Some(invite), options).unwrap()
+    Client::connect(address, keystore, invite, options).unwrap()
 }
 
-fn wait_for(client: &Client, what: &str, mut ready: impl FnMut(&State) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+fn wait_for(client: &Client, what: &str, ready: impl FnMut(&State) -> bool) {
+    wait_for_within(Duration::from_secs(5), client, what, ready);
+}
+
+fn wait_for_within(
+    timeout: Duration,
+    client: &Client,
+    what: &str,
+    mut ready: impl FnMut(&State) -> bool,
+) {
+    let deadline = Instant::now() + timeout;
     while !ready(&client.state()) {
         assert!(
             Instant::now() < deadline,
@@ -105,7 +102,7 @@ fn create_room(client: &Client) -> RoomId {
 
 #[test]
 fn mic_and_deafen_set_outside_a_room_carry_into_it() {
-    let (address, bootstrap) = server();
+    let (address, bootstrap, _server) = server();
     let (alice, _a) = client(&address, &bootstrap);
     wait_connected(&alice, "connected");
     let room = create_room(&alice);
@@ -133,7 +130,7 @@ fn mic_and_deafen_set_outside_a_room_carry_into_it() {
 
 #[test]
 fn two_clients_see_each_other_join_and_unmute() {
-    let (address, bootstrap) = server();
+    let (address, bootstrap, _server) = server();
     let (alice, _a) = client(&address, &bootstrap);
     wait_connected(&alice, "connected");
     let room = create_room(&alice);
@@ -173,7 +170,7 @@ fn two_clients_see_each_other_join_and_unmute() {
 
 #[test]
 fn a_picture_chosen_in_the_lobby_reaches_others_and_survives_a_rename() {
-    let (address, bootstrap) = server();
+    let (address, bootstrap, _server) = server();
     let (alice, _a) = client(&address, &bootstrap);
     wait_connected(&alice, "connected");
     let picture: Vec<u8> = (0..2000u32).map(|i| (i * 7) as u8).collect();
@@ -209,7 +206,7 @@ fn a_picture_chosen_in_the_lobby_reaches_others_and_survives_a_rename() {
 
 #[test]
 fn a_share_started_mid_call_shows_without_rejoining() {
-    let (address, bootstrap) = server();
+    let (address, bootstrap, _server) = server();
     let (alice, _a) = client(&address, &bootstrap);
     wait_connected(&alice, "connected");
     let room = create_room(&alice);
@@ -233,18 +230,10 @@ fn a_share_started_mid_call_shows_without_rejoining() {
         s.person(bob_id).is_some_and(|p| p.room == Some(room))
     });
 
-    let share = ShareConfig {
-        audio: false,
-        kbps: 6000,
-        codec: Codec::Vp9,
-        width: 1920,
-        height: 1080,
-        fps: 60,
-    };
+    let share = share_1080p60(Codec::Vp9, 6000);
     let media = MediaState {
         mic: true,
-        deafened: false,
-        share: Some(share),
+        ..sharing(share)
     };
     let reply = runtime.block_on(bob.request(Request::SetMedia(media)));
     assert_eq!(reply.unwrap(), Response::Ok);
@@ -259,8 +248,8 @@ fn a_share_started_mid_call_shows_without_rejoining() {
 #[test]
 fn the_profile_follows_us_to_the_next_server() {
     let dir = tempfile::tempdir().unwrap();
-    let (first, first_invite) = server();
-    let alice = client_in(dir.path(), &first, &first_invite);
+    let (first, first_invite, _first) = server();
+    let alice = client_in(dir.path(), &first, Some(&first_invite));
     wait_connected(&alice, "connected");
     let picture: Vec<u8> = (0..2000u32).map(|i| (i * 3) as u8).collect();
     alice.command(Command::SetProfile {
@@ -272,8 +261,8 @@ fn the_profile_follows_us_to_the_next_server() {
     });
     alice.command(Command::Disconnect);
 
-    let (second, second_invite) = server();
-    let alice = client_in(dir.path(), &second, &second_invite);
+    let (second, second_invite, _second) = server();
+    let alice = client_in(dir.path(), &second, Some(&second_invite));
     wait_connected(&alice, "connected again");
     assert_eq!(alice.state().profile_name.as_deref(), Some("Ilse"));
     let room = create_room(&alice);
@@ -293,7 +282,7 @@ fn the_profile_follows_us_to_the_next_server() {
 
 #[test]
 fn only_admins_name_the_server_and_everyone_sees_it() {
-    let (address, bootstrap) = server();
+    let (address, bootstrap, _server) = server();
     let (alice, _a) = client(&address, &bootstrap);
     wait_connected(&alice, "connected");
     alice.command(Command::SetServerProfile {
@@ -354,13 +343,13 @@ fn only_admins_name_the_server_and_everyone_sees_it() {
 
 #[test]
 fn a_verified_contact_stays_verified_in_the_next_session() {
-    let (address, bootstrap) = server();
+    let (address, bootstrap, _server) = server();
     let (alice, _a) = client(&address, &bootstrap);
     wait_connected(&alice, "connected");
     let room = create_room(&alice);
     let code = invite(&alice);
     let bob_dir = tempfile::tempdir().unwrap();
-    let bob = client_in(bob_dir.path(), &address, &code);
+    let bob = client_in(bob_dir.path(), &address, Some(&code));
     alice.command(Command::Join(Some(room)));
     bob.command(Command::Join(Some(room)));
     let alice_id = alice.state().me.unwrap();
@@ -373,12 +362,7 @@ fn a_verified_contact_stays_verified_in_the_next_session() {
     });
     drop(bob);
 
-    let keystore = Keystore::open_in(bob_dir.path()).unwrap();
-    let options = ClientOptions {
-        audio: false,
-        ..Default::default()
-    };
-    let bob = Client::connect(&address, keystore, None, options).unwrap();
+    let bob = client_in(bob_dir.path(), &address, None);
     wait_for(&bob, "alice still verified", |s| {
         s.person(alice_id).is_some_and(|p| p.verified)
     });
@@ -386,7 +370,7 @@ fn a_verified_contact_stays_verified_in_the_next_session() {
 
 #[test]
 fn a_removed_member_stops_reconnecting() {
-    let (address, bootstrap) = server();
+    let (address, bootstrap, _server) = server();
     let (alice, _a) = client(&address, &bootstrap);
     wait_connected(&alice, "connected");
     let code = invite(&alice);
@@ -396,9 +380,7 @@ fn a_removed_member_stops_reconnecting() {
         user: bob_id,
         cascade: false,
     });
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !matches!(bob.state().connection, ConnectionStatus::Failed(_)) {
-        assert!(Instant::now() < deadline, "{:?}", bob.state().connection);
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_for_within(Duration::from_secs(10), &bob, "bob to give up", |s| {
+        matches!(s.connection, ConnectionStatus::Failed(_))
+    });
 }

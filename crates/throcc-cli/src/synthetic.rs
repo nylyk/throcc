@@ -2,15 +2,22 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use bytes::Bytes;
 use throcc_client_core::call::{Call, CallEvent};
-use throcc_client_core::media::engine::{Kind, Outgoing};
+use throcc_client_core::control;
+use throcc_client_core::media::engine::{Kind, Outgoing, Received};
+use throcc_proto::frame::{AUDIO_CLOCK_HZ, VIDEO_CLOCK_HZ};
 use throcc_proto::ids::{MediaId, RoomId, UserId};
-use throcc_proto::messages::{Codec, Event, MediaState, Presence, Request, Response, ShareConfig};
+use throcc_proto::messages::{Codec, Event, MediaState, Presence, Request, ShareConfig};
+use tokio::sync::mpsc;
+
+use crate::unit::{is_unit, unit};
 
 const AUDIO_FRAME: Duration = Duration::from_millis(20);
+const AUDIO_FRAME_TICKS: u32 = AUDIO_CLOCK_HZ / 50;
 const AUDIO_BYTES: usize = 80;
 const QUEUE_UNITS: usize = 4096;
+/// How long a found sender may take to become a trusted member of the room.
+const TRUST_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 pub enum Track {
@@ -32,6 +39,14 @@ impl Track {
             Track::Video => video,
         }
     }
+
+    /// Refuses `--with-audio` beside `--track mic`, before anything connects.
+    pub fn check_with_audio(self, with_audio: bool) -> Result<()> {
+        if with_audio && matches!(self, Track::Mic) {
+            bail!("--with-audio needs --track video");
+        }
+        Ok(())
+    }
 }
 
 pub struct SendOptions {
@@ -43,25 +58,8 @@ pub struct SendOptions {
     pub with_audio: bool,
 }
 
-/// Fake access unit `index`: its index, then bytes derived from it.
-pub fn unit(index: u32, len: usize) -> Bytes {
-    let mut data = vec![0u8; len.max(4)];
-    data[..4].copy_from_slice(&index.to_be_bytes());
-    for (i, b) in data.iter_mut().enumerate().skip(4) {
-        *b = (index as usize).wrapping_mul(31).wrapping_add(i) as u8;
-    }
-    Bytes::from(data)
-}
-
 fn outgoing(media_id: MediaId, index: u32, len: usize, timestamp: u32) -> Outgoing {
-    Outgoing {
-        media_id,
-        data: unit(index, len),
-        timestamp,
-        keyframe: index == 0,
-        discardable: false,
-        enqueued: Instant::now(),
-    }
+    Outgoing::new(media_id, unit(index, len), timestamp, index == 0)
 }
 
 pub async fn send(call: &mut Call, room: RoomId, options: SendOptions) -> Result<()> {
@@ -72,9 +70,6 @@ pub async fn send(call: &mut Call, room: RoomId, options: SendOptions) -> Result
         count,
         with_audio,
     } = options;
-    if with_audio && matches!(track, Track::Mic) {
-        bail!("--with-audio needs --track video");
-    }
     let (placed, _) = call.join(Some(room), None).await?;
     let tracks = placed.tracks.context("joined without tracks")?;
     let media_id = track.pick((tracks.mic, tracks.shares[0].video));
@@ -92,7 +87,8 @@ pub async fn send(call: &mut Call, room: RoomId, options: SendOptions) -> Result
         deafened: false,
         share,
     };
-    expect_ok(call.request(Request::SetMedia(media)).await?)?;
+    control::expect_ok(call.request(Request::SetMedia(media)).await?)
+        .map_err(anyhow::Error::msg)?;
     println!(
         "sending {count} units of {size} bytes at {rate}/s on track {}",
         media_id.0
@@ -109,12 +105,12 @@ pub async fn send(call: &mut Call, room: RoomId, options: SendOptions) -> Result
     while tokio::time::Instant::now() < finish {
         tokio::select! {
             _ = tokio::time::sleep_until(next_unit), if sent < count => {
-                call.engine.send(kind, outgoing(media_id, sent, size, sent.wrapping_mul(90_000 / rate.max(1))));
+                call.engine.send(kind, outgoing(media_id, sent, size, sent.wrapping_mul(VIDEO_CLOCK_HZ / rate.max(1))));
                 sent += 1;
                 next_unit += unit_interval;
             }
             _ = tokio::time::sleep_until(next_audio), if with_audio && sent < count => {
-                call.engine.send(Kind::Audio, outgoing(tracks.mic, audio_sent, AUDIO_BYTES, audio_sent.wrapping_mul(960)));
+                call.engine.send(Kind::Audio, outgoing(tracks.mic, audio_sent, AUDIO_BYTES, audio_sent.wrapping_mul(AUDIO_FRAME_TICKS)));
                 audio_sent += 1;
                 next_audio += AUDIO_FRAME;
             }
@@ -162,9 +158,6 @@ pub async fn recv(call: &mut Call, room: RoomId, options: RecvOptions<'_>) -> Re
         with_audio,
         idle,
     } = options;
-    if with_audio && matches!(track, Track::Mic) {
-        bail!("--with-audio needs --track video");
-    }
     call.join(Some(room), None).await?;
     let mut presence: Vec<Presence> = call.welcome.presence.clone();
     let sender = loop {
@@ -177,11 +170,11 @@ pub async fn recv(call: &mut Call, room: RoomId, options: RecvOptions<'_>) -> Re
             None => bail!("disconnected"),
         }
     };
-    let (mut mic, video) = wait_for_tracks(call, sender).await?;
+    let (mut mic, video) = tokio::time::timeout(TRUST_WAIT, trusted_tracks(call, sender))
+        .await
+        .with_context(|| format!("user {} isn't a trusted member of this room", sender.0))??;
     let mut media_id = track.pick((mic, video));
-    let mut units = subscribe(call, media_id, track).await?;
-    let mut audio = (with_audio && media_id != mic)
-        .then(|| call.engine.subscribe(mic, Kind::Audio, QUEUE_UNITS));
+    let (mut units, mut audio) = subscribe(call, (mic, video), track, with_audio).await?;
     println!("receiving track {} from user {}", media_id.0, sender.0);
 
     let (mut intact, mut corrupt, mut bytes, mut audio_frames) = (0u32, 0u32, 0usize, 0u32);
@@ -194,8 +187,7 @@ pub async fn recv(call: &mut Call, room: RoomId, options: RecvOptions<'_>) -> Re
                 let Some(received) = received else { break };
                 started.get_or_insert_with(Instant::now);
                 last = tokio::time::Instant::now();
-                let index = received.data.first_chunk().map_or(u32::MAX, |b| u32::from_be_bytes(*b));
-                if received.data == unit(index, received.data.len()) {
+                if is_unit(&received.data) {
                     intact += 1;
                 } else {
                     corrupt += 1;
@@ -213,15 +205,12 @@ pub async fn recv(call: &mut Call, room: RoomId, options: RecvOptions<'_>) -> Re
                         && track.pick(current) != media_id
                     {
                         call.engine.unsubscribe(media_id);
-                        if audio.take().is_some() {
+                        if audio.is_some() {
                             call.engine.unsubscribe(mic);
                         }
                         mic = current.0;
                         media_id = track.pick(current);
-                        units = subscribe(call, media_id, track).await?;
-                        if with_audio && media_id != mic {
-                            audio = Some(call.engine.subscribe(mic, Kind::Audio, QUEUE_UNITS));
-                        }
+                        (units, audio) = subscribe(call, current, track, with_audio).await?;
                         println!("the sender rejoined; now receiving track {}", media_id.0);
                     }
                 }
@@ -250,31 +239,36 @@ pub async fn recv(call: &mut Call, room: RoomId, options: RecvOptions<'_>) -> Re
     println!(
         "RESULT role=receiver intact={intact} corrupt={corrupt} mbps={:.2} server_dropped_units={server_dropped} lost_datagrams={} decrypt_failures={} abandoned_units={} late_units={} audio_frames={audio_frames} audio_lost={} audio_server_dropped={audio_server_dropped}",
         bytes as f64 * 8.0 / secs / 1e6,
-        call.engine.lost(media_id),
+        call.engine.arrived(media_id).lost,
         stats.decrypt_failures.load(Ordering::Relaxed),
         stats.abandoned_units.load(Ordering::Relaxed),
         stats.late_units.load(Ordering::Relaxed),
-        call.engine.lost(mic),
+        call.engine.arrived(mic).lost,
     );
     Ok(())
 }
 
+/// Subscribes to `track` of the sender's `(mic, video)`, and to the mic too `with_audio`.
 async fn subscribe(
     call: &Call,
-    media_id: MediaId,
+    tracks: (MediaId, MediaId),
     track: Track,
-) -> Result<tokio::sync::mpsc::Receiver<throcc_client_core::media::engine::Received>> {
+    with_audio: bool,
+) -> Result<(mpsc::Receiver<Received>, Option<mpsc::Receiver<Received>>)> {
+    let media_id = track.pick(tracks);
     let units = call.engine.subscribe(media_id, track.kind(), QUEUE_UNITS);
     if let Track::Video = track {
-        expect_ok(call.request(Request::SetWatching(vec![media_id])).await?)?;
+        let watching = call.request(Request::SetWatching(vec![media_id])).await?;
+        control::expect_ok(watching).map_err(anyhow::Error::msg)?;
     }
-    Ok(units)
+    let audio = with_audio.then(|| call.engine.subscribe(tracks.0, Kind::Audio, QUEUE_UNITS));
+    Ok((units, audio))
 }
 
 fn find_user(presence: &[Presence], query: &str) -> Option<UserId> {
     presence
         .iter()
-        .find(|p| p.name.eq_ignore_ascii_case(query) || p.user.0.to_string() == query)
+        .find(|p| crate::names(query, &p.name, p.user.0))
         .map(|p| p.user)
 }
 
@@ -285,20 +279,15 @@ fn peer_tracks(call: &Call, user: UserId) -> Option<(MediaId, MediaId)> {
     Some((tracks.mic, tracks.shares[0].video))
 }
 
-async fn wait_for_tracks(call: &Call, user: UserId) -> Result<(MediaId, MediaId)> {
-    for _ in 0..500 {
+/// Reads events until this call trusts `user`'s tracks. The call updates its keys from each
+/// event before passing it on, so checking after every event misses nothing.
+async fn trusted_tracks(call: &mut Call, user: UserId) -> Result<(MediaId, MediaId)> {
+    loop {
         if let Some(tracks) = peer_tracks(call, user) {
             return Ok(tracks);
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    bail!("user {} isn't a trusted member of this room", user.0)
-}
-
-fn expect_ok(response: Response) -> Result<()> {
-    match response {
-        Response::Ok => Ok(()),
-        Response::Err { message, .. } => bail!("{message}"),
-        other => bail!("unexpected reply {other:?}"),
+        if call.events.recv().await.is_none() {
+            bail!("disconnected");
+        }
     }
 }

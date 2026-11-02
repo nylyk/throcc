@@ -22,10 +22,8 @@ impl Fragment {
 }
 
 /// Cuts an access unit into fragments that are slices of `unit`.
-pub fn fragment(unit: &Bytes, timestamp: u32, keyframe: bool, discardable: bool) -> Vec<Fragment> {
-    let base = Flags::default()
-        .with(Flags::KEYFRAME, keyframe)
-        .with(Flags::DISCARDABLE, discardable);
+pub fn fragment(unit: &Bytes, timestamp: u32, keyframe: bool) -> Vec<Fragment> {
+    let base = Flags::default().with(Flags::KEYFRAME, keyframe);
     let first_len = unit.len().min(BODY_BYTES - TIMESTAMP_BYTES);
     let mut fragments = vec![Fragment {
         flags: base | Flags::FIRST,
@@ -59,25 +57,13 @@ pub enum Seen {
 
 /// A 2048-bit window behind the highest `seq` seen on one track. Drops repeats and
 /// anything older than the window, and counts what never arrived.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ReplayWindow {
     highest: Option<u32>,
     bits: [u64; (WINDOW_BITS / 64) as usize],
     first: u32,
     received: u64,
     skipped_by_restarts: u64,
-}
-
-impl Default for ReplayWindow {
-    fn default() -> Self {
-        Self {
-            highest: None,
-            bits: [0; (WINDOW_BITS / 64) as usize],
-            first: 0,
-            received: 0,
-            skipped_by_restarts: 0,
-        }
-    }
 }
 
 impl ReplayWindow {
@@ -145,7 +131,7 @@ impl ReplayWindow {
                 .checked_sub(words + 1)
                 .filter(|_| bits > 0)
                 .map_or(0, |j| self.bits[j] >> (64 - bits));
-            self.bits[i] = if bits == 0 { lo } else { lo << bits | carry };
+            self.bits[i] = lo << bits | carry;
         }
     }
 }
@@ -175,36 +161,34 @@ impl Reassembler {
             self.fragments.pop_first();
         }
         self.fragments.insert(seq, (flags, plaintext.to_vec()));
-        let first = self.run_start(seq)?;
+        // Looking for the end first stops after one step while fragments arrive in order.
         let last = self.run_end(seq)?;
-        let mut data = Vec::new();
-        let mut timestamp = None;
-        let mut unit_flags = Flags::default();
-        for s in first..=last {
-            let (flags, body) = self.fragments.remove(&s)?;
-            let body = if s == first {
-                let (ts, rest) = body.split_first_chunk::<TIMESTAMP_BYTES>()?;
-                timestamp = Some(u32::from_be_bytes(*ts));
-                unit_flags = flags | Flags::LAST;
-                rest.to_vec()
-            } else {
-                body
-            };
-            data.extend_from_slice(&body);
+        let first = self.run_start(seq)?;
+        let rest: usize = self
+            .fragments
+            .range(first..=last)
+            .skip(1)
+            .map(|(_, (_, body))| body.len())
+            .sum();
+        let (flags, mut data) = self.fragments.remove(&first)?;
+        let timestamp = u32::from_be_bytes(*data.first_chunk::<TIMESTAMP_BYTES>()?);
+        data.drain(..TIMESTAMP_BYTES);
+        data.reserve(rest);
+        for s in (first..=last).skip(1) {
+            data.extend_from_slice(&self.fragments.remove(&s)?.1);
         }
-        self.fragments.retain(|s, _| *s > last || *s < first);
         Some(Unit {
             first_seq: first,
             last_seq: last,
-            timestamp: timestamp?,
-            flags: unit_flags,
+            timestamp,
+            flags: flags | Flags::LAST,
             data,
         })
     }
 
     /// Drops buffered fragments older than `seq`, which can no longer complete in order.
     pub fn forget_before(&mut self, seq: u32) {
-        self.fragments.retain(|s, _| *s >= seq);
+        self.fragments = self.fragments.split_off(&seq);
     }
 
     fn run_start(&self, mut seq: u32) -> Option<u32> {
@@ -250,7 +234,7 @@ mod tests {
     fn fragments_fit_the_body_and_slice_the_unit() {
         for len in [0, 1, BODY_BYTES - TIMESTAMP_BYTES, BODY_BYTES, 5000] {
             let data = unit(len);
-            let fragments = fragment(&data, 42, true, false);
+            let fragments = fragment(&data, 42, true);
             assert!(fragments[0].flags.contains(Flags::FIRST));
             assert!(fragments.last().unwrap().flags.contains(Flags::LAST));
             for f in &fragments {
@@ -265,7 +249,7 @@ mod tests {
     #[test]
     fn reassembles_in_any_order_and_drops_gapped_units() {
         let data = unit(4000);
-        let fragments: Vec<(u32, Fragment)> = fragment(&data, 7, false, false)
+        let fragments: Vec<(u32, Fragment)> = fragment(&data, 7, false)
             .into_iter()
             .enumerate()
             .map(|(i, f)| (100 + i as u32, f))
@@ -365,7 +349,7 @@ mod tests {
         fn shuffled_and_duplicated_fragments_reassemble_once(len in 0usize..6000, seed in any::<u64>()) {
             let data = unit(len);
             let mut fragments: Vec<(u32, Fragment)> =
-                fragment(&data, 9, false, false).into_iter().enumerate().map(|(i, f)| (i as u32, f)).collect();
+                fragment(&data, 9, false).into_iter().enumerate().map(|(i, f)| (i as u32, f)).collect();
             let copies = fragments.clone();
             fragments.extend(copies);
             let mut state = seed | 1;

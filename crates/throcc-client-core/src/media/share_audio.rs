@@ -2,12 +2,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ropus::{Application, Bitrate, Channels, Encoder, FrameDuration, InbandFec};
-use throcc_proto::frame::{VIDEO_CLOCK_HZ, timestamp_before};
+use throcc_proto::frame::{AUDIO_CLOCK_HZ, VIDEO_CLOCK_HZ, timestamp_before};
 
-use super::audio::SAMPLE_RATE;
-use super::jitter::FRAME;
+use super::audio::{FRAME, SAMPLE_RATE};
 
-const BITRATE: u32 = 128_000;
+/// Share audio's bitrate, in kbps.
+pub const KBPS: u32 = 128;
 const EXPECTED_LOSS_PERCENT: u8 = 5;
 /// Bytes one encoded 20 ms stereo frame can take at most.
 const MAX_PACKET: usize = 4000;
@@ -25,7 +25,7 @@ impl ShareAudioEncoder {
     pub fn new() -> Result<Self, ropus::EncoderBuildError> {
         let encoder = Encoder::builder(SAMPLE_RATE, Channels::Stereo, Application::Audio)
             .frame_duration(FrameDuration::Ms20)
-            .bitrate(Bitrate::Bits(BITRATE))
+            .bitrate(Bitrate::Bits(KBPS * 1000))
             .inband_fec(InbandFec::Enabled)
             .packet_loss_perc(EXPECTED_LOSS_PERCENT)
             .build()?;
@@ -82,10 +82,10 @@ pub fn due_frames(held: impl IntoIterator<Item = u32>, heard: Option<u32>) -> us
         .count()
 }
 
-/// An audio timestamp (48 kHz) on the 90 kHz video clock with the same zero.
+/// An audio timestamp on the video clock with the same zero.
 /// Both wrap together for the first 24 hours of a share.
 pub fn audio_to_video(timestamp: u32) -> u32 {
-    (u64::from(timestamp) * u64::from(VIDEO_CLOCK_HZ) / u64::from(SAMPLE_RATE)) as u32
+    (u64::from(timestamp) * u64::from(VIDEO_CLOCK_HZ) / u64::from(AUDIO_CLOCK_HZ)) as u32
 }
 
 #[cfg(test)]

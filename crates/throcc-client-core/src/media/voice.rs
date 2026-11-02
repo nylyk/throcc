@@ -10,14 +10,13 @@ use throcc_proto::ids::{MediaId, UserId};
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use super::audio::{CaptureChain, Mixer, SAMPLE_RATE, VoiceSettings};
+use super::audio::{CaptureChain, Gains, Mixer, PULL, SAMPLE_RATE, VoiceSettings};
 use super::cues::{Cue, CuePlayer};
 use super::devices::{self, Devices};
 use super::engine::{Kind, MediaEngine, Outgoing, Received};
-use super::jitter::{JitterBuffer, PULL};
+use super::jitter::JitterBuffer;
 use super::share_audio::Playout;
 use crate::lock;
-use crate::state::MAX_VOLUME;
 
 /// Playback kept queued in the device ring, in 10 ms pulls: enough to ride out
 /// scheduling hiccups, little enough to keep mouth-to-ear delay low.
@@ -68,7 +67,7 @@ pub struct Levels {
 /// Device callbacks only touch its rings.
 pub struct VoiceEngine {
     commands: std_mpsc::Sender<VoiceCommand>,
-    pub levels: Arc<Mutex<Levels>>,
+    levels: Arc<Mutex<Levels>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -123,7 +122,6 @@ struct ShareAudio {
     units: mpsc::Receiver<Received>,
     jitter: JitterBuffer,
     playout: Arc<Playout>,
-    volume: f32,
 }
 
 struct Worker {
@@ -133,7 +131,7 @@ struct Worker {
     cues: CuePlayer,
     remotes: HashMap<UserId, mpsc::Receiver<Received>>,
     shares: HashMap<UserId, ShareAudio>,
-    share_volumes: HashMap<UserId, f32>,
+    share_volumes: Gains,
     engine: Arc<MediaEngine>,
     levels: Arc<Mutex<Levels>>,
     /// Left and right resamplers to the output device's rate.
@@ -179,7 +177,7 @@ impl Worker {
             cues: CuePlayer::default(),
             remotes: HashMap::new(),
             shares: HashMap::new(),
-            share_volumes: HashMap::new(),
+            share_volumes: Gains::default(),
             engine,
             levels,
             mic_track: None,
@@ -247,13 +245,7 @@ impl Worker {
             VoiceCommand::PushToTalk(down) => self.push_to_talk = down,
             VoiceCommand::Deafened(deafened) => self.deafened = deafened,
             VoiceCommand::Volume(user, volume) => self.mixer.set_volume(user, volume),
-            VoiceCommand::ShareVolume(user, volume) => {
-                let volume = volume.clamp(0.0, MAX_VOLUME);
-                self.share_volumes.insert(user, volume);
-                if let Some(share) = self.shares.get_mut(&user) {
-                    share.volume = volume;
-                }
-            }
+            VoiceCommand::ShareVolume(user, volume) => self.share_volumes.set(user, volume),
             VoiceCommand::Listen { user, units } => {
                 self.remotes.insert(user, units);
             }
@@ -273,7 +265,6 @@ impl Worker {
                             units,
                             jitter,
                             playout,
-                            volume: self.share_volumes.get(&user).copied().unwrap_or(1.0),
                         },
                     );
                 }
@@ -383,10 +374,11 @@ impl Worker {
     fn mix_shares(&mut self, out: &mut [f32; PULL * 2]) {
         let queued = (self.queued_playback() * PULL) as u32;
         let mut pull = [0.0f32; PULL * 2];
-        for share in self.shares.values_mut() {
+        for (user, share) in &mut self.shares {
             share.jitter.pull(&mut pull);
+            let volume = self.share_volumes.get(*user);
             for (o, s) in out.iter_mut().zip(&pull) {
-                *o += s * share.volume;
+                *o += s * volume;
             }
             let heard = share
                 .jitter
@@ -428,7 +420,8 @@ impl Worker {
         let mut levels = lock(&self.levels);
         levels.mic_dbfs = self.chain.level_dbfs;
         levels.transmitting = self.chain.transmitting();
-        levels.speaking = self.mixer.speaking().collect();
+        levels.speaking.clear();
+        levels.speaking.extend(self.mixer.speaking());
         levels.overruns = self
             .devices
             .counters

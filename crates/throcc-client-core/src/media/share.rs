@@ -6,7 +6,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use throcc_proto::frame::VIDEO_CLOCK_HZ;
+use throcc_proto::frame::{VIDEO_CLOCK_HZ, timestamp_before};
 use throcc_proto::messages::{Recovery, Share, ShareConfig};
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
@@ -59,10 +59,11 @@ impl Tally {
     }
 
     fn report_if_due(&mut self) {
-        let seconds = self.since.elapsed().as_secs_f64();
-        if seconds < TALLY_EVERY.as_secs_f64() {
+        let elapsed = self.since.elapsed();
+        if elapsed < TALLY_EVERY {
             return;
         }
+        let seconds = elapsed.as_secs_f64();
         let fps = f64::from(self.frames) / seconds;
         let kbps = self.bytes as f64 * 8.0 / seconds / 1000.0;
         info!(
@@ -84,8 +85,7 @@ struct RecoveryPacer {
 
 impl RecoveryPacer {
     fn ask(&mut self, kind: Recovery) {
-        let idr = kind == Recovery::Idr || self.wanted == Some(Recovery::Idr);
-        self.wanted = Some(if idr { Recovery::Idr } else { kind });
+        self.wanted = self.wanted.max(Some(kind));
     }
 
     fn due(&mut self, now: Instant) -> Option<Recovery> {
@@ -117,23 +117,41 @@ impl FrameLimiter {
     }
 
     fn admits(&mut self, timestamp: u32) -> bool {
-        let before = |a: u32, b: u32| (a.wrapping_sub(b) as i32) < 0;
         let Some(next) = self.next else {
             self.next = Some(timestamp.wrapping_add(self.interval));
             return true;
         };
         // A frame up to a quarter interval early still counts, so a source running at
         // exactly the share's rate loses nothing to capture jitter.
-        if before(timestamp, next.wrapping_sub(self.interval / 4)) {
+        if timestamp_before(timestamp, next.wrapping_sub(self.interval / 4)) {
             return false;
         }
         let on_schedule = next.wrapping_add(self.interval);
-        self.next = Some(if before(timestamp, on_schedule) {
+        self.next = Some(if timestamp_before(timestamp, on_schedule) {
             on_schedule
         } else {
             timestamp.wrapping_add(self.interval)
         });
         true
+    }
+}
+
+/// Which captured frames a share sends, and which of those also feed the self-view.
+struct Admission {
+    limiter: FrameLimiter,
+    sent: u32,
+    preview: Arc<PreviewDemand>,
+}
+
+impl Admission {
+    /// `None` to skip a frame captured at `timestamp`, else whether it feeds the self-view
+    /// too: every [`SELF_VIEW_EVERY`]th one sent, while the self-view is on screen.
+    fn admit(&mut self, timestamp: u32) -> Option<bool> {
+        if !self.limiter.admits(timestamp) {
+            return None;
+        }
+        self.sent = self.sent.wrapping_add(1);
+        Some(self.sent.is_multiple_of(SELF_VIEW_EVERY) && self.preview.wanted())
     }
 }
 
@@ -206,8 +224,11 @@ impl ShareSender {
             frame,
             unsent: first == Some(First::Copied),
             self_view: self_tx,
-            preview: preview.clone(),
-            limiter: FrameLimiter::new(capture_config.fps),
+            admission: Admission {
+                limiter: FrameLimiter::new(capture_config.fps),
+                sent: 0,
+                preview: preview.clone(),
+            },
             tally: Tally::new(),
             #[cfg(target_os = "linux")]
             refused: Vec::new(),
@@ -262,8 +283,7 @@ struct Sending {
     /// Whether `frame` holds a captured picture that has not been sent yet.
     unsent: bool,
     self_view: watch::Sender<Option<Arc<VideoFrame>>>,
-    preview: Arc<PreviewDemand>,
-    limiter: FrameLimiter,
+    admission: Admission,
     tally: Tally,
     /// Frames in GPU memory the share no longer takes.
     #[cfg(target_os = "linux")]
@@ -276,7 +296,6 @@ struct Sending {
 impl Sending {
     fn run(mut self) {
         let mut sound = [0.0f32; STEREO_FRAME];
-        let mut count = 0u32;
         let mut pacer = RecoveryPacer::default();
         while !self.stop.load(Ordering::Relaxed) && !self.capture.ended() {
             while let Ok(kind) = self.recover.try_recv() {
@@ -288,11 +307,11 @@ impl Sending {
             self.send_audio(&mut sound);
             self.tally.report_if_due();
             #[cfg(target_os = "linux")]
-            if self.send_dmabuf(&mut count) {
+            if self.send_dmabuf() {
                 continue;
             }
             #[cfg(target_os = "macos")]
-            if self.pixel_buffers && !self.unsent && self.send_pixel_buffer(&mut count) {
+            if self.pixel_buffers && !self.unsent && self.send_pixel_buffer() {
                 continue;
             }
             let fresh =
@@ -301,11 +320,10 @@ impl Sending {
                 std::thread::sleep(IDLE);
                 continue;
             }
-            if !self.limiter.admits(self.frame.timestamp) {
+            let Some(self_view) = self.admission.admit(self.frame.timestamp) else {
                 continue;
-            }
-            count = count.wrapping_add(1);
-            if count.is_multiple_of(SELF_VIEW_EVERY) && self.preview.wanted() {
+            };
+            if self_view {
                 let factor = self.frame.width / SELF_VIEW_WIDTH;
                 let thumbnail = Arc::new(self.frame.shrunk(factor));
                 self.self_view.send_replace(Some(thumbnail));
@@ -317,20 +335,20 @@ impl Sending {
     /// Encodes the next frame if it is in GPU memory. On failure, asks the capture for
     /// no more like it, so frames arrive in shared memory instead. True if there was one.
     #[cfg(target_os = "linux")]
-    fn send_dmabuf(&mut self, count: &mut u32) -> bool {
+    fn send_dmabuf(&mut self) -> bool {
         let Some(frame) = self.capture.next_dmabuf() else {
             return false;
         };
         let modifier = frame.modifier;
         if self.refused.contains(&Refusal::All)
             || self.refused.contains(&Refusal::Modifier(modifier))
-            || !self.limiter.admits(frame.timestamp)
         {
             return true;
         }
-        *count = count.wrapping_add(1);
-        let preview = (count.is_multiple_of(SELF_VIEW_EVERY) && self.preview.wanted())
-            .then_some(SELF_VIEW_WIDTH);
+        let Some(self_view) = self.admission.admit(frame.timestamp) else {
+            return true;
+        };
+        let preview = self_view.then_some(SELF_VIEW_WIDTH);
         match self.encoder.encode_dmabuf(frame, preview) {
             Ok(encoded) => {
                 self.send_units(encoded.units);
@@ -361,15 +379,14 @@ impl Sending {
     /// another size than the encoder's sends this and later frames down the copying path.
     /// True if there was one.
     #[cfg(target_os = "macos")]
-    fn send_pixel_buffer(&mut self, count: &mut u32) -> bool {
+    fn send_pixel_buffer(&mut self) -> bool {
         let Some(picture) = self.capture.next_pixel_buffer() else {
             return false;
         };
-        if !self.limiter.admits(picture.timestamp) {
+        let Some(self_view) = self.admission.admit(picture.timestamp) else {
             return true;
-        }
-        *count = count.wrapping_add(1);
-        if count.is_multiple_of(SELF_VIEW_EVERY) && self.preview.wanted() {
+        };
+        if self_view {
             let thumbnail = picture.shrunk(picture.width() / SELF_VIEW_WIDTH);
             if let Some(thumbnail) = thumbnail {
                 self.self_view.send_replace(Some(Arc::new(thumbnail)));
@@ -504,14 +521,13 @@ fn make_room(held: &mut VecDeque<Arc<VideoFrame>>, incoming: usize) {
     }
 }
 
-/// Decodes one remote share and keeps its newest due picture. With `playout`, a frame is
-/// due once the share audio reaching the speakers has caught up with it.
-/// Decodes `units` on a thread of its own. After a unit fails to decode, `ask_idr` is called
-/// once, and again only after a unit has decoded since.
-/// Pictures larger than `config` announces are dropped. Also returns what decodes the
-/// share, which changes when hardware decoding fails.
+/// Decodes one remote share's `units` on a thread of its own and keeps its newest due
+/// picture. With `playout`, a frame is due once the share audio reaching the speakers has
+/// caught up with it. After a unit fails to decode, `ask_idr` is called once, and again only
+/// after a unit has decoded since. Pictures larger than `config` announces are dropped.
+/// Also returns what decodes the share, which changes when hardware decoding fails.
 pub fn receive(
-    units: mpsc::Receiver<Received>,
+    mut units: mpsc::Receiver<Received>,
     config: ShareConfig,
     playout: Option<Arc<Playout>>,
     ask_idr: impl Fn() + Send + 'static,
@@ -522,12 +538,14 @@ pub fn receive(
     std::thread::Builder::new()
         .name("throcc-decode".into())
         .spawn(move || {
-            let mut units = units;
             let mut held: VecDeque<Arc<VideoFrame>> = VecDeque::new();
             let mut asked = false;
             loop {
                 let unit = if held.is_empty() {
-                    units.blocking_recv()
+                    let Some(unit) = units.blocking_recv() else {
+                        return;
+                    };
+                    Some(unit)
                 } else {
                     match units.try_recv() {
                         Ok(unit) => Some(unit),
@@ -558,8 +576,6 @@ pub fn receive(
                             }
                         }
                     }
-                } else if held.is_empty() {
-                    return;
                 }
                 let heard = playout.as_ref().and_then(|p| p.heard());
                 let due = due_frames(held.iter().map(|f| f.timestamp), heard);

@@ -1,6 +1,5 @@
 mod common;
 
-use std::net::SocketAddr;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -10,11 +9,15 @@ use throcc_proto::messages::{Request, Response};
 use throcc_proto::transport::{DatagramError, close};
 use throcc_server::{Congestion, TLS_TIMEOUT, UNAUTHENTICATED, tls};
 
-use common::{admin, bare_endpoint, bind_server, invited, stalling_relay};
+use common::{
+    admin, bare_endpoint, bind_server, connect_with_transport, invited, stalling_relay,
+    start_server,
+};
 
-fn start_server(data_dir: &Path) -> (SocketAddr, throcc_proto::Fingerprint) {
+/// A server keeping its data in `data_dir`, so a test can restart it there.
+fn start_in(data_dir: &Path) -> (String, throcc_proto::Fingerprint) {
     let server = bind_server(data_dir);
-    let addr = server.local_addr().unwrap();
+    let addr = server.local_addr().unwrap().to_string();
     let fingerprint = server.fingerprint();
     tokio::spawn(server.run());
     (addr, fingerprint)
@@ -23,14 +26,12 @@ fn start_server(data_dir: &Path) -> (SocketAddr, throcc_proto::Fingerprint) {
 #[tokio::test]
 async fn client_connects_and_pins() {
     let dir = tempfile::tempdir().unwrap();
-    let (addr, fingerprint) = start_server(dir.path());
+    let (addr, fingerprint) = start_in(dir.path());
 
-    let first = connection::connect(&addr.to_string(), None).await.unwrap();
+    let first = connection::connect(&addr, None).await.unwrap();
     assert_eq!(first.fingerprint, fingerprint);
 
-    let pinned = connection::connect(&addr.to_string(), Some(fingerprint))
-        .await
-        .unwrap();
+    let pinned = connection::connect(&addr, Some(fingerprint)).await.unwrap();
     assert_eq!(pinned.fingerprint, fingerprint);
     assert_ne!(pinned.exporter, first.exporter);
 }
@@ -38,14 +39,11 @@ async fn client_connects_and_pins() {
 #[tokio::test]
 async fn new_server_key_fails_with_both_fingerprints() {
     let dir = tempfile::tempdir().unwrap();
-    let (_, old) = start_server(dir.path());
+    let (_, old) = start_in(dir.path());
     std::fs::remove_file(dir.path().join("server_key")).unwrap();
-    let (addr, new) = start_server(dir.path());
+    let (addr, new) = start_in(dir.path());
 
-    let err = connection::connect(&addr.to_string(), Some(old))
-        .await
-        .err()
-        .unwrap();
+    let err = connection::connect(&addr, Some(old)).await.err().unwrap();
     match &err {
         ConnectError::PinMismatch { expected, actual } => {
             assert_eq!((*expected, *actual), (old, new));
@@ -59,14 +57,11 @@ async fn new_server_key_fails_with_both_fingerprints() {
 #[tokio::test]
 async fn server_refuses_client_without_datagrams() {
     let dir = tempfile::tempdir().unwrap();
-    let (addr, _) = start_server(dir.path());
+    let (addr, _) = start_in(dir.path());
 
     let mut transport = connection::transport_config(0);
     transport.datagram_receive_buffer_size(None);
-    let (config, verifier) = connection::client_config(None, transport).unwrap();
-    let connected = connection::connect_with(&addr.to_string(), config, &verifier)
-        .await
-        .unwrap();
+    let connected = connect_with_transport(&addr, transport).await;
 
     match connected.connection.closed().await {
         quinn::ConnectionError::ApplicationClosed(close_frame) => {
@@ -87,16 +82,13 @@ async fn client_refuses_server_without_datagrams() {
     let mut transport = tls::transport_config(Congestion::Cubic).unwrap();
     transport.datagram_receive_buffer_size(None);
     let endpoint = bare_endpoint(dir.path(), transport);
-    let addr = endpoint.local_addr().unwrap();
+    let addr = endpoint.local_addr().unwrap().to_string();
     tokio::spawn(async move {
         let connection = endpoint.accept().await.unwrap().await.unwrap();
         connection.closed().await;
     });
 
-    let err = connection::connect(&addr.to_string(), None)
-        .await
-        .err()
-        .unwrap();
+    let err = connection::connect(&addr, None).await.err().unwrap();
     assert!(
         matches!(err, ConnectError::Datagrams(DatagramError::Unsupported)),
         "{err}"
@@ -106,17 +98,14 @@ async fn client_refuses_server_without_datagrams() {
 #[tokio::test]
 async fn payload_floor_matches_quinn_at_1200_bytes() {
     let dir = tempfile::tempdir().unwrap();
-    let (addr, _) = start_server(dir.path());
+    let (addr, _) = start_in(dir.path());
 
     let mut transport = connection::transport_config(0);
     transport
         .initial_mtu(1200)
         .min_mtu(1200)
         .mtu_discovery_config(None);
-    let (config, verifier) = connection::client_config(None, transport).unwrap();
-    let connected = connection::connect_with(&addr.to_string(), config, &verifier)
-        .await
-        .unwrap();
+    let connected = connect_with_transport(&addr, transport).await;
 
     assert_eq!(
         connected.connection.max_datagram_size(),
@@ -127,8 +116,8 @@ async fn payload_floor_matches_quinn_at_1200_bytes() {
 #[tokio::test]
 async fn clients_cannot_open_streams() {
     let dir = tempfile::tempdir().unwrap();
-    let (addr, _) = start_server(dir.path());
-    let connected = connection::connect(&addr.to_string(), None).await.unwrap();
+    let (addr, _) = start_in(dir.path());
+    let connected = connection::connect(&addr, None).await.unwrap();
     let wait = Duration::from_millis(300);
     assert!(
         tokio::time::timeout(wait, connected.connection.open_bi())
@@ -145,8 +134,8 @@ async fn clients_cannot_open_streams() {
 #[tokio::test]
 async fn a_connection_that_never_says_hello_is_closed() {
     let dir = tempfile::tempdir().unwrap();
-    let (addr, _) = start_server(dir.path());
-    let connected = connection::connect(&addr.to_string(), None).await.unwrap();
+    let (addr, _) = start_in(dir.path());
+    let connected = connection::connect(&addr, None).await.unwrap();
     let closed = tokio::time::timeout(Duration::from_secs(8), connected.connection.closed())
         .await
         .unwrap();
@@ -161,17 +150,17 @@ async fn a_connection_that_never_says_hello_is_closed() {
 #[tokio::test]
 async fn one_source_holds_a_bounded_number_of_connections() {
     let dir = tempfile::tempdir().unwrap();
-    let (addr, _) = start_server(dir.path());
+    let (addr, _) = start_in(dir.path());
     let mut held = Vec::new();
     for _ in 0..UNAUTHENTICATED.per_source {
-        held.push(connection::connect(&addr.to_string(), None).await.unwrap());
+        held.push(connection::connect(&addr, None).await.unwrap());
     }
-    assert!(connection::connect(&addr.to_string(), None).await.is_err());
+    assert!(connection::connect(&addr, None).await.is_err());
 }
 
 #[tokio::test]
 async fn stalled_tls_handshakes_time_out_and_leave_signed_in_members_alone() {
-    let server = common::start_server();
+    let server = start_server();
     let alice = admin(&server).await;
     let bob = invited(&server, &alice).await;
 
@@ -192,14 +181,7 @@ async fn stalled_tls_handshakes_time_out_and_leave_signed_in_members_alone() {
         panic!("no user list");
     };
     assert_eq!(users.len(), 2);
-    assert!(matches!(
-        bob.request(Request::SetRoom {
-            room: None,
-            password: None,
-        })
-        .await,
-        Response::Placed(_)
-    ));
+    bob.join(None).await;
 
     let deadline = stalled_at + TLS_TIMEOUT + Duration::from_secs(5);
     loop {

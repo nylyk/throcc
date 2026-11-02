@@ -1,4 +1,5 @@
 use std::ffi::{CStr, CString};
+use std::ptr::{null, null_mut};
 
 use bytes::Bytes;
 use rsmpeg::avcodec::{AVCodec, AVCodecContext};
@@ -10,6 +11,8 @@ use throcc_proto::frame::VIDEO_CLOCK_HZ;
 use throcc_proto::messages::{Codec, Recovery};
 use tracing::{debug, info};
 
+#[cfg(target_os = "linux")]
+use super::decode::to_nv12;
 #[cfg(target_os = "linux")]
 use super::frame::share_size;
 use super::frame::{VideoFrame, fit_within};
@@ -60,115 +63,81 @@ enum Input {
     Yuv420p,
 }
 
+/// The family of encoders a rung belongs to, which decides everything but its codec.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Backend {
+    Nvenc,
+    MediaFoundation,
+    /// Takes VA-API surfaces, uploaded from the NV12 picture or converted on the GPU.
+    Vaapi,
+    /// Takes CoreVideo pixel buffers, uploaded from the NV12 picture or captured straight
+    /// into.
+    VideoToolbox,
+    Libvpx,
+}
+
+impl Backend {
+    fn options(self) -> &'static [(&'static CStr, &'static CStr)] {
+        match self {
+            Backend::Nvenc => NVENC,
+            Backend::MediaFoundation => MEDIA_FOUNDATION,
+            Backend::Vaapi => VAAPI,
+            Backend::VideoToolbox => VIDEOTOOLBOX,
+            Backend::Libvpx => LIBVPX,
+        }
+    }
+
+    fn input(self) -> Input {
+        match self {
+            Backend::Libvpx => Input::Yuv420p,
+            _ => Input::Nv12,
+        }
+    }
+
+    /// Whether frames go to the encoder in GPU memory, uploaded from the picture.
+    fn uploads(self) -> bool {
+        matches!(self, Backend::Vaapi | Backend::VideoToolbox)
+    }
+
+    /// The hardware API or software library doing the work, as people see it named.
+    fn engine(self) -> &'static str {
+        match self {
+            Backend::Nvenc => "NVENC",
+            Backend::MediaFoundation => "Media Foundation",
+            Backend::Vaapi => "VA-API",
+            Backend::VideoToolbox => "VideoToolbox",
+            Backend::Libvpx => "libvpx (software)",
+        }
+    }
+}
+
 /// One rung of the encoder ladder.
 struct Candidate {
     name: &'static CStr,
     codec: Codec,
-    input: Input,
-    intra_refresh: bool,
-    options: &'static [(&'static CStr, &'static CStr)],
-    frames: Frames,
+    backend: Backend,
 }
 
-/// Where an encoder takes its frames from.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Frames {
-    Memory,
-    /// VA-API surfaces, uploaded from the NV12 picture.
-    Vaapi,
-    /// CoreVideo pixel buffers, uploaded from the NV12 picture or captured straight into.
-    VideoToolbox,
+const fn rung(name: &'static CStr, codec: Codec, backend: Backend) -> Candidate {
+    Candidate {
+        name,
+        codec,
+        backend,
+    }
 }
 
 const LADDER: &[Candidate] = &[
-    Candidate {
-        name: c"av1_nvenc",
-        codec: Codec::Av1,
-        input: Input::Nv12,
-        intra_refresh: true,
-        options: NVENC,
-        frames: Frames::Memory,
-    },
-    Candidate {
-        name: c"av1_vaapi",
-        codec: Codec::Av1,
-        input: Input::Nv12,
-        intra_refresh: false,
-        options: VAAPI,
-        frames: Frames::Vaapi,
-    },
-    Candidate {
-        name: c"hevc_nvenc",
-        codec: Codec::Hevc,
-        input: Input::Nv12,
-        intra_refresh: true,
-        options: NVENC,
-        frames: Frames::Memory,
-    },
-    Candidate {
-        name: c"hevc_mf",
-        codec: Codec::Hevc,
-        input: Input::Nv12,
-        intra_refresh: false,
-        options: MEDIA_FOUNDATION,
-        frames: Frames::Memory,
-    },
-    Candidate {
-        name: c"hevc_vaapi",
-        codec: Codec::Hevc,
-        input: Input::Nv12,
-        intra_refresh: false,
-        options: VAAPI,
-        frames: Frames::Vaapi,
-    },
-    Candidate {
-        name: c"hevc_videotoolbox",
-        codec: Codec::Hevc,
-        input: Input::Nv12,
-        intra_refresh: false,
-        options: VIDEOTOOLBOX,
-        frames: Frames::VideoToolbox,
-    },
-    Candidate {
-        name: c"h264_nvenc",
-        codec: Codec::H264,
-        input: Input::Nv12,
-        intra_refresh: true,
-        options: NVENC,
-        frames: Frames::Memory,
-    },
-    Candidate {
-        name: c"h264_mf",
-        codec: Codec::H264,
-        input: Input::Nv12,
-        intra_refresh: false,
-        options: MEDIA_FOUNDATION,
-        frames: Frames::Memory,
-    },
-    Candidate {
-        name: c"h264_vaapi",
-        codec: Codec::H264,
-        input: Input::Nv12,
-        intra_refresh: false,
-        options: VAAPI,
-        frames: Frames::Vaapi,
-    },
-    Candidate {
-        name: c"h264_videotoolbox",
-        codec: Codec::H264,
-        input: Input::Nv12,
-        intra_refresh: false,
-        options: VIDEOTOOLBOX,
-        frames: Frames::VideoToolbox,
-    },
-    Candidate {
-        name: c"libvpx-vp9",
-        codec: Codec::Vp9,
-        input: Input::Yuv420p,
-        intra_refresh: false,
-        options: LIBVPX,
-        frames: Frames::Memory,
-    },
+    rung(c"av1_nvenc", Codec::Av1, Backend::Nvenc),
+    rung(c"av1_vaapi", Codec::Av1, Backend::Vaapi),
+    rung(c"hevc_nvenc", Codec::Hevc, Backend::Nvenc),
+    rung(c"hevc_mf", Codec::Hevc, Backend::MediaFoundation),
+    rung(c"hevc_vaapi", Codec::Hevc, Backend::Vaapi),
+    rung(c"hevc_videotoolbox", Codec::Hevc, Backend::VideoToolbox),
+    rung(c"h264_nvenc", Codec::H264, Backend::Nvenc),
+    rung(c"h264_mf", Codec::H264, Backend::MediaFoundation),
+    rung(c"h264_vaapi", Codec::H264, Backend::Vaapi),
+    rung(c"h264_videotoolbox", Codec::H264, Backend::VideoToolbox),
+    rung(c"libvpx-vp9", Codec::Vp9, Backend::Libvpx),
 ];
 
 const NVENC: &[(&CStr, &CStr)] = &[
@@ -215,9 +184,7 @@ pub struct Encoder {
     ctx: AVCodecContext,
     codec: Codec,
     name: &'static str,
-    input: Input,
-    intra_refresh: bool,
-    frames: Frames,
+    backend: Backend,
     width: usize,
     height: usize,
     idr_next: bool,
@@ -255,40 +222,33 @@ struct Previews {
 
 #[cfg(target_os = "linux")]
 impl Previews {
-    /// `imported`, the surface of `frame`, scaled to at most `width` wide.
+    /// `imported`, captured at `timestamp`, scaled to at most `width` wide.
     fn draw(
         &mut self,
         vpp: &Vpp,
         imported: &vaapi::Surface<'_>,
-        frame: &DmaBuf,
+        timestamp: u32,
         width: usize,
     ) -> Result<VideoFrame, EncodeError> {
-        let source = (frame.width as usize, frame.height as usize);
+        let source = (imported.size.0 as usize, imported.size.1 as usize);
         let size = share_size(source, (width, width));
-        if self.pool.as_ref().is_none_or(|(made, _)| *made != size) {
-            let pool = surface_pool(&self.device, size, PREVIEW_SURFACES)?;
-            self.pool = Some((size, pool));
-        }
-        let Some((_, pool)) = self.pool.as_mut() else {
-            return Err(EncodeError::NoSurfaces);
+        let pool = match &mut self.pool {
+            Some((made, pool)) if *made == size => pool,
+            slot => {
+                let pool =
+                    surface_pool(&self.device, ffi::AV_PIX_FMT_NV12, size, PREVIEW_SURFACES)?;
+                &mut slot.insert((size, pool)).1
+            }
         };
         let mut surface = AVFrame::new();
         pool.get_buffer(&mut surface)?;
         let whole = rectangle((0, 0, size.0, size.1));
-        vpp.convert(
-            imported,
-            (frame.width, frame.height),
-            surface_id(&surface),
-            whole,
-        )
-        .map_err(EncodeError::Gpu)?;
+        vpp.convert(imported, surface_id(&surface), whole)
+            .map_err(EncodeError::Gpu)?;
         let mut downloaded = AVFrame::new();
         downloaded.set_format(ffi::AV_PIX_FMT_NV12);
         downloaded.hwframe_transfer_data(&surface)?;
-        let mut preview = VideoFrame::blank(size.0, size.1);
-        preview.timestamp = frame.timestamp;
-        copy_out(&downloaded, &mut preview);
-        Ok(preview)
+        to_nv12(&downloaded, timestamp).ok_or(EncodeError::NoSurfaces)
     }
 }
 
@@ -316,9 +276,7 @@ impl Encoder {
                     ctx,
                     codec: candidate.codec,
                     name,
-                    input: candidate.input,
-                    intra_refresh: candidate.intra_refresh,
-                    frames: candidate.frames,
+                    backend: candidate.backend,
                     width: config.width,
                     height: config.height,
                     idr_next: true,
@@ -346,34 +304,26 @@ impl Encoder {
 
     /// The hardware API or software library doing the work, as people see it named.
     pub fn engine(&self) -> &'static str {
-        let suffixes = [
-            ("_vaapi", "VA-API"),
-            ("_videotoolbox", "VideoToolbox"),
-            ("_nvenc", "NVENC"),
-            ("_mf", "Media Foundation"),
-        ];
-        suffixes
-            .iter()
-            .find(|(suffix, _)| self.name.ends_with(suffix))
-            .map_or("libvpx (software)", |(_, engine)| engine)
+        self.backend.engine()
     }
 
     /// Asks for recovery: an IDR, or for `Refresh`, whatever the encoder's intra refresh
-    /// does on its own. An encoder without intra refresh treats `Refresh` as `Idr`.
+    /// does on its own. Only NVENC has intra refresh; the others treat `Refresh` as `Idr`.
     pub fn recover(&mut self, kind: Recovery) {
-        if kind == Recovery::Idr || !self.intra_refresh {
+        if kind == Recovery::Idr || self.backend != Backend::Nvenc {
             self.idr_next = true;
         }
     }
 
     pub fn encode(&mut self, picture: &VideoFrame) -> Result<Vec<EncodedUnit>, EncodeError> {
-        let mut frame = new_frame(self.width, self.height, self.input)?;
+        let input = self.backend.input();
+        let mut frame = new_frame(self.width, self.height, input)?;
         if (picture.width, picture.height) == (self.width, self.height) {
-            copy_into(&mut frame, picture, self.input);
+            copy_into(&mut frame, picture, input);
         } else {
             self.fit(picture, &mut frame)?;
         }
-        if self.frames != Frames::Memory {
+        if self.backend.uploads() {
             frame = self.upload(&frame)?;
         }
         self.submit(frame, picture.timestamp)
@@ -400,7 +350,7 @@ impl Encoder {
         Ok(units)
     }
 
-    /// Copies an NV12 frame into a VA-API surface from the encoder's pool.
+    /// Copies an NV12 frame into a surface from the encoder's pool.
     fn upload(&mut self, frame: &AVFrame) -> Result<AVFrame, EncodeError> {
         let mut surface = self.surface()?;
         surface.hwframe_transfer_data(frame)?;
@@ -428,18 +378,15 @@ impl Encoder {
     ) -> Result<GpuEncoded, EncodeError> {
         let source = (frame.width as usize, frame.height as usize);
         let region = rectangle(fitted(source, (self.width, self.height)));
+        // First, so an encoder that takes no GPU input says so rather than lacking surfaces.
         self.gpu()?;
         let surface = self.surface()?;
         let GpuInput { vpp, previews } = self.gpu()?;
         let imported = vpp.import(frame).map_err(EncodeError::Import)?;
-        vpp.convert(
-            &imported,
-            (frame.width, frame.height),
-            surface_id(&surface),
-            region,
-        )
-        .map_err(EncodeError::Gpu)?;
-        let preview = preview_width.map(|width| previews.draw(vpp, &imported, frame, width));
+        vpp.convert(&imported, surface_id(&surface), region)
+            .map_err(EncodeError::Gpu)?;
+        let preview =
+            preview_width.map(|width| previews.draw(vpp, &imported, frame.timestamp, width));
         drop(imported);
         let units = self.submit(surface, frame.timestamp)?;
         Ok(GpuEncoded { units, preview })
@@ -448,7 +395,7 @@ impl Encoder {
     /// Whether [`Encoder::encode_pixel_buffer`] takes captured pixel buffers.
     #[cfg(target_os = "macos")]
     pub fn takes_pixel_buffers(&self) -> bool {
-        self.frames == Frames::VideoToolbox
+        self.backend == Backend::VideoToolbox
     }
 
     /// Encodes a captured picture by handing its pixel buffer to VideoToolbox, uncopied.
@@ -533,53 +480,51 @@ impl Encoder {
 impl Encoder {
     /// Scales `picture` into `frame` keeping its aspect ratio, with black bars around it.
     fn fit(&mut self, picture: &VideoFrame, frame: &mut AVFrame) -> Result<(), EncodeError> {
+        let input = self.backend.input();
         let source_size = (picture.width, picture.height);
         let (x, y, width, height) = fitted(source_size, (self.width, self.height));
-        if self
-            .scaler
-            .as_ref()
-            .is_none_or(|(size, _)| *size != source_size)
-        {
-            let context = SwsContext::get_context(
-                picture.width as i32,
-                picture.height as i32,
-                ffi::AV_PIX_FMT_NV12,
-                width as i32,
-                height as i32,
-                pixel_format(self.input),
-                ffi::SWS_BILINEAR,
-                None,
-                None,
-                None,
-            )
-            .ok_or(EncodeError::Scaler)?;
-            self.scaler = Some((source_size, context));
-        }
-        let Some((_, scaler)) = self.scaler.as_mut() else {
-            return Err(EncodeError::Scaler);
+        let scaler = match &mut self.scaler {
+            Some((size, scaler)) if *size == source_size => scaler,
+            slot => {
+                let scaler = SwsContext::get_context(
+                    picture.width as i32,
+                    picture.height as i32,
+                    ffi::AV_PIX_FMT_NV12,
+                    width as i32,
+                    height as i32,
+                    pixel_format(input),
+                    ffi::SWS_BILINEAR,
+                    None,
+                    None,
+                    None,
+                )
+                .ok_or(EncodeError::Scaler)?;
+                &mut slot.insert((source_size, scaler)).1
+            }
         };
-        let mut source = new_frame(picture.width, picture.height, Input::Nv12)?;
-        copy_into(&mut source, picture, Input::Nv12);
-        fill_black(frame, self.input, self.height);
-        let chroma_x = match self.input {
+        fill_black(frame, input);
+        let chroma_x = match input {
             Input::Nv12 => x,
             Input::Yuv420p => x / 2,
         };
-        // SAFETY: `fitted` keeps the rectangle inside the frame with even offsets, so every
+        let source = [picture.y.as_ptr(), picture.uv.as_ptr(), null(), null()];
+        let source_stride = [picture.width as i32, picture.width as i32, 0, 0];
+        // SAFETY: sws reads `picture`'s NV12 planes, which hold its height in rows of its
+        // width. `fitted` keeps the rectangle inside the frame with even offsets, so every
         // plane pointer stays within its plane and sws writes only `width`×`height` from it.
         unsafe {
             let destination = [
                 frame.data[0].add(y * frame.linesize[0] as usize + x),
                 frame.data[1].add(y / 2 * frame.linesize[1] as usize + chroma_x),
-                match self.input {
-                    Input::Nv12 => std::ptr::null_mut(),
+                match input {
+                    Input::Nv12 => null_mut(),
                     Input::Yuv420p => frame.data[2].add(y / 2 * frame.linesize[2] as usize + x / 2),
                 },
-                std::ptr::null_mut(),
+                null_mut(),
             ];
             scaler.scale(
-                source.data.as_ptr() as _,
-                source.linesize.as_ptr(),
+                source.as_ptr(),
+                source_stride.as_ptr(),
                 0,
                 picture.height as i32,
                 destination.as_ptr(),
@@ -597,7 +542,7 @@ pub fn tries_gpu_input_first() -> bool {
     first_tried(|candidate| {
         has_driver(candidate) && AVCodec::find_encoder_by_name(candidate.name).is_some()
     })
-    .is_some_and(|candidate| candidate.frames == Frames::Vaapi)
+    .is_some_and(|candidate| candidate.backend == Backend::Vaapi)
 }
 
 #[cfg(target_os = "linux")]
@@ -608,7 +553,7 @@ fn first_tried(available: impl Fn(&Candidate) -> bool) -> Option<&'static Candid
 /// Whether the driver an encoder loads is installed. Only NVENC is checked, by its CUDA
 /// library, so machines without NVIDIA's driver skip probing it.
 fn has_driver(candidate: &Candidate) -> bool {
-    !candidate.name.to_bytes().ends_with(b"_nvenc") || cuda_present()
+    candidate.backend != Backend::Nvenc || cuda_present()
 }
 
 #[cfg(target_os = "linux")]
@@ -668,26 +613,6 @@ fn surface_id(frame: &AVFrame) -> vaapi::SurfaceId {
     frame.data[3] as usize as vaapi::SurfaceId
 }
 
-/// Copies a downloaded NV12 frame of the preview's size into it.
-#[cfg(target_os = "linux")]
-fn copy_out(frame: &AVFrame, into: &mut VideoFrame) {
-    let width = into.width;
-    let planes = [(0, &mut into.y), (1, &mut into.uv)];
-    for (plane, out) in planes {
-        let stride = frame.linesize[plane] as usize;
-        if frame.data[plane].is_null() || stride < width {
-            return;
-        }
-        for (row, out) in out.chunks_exact_mut(width).enumerate() {
-            // SAFETY: the transfer gave the plane at least as many rows of `stride` bytes
-            // as `out` has rows of `width`.
-            let source =
-                unsafe { std::slice::from_raw_parts(frame.data[plane].add(row * stride), width) };
-            out.copy_from_slice(source);
-        }
-    }
-}
-
 fn pixel_format(input: Input) -> i32 {
     match input {
         Input::Nv12 => ffi::AV_PIX_FMT_NV12,
@@ -705,7 +630,8 @@ fn new_frame(width: usize, height: usize, input: Input) -> Result<AVFrame, Rsmpe
 }
 
 /// Paints the whole frame full-range black.
-fn fill_black(frame: &mut AVFrame, input: Input, height: usize) {
+fn fill_black(frame: &mut AVFrame, input: Input) {
+    let height = frame.height as usize;
     let planes: &[(usize, u8, usize)] = match input {
         Input::Nv12 => &[(0, 0, height), (1, 128, height.div_ceil(2))],
         Input::Yuv420p => &[
@@ -726,16 +652,17 @@ fn fill_black(frame: &mut AVFrame, input: Input, height: usize) {
     }
 }
 
-/// A pool of `count` NV12 VA-API surfaces of `size` on `device`.
+/// A pool of `count` VA-API surfaces of `size` holding `format` pictures, on `device`.
 fn surface_pool(
     device: &AVHWDeviceContext,
+    format: ffi::AVPixelFormat,
     size: (usize, usize),
     count: i32,
 ) -> Result<AVHWFramesContext, RsmpegError> {
     let mut pool = device.hwframe_ctx_alloc();
     let surfaces = pool.data();
     surfaces.format = ffi::AV_PIX_FMT_VAAPI;
-    surfaces.sw_format = ffi::AV_PIX_FMT_NV12;
+    surfaces.sw_format = format;
     surfaces.width = size.0 as i32;
     surfaces.height = size.1 as i32;
     surfaces.initial_pool_size = count;
@@ -777,24 +704,25 @@ fn open_candidate(
     ctx.set_height(config.height as i32);
     ctx.set_time_base(ra(1, VIDEO_CLOCK_HZ as i32));
     ctx.set_framerate(ra(config.fps as i32, 1));
-    ctx.set_pix_fmt(pixel_format(candidate.input));
+    ctx.set_pix_fmt(pixel_format(candidate.backend.input()));
     let mut device = None;
-    match candidate.frames {
-        Frames::Memory => {}
-        Frames::Vaapi => {
+    match candidate.backend {
+        Backend::Vaapi => {
             let vaapi = AVHWDeviceContext::create(ffi::AV_HWDEVICE_TYPE_VAAPI, None, None, 0)?;
-            let pool = surface_pool(&vaapi, (config.width, config.height), VAAPI_SURFACES)?;
+            let size = (config.width, config.height);
+            let pool = surface_pool(&vaapi, ffi::AV_PIX_FMT_NV12, size, VAAPI_SURFACES)?;
             ctx.set_pix_fmt(ffi::AV_PIX_FMT_VAAPI);
             ctx.set_hw_frames_ctx(pool);
             device = Some(vaapi);
         }
-        Frames::VideoToolbox => {
+        Backend::VideoToolbox => {
             let pool = pixel_buffer_pool((config.width, config.height))?;
             ctx.set_pix_fmt(ffi::AV_PIX_FMT_VIDEOTOOLBOX);
             // SAFETY: `ctx` owns a live context, and sw_pix_fmt is a plain field of it.
             unsafe { (*ctx.as_mut_ptr()).sw_pix_fmt = ffi::AV_PIX_FMT_NV12 };
             ctx.set_hw_frames_ctx(pool);
         }
+        Backend::Nvenc | Backend::MediaFoundation | Backend::Libvpx => {}
     }
     let bitrate = i64::from(config.kbps) * 1000;
     ctx.set_bit_rate(bitrate);
@@ -809,11 +737,14 @@ fn open_candidate(
         (c"color_range", c"pc"),
         (c"colorspace", c"bt709"),
     ];
-    for (key, value) in common.into_iter().chain(candidate.options.iter().copied()) {
+    for (key, value) in common
+        .into_iter()
+        .chain(candidate.backend.options().iter().copied())
+    {
         set_option(&mut ctx, key, value)?;
     }
     // libvpx runs constant bitrate only when the minimum rate equals the bitrate.
-    if candidate.codec == Codec::Vp9 {
+    if candidate.backend == Backend::Libvpx {
         set_option(&mut ctx, c"minrate", &maxrate)?;
     }
     // rsmpeg 0.18 frees an options dictionary twice when opening fails after ffmpeg has
@@ -875,6 +806,12 @@ fn copy_into(frame: &mut AVFrame, picture: &VideoFrame, input: Input) {
     }
 }
 
+/// The ladder's rung for the encoder called `name`.
+#[cfg(test)]
+fn candidate(name: &CStr) -> Option<&'static Candidate> {
+    LADDER.iter().find(|c| c.name == name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::fitted;
@@ -929,7 +866,7 @@ mod failed_open {
         let Some(codec) = AVCodec::find_encoder_by_name(c"hevc_videotoolbox") else {
             return;
         };
-        let Some(candidate) = LADDER.iter().find(|c| c.name == c"hevc_videotoolbox") else {
+        let Some(candidate) = candidate(c"hevc_videotoolbox") else {
             return;
         };
         for _ in 0..20 {
@@ -945,55 +882,6 @@ mod failed_open {
 }
 
 #[cfg(test)]
-mod vp9 {
-    use super::super::decode::{Decoder, MAX_PIXELS};
-    use super::super::frame::{VideoFrame, luma_psnr};
-    use super::*;
-
-    #[test]
-    fn the_software_fallback_round_trips_through_vp9() {
-        let Some(candidate) = LADDER.iter().find(|c| c.name == c"libvpx-vp9") else {
-            return;
-        };
-        let config = EncoderConfig {
-            width: 1280,
-            height: 720,
-            fps: 30,
-            kbps: 3000,
-        };
-        let Some(mut encoder) = Encoder::open_with(candidate, config) else {
-            eprintln!("this ffmpeg has no libvpx; skipping");
-            return;
-        };
-        let mut decoder = Decoder::new(Codec::Vp9, MAX_PIXELS).unwrap();
-        let started = std::time::Instant::now();
-        let mut shown = Vec::new();
-        for n in 0..60u16 {
-            let input = VideoFrame::test_pattern(1280, 720, n, u32::from(n) * 3000);
-            for unit in encoder.encode(&input).unwrap() {
-                if let Some(output) = decoder.decode(&unit.data, unit.timestamp).unwrap() {
-                    let number = output.read_test_number();
-                    let psnr = luma_psnr(&output, &VideoFrame::test_pattern(1280, 720, number, 0));
-                    shown.push((number, psnr));
-                }
-            }
-        }
-        let per_frame = started.elapsed() / 60;
-        eprintln!(
-            "libvpx-vp9: {} frames shown, {per_frame:?} a frame",
-            shown.len()
-        );
-        assert!(
-            shown.len() >= 55,
-            "only {} of 60 frames came out",
-            shown.len()
-        );
-        let worst = shown.iter().map(|(_, p)| *p).fold(f64::INFINITY, f64::min);
-        assert!(worst > 25.0, "picture quality {worst:.1} dB");
-    }
-}
-
-#[cfg(test)]
 mod round_trip {
     use super::super::decode::{Decoder, MAX_PIXELS};
     use super::super::frame::{VideoFrame, luma_psnr};
@@ -1002,7 +890,7 @@ mod round_trip {
     /// Encodes 30 frames with `encoder` and decodes them. Returns whether decoding ran
     /// on hardware, or `None` when this machine can't open the encoder.
     fn round_trip(encoder: &CStr, codec: Codec) -> Option<bool> {
-        let candidate = LADDER.iter().find(|c| c.name == encoder)?;
+        let candidate = candidate(encoder)?;
         let config = EncoderConfig {
             width: 1280,
             height: 720,
@@ -1122,7 +1010,7 @@ mod gpu_input {
         };
         LADDER
             .iter()
-            .filter(|c| c.frames == Frames::Vaapi)
+            .filter(|c| c.backend == Backend::Vaapi)
             .find_map(|c| Encoder::open_with(c, config))
     }
 
@@ -1130,14 +1018,7 @@ mod gpu_input {
     /// a DMA-BUF.
     fn shared_picture(encoder: &Encoder, width: usize, height: usize) -> DmaBuf {
         let device = encoder.device.as_ref().unwrap();
-        let mut pool = device.hwframe_ctx_alloc();
-        let surfaces = pool.data();
-        surfaces.format = ffi::AV_PIX_FMT_VAAPI;
-        surfaces.sw_format = ffi::AV_PIX_FMT_BGR0;
-        surfaces.width = width as i32;
-        surfaces.height = height as i32;
-        surfaces.initial_pool_size = 1;
-        pool.init().unwrap();
+        let mut pool = surface_pool(device, ffi::AV_PIX_FMT_BGR0, (width, height), 1).unwrap();
         let mut picture = AVFrame::new();
         picture.set_width(width as i32);
         picture.set_height(height as i32);
@@ -1245,7 +1126,7 @@ mod gpu_input {
         };
         let frame = shared_picture(&vaapi, 640, 360);
         assert!(vaapi.encode_dmabuf(&frame, None).is_ok());
-        let Some(candidate) = LADDER.iter().find(|c| c.name == c"libvpx-vp9") else {
+        let Some(candidate) = candidate(c"libvpx-vp9") else {
             return;
         };
         let config = EncoderConfig {
@@ -1271,7 +1152,7 @@ mod pixel_buffers {
     use super::*;
 
     fn opened(name: &CStr) -> Option<Encoder> {
-        let candidate = LADDER.iter().find(|c| c.name == name)?;
+        let candidate = candidate(name)?;
         let config = EncoderConfig {
             width: 1280,
             height: 720,

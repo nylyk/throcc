@@ -17,14 +17,6 @@ use tokio::task::JoinSet;
 
 use common::*;
 
-async fn read_frame(recv: &mut quinn::RecvStream) -> Vec<u8> {
-    let mut header = [0u8; 4];
-    recv.read_exact(&mut header).await.unwrap();
-    let mut body = vec![0u8; framing::body_len(header).unwrap()];
-    recv.read_exact(&mut body).await.unwrap();
-    body
-}
-
 #[tokio::test]
 async fn concurrent_requests_match_by_id() {
     let server = start_server();
@@ -61,7 +53,7 @@ async fn oversized_frame_closes_the_connection() {
     let server = start_server();
     let connected = connection::connect(&server.addr, None).await.unwrap();
     let (mut send, mut recv) = connected.connection.accept_bi().await.unwrap();
-    let _: ServerHello = framing::decode(&read_frame(&mut recv).await).unwrap();
+    let _: ServerHello = read_message(&mut recv).await;
 
     send.write_all(&u32::MAX.to_be_bytes()).await.unwrap();
     match connected.connection.closed().await {
@@ -91,7 +83,7 @@ async fn unknown_reply_id_closes_the_connection() {
         send.write_all(&framing::encode(&hello).unwrap())
             .await
             .unwrap();
-        let _: Hello = framing::decode(&read_frame(&mut recv).await).unwrap();
+        let _: Hello = read_message(&mut recv).await;
         let welcome = Welcome {
             me: UserId(1),
             role: Role::User,

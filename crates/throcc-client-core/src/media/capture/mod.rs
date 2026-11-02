@@ -18,8 +18,7 @@ use std::time::{Duration, Instant};
 use throcc_proto::frame::VIDEO_CLOCK_HZ;
 use throcc_proto::messages::ShareConfig;
 
-use super::audio::SAMPLE_RATE;
-use super::jitter::FRAME;
+use super::audio::{FRAME, SAMPLE_RATE};
 use super::share_audio::STEREO_FRAME;
 use super::video::frame::VideoFrame;
 

@@ -1,46 +1,21 @@
 mod common;
 
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use throcc_client_core::account;
 use throcc_proto::framing;
 use throcc_proto::ids::{Epoch, Role, RoomId, UserId};
 use throcc_proto::messages::{
-    ClientMessage, ErrorCode, Event, MAX_AVATAR_BYTES, Placed, Presence, Request, Response,
-    ServerMessage, SignedEncKey, Welcome,
+    ClientMessage, ErrorCode, Event, MAX_AVATAR_BYTES, Presence, Request, Response, ServerMessage,
+    SignedEncKey, Welcome,
 };
 use throcc_server::database::Database;
 use throcc_server::rooms::MAX_ROOMS;
-use throcc_server::{Config, Congestion, DATABASE_FILE, Server, unix_now};
-use tokio::net::UdpSocket;
+use throcc_server::{DATABASE_FILE, unix_now};
 
 use common::*;
-
-async fn join(client: &TestClient, room: Option<RoomId>) -> Placed {
-    match client
-        .request(Request::SetRoom {
-            room,
-            password: None,
-        })
-        .await
-    {
-        Response::Placed(placed) => placed,
-        other => panic!("expected Placed, got {other:?}"),
-    }
-}
-
-async fn enter(client: &TestClient, room: RoomId, password: Option<&str>) -> Response {
-    client
-        .request(Request::SetRoom {
-            room: Some(room),
-            password: password.map(str::to_owned),
-        })
-        .await
-}
 
 /// Presence as one client sees it, built from its welcome and events.
 #[derive(Default, Debug, PartialEq)]
@@ -88,9 +63,9 @@ async fn three_clients_see_consistent_presence() {
         View::from_welcome(&carol.link.welcome),
     ];
 
-    let bob_placed = join(&bob, Some(general)).await;
+    let bob_placed = bob.join(Some(general)).await;
     assert_eq!(bob_placed.peers.len(), 1);
-    let carol_placed = join(&carol, Some(general)).await;
+    let carol_placed = carol.join(Some(general)).await;
     assert_eq!(carol_placed.peers.len(), 2);
     assert!(carol_placed.epoch > bob_placed.epoch);
     let bob_state = bob
@@ -103,7 +78,7 @@ async fn three_clients_see_consistent_presence() {
         .await;
     assert_eq!(bob_state, (carol_placed.epoch, 2));
 
-    join(&bob, Some(gaming)).await;
+    bob.join(Some(gaming)).await;
     for (client, view) in [&mut alice, &mut bob, &mut carol]
         .into_iter()
         .zip(views.iter_mut())
@@ -118,7 +93,7 @@ async fn three_clients_see_consistent_presence() {
         assert_eq!(view, &expected);
     }
 
-    carol.link.connected.connection.close(0u32.into(), b"bye");
+    carol.disconnect();
     for (client, view) in [&mut alice, &mut bob].into_iter().zip(views.iter_mut()) {
         client
             .event(|e| matches!(e, Event::PresenceEnded(u) if *u == carol_id).then_some(()))
@@ -156,38 +131,27 @@ async fn a_locked_room_needs_its_password_from_members_on_every_join() {
         matches!(e, Event::RoomLocked { room, locked: true } if *room == general).then_some(())
     })
     .await;
-    assert_error(&enter(&bob, general, None).await, ErrorCode::WrongPassword);
     assert_error(
-        &enter(&bob, general, Some("hunter3")).await,
+        &bob.set_room(Some(general), None).await,
         ErrorCode::WrongPassword,
     );
-    let placed = enter(&bob, general, Some("hunter2")).await;
-    assert!(matches!(placed, Response::Placed(p) if p.room == Some(general)));
-    let placed = enter(&alice, general, None).await;
-    assert!(matches!(placed, Response::Placed(p) if p.room == Some(general)));
-
-    bob.link.connected.connection.close(0u32.into(), b"");
-    let link = account::sign_in(&bob.keystore, &server.addr, Some(general))
-        .await
-        .unwrap();
-    assert_eq!(link.welcome.placed.room, Some(general));
-    assert!(
-        link.welcome
-            .rooms
-            .iter()
-            .any(|r| r.id == general && r.locked)
+    assert_error(
+        &bob.set_room(Some(general), Some("hunter3")).await,
+        ErrorCode::WrongPassword,
     );
+    let placed = bob.set_room(Some(general), Some("hunter2")).await;
+    assert!(matches!(placed, Response::Placed(p) if p.room == Some(general)));
+    let placed = alice.set_room(Some(general), None).await;
+    assert!(matches!(placed, Response::Placed(p) if p.room == Some(general)));
 
-    let lobby = Request::SetRoom {
-        room: None,
-        password: None,
-    };
-    link.requester.request(lobby).await.unwrap();
-    link.connected.connection.close(0u32.into(), b"");
-    let link = account::sign_in(&bob.keystore, &server.addr, Some(general))
-        .await
-        .unwrap();
-    assert_eq!(link.welcome.placed.room, None);
+    bob.reconnect(&server.addr, Some(general)).await;
+    let welcome = &bob.link.welcome;
+    assert_eq!(welcome.placed.room, Some(general));
+    assert!(welcome.rooms.iter().any(|r| r.id == general && r.locked));
+
+    bob.join(None).await;
+    bob.reconnect(&server.addr, Some(general)).await;
+    assert_eq!(bob.link.welcome.placed.room, None);
 }
 
 #[tokio::test]
@@ -218,20 +182,16 @@ async fn a_room_created_with_a_password_is_locked_from_the_start() {
             _ => None,
         })
         .await;
-    assert_error(&enter(&bob, private, None).await, ErrorCode::WrongPassword);
-    let placed = enter(&bob, private, Some("hunter2")).await;
+    assert_error(
+        &bob.set_room(Some(private), None).await,
+        ErrorCode::WrongPassword,
+    );
+    let placed = bob.set_room(Some(private), Some("hunter2")).await;
     assert!(matches!(placed, Response::Placed(p) if p.room == Some(private)));
 
-    bob.link.connected.connection.close(0u32.into(), b"");
-    let link = account::sign_in(&bob.keystore, &server.addr, None)
-        .await
-        .unwrap();
-    assert!(
-        link.welcome
-            .rooms
-            .iter()
-            .any(|r| r.id == private && r.locked)
-    );
+    bob.reconnect(&server.addr, None).await;
+    let rooms = &bob.link.welcome.rooms;
+    assert!(rooms.iter().any(|r| r.id == private && r.locked));
 }
 
 #[tokio::test]
@@ -240,15 +200,10 @@ async fn failed_set_room_leaves_the_client_in_place() {
     let mut alice = admin(&server).await;
     let general = create_room(&mut alice, "General").await;
     let bob = invited(&server, &alice).await;
-    let placed = join(&bob, Some(general)).await;
-    let missing = bob
-        .request(Request::SetRoom {
-            room: Some(RoomId(999)),
-            password: None,
-        })
-        .await;
+    let placed = bob.join(Some(general)).await;
+    let missing = bob.set_room(Some(RoomId(999)), None).await;
     assert_error(&missing, ErrorCode::NotFound);
-    let again = join(&bob, Some(general)).await;
+    let again = bob.join(Some(general)).await;
     assert_eq!(again.tracks, placed.tracks);
 }
 
@@ -257,14 +212,11 @@ async fn reconnect_returns_to_the_wanted_room_with_fresh_tracks() {
     let server = start_server();
     let mut alice = admin(&server).await;
     let general = create_room(&mut alice, "General").await;
-    let bob = invited(&server, &alice).await;
-    let first = join(&bob, Some(general)).await;
+    let mut bob = invited(&server, &alice).await;
+    let first = bob.join(Some(general)).await;
 
-    bob.link.connected.connection.close(0u32.into(), b"");
-    let link = account::sign_in(&bob.keystore, &server.addr, Some(general))
-        .await
-        .unwrap();
-    let placed = link.welcome.placed;
+    bob.reconnect(&server.addr, Some(general)).await;
+    let placed = bob.link.welcome.placed;
     assert_eq!(placed.room, Some(general));
     assert!(placed.epoch > first.epoch);
     let (old, new) = (first.tracks.unwrap(), placed.tracks.unwrap());
@@ -290,55 +242,6 @@ async fn profile_changes_are_rate_limited_and_avatars_capped() {
     assert_error(&empty_name, ErrorCode::Invalid);
 }
 
-/// Runs a server on its own runtime, so stopping it drops everything like a process exit.
-struct ProcessLikeServer {
-    addr: SocketAddr,
-    bootstrap: Option<throcc_proto::invite::InviteCode>,
-    stop: std::sync::mpsc::Sender<()>,
-    thread: std::thread::JoinHandle<()>,
-}
-
-impl ProcessLikeServer {
-    fn start(dir: &std::path::Path, listen: SocketAddr) -> Self {
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        let (stop, stop_rx) = std::sync::mpsc::channel::<()>();
-        let dir = dir.to_owned();
-        let thread = std::thread::spawn(move || {
-            let runtime = tokio::runtime::Runtime::new().unwrap();
-            runtime.block_on(async {
-                let server = Server::bind(&Config {
-                    data_dir: dir,
-                    listen,
-                    congestion: Congestion::Cubic,
-                })
-                .unwrap();
-                ready_tx
-                    .send((
-                        server.local_addr().unwrap(),
-                        server.bootstrap_invite().cloned(),
-                    ))
-                    .unwrap();
-                tokio::spawn(server.run());
-                tokio::task::spawn_blocking(move || stop_rx.recv().ok())
-                    .await
-                    .ok();
-            });
-        });
-        let (addr, bootstrap) = ready_rx.recv().unwrap();
-        Self {
-            addr,
-            bootstrap,
-            stop,
-            thread,
-        }
-    }
-
-    fn stop(self) {
-        self.stop.send(()).unwrap();
-        self.thread.join().unwrap();
-    }
-}
-
 #[tokio::test]
 async fn media_ids_never_repeat_across_a_restart() {
     let dir = tempfile::tempdir().unwrap();
@@ -346,57 +249,27 @@ async fn media_ids_never_repeat_across_a_restart() {
     let addr = first.addr;
     let mut alice = enroll_at(&addr.to_string(), first.bootstrap.as_ref().unwrap()).await;
     let general = create_room(&mut alice, "General").await;
-    let before = join(&alice, Some(general)).await.tracks.unwrap();
+    let before = alice.join(Some(general)).await.tracks.unwrap();
     first.stop();
 
     let second = ProcessLikeServer::start(dir.path(), addr);
     assert!(second.bootstrap.is_none());
-    let link = account::sign_in(&alice.keystore, &addr.to_string(), Some(general))
-        .await
-        .unwrap();
-    let after = link.welcome.placed.tracks.unwrap();
+    alice.reconnect(&addr.to_string(), Some(general)).await;
+    let placed = &alice.link.welcome.placed;
+    let after = placed.tracks.as_ref().unwrap();
     assert!(
         after.mic > before.shares[0].audio,
         "{before:?} then {after:?}"
     );
-    assert!(link.welcome.placed.epoch > Epoch(1));
+    assert!(placed.epoch > Epoch(1));
     second.stop();
 }
 
-/// Forwards UDP between a client and the server until `cut` is set.
-async fn start_cuttable_relay(server: SocketAddr) -> (SocketAddr, Arc<AtomicBool>) {
-    let front = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-    let back = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-    back.connect(server).await.unwrap();
-    let addr = front.local_addr().unwrap();
+/// A relay that forwards both ways until the returned flag is set.
+async fn cuttable_relay(server: &str) -> (String, Arc<AtomicBool>) {
     let cut = Arc::new(AtomicBool::new(false));
-    let client: Arc<std::sync::Mutex<Option<SocketAddr>>> = Arc::default();
-    {
-        let (front, back, cut, client) = (front.clone(), back.clone(), cut.clone(), client.clone());
-        tokio::spawn(async move {
-            let mut buf = vec![0u8; 65536];
-            while let Ok((n, from)) = front.recv_from(&mut buf).await {
-                *client.lock().unwrap() = Some(from);
-                if !cut.load(Ordering::Relaxed) {
-                    back.send(&buf[..n]).await.ok();
-                }
-            }
-        });
-    }
-    {
-        let cut = cut.clone();
-        tokio::spawn(async move {
-            let mut buf = vec![0u8; 65536];
-            while let Ok(n) = back.recv(&mut buf).await {
-                let to = *client.lock().unwrap();
-                if let Some(to) = to
-                    && !cut.load(Ordering::Relaxed)
-                {
-                    front.send_to(&buf[..n], to).await.ok();
-                }
-            }
-        });
-    }
+    let relay_cut = cut.clone();
+    let addr = relay(server, move |_, _| !relay_cut.load(Ordering::Relaxed)).await;
     (addr, cut)
 }
 
@@ -407,10 +280,10 @@ async fn killed_connection_retracts_presence_within_the_idle_timeout() {
     let general = create_room(&mut alice, "General").await;
     let code = invite(&alice).await;
 
-    let (relay, cut) = start_cuttable_relay(server.addr.parse().unwrap()).await;
-    let bob = enroll_at(&relay.to_string(), &code).await;
+    let (relay, cut) = cuttable_relay(&server.addr).await;
+    let bob = enroll_at(&relay, &code).await;
     let bob_id = bob.link.welcome.me;
-    join(&bob, Some(general)).await;
+    bob.join(Some(general)).await;
     alice
         .event(|e| matches!(e, Event::PresenceChanged(p) if p.user == bob_id).then_some(()))
         .await;
@@ -480,12 +353,8 @@ async fn an_expired_encryption_key_cannot_enter_a_room() {
         sig: [2; 64],
     };
     server.shared.hub().db.set_enc_key(me, &expired).unwrap();
-    alice.link.connected.connection.close(0u32.into(), b"");
-
-    let link = account::sign_in(&alice.keystore, &server.addr, Some(general))
-        .await
-        .unwrap();
-    assert_eq!(link.welcome.placed.room, None);
+    alice.reconnect(&server.addr, Some(general)).await;
+    assert_eq!(alice.link.welcome.placed.room, None);
 }
 
 #[tokio::test]
@@ -500,12 +369,7 @@ async fn exhausted_media_ids_refuse_joins_but_keep_the_server_up() {
         .allocate_media_ids(u32::MAX - 1)
         .unwrap()
         .unwrap();
-    let res = alice
-        .request(Request::SetRoom {
-            room: Some(general),
-            password: None,
-        })
-        .await;
+    let res = alice.set_room(Some(general), None).await;
     assert_error(&res, ErrorCode::Internal);
     assert!(matches!(
         alice.request(Request::ListUsers).await,
@@ -520,7 +384,7 @@ async fn a_leave_that_cannot_bump_the_epoch_still_ends_presence() {
     let addr = first.addr;
     let mut alice = enroll_at(&addr.to_string(), first.bootstrap.as_ref().unwrap()).await;
     let general = create_room(&mut alice, "General").await;
-    let bob = invited_at(&addr.to_string(), &alice).await;
+    let mut bob = invited_at(&addr.to_string(), &alice).await;
     first.stop();
     Database::open(&dir.path().join(DATABASE_FILE))
         .unwrap()
@@ -528,23 +392,14 @@ async fn a_leave_that_cannot_bump_the_epoch_still_ends_presence() {
         .unwrap();
 
     let second = ProcessLikeServer::start(dir.path(), addr);
-    let alice_link = account::sign_in(&alice.keystore, &addr.to_string(), None)
-        .await
-        .unwrap();
-    let alice_id = alice_link.welcome.me;
-    let link = account::sign_in(&bob.keystore, &addr.to_string(), None)
-        .await
-        .unwrap();
-    let mut bob = TestClient { link, ..bob };
-    let alice = TestClient {
-        link: alice_link,
-        ..alice
-    };
-    assert_eq!(join(&alice, Some(general)).await.epoch, Epoch(u32::MAX));
+    alice.reconnect(&addr.to_string(), None).await;
+    bob.reconnect(&addr.to_string(), None).await;
+    let alice_id = alice.link.welcome.me;
+    assert_eq!(alice.join(Some(general)).await.epoch, Epoch(u32::MAX));
     bob.event(|e| matches!(e, Event::PresenceChanged(p) if p.user == alice_id).then_some(()))
         .await;
 
-    alice.link.connected.connection.close(0u32.into(), b"");
+    alice.disconnect();
     bob.event(|e| matches!(e, Event::PresenceEnded(u) if *u == alice_id).then_some(()))
         .await;
     second.stop();
@@ -555,7 +410,7 @@ async fn a_server_holds_a_bounded_number_of_rooms() {
     let dir = tempfile::tempdir().unwrap();
     let first = ProcessLikeServer::start(dir.path(), "127.0.0.1:0".parse().unwrap());
     let addr = first.addr;
-    let alice = enroll_at(&addr.to_string(), first.bootstrap.as_ref().unwrap()).await;
+    let mut alice = enroll_at(&addr.to_string(), first.bootstrap.as_ref().unwrap()).await;
     first.stop();
     let db = Database::open(&dir.path().join(DATABASE_FILE)).unwrap();
     for i in 0..MAX_ROOMS {
@@ -564,11 +419,8 @@ async fn a_server_holds_a_bounded_number_of_rooms() {
     drop(db);
 
     let second = ProcessLikeServer::start(dir.path(), addr);
-    let link = account::sign_in(&alice.keystore, &addr.to_string(), None)
-        .await
-        .unwrap();
-    assert_eq!(link.welcome.rooms.len(), MAX_ROOMS);
-    let alice = TestClient { link, ..alice };
+    alice.reconnect(&addr.to_string(), None).await;
+    assert_eq!(alice.link.welcome.rooms.len(), MAX_ROOMS);
     let res = alice
         .request(Request::CreateRoom {
             name: "One more".into(),
@@ -660,8 +512,7 @@ async fn a_member_who_stops_reading_pictures_stops_being_read() {
 
     let mut pictures = 0;
     loop {
-        let message = framing::decode(&read_frame(&mut bob.recv).await).unwrap();
-        match message {
+        match read_message(&mut bob.recv).await {
             ServerMessage::Response {
                 res: Response::Avatar(_),
                 ..
@@ -698,9 +549,9 @@ async fn managers_kick_lower_ranks_out_of_rooms() {
         role: Role::Manager,
     };
     assert_eq!(alice.request(promote).await, Response::Ok);
-    join(&alice, Some(general)).await;
-    join(&bob, Some(general)).await;
-    join(&carol, Some(general)).await;
+    alice.join(Some(general)).await;
+    bob.join(Some(general)).await;
+    carol.join(Some(general)).await;
 
     assert_error(&carol.request(kick(bob_id)).await, ErrorCode::Forbidden);
     assert_error(&bob.request(kick(alice_id)).await, ErrorCode::Forbidden);
@@ -713,7 +564,7 @@ async fn managers_kick_lower_ranks_out_of_rooms() {
         .await;
     assert_eq!(by, (bob_id, general));
     assert_error(&bob.request(kick(carol_id)).await, ErrorCode::NotFound);
-    assert_eq!(join(&carol, Some(general)).await.room, Some(general));
+    assert_eq!(carol.join(Some(general)).await.room, Some(general));
     let elsewhere = Request::KickFromRoom {
         user: carol_id,
         room: RoomId(999),

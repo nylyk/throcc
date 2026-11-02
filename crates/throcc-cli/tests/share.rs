@@ -13,21 +13,14 @@ use throcc_client_core::media::reorder::REORDER_WINDOW;
 use throcc_client_core::media::share::{self, ShareSender};
 use throcc_client_core::media::share_audio::audio_to_video;
 use throcc_client_core::media::video::decode::{Decoder, MAX_PIXELS};
-use throcc_proto::frame::Flags;
-use throcc_proto::ids::MediaId;
-use throcc_proto::messages::{Codec, Event, MediaState, Request, Response, Share, ShareConfig};
+use throcc_proto::frame::{Flags, VIDEO_CLOCK_HZ};
+use throcc_proto::messages::{Codec, Event, Request, Response, Share, ShareConfig};
 use tokio::sync::{Mutex, mpsc};
 
 use common::*;
 
-const WANTED: ShareConfig = ShareConfig {
-    audio: false,
-    kbps: 8000,
-    codec: Codec::H264,
-    width: 1920,
-    height: 1080,
-    fps: 60,
-};
+const WANTED: ShareConfig = share_1080p60(Codec::H264, 8000);
+const WATCH_UNITS: usize = 256;
 
 /// Starts Alice sharing a test pattern stamped with milliseconds since `epoch`, and
 /// forwards the server's keyframe requests to her encoder. `None` without an encoder.
@@ -47,13 +40,11 @@ async fn share_pattern(
         }
     };
     eprintln!("encoder {} for {:?}", sender.encoder, sender.config.codec);
-    let media = MediaState {
-        mic: false,
-        deafened: false,
-        share: Some(sender.config),
-    };
     assert_eq!(
-        alice.request(Request::SetMedia(media)).await.unwrap(),
+        alice
+            .request(Request::SetMedia(sharing(sender.config)))
+            .await
+            .unwrap(),
         Response::Ok
     );
 
@@ -72,20 +63,6 @@ async fn share_pattern(
     Some((sender, tracks, requests))
 }
 
-async fn watch(
-    bob: &Call,
-    video: MediaId,
-) -> mpsc::Receiver<throcc_client_core::media::engine::Received> {
-    let units = bob.engine.subscribe(video, Kind::Video, 256);
-    assert_eq!(
-        bob.request(Request::SetWatching(vec![video]))
-            .await
-            .unwrap(),
-        Response::Ok
-    );
-    units
-}
-
 fn millis_since(epoch: Instant) -> u16 {
     epoch.elapsed().as_millis() as u16
 }
@@ -99,7 +76,7 @@ async fn a_shared_picture_arrives_within_a_few_frames() {
     let Some((sender, tracks, _)) = share_pattern(&mut alice, &bob, WANTED, epoch).await else {
         return;
     };
-    let units = watch(&bob, tracks.video).await;
+    let units = watch(&bob, tracks.video, WATCH_UNITS).await;
     let (mut picture, _) = share::receive(units, sender.config, None, || {}).unwrap();
 
     let mut latencies = Vec::new();
@@ -134,7 +111,7 @@ async fn two_percent_loss_brings_a_refresh_within_a_second() {
     else {
         return;
     };
-    let mut units = watch(&bob, tracks.video).await;
+    let mut units = watch(&bob, tracks.video, WATCH_UNITS).await;
     let mut decoder = Decoder::new(sender.config.codec, MAX_PIXELS).unwrap();
 
     let mut keyframes = Vec::new();
@@ -207,7 +184,8 @@ async fn share_audio_and_video_arrive_on_one_clock() {
     let watching = Request::SetWatching(vec![tracks.video, tracks.audio]);
     assert_eq!(bob.request(watching).await.unwrap(), Response::Ok);
 
-    let now_on_video_clock = || (epoch.elapsed().as_micros() * 90_000 / 1_000_000) as u32;
+    let now_on_video_clock =
+        || (epoch.elapsed().as_micros() * u128::from(VIDEO_CLOCK_HZ) / 1_000_000) as u32;
     let (mut audio_lags, mut video_lags) = (Vec::new(), Vec::new());
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     while tokio::time::Instant::now() < deadline {
@@ -292,7 +270,7 @@ async fn a_screen_share_runs_for_profiling() {
             }
         });
     }
-    let mut units = watch(&bob, tracks.video).await;
+    let mut units = watch(&bob, tracks.video, WATCH_UNITS).await;
     let (mut count, mut bytes) = (0usize, 0usize);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
     while let Ok(Some(unit)) = tokio::time::timeout_at(deadline, units.recv()).await {

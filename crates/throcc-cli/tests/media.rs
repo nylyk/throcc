@@ -6,19 +6,12 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use throcc_client_core::call::CallEvent;
 use throcc_client_core::media::engine::{Kind, Outgoing};
-use throcc_proto::messages::{Codec, Event, MediaState, Request, Response, ShareConfig};
+use throcc_proto::frame::VIDEO_CLOCK_HZ;
+use throcc_proto::messages::{Codec, Event, MediaState, Request, Response};
 use throcc_proto::transport::close;
 
+use common::unit::{unit, unit_index};
 use common::*;
-
-fn synthetic(index: u32, len: usize) -> Bytes {
-    let mut data = vec![0u8; len];
-    data[..4].copy_from_slice(&index.to_be_bytes());
-    for (i, b) in data.iter_mut().enumerate().skip(4) {
-        *b = (index as usize).wrapping_mul(31).wrapping_add(i) as u8;
-    }
-    Bytes::from(data)
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[cfg_attr(
@@ -32,40 +25,14 @@ async fn ten_seconds_of_frames_at_15_mbps_arrive_intact() {
     let server = start_server();
     let (alice, bob, _) = room_with_two(&server).await;
 
-    let config = ShareConfig {
-        audio: false,
-        kbps: 15_000,
-        codec: Codec::Av1,
-        width: 1920,
-        height: 1080,
-        fps: 60,
-    };
-    let share = MediaState {
-        mic: false,
-        deafened: false,
-        share: Some(config),
-    };
+    let share = sharing(share_1080p60(Codec::Av1, 15_000));
     assert_eq!(
         alice.request(Request::SetMedia(share)).await.unwrap(),
         Response::Ok
     );
     let epoch = alice.engine.keys().keys.epoch();
-    let video_id = bob
-        .engine
-        .keys()
-        .keys
-        .peer_tracks(alice.me())
-        .unwrap()
-        .shares[0]
-        .video;
-
-    let mut units = bob.engine.subscribe(video_id, Kind::Video, UNITS as usize);
-    assert_eq!(
-        bob.request(Request::SetWatching(vec![video_id]))
-            .await
-            .unwrap(),
-        Response::Ok
-    );
+    let video_id = first_share(&bob, &alice).await.video;
+    let mut units = watch(&bob, video_id, UNITS as usize).await;
     wait_for("bob's key for alice's video", || {
         bob.engine.keys().keys.recv_key(video_id, epoch).is_some()
     })
@@ -81,27 +48,21 @@ async fn ten_seconds_of_frames_at_15_mbps_arrive_intact() {
         let mut tick = tokio::time::interval(Duration::from_secs(1) / FPS);
         for index in 0..UNITS {
             tick.tick().await;
-            let unit = Outgoing {
-                media_id: video_id,
-                data: synthetic(index, LEN),
-                timestamp: index * (90_000 / FPS),
-                keyframe: index == 0,
-                discardable: false,
-                enqueued: Instant::now(),
-            };
-            sender.send(Kind::Video, unit);
+            let timestamp = index * (VIDEO_CLOCK_HZ / FPS);
+            let sent = Outgoing::new(video_id, unit(index, LEN), timestamp, index == 0);
+            sender.send(Kind::Video, sent);
         }
     });
 
     let mut intact = 0;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     while intact < UNITS {
-        let unit = tokio::time::timeout_at(deadline, units.recv())
+        let received = tokio::time::timeout_at(deadline, units.recv())
             .await
             .expect("units stopped arriving")
             .unwrap();
-        let index = u32::from_be_bytes(unit.data[..4].try_into().unwrap());
-        assert_eq!(unit.data, synthetic(index, LEN), "unit {index} corrupted");
+        let index = unit_index(&received.data).unwrap();
+        assert_eq!(received.data, unit(index, LEN), "unit {index} corrupted");
         assert_eq!(
             index,
             intact,
@@ -139,20 +100,9 @@ async fn ten_seconds_of_frames_at_15_mbps_arrive_intact() {
 async fn watching_a_share_asks_its_sender_for_an_idr() {
     let server = start_server();
     let (mut alice, bob, _) = room_with_two(&server).await;
-    let video_id = bob
-        .engine
-        .keys()
-        .keys
-        .peer_tracks(alice.me())
-        .unwrap()
-        .shares[0]
-        .video;
-    assert_eq!(
-        bob.request(Request::SetWatching(vec![video_id]))
-            .await
-            .unwrap(),
-        Response::Ok
-    );
+    let video_id = first_share(&bob, &alice).await.video;
+    let watching = Request::SetWatching(vec![video_id]);
+    assert_eq!(bob.request(watching).await.unwrap(), Response::Ok);
     let wanted = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Some(CallEvent::Server(Event::KeyframeWanted { media_id, kind })) =
@@ -171,7 +121,7 @@ async fn watching_a_share_asks_its_sender_for_an_idr() {
 async fn mic_audio_reaches_peers_but_not_the_deafened() {
     let server = start_server();
     let (alice, bob, _) = room_with_two(&server).await;
-    let mic = bob.engine.keys().keys.peer_tracks(alice.me()).unwrap().mic;
+    let mic = peer_tracks(&bob, &alice).await.mic;
     let epoch = alice.engine.keys().keys.epoch();
     let mut heard = bob.engine.subscribe(mic, Kind::Audio, 64);
     wait_for("bob's key for alice's mic", || {
@@ -179,14 +129,7 @@ async fn mic_audio_reaches_peers_but_not_the_deafened() {
     })
     .await;
 
-    let frame = |i: u32| Outgoing {
-        media_id: mic,
-        data: Bytes::from(vec![i as u8; 80]),
-        timestamp: i * 960,
-        keyframe: false,
-        discardable: false,
-        enqueued: Instant::now(),
-    };
+    let frame = |i: u32| Outgoing::new(mic, Bytes::from(vec![i as u8; 80]), i * 960, false);
     alice.engine.send(Kind::Audio, frame(1));
     let got = tokio::time::timeout(Duration::from_secs(5), heard.recv())
         .await
@@ -218,33 +161,13 @@ async fn keyframes_arrive_whole_through_two_percent_loss() {
     let server = start_server();
     let relay = lossy_relay(&server.addr, 50).await;
     let (alice, bob, _) = room_with_two_at(&server, &relay.addr).await;
-    let config = ShareConfig {
-        audio: false,
-        kbps: 10_000,
-        codec: Codec::H264,
-        width: 1920,
-        height: 1080,
-        fps: 60,
-    };
-    let share = MediaState {
-        mic: false,
-        deafened: false,
-        share: Some(config),
-    };
+    let share = sharing(share_1080p60(Codec::H264, 10_000));
     assert_eq!(
         alice.request(Request::SetMedia(share)).await.unwrap(),
         Response::Ok
     );
     let video_id = first_share(&bob, &alice).await.video;
-    let mut units = bob
-        .engine
-        .subscribe(video_id, Kind::Video, KEYFRAMES as usize);
-    assert_eq!(
-        bob.request(Request::SetWatching(vec![video_id]))
-            .await
-            .unwrap(),
-        Response::Ok
-    );
+    let mut units = watch(&bob, video_id, KEYFRAMES as usize).await;
     wait_for("both at one epoch with keys", || {
         let epoch = alice.engine.keys().keys.epoch();
         epoch == bob.engine.keys().keys.epoch()
@@ -254,23 +177,16 @@ async fn keyframes_arrive_whole_through_two_percent_loss() {
 
     relay.lossy.store(true, Ordering::Relaxed);
     for index in 0..KEYFRAMES {
-        alice.engine.send(
-            Kind::Video,
-            Outgoing {
-                media_id: video_id,
-                data: synthetic(index, LEN),
-                timestamp: index * 3000,
-                keyframe: true,
-                discardable: false,
-                enqueued: Instant::now(),
-            },
-        );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let keyframe = Outgoing::new(video_id, unit(index, LEN), index * 3000, true);
+        alice.engine.send(Kind::Video, keyframe);
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let mut whole = std::collections::HashSet::new();
-    while let Ok(Some(unit)) = tokio::time::timeout(Duration::from_secs(1), units.recv()).await {
-        let index = u32::from_be_bytes(unit.data[..4].try_into().unwrap());
-        assert_eq!(unit.data, synthetic(index, LEN));
+    while whole.len() < KEYFRAMES as usize
+        && let Ok(Some(received)) = tokio::time::timeout(Duration::from_secs(1), units.recv()).await
+    {
+        let index = unit_index(&received.data).unwrap();
+        assert_eq!(received.data, unit(index, LEN));
         whole.insert(index);
     }
     let whole = whole.len() as u32;
@@ -284,7 +200,7 @@ async fn keyframes_arrive_whole_through_two_percent_loss() {
         stats.abandoned_units.load(Ordering::Relaxed),
         stats.track_overflow.load(Ordering::Relaxed),
         stats.too_old.load(Ordering::Relaxed),
-        bob.engine.lost(video_id),
+        bob.engine.arrived(video_id).lost,
     );
     assert!(dropped >= 30, "the relay dropped only {dropped} packets");
     assert!(

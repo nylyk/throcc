@@ -390,7 +390,11 @@ impl Vpp {
             )
         };
         check("vaCreateSurfaces", status)?;
-        Ok(Surface { vpp: self, id })
+        Ok(Surface {
+            vpp: self,
+            id,
+            size: (frame.width, frame.height),
+        })
     }
 
     /// Draws all of `source` into `region` of `target`, painting the rest of `target`
@@ -398,15 +402,14 @@ impl Vpp {
     pub fn convert(
         &self,
         source: &Surface<'_>,
-        source_size: (u32, u32),
         target: SurfaceId,
         region: Rectangle,
     ) -> Result<(), VaError> {
         let whole = Rectangle {
             x: 0,
             y: 0,
-            width: source_size.0 as u16,
-            height: source_size.1 as u16,
+            width: source.size.0 as u16,
+            height: source.size.1 as u16,
         };
         let full_range_bt709 = ColorProperties {
             color_range: RANGE_FULL,
@@ -477,6 +480,8 @@ impl Drop for Vpp {
 pub struct Surface<'a> {
     vpp: &'a Vpp,
     id: SurfaceId,
+    /// Width and height of the imported picture.
+    pub size: (u32, u32),
 }
 
 impl Drop for Surface<'_> {

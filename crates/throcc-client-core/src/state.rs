@@ -6,7 +6,7 @@ use throcc_proto::ids::{Hash, Role, RoomId, UserId};
 use throcc_proto::messages::{Codec, Room, ShareConfig};
 
 pub(crate) const MIC_KBPS: u32 = 64;
-pub(crate) const SHARE_AUDIO_KBPS: u32 = 128;
+pub(crate) const SHARE_AUDIO_KBPS: u32 = crate::media::share_audio::KBPS;
 pub(crate) const VOICE_DETAIL: &str = "Opus voice, mono";
 pub(crate) const SHARE_AUDIO_DETAIL: &str = "Opus music, stereo";
 

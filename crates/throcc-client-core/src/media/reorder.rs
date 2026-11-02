@@ -13,6 +13,8 @@ pub enum Output {
     Abandoned {
         from: u32,
     },
+    /// A unit arrived after the ones before it were abandoned, and was dropped.
+    Late,
 }
 
 /// Emits whole units in `seq` order, waiting at most [`REORDER_WINDOW`] for a missing one.
@@ -21,17 +23,12 @@ pub struct Reorder {
     next: Option<u32>,
     waiting: BTreeMap<u32, Unit>,
     gap_since: Option<Instant>,
-    /// Units that arrived after the ones before them were abandoned.
-    pub late: u64,
 }
 
 impl Reorder {
     pub fn push(&mut self, unit: Unit, now: Instant) -> Vec<Output> {
         match self.next {
-            Some(next) if unit.last_seq < next => {
-                self.late += 1;
-                return Vec::new();
-            }
+            Some(next) if unit.last_seq < next => return vec![Output::Late],
             None => self.next = Some(unit.first_seq),
             _ => {}
         }
@@ -39,12 +36,7 @@ impl Reorder {
             self.waiting.pop_first();
         }
         self.waiting.insert(unit.first_seq, unit);
-        self.drain(now)
-    }
-
-    /// Abandons a gap whose wait has run out.
-    pub fn poll(&mut self, now: Instant) -> Vec<Output> {
-        self.drain(now)
+        self.poll(now)
     }
 
     /// When [`Reorder::poll`] next has something to do.
@@ -52,7 +44,8 @@ impl Reorder {
         self.gap_since.map(|since| since + REORDER_WINDOW)
     }
 
-    fn drain(&mut self, now: Instant) -> Vec<Output> {
+    /// Emits what is in order, and abandons a gap whose wait has run out.
+    pub fn poll(&mut self, now: Instant) -> Vec<Output> {
         let mut out = Vec::new();
         while let Some((&first, _)) = self.waiting.first_key_value() {
             let next = self.next.unwrap_or(first);
@@ -93,7 +86,7 @@ mod tests {
         out.iter()
             .map(|o| match o {
                 Output::Unit(u) => Some(u.first_seq),
-                Output::Abandoned { .. } => None,
+                Output::Abandoned { .. } | Output::Late => None,
             })
             .collect()
     }
@@ -121,7 +114,9 @@ mod tests {
         let out = reorder.poll(t + REORDER_WINDOW);
         assert_eq!(out[0], Output::Abandoned { from: 1 });
         assert_eq!(firsts(&out[1..]), vec![Some(5)]);
-        assert!(reorder.push(unit(1, 4), t + REORDER_WINDOW).is_empty());
-        assert_eq!(reorder.late, 1);
+        assert_eq!(
+            reorder.push(unit(1, 4), t + REORDER_WINDOW),
+            vec![Output::Late]
+        );
     }
 }

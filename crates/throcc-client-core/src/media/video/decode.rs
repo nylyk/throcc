@@ -21,23 +21,14 @@ pub enum DecodeError {
     Ffmpeg(#[from] RsmpegError),
 }
 
-/// Software decoders, fastest first.
+/// Software decoders, fastest first. The last is FFmpeg's own, which is also the one that
+/// hands work to a hardware device.
 fn decoders(codec: Codec) -> &'static [&'static CStr] {
     match codec {
         Codec::Av1 => &[c"libdav1d", c"av1"],
         Codec::Hevc => &[c"hevc"],
         Codec::H264 => &[c"h264"],
         Codec::Vp9 => &[c"vp9"],
-    }
-}
-
-/// FFmpeg's own decoder for `codec`, the one that hands work to a hardware device.
-fn native(codec: Codec) -> &'static CStr {
-    match codec {
-        Codec::Av1 => c"av1",
-        Codec::Hevc => c"hevc",
-        Codec::H264 => c"h264",
-        Codec::Vp9 => c"vp9",
     }
 }
 
@@ -86,7 +77,7 @@ impl Decoder {
     }
 
     fn on_hardware(codec: Codec, max_pixels: usize) -> Option<Self> {
-        let found = AVCodec::find_decoder_by_name(native(codec))?;
+        let found = AVCodec::find_decoder_by_name(decoders(codec).last()?)?;
         devices().iter().find_map(|&device_type| {
             let supported = (0..).map_while(|i| found.hw_config(i)).any(|config| {
                 config.device_type == device_type
@@ -96,9 +87,7 @@ impl Decoder {
                 return None;
             }
             let device = AVHWDeviceContext::create(device_type, None, None, 0).ok()?;
-            let mut ctx = AVCodecContext::new(&found);
-            ctx.set_flags(ctx.flags | ffi::AV_CODEC_FLAG_LOW_DELAY as i32);
-            limit_pixels(&mut ctx, max_pixels);
+            let mut ctx = context(&found, max_pixels);
             ctx.set_hw_device_ctx(device);
             ctx.open(None).ok()?;
             Some(Self {
@@ -116,9 +105,7 @@ impl Decoder {
             .iter()
             .find_map(|name| AVCodec::find_decoder_by_name(name))
             .ok_or(DecodeError::NoDecoder(codec))?;
-        let mut ctx = AVCodecContext::new(&found);
-        ctx.set_flags(ctx.flags | ffi::AV_CODEC_FLAG_LOW_DELAY as i32);
-        limit_pixels(&mut ctx, max_pixels);
+        let mut ctx = context(&found, max_pixels);
         ctx.open(None)?;
         let engine = if found.name().to_bytes() == b"libdav1d" {
             "dav1d (software)"
@@ -182,21 +169,23 @@ impl Decoder {
                 Ok(frame) if !fits(&frame, self.max_pixels) => {
                     return Err(DecodeError::TooLarge(frame.width, frame.height));
                 }
-                Ok(frame) if frame.hw_frames_ctx.is_null() => {
-                    newest = Some(to_nv12(&frame, timestamp)?);
-                }
-                Ok(frame) => {
-                    let mut copied = AVFrame::new();
-                    copied.hwframe_transfer_data(&frame)?;
-                    newest = Some(to_nv12(&copied, timestamp)?);
-                }
+                Ok(frame) => newest = Some(frame),
                 Err(RsmpegError::DecoderDrainError) | Err(RsmpegError::DecoderFlushedError) => {
                     break;
                 }
                 Err(e) => return Err(e.into()),
             }
         }
-        Ok(newest)
+        let Some(mut frame) = newest else {
+            return Ok(None);
+        };
+        if !frame.hw_frames_ctx.is_null() {
+            let mut copied = AVFrame::new();
+            copied.hwframe_transfer_data(&frame)?;
+            frame = copied;
+        }
+        let picture = to_nv12(&frame, timestamp).ok_or(DecodeError::Format(frame.format))?;
+        Ok(Some(picture))
     }
 }
 
@@ -210,9 +199,13 @@ fn device_name(device_type: ffi::AVHWDeviceType) -> &'static str {
     }
 }
 
-fn limit_pixels(ctx: &mut AVCodecContext, max_pixels: usize) {
+/// A low-delay context for `found` that refuses pictures of more than `max_pixels`.
+fn context(found: &AVCodec, max_pixels: usize) -> AVCodecContext {
+    let mut ctx = AVCodecContext::new(found);
+    ctx.set_flags(ctx.flags | ffi::AV_CODEC_FLAG_LOW_DELAY as i32);
     // SAFETY: `ctx` is a live codec context that has not been opened yet.
     unsafe { (*ctx.as_mut_ptr()).max_pixels = i64::try_from(max_pixels).unwrap_or(i64::MAX) };
+    ctx
 }
 
 fn fits(frame: &AVFrame, max_pixels: usize) -> bool {
@@ -220,37 +213,51 @@ fn fits(frame: &AVFrame, max_pixels: usize) -> bool {
     side(frame.width).saturating_mul(side(frame.height)) <= max_pixels
 }
 
-/// Copies a decoded 4:2:0 frame into NV12, cropped to even dimensions.
-fn to_nv12(frame: &AVFrame, timestamp: u32) -> Result<VideoFrame, DecodeError> {
+/// Copies a 4:2:0 frame, planar or NV12, into NV12 cropped to even dimensions. `None` for
+/// frames in any other format.
+pub(super) fn to_nv12(frame: &AVFrame, timestamp: u32) -> Option<VideoFrame> {
     let (width, height) = (frame.width as usize & !1, frame.height as usize & !1);
-    let mut picture = VideoFrame::blank(width, height);
-    picture.timestamp = timestamp;
-    let chroma_rows = height / 2;
-    let chroma_cols = width / 2;
-    let planar = [ffi::AV_PIX_FMT_YUV420P, ffi::AV_PIX_FMT_YUVJ420P];
-    // SAFETY: the decoder sized each plane for `width`×`height` 4:2:0 with the strides in
-    // `linesize`; reads stay within one row of one plane.
+    let planar = [ffi::AV_PIX_FMT_YUV420P, ffi::AV_PIX_FMT_YUVJ420P].contains(&frame.format);
+    if !planar && frame.format != ffi::AV_PIX_FMT_NV12 {
+        return None;
+    }
+    let mut y = Vec::with_capacity(width * height);
+    let mut uv = Vec::with_capacity(width * height / 2);
+    // SAFETY: the decoder or transfer sized each plane for `width`×`height` 4:2:0 with the
+    // strides in `linesize`, and each row read lies within one row of one plane.
     unsafe {
         for row in 0..height {
-            let src = frame.data[0].add(row * frame.linesize[0] as usize);
-            std::ptr::copy_nonoverlapping(src, picture.y.as_mut_ptr().add(row * width), width);
+            y.extend_from_slice(plane_row(frame, 0, row, width));
         }
-        if planar.contains(&frame.format) {
-            for row in 0..chroma_rows {
-                for col in 0..chroma_cols {
-                    let at = row * width + col * 2;
-                    picture.uv[at] = *frame.data[1].add(row * frame.linesize[1] as usize + col);
-                    picture.uv[at + 1] = *frame.data[2].add(row * frame.linesize[2] as usize + col);
-                }
+        for row in 0..height / 2 {
+            if planar {
+                let u = plane_row(frame, 1, row, width / 2);
+                let v = plane_row(frame, 2, row, width / 2);
+                uv.extend(u.iter().zip(v).flat_map(|(u, v)| [*u, *v]));
+            } else {
+                uv.extend_from_slice(plane_row(frame, 1, row, width));
             }
-        } else if frame.format == ffi::AV_PIX_FMT_NV12 {
-            for row in 0..chroma_rows {
-                let src = frame.data[1].add(row * frame.linesize[1] as usize);
-                std::ptr::copy_nonoverlapping(src, picture.uv.as_mut_ptr().add(row * width), width);
-            }
-        } else {
-            return Err(DecodeError::Format(frame.format));
         }
     }
-    Ok(picture)
+    Some(VideoFrame {
+        width,
+        height,
+        y,
+        uv,
+        timestamp,
+    })
+}
+
+/// The first `len` bytes of row `row` of `frame`'s plane `plane`.
+///
+/// # Safety
+/// The plane must hold at least `row + 1` rows of its `linesize`, each at least `len` long.
+unsafe fn plane_row(frame: &AVFrame, plane: usize, row: usize, len: usize) -> &[u8] {
+    // SAFETY: the caller promises the row is within the plane.
+    unsafe {
+        std::slice::from_raw_parts(
+            frame.data[plane].add(row * frame.linesize[plane] as usize),
+            len,
+        )
+    }
 }

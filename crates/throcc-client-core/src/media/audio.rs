@@ -1,18 +1,25 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use ropus::{Application, Bitrate, Channels, Encoder, FrameDuration, InbandFec};
 use sonora::config::{
     AdaptiveDigital, EchoCanceller, GainController2, HighPassFilter, NoiseSuppression,
 };
 use sonora::{AudioProcessing, Config, StreamConfig};
+use throcc_proto::frame::AUDIO_CLOCK_HZ;
 use throcc_proto::ids::UserId;
 
 pub use sonora::config::NoiseSuppressionLevel;
 
-use super::jitter::{FRAME, JitterBuffer, PULL};
+use super::jitter::JitterBuffer;
 use crate::state::MAX_VOLUME;
 
-pub const SAMPLE_RATE: u32 = 48_000;
+/// The rate all audio is processed at, which is also its media clock.
+pub const SAMPLE_RATE: u32 = AUDIO_CLOCK_HZ;
+/// Samples per channel in one Opus frame: 20 ms.
+pub const FRAME: usize = SAMPLE_RATE as usize / 50;
+/// Samples per channel in one pull: 10 ms.
+pub const PULL: usize = SAMPLE_RATE as usize / 100;
 /// Voice activation keeps sending, and the speaking ring stays lit, this long after speech stops.
 const HANGOVER_PULLS: u32 = 30;
 const MAX_PACKET: usize = 1500;
@@ -185,12 +192,7 @@ impl CaptureChain {
         let open = match self.transmit {
             Transmit::PushToTalk => push_to_talk,
             Transmit::VoiceActivity { threshold_dbfs } => {
-                if self.level_dbfs > threshold_dbfs {
-                    self.hangover = HANGOVER_PULLS;
-                } else {
-                    self.hangover = self.hangover.saturating_sub(1);
-                }
-                self.hangover > 0
+                hold(&mut self.hangover, self.level_dbfs > threshold_dbfs)
             }
         };
         self.frame_open |= open && !self.muted;
@@ -246,9 +248,32 @@ fn processing_config(settings: &VoiceSettings) -> Config {
     }
 }
 
+/// Restarts `hangover` while `active`, else counts it down. True while it runs.
+fn hold(hangover: &mut u32, active: bool) -> bool {
+    *hangover = if active {
+        HANGOVER_PULLS
+    } else {
+        hangover.saturating_sub(1)
+    };
+    *hangover > 0
+}
+
+/// Per-user gains, 1 until set, kept for streams that start later.
+#[derive(Default)]
+pub struct Gains(HashMap<UserId, f32>);
+
+impl Gains {
+    pub fn set(&mut self, user: UserId, gain: f32) {
+        self.0.insert(user, gain.clamp(0.0, MAX_VOLUME));
+    }
+
+    pub fn get(&self, user: UserId) -> f32 {
+        self.0.get(&user).copied().unwrap_or(1.0)
+    }
+}
+
 struct Stream {
     jitter: JitterBuffer,
-    volume: f32,
     /// Pulls left before the stream stops counting as speaking.
     speaking_pulls: u32,
 }
@@ -257,7 +282,7 @@ struct Stream {
 /// The result is what the speakers play and the echo canceller's reference.
 pub struct Mixer {
     streams: HashMap<UserId, Stream>,
-    volumes: HashMap<UserId, f32>,
+    volumes: Gains,
     pull: [f32; PULL],
 }
 
@@ -265,7 +290,7 @@ impl Default for Mixer {
     fn default() -> Self {
         Self {
             streams: HashMap::new(),
-            volumes: HashMap::new(),
+            volumes: Gains::default(),
             pull: [0.0; PULL],
         }
     }
@@ -280,11 +305,10 @@ impl Mixer {
         arrival: u64,
     ) -> Result<(), AudioError> {
         let stream = match self.streams.entry(user) {
-            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-            std::collections::hash_map::Entry::Vacant(e) => e.insert(Stream {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => e.insert(Stream {
                 jitter: JitterBuffer::new(Channels::Mono)
                     .map_err(|e| AudioError::Decoder(e.to_string()))?,
-                volume: self.volumes.get(&user).copied().unwrap_or(1.0),
                 speaking_pulls: 0,
             }),
         };
@@ -302,25 +326,18 @@ impl Mixer {
 
     /// Sets `user`'s volume, kept for streams they start later.
     pub fn set_volume(&mut self, user: UserId, volume: f32) {
-        let volume = volume.clamp(0.0, MAX_VOLUME);
-        self.volumes.insert(user, volume);
-        if let Some(stream) = self.streams.get_mut(&user) {
-            stream.volume = volume;
-        }
+        self.volumes.set(user, volume);
     }
 
     /// Mixes the next 10 ms of every stream into `out`.
     pub fn mix(&mut self, out: &mut [f32; PULL]) {
         out.fill(0.0);
-        for stream in self.streams.values_mut() {
+        for (user, stream) in &mut self.streams {
             stream.jitter.pull(&mut self.pull);
-            stream.speaking_pulls = if dbfs(&self.pull) > SPEAKING_DBFS {
-                HANGOVER_PULLS
-            } else {
-                stream.speaking_pulls.saturating_sub(1)
-            };
+            hold(&mut stream.speaking_pulls, dbfs(&self.pull) > SPEAKING_DBFS);
+            let volume = self.volumes.get(*user);
             for (o, s) in out.iter_mut().zip(&self.pull) {
-                *o += s * stream.volume;
+                *o += s * volume;
             }
         }
         for o in out.iter_mut() {
@@ -517,7 +534,6 @@ pub(crate) mod tests {
             }
             frame
         };
-        let reference = decode(Some(DecodeMode::Normal));
         let reference = {
             let mut decoder = Decoder::new(SAMPLE_RATE, Channels::Mono).unwrap();
             let mut frame = vec![0.0f32; FRAME];
@@ -526,7 +542,6 @@ pub(crate) mod tests {
                     .decode_float(packet, &mut frame, DecodeMode::Normal)
                     .unwrap();
             }
-            let _ = reference;
             frame
         };
         let snr = |x: &[f32]| {
@@ -634,14 +649,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_volume_applies_to_streams_started_after_it() {
-        let user = UserId(7);
-        let mut mixer = Mixer::default();
-        mixer.set_volume(user, 0.5);
-        mixer.insert(user, 0, &[], 0).unwrap();
-        assert_eq!(mixer.streams[&user].volume, 0.5);
-        mixer.clear();
-        mixer.insert(user, 0, &[], 0).unwrap();
-        assert_eq!(mixer.streams[&user].volume, 0.5);
+    fn gains_are_one_until_set_and_stay_in_range() {
+        let mut gains = Gains::default();
+        assert_eq!(gains.get(UserId(7)), 1.0);
+        gains.set(UserId(7), 0.5);
+        assert_eq!(gains.get(UserId(7)), 0.5);
+        gains.set(UserId(7), 100.0);
+        assert_eq!(gains.get(UserId(7)), MAX_VOLUME);
     }
 }

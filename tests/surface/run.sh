@@ -31,8 +31,8 @@ export WAYLAND_DISPLAY
 RUST_LOG=gpui_wgpu=info ./target/debug/throcc-client --mock --screen room >"$out/client.log" 2>&1 &
 client_pid=$!
 adapter=
-for _ in $(seq 30); do
-    sleep 2
+for _ in $(seq 240); do
+    sleep 0.25
     adapter=$(grep -o 'Selected GPU adapter: .*' "$out/client.log" | head -1 || true)
     [ -n "$adapter" ] && break
 done
@@ -65,7 +65,7 @@ def fail(message):
 # white (Y 235). Full-range BT.709 shows them as exactly (16,16,16) and (235,235,235).
 band = {}
 for y in range(height):
-    run = start = 0
+    run = 0
     for x in range(width):
         if grey(at(x, y), 16):
             run += 1

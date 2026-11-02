@@ -67,8 +67,7 @@ use windows::core::{HRESULT, IInspectable, Interface, Owned, Ref, implement};
 
 use super::clock::{AudioChunker, ShareZero};
 use super::{Capture, CaptureConfig, CaptureError};
-use crate::media::audio::SAMPLE_RATE;
-use crate::media::jitter::FRAME;
+use crate::media::audio::{FRAME, SAMPLE_RATE};
 use crate::media::share_audio::STEREO_FRAME;
 use crate::media::video::frame::{VideoFrame, share_size};
 use throcc_proto::frame::VIDEO_CLOCK_HZ;

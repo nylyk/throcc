@@ -1146,13 +1146,13 @@ impl Session {
 
     /// Health bookkeeping for `media_id`, counting from the engine's totals so far.
     fn watched(&self, media_id: MediaId, user: UserId, carries: Carries) -> Watched {
-        let (last_received, last_lost) = self.call.engine.datagrams(media_id);
+        let arrived = self.call.engine.arrived(media_id);
         Watched {
             user,
             carries,
-            last_bytes: self.call.engine.received_bytes(media_id),
-            last_received,
-            last_lost,
+            last_bytes: arrived.bytes,
+            last_received: arrived.datagrams,
+            last_lost: arrived.lost,
         }
     }
 
@@ -1492,11 +1492,10 @@ impl Session {
         let mut rows = Vec::new();
         let (mut received_total, mut lost_total) = (0, 0);
         for (media_id, track) in self.tracks.iter_mut() {
-            let bytes = self.call.engine.received_bytes(*media_id);
-            let (received, lost) = self.call.engine.datagrams(*media_id);
-            let new_bytes = advance(&mut track.last_bytes, bytes);
-            let new_received = advance(&mut track.last_received, received);
-            let new_lost = advance(&mut track.last_lost, lost);
+            let arrived = self.call.engine.arrived(*media_id);
+            let new_bytes = advance(&mut track.last_bytes, arrived.bytes);
+            let new_received = advance(&mut track.last_received, arrived.datagrams);
+            let new_lost = advance(&mut track.last_lost, arrived.lost);
             received_total += new_received;
             lost_total += new_lost;
             let name = state

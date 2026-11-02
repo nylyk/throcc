@@ -95,26 +95,37 @@ impl VideoFrame {
     /// The same picture as BGRA, for renderers that take RGB images.
     pub fn to_bgra(&self) -> Vec<u8> {
         let mut out = vec![0u8; self.width * self.height * 4];
+        let width = self.width.max(1);
         let last_pair = self.width.saturating_sub(2) & !1;
-        let chroma = |at: usize| f32::from(self.uv.get(at).copied().unwrap_or(128)) - 128.0;
-        for row in 0..self.height {
-            for col in 0..self.width {
-                let y = f32::from(self.y[row * self.width + col]);
-                let uv_at = (row / 2) * self.width + (col & !1).min(last_pair);
-                let u = chroma(uv_at);
-                let v = chroma(uv_at + 1);
-                let r = y + 1.5748 * v;
-                let g = y - 0.1873 * u - 0.4681 * v;
-                let b = y + 1.8556 * u;
-                let px = (row * self.width + col) * 4;
-                out[px] = b.clamp(0.0, 255.0) as u8;
-                out[px + 1] = g.clamp(0.0, 255.0) as u8;
-                out[px + 2] = r.clamp(0.0, 255.0) as u8;
-                out[px + 3] = 255;
+        let rows = out
+            .chunks_exact_mut(width * 4)
+            .zip(self.y.chunks_exact(width));
+        for (row, (out_row, y_row)) in rows.enumerate() {
+            let uv_row = self.uv.get((row / 2) * width..).unwrap_or_default();
+            let chroma = |at: usize| i32::from(uv_row.get(at).copied().unwrap_or(128)) - 128;
+            for (pair, (pixels, ys)) in out_row.chunks_mut(8).zip(y_row.chunks(2)).enumerate() {
+                let at = (pair * 2).min(last_pair);
+                let (u, v) = (chroma(at), chroma(at + 1));
+                let (r, g, b) = (R_V * v, -G_U * u - G_V * v, B_U * u);
+                for (pixel, y) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(ys) {
+                    let y = i32::from(*y) << 16;
+                    let channel = |c: i32| ((y + c) >> 16).clamp(0, 255) as u8;
+                    *pixel = [channel(b), channel(g), channel(r), 255];
+                }
             }
         }
         out
     }
+}
+
+/// BT.709 full-range YUV to RGB coefficients, in 16.16 fixed point.
+const R_V: i32 = fixed(1.5748);
+const G_U: i32 = fixed(0.1873);
+const G_V: i32 = fixed(0.4681);
+const B_U: i32 = fixed(1.8556);
+
+const fn fixed(coefficient: f64) -> i32 {
+    (coefficient * 65536.0 + 0.5) as i32
 }
 
 /// Averages `factor`×`factor` blocks of samples of `channels` interleaved bytes from rows

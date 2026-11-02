@@ -7,8 +7,8 @@ use bytes::Bytes;
 use throcc_crypto::hpke::EncKeyPair;
 use throcc_crypto::media::TrackKey;
 use throcc_proto::Fingerprint;
-use throcc_proto::frame::{Flags, Header};
-use throcc_proto::ids::{Epoch, MediaId, UserId};
+use throcc_proto::frame::{Flags, HEADER_BYTES, Header, TAG_BYTES};
+use throcc_proto::ids::{Epoch, MediaId, RoomId, UserId};
 use throcc_proto::messages::{Event, Placed, Recovery, Request};
 use tokio::sync::mpsc;
 use tracing::warn;
@@ -37,10 +37,19 @@ pub enum Kind {
 /// A decrypted access unit from a remote track.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Received {
-    pub seq: u32,
     pub timestamp: u32,
     pub flags: Flags,
     pub data: Vec<u8>,
+}
+
+impl From<Unit> for Received {
+    fn from(unit: Unit) -> Self {
+        Self {
+            timestamp: unit.timestamp,
+            flags: unit.flags,
+            data: unit.data,
+        }
+    }
 }
 
 /// An access unit to send on one of our tracks.
@@ -49,19 +58,17 @@ pub struct Outgoing {
     pub data: Bytes,
     pub timestamp: u32,
     pub keyframe: bool,
-    pub discardable: bool,
     pub enqueued: Instant,
 }
 
 impl Outgoing {
-    /// A unit that must not be discarded, enqueued now.
+    /// A unit enqueued now.
     pub fn new(media_id: MediaId, data: Bytes, timestamp: u32, keyframe: bool) -> Self {
         Self {
             media_id,
             data,
             timestamp,
             keyframe,
-            discardable: false,
             enqueued: Instant::now(),
         }
     }
@@ -82,6 +89,15 @@ pub struct Stats {
     pub sent_datagrams: AtomicU64,
     /// Bytes sealed for sending on each of our tracks, counting each datagram once.
     pub sent_bytes: Mutex<HashMap<MediaId, u64>>,
+}
+
+/// Totals for one remote track, counting each datagram once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Arrived {
+    pub datagrams: u64,
+    /// Datagrams that never arrived, from the track's replay window.
+    pub lost: u64,
+    pub bytes: u64,
 }
 
 pub struct KeyState {
@@ -176,39 +192,30 @@ impl MediaEngine {
 
     /// Applies our placement after `SetRoom`.
     pub fn placed(&self, placed: &Placed) -> Vec<KeyNotice> {
-        let mut state = self.keys();
-        let KeyState { keys, contacts } = &mut *state;
-        let room_changed = keys.room() != placed.room;
-        let (requests, notices) = keys.placed(
-            placed.room,
-            placed.epoch,
-            placed.tracks.clone(),
-            &placed.peers,
-            contacts,
-            Instant::now(),
-        );
-        drop(state);
+        let (room_changed, (requests, notices)) = self.with_keys(|keys, contacts, now| {
+            let room_changed = keys.room() != placed.room;
+            let applied = keys.placed(
+                placed.room,
+                placed.epoch,
+                placed.tracks.clone(),
+                &placed.peers,
+                contacts,
+                now,
+            );
+            (room_changed, applied)
+        });
         if room_changed {
             lock(&self.sinks).clear();
         }
-        for request in requests {
-            self.send_request(Some(request));
-        }
+        self.send_requests(requests);
         notices
     }
 
     /// Applies a control event that concerns media. Returns key warnings for the user.
     pub fn event(&self, event: &Event) -> Vec<KeyNotice> {
         match event {
-            Event::RoomState { room, epoch, peers } => {
-                let mut state = self.keys();
-                let KeyState { keys, contacts } = &mut *state;
-                let (request, notices) =
-                    keys.room_state(*room, *epoch, peers, contacts, Instant::now());
-                drop(state);
-                self.send_request(request);
-                notices
-            }
+            Event::RoomState { room, epoch, peers } => self
+                .rekey(|keys, contacts, now| keys.room_state(*room, *epoch, peers, contacts, now)),
             Event::SenderKey {
                 from,
                 epoch,
@@ -223,22 +230,43 @@ impl MediaEngine {
                 }
                 Vec::new()
             }
+            Event::PresenceChanged(p) => self.set_presence(p.user, p.room),
+            Event::PresenceEnded(user) => self.set_presence(*user, None),
             _ => Vec::new(),
         }
     }
 
-    /// Applies the current room state again, after presence changed.
-    pub fn refresh_keys(&self) -> Vec<KeyNotice> {
-        let mut state = self.keys();
-        let KeyState { keys, contacts } = &mut *state;
-        let (request, notices) = keys.reapply_room_state(contacts, Instant::now());
-        drop(state);
-        self.send_request(request);
+    /// Notes where `user` is, and applies the room state again when that changes who is
+    /// in our room.
+    pub fn set_presence(&self, user: UserId, room: Option<RoomId>) -> Vec<KeyNotice> {
+        self.rekey(|keys, contacts, now| {
+            if keys.set_presence(user, room) {
+                keys.reapply_room_state(contacts, now)
+            } else {
+                (None, Vec::new())
+            }
+        })
+    }
+
+    /// Applies `f` to the keys, then sends the request it makes.
+    fn rekey(
+        &self,
+        f: impl FnOnce(&mut KeyManager, &mut Contacts, Instant) -> (Option<Request>, Vec<KeyNotice>),
+    ) -> Vec<KeyNotice> {
+        let (request, notices) = self.with_keys(f);
+        self.send_requests(request);
         notices
     }
 
-    fn send_request(&self, request: Option<Request>) {
-        if let Some(request) = request {
+    /// Runs `f` on the key manager and contacts, holding the key lock only for it.
+    fn with_keys<R>(&self, f: impl FnOnce(&mut KeyManager, &mut Contacts, Instant) -> R) -> R {
+        let mut state = self.keys();
+        let KeyState { keys, contacts } = &mut *state;
+        f(keys, contacts, Instant::now())
+    }
+
+    fn send_requests(&self, requests: impl IntoIterator<Item = Request>) {
+        for request in requests {
             self.requests.send(request).ok();
         }
     }
@@ -263,6 +291,7 @@ impl MediaEngine {
             pending: VecDeque::new(),
             next_tick: None,
             tried_generation: 0,
+            scratch: Vec::new(),
             last_unit_overflowed: false,
             reassembler: Reassembler::default(),
             reorder: Reorder::default(),
@@ -289,23 +318,15 @@ impl MediaEngine {
         }
     }
 
-    /// Datagrams that never arrived on `media_id`, from its replay window.
-    pub fn lost(&self, media_id: MediaId) -> u64 {
+    /// What has arrived on `media_id` so far.
+    pub fn arrived(&self, media_id: MediaId) -> Arrived {
         lock(&self.sinks)
             .get(&media_id)
-            .map_or(0, |s| s.window.lost())
-    }
-
-    /// Datagrams received and lost on `media_id` so far.
-    pub fn datagrams(&self, media_id: MediaId) -> (u64, u64) {
-        lock(&self.sinks)
-            .get(&media_id)
-            .map_or((0, 0), |s| (s.window.received(), s.window.lost()))
-    }
-
-    /// Bytes received on `media_id` so far, counting each datagram once.
-    pub fn received_bytes(&self, media_id: MediaId) -> u64 {
-        lock(&self.sinks).get(&media_id).map_or(0, |s| s.bytes)
+            .map_or(Arrived::default(), |s| Arrived {
+                datagrams: s.window.received(),
+                lost: s.window.lost(),
+                bytes: s.bytes,
+            })
     }
 
     /// Bytes sealed for sending on our track `media_id` so far.
@@ -376,6 +397,8 @@ struct Track {
     next_tick: Option<Instant>,
     /// The key generation the pending datagrams were last tried against.
     tried_generation: u64,
+    /// Where datagrams are decrypted; the reassembler copies out what it keeps.
+    scratch: Vec<u8>,
     reassembler: Reassembler,
     reorder: Reorder,
     last_unit_overflowed: bool,
@@ -447,29 +470,23 @@ impl Track {
             }
             return;
         };
-        let mut buf = datagram.to_vec();
-        let Ok((header, plaintext)) = key.open(&mut buf) else {
+        self.scratch.clear();
+        self.scratch.extend_from_slice(&datagram);
+        let Ok((header, plaintext)) = key.open(&mut self.scratch) else {
             self.stats.decrypt_failures.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        let Some(unit) = self.reassembler.push(header.seq, header.flags, plaintext) else {
             return;
         };
         match self.kind {
             Kind::Audio => {
-                let Some((ts, data)) = plaintext.split_first_chunk::<4>() else {
-                    return;
-                };
-                let received = Received {
-                    seq: header.seq,
-                    timestamp: u32::from_be_bytes(*ts),
-                    flags: header.flags,
-                    data: data.to_vec(),
-                };
-                self.deliver(received);
+                self.reassembler.forget_before(unit.first_seq);
+                self.deliver(unit.into());
             }
             Kind::Video => {
-                if let Some(unit) = self.reassembler.push(header.seq, header.flags, plaintext) {
-                    let outputs = self.reorder.push(unit, now);
-                    self.emit(outputs);
-                }
+                let outputs = self.reorder.push(unit, now);
+                self.emit(outputs);
             }
         }
     }
@@ -477,34 +494,27 @@ impl Track {
     fn emit(&mut self, outputs: Vec<Output>) {
         for output in outputs {
             match output {
-                Output::Unit(Unit {
-                    first_seq,
-                    timestamp,
-                    flags,
-                    data,
-                    ..
-                }) => {
-                    self.reassembler.forget_before(first_seq);
-                    self.deliver(Received {
-                        seq: first_seq,
-                        timestamp,
-                        flags,
-                        data,
-                    });
+                Output::Unit(unit) => {
+                    self.reassembler.forget_before(unit.first_seq);
+                    self.deliver(unit.into());
                 }
                 Output::Abandoned { .. } => {
                     self.stats.abandoned_units.fetch_add(1, Ordering::Relaxed);
-                    let request = Request::RequestKeyframe {
-                        media_id: self.media_id,
-                        kind: Recovery::Refresh,
-                    };
-                    self.requests.send(request).ok();
+                    self.ask_refresh();
+                }
+                Output::Late => {
+                    self.stats.late_units.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
-        self.stats
-            .late_units
-            .store(self.reorder.late, Ordering::Relaxed);
+    }
+
+    fn ask_refresh(&self) {
+        let request = Request::RequestKeyframe {
+            media_id: self.media_id,
+            kind: Recovery::Refresh,
+        };
+        self.requests.send(request).ok();
     }
 
     /// Passes a unit to the consumer. The first video unit dropped in a run of full-channel
@@ -516,11 +526,7 @@ impl Track {
                 self.stats.track_overflow.fetch_add(1, Ordering::Relaxed);
                 let full = matches!(e, mpsc::error::TrySendError::Full(_));
                 if full && self.kind == Kind::Video && !self.last_unit_overflowed {
-                    let request = Request::RequestKeyframe {
-                        media_id: self.media_id,
-                        kind: Recovery::Refresh,
-                    };
-                    self.requests.send(request).ok();
+                    self.ask_refresh();
                 }
                 self.last_unit_overflowed = full;
             }
@@ -538,10 +544,10 @@ pub struct Sealer {
 impl Sealer {
     /// Seals one access unit into datagrams. Stops early if the track's `seq` is exhausted.
     pub fn seal(&mut self, unit: &Outgoing, epoch: Epoch, key: &TrackKey) -> Vec<Bytes> {
-        let mut datagrams = Vec::new();
-        let mut buf = Vec::new();
-        for fragment in fragment(&unit.data, unit.timestamp, unit.keyframe, unit.discardable) {
-            let seq = self.seqs.entry(unit.media_id).or_insert(0);
+        let fragments = fragment(&unit.data, unit.timestamp, unit.keyframe);
+        let mut datagrams = Vec::with_capacity(fragments.len());
+        let seq = self.seqs.entry(unit.media_id).or_insert(0);
+        for fragment in fragments {
             let Some(next) = seq.checked_add(1) else {
                 warn!(
                     media_id = unit.media_id.0,
@@ -556,11 +562,11 @@ impl Sealer {
                 flags: fragment.flags,
             };
             *seq = next;
-            if key
-                .seal(&header, &fragment.plaintext_parts(), &mut buf)
-                .is_ok()
-            {
-                datagrams.push(Bytes::copy_from_slice(&buf));
+            let parts = fragment.plaintext_parts();
+            let len = parts.iter().map(|p| p.len()).sum::<usize>();
+            let mut sealed = Vec::with_capacity(HEADER_BYTES + len + TAG_BYTES);
+            if key.seal(&header, &parts, &mut sealed).is_ok() {
+                datagrams.push(Bytes::from(sealed));
             }
         }
         datagrams
@@ -581,23 +587,20 @@ async fn send_loop(
 ) {
     let mut sealer = Sealer::default();
     loop {
-        let (kind, unit) = tokio::select! {
+        let unit = tokio::select! {
             biased;
-            Some(unit) = audio.recv() => (Kind::Audio, unit),
-            Some(unit) = video.recv() => (Kind::Video, unit),
+            Some(voice) = audio.recv() => {
+                if !send_unit(&connection, &keys, &mut sealer, &voice, &stats).await {
+                    return;
+                }
+                continue;
+            }
+            Some(unit) = video.recv() => unit,
             else => return,
         };
-        if kind == Kind::Audio {
-            if !send_unit(&connection, &keys, &mut sealer, &unit, &stats).await {
-                return;
-            }
-            continue;
-        }
         if unit.enqueued.elapsed() > SEND_BUDGET {
             stats.send_dropped_units.fetch_add(1, Ordering::Relaxed);
-            if !unit.discardable {
-                recovery.try_send(unit.media_id).ok();
-            }
+            recovery.try_send(unit.media_id).ok();
             continue;
         }
         let Some(datagrams) = seal(&keys, &mut sealer, &unit, &stats) else {
@@ -704,7 +707,6 @@ mod tests {
                     data: Bytes::from(vec![0u8; len]),
                     timestamp: 0,
                     keyframe: false,
-                    discardable: false,
                     enqueued: Instant::now(),
                 };
                 for datagram in sealer.seal(&unit, epoch, key) {

@@ -3,10 +3,7 @@ use std::collections::BTreeMap;
 use ropus::{Channels, DecodeMode, Decoder};
 use throcc_proto::frame::timestamp_before;
 
-/// Samples per channel in one Opus frame: 20 ms at 48 kHz.
-pub const FRAME: usize = 960;
-/// Samples per channel in one pull: 10 ms at 48 kHz.
-pub const PULL: usize = 480;
+use super::audio::{FRAME, PULL, SAMPLE_RATE};
 const MIN_TARGET: u32 = FRAME as u32;
 const MAX_TARGET: u32 = 10 * FRAME as u32;
 /// Concealed frames played before a buffer with no packet within its target rebuffers.
@@ -32,15 +29,6 @@ pub struct JitterStats {
     pub stretched: u64,
     /// Times playout jumped to a packet off its 20 ms grid.
     pub realigned: u64,
-}
-
-/// What filled the last pull.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Played {
-    Silence,
-    Normal,
-    Fec,
-    Concealed,
 }
 
 /// A jitter buffer for one remote Opus track. It decodes 20 ms packets in timestamp
@@ -69,12 +57,9 @@ pub struct JitterBuffer {
 
 impl JitterBuffer {
     pub fn new(channels: Channels) -> Result<Self, ropus::DecoderInitError> {
-        let count = match channels {
-            Channels::Mono => 1,
-            Channels::Stereo => 2,
-        };
+        let count = channels.count();
         Ok(Self {
-            decoder: Decoder::new(48_000, channels)?,
+            decoder: Decoder::new(SAMPLE_RATE, channels)?,
             packets: BTreeMap::new(),
             next_ts: None,
             playing: false,
@@ -91,7 +76,8 @@ impl JitterBuffer {
         })
     }
 
-    /// Adds a packet with its media timestamp, arriving at `arrival` on the local 48 kHz clock.
+    /// Adds a packet with its media timestamp, arriving at `arrival` on the local clock
+    /// counting samples played.
     pub fn insert(&mut self, timestamp: u32, payload: &[u8], arrival: u64) {
         let transit = arrival as i64 - i64::from(timestamp);
         if let Some(last) = self.last_transit {
@@ -133,7 +119,7 @@ impl JitterBuffer {
     /// Buffered audio ahead of playout, in milliseconds.
     #[cfg(test)]
     fn buffer_ms(&self) -> f32 {
-        self.buffered() as f32 / 48.0
+        self.buffered() as f32 * 1000.0 / SAMPLE_RATE as f32
     }
 
     fn buffered(&self) -> u32 {
@@ -158,7 +144,7 @@ impl JitterBuffer {
     }
 
     /// Fills 10 ms of output, channels interleaved: `out` holds `PULL` samples per channel.
-    pub fn pull(&mut self, out: &mut [f32]) -> Played {
+    pub fn pull(&mut self, out: &mut [f32]) {
         let channels = self.channels;
         if !self.playing {
             if self.buffered() >= self.target() && self.next_ts.is_some() {
@@ -166,24 +152,14 @@ impl JitterBuffer {
                 self.frame_pos = FRAME;
             } else {
                 out.fill(0.0);
-                return Played::Silence;
+                return;
             }
         }
         let mut filled = 0;
-        let mut played = Played::Normal;
         while filled < PULL {
-            if self.frame_pos == FRAME {
-                match self.decode_next() {
-                    Some(kind) => {
-                        if kind != Played::Normal {
-                            played = kind;
-                        }
-                    }
-                    None => {
-                        out[filled * channels..].fill(0.0);
-                        return Played::Silence;
-                    }
-                }
+            if self.frame_pos == FRAME && !self.decode_next() {
+                out[filled * channels..].fill(0.0);
+                return;
             }
             let take = (PULL - filled).min(FRAME - self.frame_pos);
             out[filled * channels..(filled + take) * channels].copy_from_slice(
@@ -193,11 +169,13 @@ impl JitterBuffer {
             filled += take;
         }
         self.accelerate();
-        played
     }
 
-    fn decode_next(&mut self) -> Option<Played> {
-        let mut next = self.next_ts?;
+    /// Decodes, recovers or conceals the next frame. False when playout stopped to rebuffer.
+    fn decode_next(&mut self) -> bool {
+        let Some(mut next) = self.next_ts else {
+            return false;
+        };
         if !self.packets.contains_key(&next)
             && let Some(&first) = self.packets.keys().next()
             && first.wrapping_sub(next) % FRAME as u32 != 0
@@ -206,40 +184,42 @@ impl JitterBuffer {
             self.stats.realigned += 1;
         }
         let following = next.wrapping_add(FRAME as u32);
-        let kind = if let Some(packet) = self.packets.remove(&next) {
-            self.decode(&packet, DecodeMode::Normal);
+        if let Some(packet) = self.packets.remove(&next) {
+            decode(
+                &mut self.decoder,
+                &mut self.frame,
+                &packet,
+                DecodeMode::Normal,
+            );
             self.concealed_in_a_row = 0;
             self.stats.normal += 1;
-            Played::Normal
-        } else if let Some(packet) = self.packets.get(&following).cloned() {
-            self.decode(&packet, DecodeMode::Fec);
+        } else if let Some(packet) = self.packets.get(&following) {
+            decode(&mut self.decoder, &mut self.frame, packet, DecodeMode::Fec);
             self.concealed_in_a_row = 0;
             self.stats.fec += 1;
-            Played::Fec
         } else if self.packets.is_empty() && self.concealed_in_a_row < MAX_CONCEALED {
-            self.decode(&[], DecodeMode::Normal);
+            decode(&mut self.decoder, &mut self.frame, &[], DecodeMode::Normal);
             self.concealed_in_a_row += 1;
             self.stats.stretched += 1;
             self.frame_ts = next.wrapping_sub(FRAME as u32);
             self.frame_pos = 0;
-            return Some(Played::Concealed);
+            return true;
         } else if self.concealed_in_a_row < MAX_CONCEALED || self.first_packet_within_target(next) {
-            self.decode(&[], DecodeMode::Normal);
+            decode(&mut self.decoder, &mut self.frame, &[], DecodeMode::Normal);
             self.concealed_in_a_row += 1;
             self.stats.concealed += 1;
-            Played::Concealed
         } else {
             self.playing = false;
             self.next_ts = self.packets.keys().next().copied();
             self.stats.rebuffered += 1;
-            return None;
-        };
+            return false;
+        }
         self.frame_ts = next;
         self.frame_pos = 0;
         self.next_ts = Some(following);
         self.packets
             .retain(|ts, _| !timestamp_before(*ts, following));
-        Some(kind)
+        true
     }
 
     fn first_packet_within_target(&self, next: u32) -> bool {
@@ -247,16 +227,6 @@ impl JitterBuffer {
             .keys()
             .next()
             .is_some_and(|first| first.wrapping_sub(next) <= self.target())
-    }
-
-    fn decode(&mut self, packet: &[u8], mode: DecodeMode) {
-        if self
-            .decoder
-            .decode_float(packet, &mut self.frame, mode)
-            .is_err()
-        {
-            self.frame.fill(0.0);
-        }
     }
 
     /// Skips one frame when the buffer stayed over [`SPARE`] for a whole 200 ms window.
@@ -280,6 +250,13 @@ impl JitterBuffer {
     }
 }
 
+/// Decodes one packet into `frame`, or silence if it fails.
+fn decode(decoder: &mut Decoder, frame: &mut [f32], packet: &[u8], mode: DecodeMode) {
+    if decoder.decode_float(packet, frame, mode).is_err() {
+        frame.fill(0.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ropus::{Application, Bitrate, Encoder, FrameDuration, InbandFec};
@@ -287,7 +264,7 @@ mod tests {
     use super::*;
 
     fn encoder() -> Encoder {
-        Encoder::builder(48_000, Channels::Mono, Application::Voip)
+        Encoder::builder(SAMPLE_RATE, Channels::Mono, Application::Voip)
             .frame_duration(FrameDuration::Ms20)
             .bitrate(Bitrate::Bits(32_000))
             .inband_fec(InbandFec::Enabled)
@@ -296,10 +273,14 @@ mod tests {
             .unwrap()
     }
 
+    fn ms(samples: u64) -> f64 {
+        samples as f64 * 1000.0 / f64::from(SAMPLE_RATE)
+    }
+
     fn tone(frame: usize) -> Vec<f32> {
         (0..FRAME)
             .map(|i| {
-                let t = (frame * FRAME + i) as f32 / 48_000.0;
+                let t = (frame * FRAME + i) as f32 / SAMPLE_RATE as f32;
                 0.3 * (2.0 * std::f32::consts::PI * 220.0 * t).sin()
             })
             .collect()
@@ -317,9 +298,11 @@ mod tests {
             .collect()
     }
 
-    fn drain(jb: &mut JitterBuffer, pulls: usize) -> Vec<Played> {
+    fn drain(jb: &mut JitterBuffer, pulls: usize) {
         let mut out = [0.0; PULL];
-        (0..pulls).map(|_| jb.pull(&mut out)).collect()
+        for _ in 0..pulls {
+            jb.pull(&mut out);
+        }
     }
 
     #[test]
@@ -328,9 +311,19 @@ mod tests {
         for (i, p) in packets(10).iter().enumerate() {
             jb.insert(1000 + (i * FRAME) as u32, p, (i * FRAME) as u64);
         }
-        let played = drain(&mut jb, 20);
-        assert!(played.iter().all(|p| *p == Played::Normal), "{played:?}");
-        assert_eq!(jb.stats.normal, 10);
+        drain(&mut jb, 20);
+        let JitterStats {
+            normal,
+            fec,
+            concealed,
+            stretched,
+            rebuffered,
+            ..
+        } = jb.stats;
+        assert_eq!(
+            (normal, fec, concealed, stretched, rebuffered),
+            (10, 0, 0, 0, 0)
+        );
     }
 
     #[test]
@@ -417,7 +410,7 @@ mod tests {
 
     #[test]
     fn stereo_keeps_its_channels_apart() {
-        let mut enc = Encoder::builder(48_000, Channels::Stereo, Application::Audio)
+        let mut enc = Encoder::builder(SAMPLE_RATE, Channels::Stereo, Application::Audio)
             .frame_duration(FrameDuration::Ms20)
             .bitrate(Bitrate::Bits(128_000))
             .build()
@@ -450,9 +443,9 @@ mod tests {
             let shift = if i < 4 { 0 } else { 333 };
             jb.insert((i * FRAME + shift) as u32, p, (i * FRAME) as u64);
         }
-        let played = drain(&mut jb, 24);
+        drain(&mut jb, 24);
         assert_eq!(jb.stats.realigned, 1);
-        assert_eq!(jb.stats.normal, 12, "{played:?}");
+        assert_eq!(jb.stats.normal, 12, "{:?}", jb.stats);
         assert_eq!(jb.stats.concealed, 0);
     }
 
@@ -532,12 +525,15 @@ mod tests {
             }
             jb.pull(&mut out);
             clock += PULL as u64;
-            if clock == 2 * 48_000 {
+            if clock == 2 * u64::from(SAMPLE_RATE) {
                 warm = jb.stats;
             }
-            if let Some(timestamp) = jb.playout_timestamp().filter(|_| clock > 20 * 48_000) {
+            if let Some(timestamp) = jb
+                .playout_timestamp()
+                .filter(|_| clock > 20 * u64::from(SAMPLE_RATE))
+            {
                 let behind = clock - phase - u64::from(timestamp);
-                delay = delay.max(behind as f64 / 48.0);
+                delay = delay.max(ms(behind));
             }
         }
         let stats = jb.stats;
@@ -558,7 +554,7 @@ mod tests {
                 let (stats, delay) = bursts(quantum, phase);
                 let gaps = stats.concealed + stats.stretched + stats.late + stats.accelerated;
                 assert_eq!(gaps, 0, "quantum {quantum}, phase {phase}: {stats:?}");
-                let burst_ms = quantum as f64 / 48.0;
+                let burst_ms = ms(quantum);
                 assert!(
                     delay < burst_ms + 40.0,
                     "quantum {quantum}, phase {phase}: {delay:.0} ms behind"

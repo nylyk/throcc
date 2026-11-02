@@ -54,11 +54,8 @@ impl Call {
         );
         let engine = Arc::new(engine);
 
-        {
-            let mut keys = engine.keys();
-            for p in &welcome.presence {
-                keys.keys.set_presence(p.user, p.room);
-            }
+        for p in &welcome.presence {
+            engine.set_presence(p.user, p.room);
         }
         let placed_notices = match welcome.placed.room {
             Some(_) => engine.placed(&welcome.placed),
@@ -72,8 +69,7 @@ impl Call {
         let pump_engine = engine.clone();
         tokio::spawn(async move {
             while let Some(event) = server_events.recv().await {
-                let mut notices = pump_engine.event(&event);
-                notices.extend(follow_presence(&pump_engine, &event));
+                let notices = pump_engine.event(&event);
                 events_tx.send(CallEvent::Server(event)).await.ok();
                 for notice in notices {
                     events_tx.send(CallEvent::Key(notice)).await.ok();
@@ -135,20 +131,5 @@ impl Call {
             }
             other => bail!("{}", control::refusal(other)),
         }
-    }
-}
-
-/// Tells the key manager where `event` shows a user, and applies the room state again
-/// when that changes who is shown in our room.
-fn follow_presence(engine: &MediaEngine, event: &Event) -> Vec<KeyNotice> {
-    let (user, room) = match event {
-        Event::PresenceChanged(p) => (p.user, p.room),
-        Event::PresenceEnded(user) => (*user, None),
-        _ => return Vec::new(),
-    };
-    if engine.keys().keys.set_presence(user, room) {
-        engine.refresh_keys()
-    } else {
-        Vec::new()
     }
 }

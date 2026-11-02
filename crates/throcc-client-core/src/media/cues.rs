@@ -194,6 +194,7 @@ impl CuePlayer {
 
 #[cfg(test)]
 mod tests {
+    use super::super::audio::PULL;
     use super::*;
 
     #[test]
@@ -224,16 +225,16 @@ mod tests {
     fn a_cue_plays_to_its_end_and_a_repeat_does_not_restart_it() {
         let mut player = CuePlayer::default();
         player.play(Cue::Join, 1.0);
-        let mut pull = [0.0f32; 480];
+        let mut pull = [0.0f32; PULL];
         player.mix(&mut pull);
         assert!(pull.iter().any(|s| *s != 0.0));
         player.play(Cue::Join, 1.0);
-        assert_eq!(player.playing.as_ref().map(|p| p.position), Some(480));
+        assert_eq!(player.playing.as_ref().map(|p| p.position), Some(PULL));
         for _ in 0..30 {
             player.mix(&mut pull);
         }
         assert!(player.playing.is_none());
-        let mut silent = [0.0f32; 480];
+        let mut silent = [0.0f32; PULL];
         player.mix(&mut silent);
         assert!(silent.iter().all(|s| *s == 0.0));
     }

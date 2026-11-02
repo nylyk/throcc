@@ -5,26 +5,38 @@ use std::time::Duration;
 use throcc_client_core::account::{self, SignInError};
 use throcc_client_core::connection;
 use throcc_client_core::control::LoginError;
-use throcc_client_core::keystore::Keystore;
 use throcc_crypto::identity::IdentityKey;
-use throcc_crypto::pake::{ClientPake, PakeError, Transcript};
+use throcc_crypto::pake::{ClientPake, PakeError};
 use throcc_proto::framing;
 use throcc_proto::ids::Role;
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
-    AuthError, AuthResult, ErrorCode, Event, Hello, PROTOCOL, PakeFinish, PakeStep, Request,
-    Response, ServerHello,
+    AuthError, ErrorCode, Event, Hello, PROTOCOL, Request, Response, ServerHello,
 };
 use throcc_server::{Congestion, HANDSHAKES, tls};
 
 use common::*;
 
-async fn try_enroll(server_addr: &str, code: &InviteCode) -> Result<(), SignInError> {
-    let dir = tempfile::tempdir().unwrap();
-    let mut keystore = Keystore::open_in(dir.path()).unwrap();
-    account::enroll(&mut keystore, server_addr, code)
+async fn try_enroll(addr: &str, code: &InviteCode) -> Result<(), SignInError> {
+    try_enroll_at(addr, code).await.map(drop)
+}
+
+/// `code` with a wrong secret.
+fn wrong_secret(code: &InviteCode) -> InviteCode {
+    InviteCode {
+        id: code.id.clone(),
+        secret: "00000".into(),
+    }
+}
+
+/// Waits for the server to tell `minter` that one of its invites burned.
+async fn burned(minter: &mut TestClient) -> String {
+    minter
+        .event(|e| match e {
+            Event::InviteBurned { code_id } => Some(code_id.clone()),
+            _ => None,
+        })
         .await
-        .map(|_| ())
 }
 
 fn failures(server: &TestServer, code: &InviteCode) -> Option<u32> {
@@ -98,10 +110,7 @@ async fn third_failure_burns_the_invite_and_tells_the_minter() {
     let server = start_server();
     let mut alice = admin(&server).await;
     let code = invite(&alice).await;
-    let wrong = InviteCode {
-        id: code.id.clone(),
-        secret: "00000".into(),
-    };
+    let wrong = wrong_secret(&code);
 
     for attempt in 1..=3 {
         let err = try_enroll(&server.addr, &wrong).await.unwrap_err();
@@ -110,13 +119,7 @@ async fn third_failure_burns_the_invite_and_tells_the_minter() {
             "attempt {attempt}: {err}"
         );
     }
-    let burned = alice
-        .event(|e| match e {
-            Event::InviteBurned { code_id } => Some(code_id.clone()),
-            _ => None,
-        })
-        .await;
-    assert_eq!(burned, code.id);
+    assert_eq!(burned(&mut alice).await, code.id);
     assert_eq!(failures(&server, &code), None);
     assert!(try_enroll(&server.addr, &code).await.is_err());
 }
@@ -304,53 +307,15 @@ async fn a_failed_run_does_not_burn_an_invite_while_another_run_is_in_flight() {
     let alice = admin(&server).await;
     let code = invite(&alice).await;
 
-    let connected = connection::connect(&server.addr, None).await.unwrap();
-    let (mut send, mut recv) = connected.connection.accept_bi().await.unwrap();
-    let hello: ServerHello = framing::decode(&read_frame(&mut recv).await).unwrap();
-    let identity = IdentityKey::generate();
-    let pubkey = identity.public();
-    let client_nonce = [7; 32];
-    let (pake, pake_a) = ClientPake::start(&code.id, &code.secret);
-    let enroll = Hello::Enroll {
-        code_id: code.id.clone(),
-        pubkey,
-        client_nonce,
-        pake_a: pake_a.clone(),
-    };
-    send.write_all(&framing::encode(&enroll).unwrap())
-        .await
-        .unwrap();
-    let step: PakeStep = framing::decode(&read_frame(&mut recv).await).unwrap();
-    let reply = step.unwrap();
+    let pending = raw_enroll_start(&server.addr, &code, connection::transport_config(0)).await;
 
-    let wrong = InviteCode {
-        id: code.id.clone(),
-        secret: "00000".into(),
-    };
     for _ in 0..2 {
-        try_enroll(&server.addr, &wrong).await.unwrap_err();
+        try_enroll(&server.addr, &wrong_secret(&code))
+            .await
+            .unwrap_err();
     }
     assert_eq!(failures(&server, &code), Some(3));
-
-    let transcript = Transcript {
-        server_nonce: &hello.nonce,
-        client_nonce: &client_nonce,
-        code_id: &code.id,
-        pubkey: &pubkey,
-        spki_hash: &connected.fingerprint.0,
-        exporter: &connected.exporter,
-        pake_a: &pake_a,
-        pake_b: &reply.pake_b,
-    };
-    let finish = PakeFinish {
-        confirm_a: pake.finish(&transcript, &reply.confirm_b).unwrap(),
-        signature: identity.sign(&transcript.to_bytes()),
-    };
-    send.write_all(&framing::encode(&finish).unwrap())
-        .await
-        .unwrap();
-    let result: AuthResult = framing::decode(&read_frame(&mut recv).await).unwrap();
-    assert!(matches!(result, AuthResult::Ok(_)), "{result:?}");
+    pending.finish().await;
 }
 
 #[tokio::test]
@@ -403,12 +368,10 @@ async fn a_run_whose_client_stops_reading_still_burns_the_invite() {
     })
     .await;
 
-    let wrong = InviteCode {
-        id: code.id.clone(),
-        secret: "00000".into(),
-    };
     for _ in 0..2 {
-        try_enroll(&server.addr, &wrong).await.unwrap_err();
+        try_enroll(&server.addr, &wrong_secret(&code))
+            .await
+            .unwrap_err();
     }
     assert_eq!(failures(&server, &code), Some(3));
 
@@ -416,11 +379,5 @@ async fn a_run_whose_client_stops_reading_still_burns_the_invite() {
         failures(&server, &code).is_none()
     })
     .await;
-    let burned = alice
-        .event(|e| match e {
-            Event::InviteBurned { code_id } => Some(code_id.clone()),
-            _ => None,
-        })
-        .await;
-    assert_eq!(burned, code.id);
+    assert_eq!(burned(&mut alice).await, code.id);
 }

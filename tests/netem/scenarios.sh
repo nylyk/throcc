@@ -111,6 +111,14 @@ eq() { [ "$1" = "$2" ]; }
 spaced() { [ "$1" = none ] || [ "$1" -ge 900 ]; }
 gt() { [ "$1" -gt "$2" ]; }
 
+# Checks that every receiver of run `name` got only intact units.
+all_intact() {
+    local name=$1
+    for ns in a b c; do
+        check "$ns gets only intact units" eq "$(field "$name-$ns" corrupt)" 0
+    done
+}
+
 scenario_receiver_limited() {
     downlink b tbf rate 3mbit burst 32kbit latency 100ms
     run_share receiver_limited
@@ -125,26 +133,20 @@ scenario_receiver_limited() {
 scenario_random_loss() {
     for ns in a b c; do downlink "$ns" netem loss 2%; done
     run_share random_loss
-    for ns in a b c; do
-        check "$ns gets only intact units" eq "$(field "random_loss-$ns" corrupt)" 0
-    done
+    all_intact random_loss
     check "sender gets at most 1 keyframe request per second" spaced "$(field random_loss-s min_keyframe_gap_ms)"
 }
 
 scenario_jitter() {
     for ns in a b c; do downlink "$ns" netem delay 40ms 30ms distribution normal; done
     run_share jitter
-    for ns in a b c; do
-        check "$ns gets only intact units" eq "$(field "jitter-$ns" corrupt)" 0
-    done
+    all_intact jitter
 }
 
 scenario_uplink_jitter() {
     uplink s netem delay 40ms 30ms distribution normal
     run_share uplink_jitter
-    for ns in a b c; do
-        check "$ns gets only intact units" eq "$(field "uplink_jitter-$ns" corrupt)" 0
-    done
+    all_intact uplink_jitter
 }
 
 scenario_sender_uplink() {
