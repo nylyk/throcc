@@ -288,17 +288,54 @@ async fn invite_code(arg: Option<String>) -> Result<InviteCode> {
     let code = match given_code(arg, std::env::var("THROCC_INVITE").ok()) {
         Some(code) => code,
         None => {
-            if std::io::stdin().is_terminal() {
-                eprint!("invite code: ");
-            }
+            let unechoed = std::io::stdin()
+                .is_terminal()
+                .then(|| {
+                    eprint!("invite code: ");
+                    Unechoed::start()
+                })
+                .flatten();
             let mut line = String::new();
-            BufReader::new(tokio::io::stdin())
+            let read = BufReader::new(tokio::io::stdin())
                 .read_line(&mut line)
-                .await?;
+                .await;
+            if let Some(unechoed) = unechoed {
+                drop(unechoed);
+                // The Enter that ended the line wasn't shown either.
+                eprintln!();
+            }
+            read?;
             line
         }
     };
     Ok(code.parse()?)
+}
+
+/// Terminal echo turned off while a secret is typed, and back on when dropped. Uses `stty`,
+/// so where that is missing (Windows, say) the typing shows as before.
+struct Unechoed;
+
+impl Unechoed {
+    fn start() -> Option<Self> {
+        stty("-echo").then_some(Self)
+    }
+}
+
+impl Drop for Unechoed {
+    fn drop(&mut self) {
+        stty("echo");
+    }
+}
+
+/// Runs `stty` on our terminal; true if it worked.
+fn stty(setting: &str) -> bool {
+    cfg!(unix)
+        && std::process::Command::new("stty")
+            .arg(setting)
+            .stdin(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
 }
 
 /// The code given without reading stdin: the argument unless it is `-`, else the environment.
@@ -555,7 +592,8 @@ fn shown(text: &str) -> Cow<'_, str> {
 
 fn moves_terminal(c: char) -> bool {
     c.is_control()
-        || matches!(c, '\u{200E}' | '\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+        || matches!(c,
+            '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
 #[cfg(test)]
@@ -628,6 +666,10 @@ mod tests {
         assert_eq!(shown("a\u{9b}2Jb"), "a\\u{9b}2Jb");
         assert_eq!(shown("a\nb\rc\u{7f}"), "a\\u{a}b\\u{d}c\\u{7f}");
         assert_eq!(shown("x\u{202E}y\u{2028}z"), "x\\u{202e}y\\u{2028}z");
+        assert_eq!(
+            shown("\u{061C}\u{200E}\u{200F}\u{2066}\u{2069}"),
+            "\\u{61c}\\u{200e}\\u{200f}\\u{2066}\\u{2069}"
+        );
     }
 
     #[test]

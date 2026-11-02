@@ -48,9 +48,18 @@ impl KnownServers {
         })
     }
 
-    /// Takes `address` off the list, as the user chose. What is kept for its server key,
-    /// such as the people pinned there, goes too unless another address still uses that key.
+    /// Takes `address` off the list, as the user chose, while they stay a member there.
+    /// The people pinned under its key stay, so adding it again still notices a changed key.
     pub fn forget(&mut self, address: &str) -> Result<()> {
+        self.pins.remove(address);
+        Servers::update(&self.dir, |s| {
+            s.known.remove(address);
+        })
+    }
+
+    /// Takes `address` off the list after the user left that server. What is kept for its
+    /// key, such as the people pinned there, goes too unless another address still uses it.
+    pub fn leave(&mut self, address: &str) -> Result<()> {
         self.pins.remove(address);
         Servers::update(&self.dir, |s| {
             if let Some(key) = s.known.remove(address)
@@ -108,7 +117,7 @@ mod tests {
     }
 
     #[test]
-    fn forgetting_a_server_drops_its_people_unless_another_address_uses_its_key() {
+    fn leaving_a_server_drops_its_people_unless_another_address_uses_its_key() {
         let dir = tempfile::tempdir().unwrap();
         let (shared, alone) = (Fingerprint([1; 32]), Fingerprint([2; 32]));
         let mut known = KnownServers::load(dir.path()).unwrap();
@@ -127,12 +136,38 @@ mod tests {
                 .is_some()
         };
 
-        known.forget("a.example.net").unwrap();
-        known.forget("c.example.net").unwrap();
+        known.leave("a.example.net").unwrap();
+        known.leave("c.example.net").unwrap();
         assert!(pinned(shared));
         assert!(!pinned(alone));
-        known.forget("b.example.net").unwrap();
+        known.leave("b.example.net").unwrap();
         assert!(!pinned(shared));
+        assert_eq!(known.get("b.example.net"), None);
+    }
+
+    #[test]
+    fn removing_a_server_keeps_its_people_for_when_it_is_added_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Fingerprint([1; 32]);
+        let mut known = KnownServers::load(dir.path()).unwrap();
+        known.trust("a.example.net", server).unwrap();
+        let mut contacts = Contacts::load(dir.path(), &server).unwrap();
+        contacts.pin(UserId(4), [4; 32]);
+        contacts.unsaved().save().unwrap();
+
+        known.forget("a.example.net").unwrap();
+        assert_eq!(known.get("a.example.net"), None);
+        assert_eq!(
+            KnownServers::load(dir.path()).unwrap().get("a.example.net"),
+            None
+        );
+        known.trust("a.example.net", server).unwrap();
+        assert_eq!(
+            Contacts::load(dir.path(), &server)
+                .unwrap()
+                .status(UserId(4), &[9; 32]),
+            ContactStatus::Changed { pinned: [4; 32] }
+        );
     }
 
     #[test]

@@ -4,11 +4,12 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use throcc_crypto::identity::random;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, MediaId, RoomId, UserId};
 use throcc_proto::messages::{
-    AuthError, Event as ServerEvent, MediaState, Placed, Presence, Recovery, Request, Response,
-    RoomPeer, Share, ShareConfig, User, Welcome,
+    AuthError, ErrorCode, Event as ServerEvent, MediaState, Placed, Presence, Recovery, Request,
+    Response, RoomPeer, Share, ShareConfig, User, Welcome,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{Semaphore, broadcast, mpsc, watch};
@@ -40,6 +41,9 @@ use crate::state::{
 const LEVELS_EVERY: Duration = Duration::from_millis(100);
 const HEALTH_EVERY: Duration = Duration::from_secs(2);
 const MAX_BACKOFF: Duration = Duration::from_secs(15);
+/// Each reconnect wait is spread over this fraction either side of the backoff, so clients
+/// that lost the same server don't all come back in the same instant.
+const BACKOFF_JITTER: f64 = 0.3;
 const RENEWAL_CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
 const MAX_QUEUED_WHILE_RECONNECTING: usize = 64;
 /// How many pictures are fetched from the server at once.
@@ -216,6 +220,8 @@ pub(crate) struct Session {
     room: Option<RoomId>,
     my_tracks: Option<throcc_proto::messages::Tracks>,
     media: MediaState,
+    /// The share the server last took from us. A share-start refusal leaves it in place.
+    server_share: Option<ShareConfig>,
     /// The peers our key is wrapped to, whose tracks we follow.
     peers: BTreeMap<UserId, RoomPeer>,
     watching: Vec<UserId>,
@@ -344,6 +350,7 @@ impl Session {
                 mic: true,
                 ..MediaState::default()
             },
+            server_share: None,
             peers: BTreeMap::new(),
             watching: Vec::new(),
             watched_shares: HashMap::new(),
@@ -558,7 +565,7 @@ impl Session {
                 .notice("Couldn't leave this server: the connection dropped. Try again.");
             return false;
         }
-        if let Err(e) = self.keystore.known_servers.forget(&self.address) {
+        if let Err(e) = self.keystore.known_servers.leave(&self.address) {
             warn!("forgetting the server: {e:#}");
         }
         self.call.close().await;
@@ -590,7 +597,7 @@ impl Session {
                     reason: reason.clone(),
                 }
             });
-            let wait = tokio::time::sleep(backoff);
+            let wait = tokio::time::sleep(jittered(backoff, u64::from_le_bytes(random())));
             tokio::pin!(wait);
             loop {
                 tokio::select! {
@@ -683,6 +690,8 @@ impl Session {
 
     fn reset_room(&mut self) {
         self.stop_share();
+        // The server ends our share whenever it moves us, and a new connection starts without one.
+        self.server_share = None;
         self.stop_watching_all();
         self.room = None;
         self.my_tracks = None;
@@ -1135,7 +1144,29 @@ impl Session {
         self.voice(VoiceCommand::Muted(!self.media.mic));
         self.voice(VoiceCommand::Deafened(self.media.deafened));
         self.show_shares();
-        self.simple(Request::SetMedia(media)).await;
+        let response = self.call.request(Request::SetMedia(media)).await;
+        if refuses_share_start(&response, media.share, self.server_share) {
+            self.undo_refused_share();
+            return;
+        }
+        match response {
+            Ok(Response::Ok) => self.server_share = media.share,
+            other => self.refused(other),
+        }
+    }
+
+    /// Stops a share the server wouldn't start. Leaving it running would carry the refused
+    /// start in every later `SetMedia`, such as each push-to-talk press.
+    fn undo_refused_share(&mut self) {
+        self.stop_share();
+        self.shared.update(|s| {
+            if let Some(c) = s.current.as_mut() {
+                c.sharing = None;
+            }
+        });
+        self.show_shares();
+        self.shared
+            .notice("Sharing was started too often. Try again in a moment.");
     }
 
     async fn push_watching(&mut self) {
@@ -1793,6 +1824,23 @@ fn refusal(response: anyhow::Result<Response>) -> String {
     response.map_or_else(|e| e.to_string(), control::refusal)
 }
 
+/// Whether `response` to a `SetMedia` carrying `sent` refused to start that share. The server
+/// still applies the mic and deafen then, and keeps the share it had (`on_server`).
+fn refuses_share_start(
+    response: &anyhow::Result<Response>,
+    sent: Option<ShareConfig>,
+    on_server: Option<ShareConfig>,
+) -> bool {
+    let rate_limited = matches!(
+        response,
+        Ok(Response::Err {
+            code: ErrorCode::RateLimited,
+            ..
+        })
+    );
+    rate_limited && sent.is_some() && sent != on_server
+}
+
 /// How far `counter` has moved since `last`, which it then replaces.
 fn advance(last: &mut u64, counter: u64) -> u64 {
     counter.saturating_sub(std::mem::replace(last, counter))
@@ -1869,9 +1917,70 @@ fn supersedes(newer: &Command, older: &Command) -> bool {
     }
 }
 
+/// `backoff` scaled by a factor spread evenly over 1 ± `BACKOFF_JITTER`, picked by `random`.
+/// The mean wait stays `backoff`.
+fn jittered(backoff: Duration, random: u64) -> Duration {
+    let unit = (random >> 11) as f64 / (1u64 << 53) as f64;
+    backoff.mul_f64(1.0 - BACKOFF_JITTER + 2.0 * BACKOFF_JITTER * unit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_rate_limited_share_start_is_undone() {
+        let share = Some(ShareConfig {
+            codec: throcc_proto::messages::Codec::H264,
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            kbps: 8000,
+            audio: true,
+        });
+        let limited = || {
+            Ok(Response::Err {
+                code: ErrorCode::RateLimited,
+                message: "too many share starts".into(),
+            })
+        };
+        assert!(refuses_share_start(&limited(), share, None));
+        // A push-to-talk press while the server already has our share.
+        assert!(!refuses_share_start(&limited(), share, share));
+        assert!(!refuses_share_start(&limited(), None, None));
+        assert!(!refuses_share_start(&Ok(Response::Ok), share, None));
+        let forbidden = Ok(Response::Err {
+            code: ErrorCode::Forbidden,
+            message: "no".into(),
+        });
+        assert!(!refuses_share_start(&forbidden, share, None));
+        assert!(!refuses_share_start(
+            &Err(anyhow::anyhow!("timed out")),
+            share,
+            None
+        ));
+    }
+
+    #[test]
+    fn reconnect_waits_are_jittered_within_bounds() {
+        for backoff in [Duration::from_secs(1), MAX_BACKOFF] {
+            let (low, high) = (backoff.mul_f64(0.7), backoff.mul_f64(1.3));
+            let close = |a: Duration, b: Duration| a.abs_diff(b) < Duration::from_micros(1);
+            assert!(close(jittered(backoff, 0), low));
+            assert!(close(jittered(backoff, u64::MAX), high));
+            assert!(close(jittered(backoff, 1 << 63), backoff));
+            let waits: Vec<Duration> = (0..64)
+                .map(|_| jittered(backoff, u64::from_le_bytes(random())))
+                .collect();
+            assert!(
+                waits
+                    .iter()
+                    .all(|w| (low..=high).contains(w) || close(*w, low) || close(*w, high)),
+                "{waits:?}"
+            );
+            assert!(waits.iter().any(|w| *w != waits[0]), "{waits:?}");
+        }
+    }
 
     #[test]
     fn pictures_nothing_shown_uses_are_dropped_once_many_are_kept() {

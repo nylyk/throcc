@@ -6,7 +6,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::UserId;
-use throcc_proto::messages::{PublicKey, valid_name};
+use throcc_proto::messages::{PublicKey, name_key, valid_name};
 
 use crate::lock;
 use crate::servers::Servers;
@@ -228,10 +228,11 @@ impl Contacts {
     }
 }
 
-/// True for valid names that are the same ignoring case and surrounding space.
+/// True for valid names that look the same: alike ignoring case, surrounding space and the
+/// characters that draw nothing, such as joiners.
 fn same_name(a: &str, b: &str) -> bool {
     match (valid_name(a), valid_name(b)) {
-        (Some(a), Some(b)) => a.to_lowercase() == b.to_lowercase(),
+        (Some(a), Some(b)) => name_key(a) == name_key(b),
         _ => false,
     }
 }
@@ -355,6 +356,13 @@ mod tests {
 
         assert_eq!(contacts.namesake(ghost, " bOB ", []), Some(bob));
         assert_eq!(contacts.namesake(bob, "Bob", []), None);
+        for look_alike in ["Bo\u{200C}b", "\u{200D}bob", "BOB\u{FE0F}"] {
+            assert_eq!(
+                contacts.namesake(ghost, look_alike, []),
+                Some(bob),
+                "{look_alike:?}"
+            );
+        }
         assert_eq!(
             contacts.namesake(ghost, "Carol", [(carol, "carol")]),
             Some(carol)
