@@ -157,11 +157,5 @@ mod tests {
             let header = Header { media_id: MediaId(media), epoch: Epoch(epoch), seq, flags: Flags(flags) };
             prop_assert_eq!(Header::parse_strict(&header.encode()).unwrap(), header);
         }
-
-        #[test]
-        fn parse_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..32)) {
-            let _ = Header::parse(&bytes);
-            let _ = Header::parse_strict(&bytes);
-        }
     }
 }

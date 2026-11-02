@@ -72,6 +72,7 @@ mod tests {
         let text = fp.to_string();
         assert_eq!(text.len(), 64 + 15);
         assert_eq!(text.parse::<Fingerprint>().unwrap(), fp);
+        assert_eq!(text.to_uppercase().parse::<Fingerprint>().unwrap(), fp);
         assert_eq!(fp.short(), text[..9]);
     }
 
@@ -80,12 +81,5 @@ mod tests {
         assert!("abcd".parse::<Fingerprint>().is_err());
         assert!("zz".repeat(32).parse::<Fingerprint>().is_err());
         assert!("+a".repeat(32).parse::<Fingerprint>().is_err());
-    }
-
-    #[test]
-    fn parses_upper_case_hex() {
-        let fp = Fingerprint::of_spki(b"spki");
-        let upper = fp.to_string().to_uppercase();
-        assert_eq!(upper.parse::<Fingerprint>().unwrap(), fp);
     }
 }

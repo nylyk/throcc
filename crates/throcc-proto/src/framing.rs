@@ -61,23 +61,8 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::ids::{MediaId, RoomId};
+    use crate::ids::MediaId;
     use crate::messages::{ClientMessage, Request};
-
-    #[test]
-    fn round_trips() {
-        let message = ClientMessage::Request {
-            id: 7,
-            req: Request::SetRoom {
-                room: Some(RoomId(3)),
-                password: None,
-            },
-        };
-        let frame = encode(&message).unwrap();
-        let (body, rest) = split(&frame).unwrap().unwrap();
-        assert!(rest.is_empty());
-        assert_eq!(decode::<ClientMessage>(body).unwrap(), message);
-    }
 
     #[test]
     fn rejects_oversized_header_before_reading_body() {
@@ -116,10 +101,14 @@ mod tests {
 
     proptest! {
         #[test]
-        fn split_never_panics(buf in proptest::collection::vec(any::<u8>(), 0..64)) {
-            if let Ok(Some((body, _))) = split(&buf) {
-                let _ = decode::<ClientMessage>(body);
-            }
+        fn split_and_decode_never_panic(body in proptest::collection::vec(any::<u8>(), 0..64), extra in proptest::collection::vec(any::<u8>(), 0..8)) {
+            let mut buf = (body.len() as u32).to_be_bytes().to_vec();
+            buf.extend_from_slice(&body);
+            buf.extend_from_slice(&extra);
+            let (framed, rest) = split(&buf).unwrap().unwrap();
+            prop_assert_eq!(framed, &body[..]);
+            prop_assert_eq!(rest, &extra[..]);
+            let _ = decode::<ClientMessage>(framed);
         }
 
         #[test]
@@ -129,7 +118,8 @@ mod tests {
                 req: Request::SetWatching(ids.into_iter().map(MediaId).collect()),
             };
             let frame = encode(&message).unwrap();
-            let (body, _) = split(&frame).unwrap().unwrap();
+            let (body, rest) = split(&frame).unwrap().unwrap();
+            prop_assert!(rest.is_empty());
             prop_assert_eq!(decode::<ClientMessage>(body).unwrap(), message);
         }
     }

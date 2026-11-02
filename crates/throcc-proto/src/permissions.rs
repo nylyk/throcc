@@ -52,7 +52,7 @@ mod tests {
     }
 
     #[test]
-    fn ranks_are_strict() {
+    fn only_admins_remove_and_change_roles_and_only_downwards() {
         assert!(!can_remove(Manager, Admin));
         assert!(!can_remove(Manager, User));
         assert!(!can_remove(Admin, Admin));
@@ -60,7 +60,13 @@ mod tests {
         assert!(can_set_role(Admin, User, Manager));
         assert!(!can_set_role(Admin, User, Admin));
         assert!(!can_set_role(Manager, User, User));
+    }
+
+    #[test]
+    fn what_each_role_may_do_on_the_server() {
         assert!(can_manage_rooms(Manager) && !can_manage_rooms(User));
+        assert!(can_list_users(Admin) && !can_list_users(Manager));
+        assert!(can_edit_server(Admin) && !can_edit_server(Manager));
         assert_eq!(invite_cap(User), Some(3));
         assert_eq!(invite_cap(Manager), Some(3));
         assert_eq!(invite_cap(Admin), None);
