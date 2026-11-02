@@ -1,7 +1,17 @@
-#[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
+#[cfg(any(windows, target_os = "linux", test))]
+mod audio_ring;
+#[cfg(any(
+    windows,
+    target_os = "macos",
+    target_os = "linux",
+    feature = "ffmpeg",
+    test
+))]
 mod clock;
+#[cfg(feature = "ffmpeg")]
+pub(crate) use clock::FrameLimiter;
 #[cfg(target_os = "linux")]
-pub(crate) mod linux;
+mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{DmaBuf, DmaBufPlane};
 #[cfg(target_os = "macos")]
@@ -9,10 +19,8 @@ pub(crate) mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::PixelBuffer;
 #[cfg(windows)]
-pub(crate) mod windows;
+mod windows;
 
-use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant};
 
 use throcc_proto::frame::VIDEO_CLOCK_HZ;
@@ -30,6 +38,45 @@ pub enum CaptureError {
     Cancelled,
     #[error("screen capture: {0}")]
     Failed(String),
+}
+
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+fn failed(e: impl std::fmt::Display) -> CaptureError {
+    CaptureError::Failed(e.to_string())
+}
+
+/// Copies an NV12 picture of `width`×`height`, given as (plane, stride) pairs, into `into`.
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+fn copy_nv12(
+    into: &mut VideoFrame,
+    (y, y_stride): (&[u8], usize),
+    (uv, uv_stride): (&[u8], usize),
+    (width, height): (usize, usize),
+) {
+    resize(into, width, height);
+    copy_rows(y, y_stride, width, &mut into.y);
+    copy_rows(uv, uv_stride, width, &mut into.uv);
+}
+
+/// Makes `frame` `width`×`height`, keeping its buffers when it already is.
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+fn resize(frame: &mut VideoFrame, width: usize, height: usize) {
+    if frame.width != width || frame.height != height {
+        *frame = VideoFrame::blank(width, height);
+    }
+}
+
+/// Copies rows of `row_bytes` from `src`, `stride` apart, into the tightly packed `dst`.
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+fn copy_rows(src: &[u8], stride: usize, row_bytes: usize, dst: &mut [u8]) {
+    if stride < row_bytes || row_bytes == 0 {
+        return;
+    }
+    for (src, dst) in src.chunks(stride).zip(dst.chunks_exact_mut(row_bytes)) {
+        if let Some(src) = src.get(..row_bytes) {
+            dst.copy_from_slice(src);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,7 +109,7 @@ pub trait Capture: Send {
         None
     }
     /// Asks for no more frames in GPU memory with `modifier`, or none at all without one.
-    /// Frames already captured still arrive.
+    /// Those already captured are skipped.
     #[cfg(target_os = "linux")]
     fn refuse_dmabuf(&mut self, _modifier: Option<u64>) {}
     /// The oldest captured frame not yet taken, in the pixel buffer the system captured it
@@ -71,8 +118,10 @@ pub trait Capture: Send {
     fn next_pixel_buffer(&mut self) -> Option<PixelBuffer> {
         None
     }
-    /// Frames the capture callback dropped because the ring was full.
-    fn dropped(&self) -> Arc<AtomicU64>;
+    /// Frames and audio buffers the capture callbacks dropped because a ring was full.
+    fn dropped(&self) -> u64 {
+        0
+    }
     /// Whether capturing stopped for good, as when the shared window closed or the system
     /// ended the share.
     fn ended(&self) -> bool {
@@ -125,7 +174,7 @@ pub struct TestPattern {
 
 impl TestPattern {
     pub fn new(config: CaptureConfig, epoch: Instant) -> Self {
-        let since_epoch = epoch.elapsed().as_micros() as u64 * u64::from(SAMPLE_RATE) / 1_000_000;
+        let since_epoch = ticks(epoch.elapsed(), SAMPLE_RATE);
         Self {
             audio: config.audio,
             audio_next: since_epoch - since_epoch % FRAME as u64,
@@ -151,12 +200,8 @@ impl Capture for TestPattern {
         self.shown = (self.shown + 1) % self.bases.len();
         into.clone_from(&self.bases[self.shown]);
         into.stamp_number(elapsed.as_millis() as u16);
-        into.timestamp = (elapsed.as_micros() * u128::from(VIDEO_CLOCK_HZ) / 1_000_000) as u32;
+        into.timestamp = ticks(elapsed, VIDEO_CLOCK_HZ) as u32;
         true
-    }
-
-    fn dropped(&self) -> Arc<AtomicU64> {
-        Arc::default()
     }
 
     fn captures_audio(&self) -> bool {
@@ -165,7 +210,7 @@ impl Capture for TestPattern {
 
     /// A 440 Hz tone on the left and 660 Hz on the right, as real time allows.
     fn next_audio(&mut self, into: &mut [f32; STEREO_FRAME]) -> Option<u32> {
-        let now = self.epoch.elapsed().as_micros() as u64 * u64::from(SAMPLE_RATE) / 1_000_000;
+        let now = ticks(self.epoch.elapsed(), SAMPLE_RATE);
         if !self.audio || now < self.audio_next + FRAME as u64 {
             return None;
         }
@@ -178,4 +223,24 @@ impl Capture for TestPattern {
         self.audio_next += FRAME as u64;
         Some(start as u32)
     }
+}
+
+/// `elapsed` in ticks of a `hz` clock.
+fn ticks(elapsed: Duration, hz: u32) -> u64 {
+    (elapsed.as_micros() * u128::from(hz) / 1_000_000) as u64
+}
+
+/// The timestamps of up to `want` frames captured within five seconds, the last in `frame`.
+#[cfg(test)]
+fn frames_within(capture: &mut dyn Capture, frame: &mut VideoFrame, want: usize) -> Vec<u32> {
+    let mut timestamps = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && timestamps.len() < want {
+        if capture.next_frame(frame) {
+            timestamps.push(frame.timestamp);
+        } else {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    timestamps
 }

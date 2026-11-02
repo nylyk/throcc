@@ -14,16 +14,15 @@ use screencapturekit::content_sharing_picker::{
     SCContentSharingPicker, SCContentSharingPickerConfiguration, SCContentSharingPickerMode,
     SCPickerOutcome,
 };
-use screencapturekit::cv::CVPixelBuffer;
+use screencapturekit::cv::{CVPixelBuffer, CVPixelBufferLockGuard};
 use screencapturekit::prelude::*;
 use screencapturekit::stream::ErrorHandler;
 
-use super::clock::{AudioChunker, ShareZero};
-use super::{Capture, CaptureConfig, CaptureError};
+use super::clock::ShareClock;
+use super::{Capture, CaptureConfig, CaptureError, copy_nv12, failed};
 use crate::media::audio::SAMPLE_RATE;
 use crate::media::share_audio::STEREO_FRAME;
 use crate::media::video::frame::{VideoFrame, share_size};
-use throcc_proto::frame::VIDEO_CLOCK_HZ;
 
 /// Captured frames waiting for the share thread. A full ring drops the newest frame.
 const RING: usize = 4;
@@ -45,20 +44,22 @@ impl PixelBuffer {
     /// The picture `factor` times smaller each way, read out of GPU memory.
     pub fn shrunk(&self, factor: usize) -> Option<VideoFrame> {
         let guard = self.buffer.lock_read_only().ok()?;
-        let plane = |index: usize| {
-            let base = guard.base_address_of_plane(index)?;
-            let stride = guard.bytes_per_row_of_plane(index);
-            let len = stride * guard.height_of_plane(index);
-            // SAFETY: the buffer is locked, and plane `index` is `height_of_plane` rows of
-            // `stride` bytes.
-            Some((unsafe { std::slice::from_raw_parts(base, len) }, stride))
-        };
-        let (y, uv) = (plane(0)?, plane(1)?);
+        let (y, uv) = (plane(&guard, 0)?, plane(&guard, 1)?);
         let size = (guard.width(), guard.height());
         let mut out = VideoFrame::shrunk_nv12(y, uv, size, factor);
         out.timestamp = self.timestamp;
         Some(out)
     }
+}
+
+/// Plane `index` of a locked pixel buffer, with its stride.
+fn plane<'a>(guard: &'a CVPixelBufferLockGuard<'_>, index: usize) -> Option<(&'a [u8], usize)> {
+    let base = guard.base_address_of_plane(index)?;
+    let stride = guard.bytes_per_row_of_plane(index);
+    let len = stride * guard.height_of_plane(index);
+    // SAFETY: the buffer stays locked while `guard` is borrowed, and plane `index` is
+    // `height_of_plane` rows of `stride` bytes.
+    Some((unsafe { std::slice::from_raw_parts(base, len) }, stride))
 }
 
 /// ScreenCaptureKit's `420f`: full-range NV12.
@@ -103,9 +104,8 @@ pub struct MacCapture {
     audio: Option<rtrb::Consumer<(CMSampleBuffer, i64)>>,
     dropped: Arc<AtomicU64>,
     ended: Arc<AtomicBool>,
-    /// Host time, in nanoseconds, that both media clocks count from.
-    zero: ShareZero,
-    chunker: AudioChunker,
+    /// Counts from host time, in nanoseconds.
+    clock: ShareClock,
 }
 
 // SAFETY: SCStream is a reference to an Objective-C object that ScreenCaptureKit
@@ -143,54 +143,22 @@ fn capture(
     let mut stream =
         SCStream::new_with_delegate(filter, &stream_config, on_stop).map_err(failed)?;
 
-    let (producer, frames) = rtrb::RingBuffer::new(RING);
-    // The handler runs on one serial dispatch queue, so `try_lock` never finds it taken;
-    // it is there only to make the producer shareable without ever blocking.
-    let producer = std::sync::Mutex::new(producer);
     let dropped = Arc::new(AtomicU64::new(0));
-    let callback_dropped = dropped.clone();
-    stream
-        .add_output_handler(
-            move |sample: CMSampleBuffer, kind: SCStreamOutputType| {
-                if kind != SCStreamOutputType::Screen {
-                    return;
-                }
-                let Some(buffer) = sample.pixel_buffer() else {
-                    return;
-                };
-                let at = host_nanos(&sample);
-                let pushed = producer
-                    .try_lock()
-                    .is_ok_and(|mut p| p.push((buffer, at)).is_ok());
-                if !pushed {
-                    callback_dropped.fetch_add(1, Ordering::Relaxed);
-                }
-            },
-            SCStreamOutputType::Screen,
-        )
-        .map_err(failed)?;
+    let frames = queue_output(
+        &mut stream,
+        SCStreamOutputType::Screen,
+        RING,
+        &dropped,
+        |sample: CMSampleBuffer| sample.pixel_buffer(),
+    )?;
     let audio = if config.audio {
-        let (producer, audio) = rtrb::RingBuffer::new(AUDIO_RING);
-        let producer = std::sync::Mutex::new(producer);
-        let callback_dropped = dropped.clone();
-        stream
-            .add_output_handler(
-                move |sample: CMSampleBuffer, kind: SCStreamOutputType| {
-                    if kind != SCStreamOutputType::Audio {
-                        return;
-                    }
-                    let at = host_nanos(&sample);
-                    let pushed = producer
-                        .try_lock()
-                        .is_ok_and(|mut p| p.push((sample, at)).is_ok());
-                    if !pushed {
-                        callback_dropped.fetch_add(1, Ordering::Relaxed);
-                    }
-                },
-                SCStreamOutputType::Audio,
-            )
-            .map_err(failed)?;
-        Some(audio)
+        Some(queue_output(
+            &mut stream,
+            SCStreamOutputType::Audio,
+            AUDIO_RING,
+            &dropped,
+            Some,
+        )?)
     } else {
         None
     };
@@ -201,9 +169,42 @@ fn capture(
         audio,
         dropped,
         ended,
-        zero: ShareZero::new(NANOS as i64),
-        chunker: AudioChunker::default(),
+        clock: ShareClock::new(NANOS as i64),
     })
+}
+
+/// Queues what `take` makes of each sample of `kind`, with its host time, in a ring of
+/// `size`; a full ring counts a drop. Handlers run on one serial dispatch queue per kind,
+/// so `try_lock` never finds the producer taken: the lock only makes it shareable without
+/// ever blocking.
+fn queue_output<T: Send + 'static>(
+    stream: &mut SCStream,
+    kind: SCStreamOutputType,
+    size: usize,
+    dropped: &Arc<AtomicU64>,
+    take: impl Fn(CMSampleBuffer) -> Option<T> + Send + Sync + 'static,
+) -> Result<rtrb::Consumer<(T, i64)>, CaptureError> {
+    let (producer, consumer) = rtrb::RingBuffer::new(size);
+    let producer = std::sync::Mutex::new(producer);
+    let dropped = dropped.clone();
+    stream
+        .add_output_handler(
+            move |sample: CMSampleBuffer, _: SCStreamOutputType| {
+                let at = host_nanos(&sample);
+                let Some(item) = take(sample) else {
+                    return;
+                };
+                let pushed = producer
+                    .try_lock()
+                    .is_ok_and(|mut p| p.push((item, at)).is_ok());
+                if !pushed {
+                    dropped.fetch_add(1, Ordering::Relaxed);
+                }
+            },
+            kind,
+        )
+        .map_err(failed)?;
+    Ok(consumer)
 }
 
 /// A sample's presentation time on the host clock, in nanoseconds.
@@ -215,8 +216,8 @@ fn host_nanos(sample: &CMSampleBuffer) -> i64 {
     (i128::from(time.value) * NANOS / i128::from(time.timescale)) as i64
 }
 
-/// Shows `SCContentSharingPicker` and waits for the person's choice.
-/// Asks what to share; returns it with its size in points.
+/// Shows `SCContentSharingPicker` and waits for the person's choice; returns it with its
+/// size in pixels.
 fn pick() -> Result<(SCContentFilter, (usize, usize)), CaptureError> {
     let mut picker = SCContentSharingPickerConfiguration::new().map_err(failed)?;
     picker.set_allowed_picker_modes(&[
@@ -238,18 +239,11 @@ fn pick() -> Result<(SCContentFilter, (usize, usize)), CaptureError> {
     }
 }
 
-fn failed(e: impl std::fmt::Display) -> CaptureError {
-    CaptureError::Failed(e.to_string())
-}
-
 impl MacCapture {
     fn pop(&mut self) -> Option<PixelBuffer> {
         let (buffer, at) = self.frames.pop().ok()?;
-        let ticks = self.zero.ticks(at, VIDEO_CLOCK_HZ);
-        (ticks >= 0).then_some(PixelBuffer {
-            buffer,
-            timestamp: ticks as u32,
-        })
+        let timestamp = self.clock.video(at)?;
+        Some(PixelBuffer { buffer, timestamp })
     }
 }
 
@@ -261,13 +255,11 @@ impl Capture for MacCapture {
         let Ok(guard) = picture.buffer.lock_read_only() else {
             return false;
         };
-        let (width, height) = (guard.width(), guard.height());
-        if into.width != width || into.height != height {
-            *into = VideoFrame::blank(width, height);
-        }
+        let (Some(y), Some(uv)) = (plane(&guard, 0), plane(&guard, 1)) else {
+            return false;
+        };
+        copy_nv12(into, y, uv, (guard.width(), guard.height()));
         into.timestamp = picture.timestamp;
-        copy_plane(&guard, 0, width, height, &mut into.y);
-        copy_plane(&guard, 1, width, height.div_ceil(2), &mut into.uv);
         true
     }
 
@@ -275,8 +267,8 @@ impl Capture for MacCapture {
         self.pop()
     }
 
-    fn dropped(&self) -> Arc<AtomicU64> {
-        self.dropped.clone()
+    fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     fn ended(&self) -> bool {
@@ -289,16 +281,11 @@ impl Capture for MacCapture {
 
     fn next_audio(&mut self, into: &mut [f32; STEREO_FRAME]) -> Option<u32> {
         let audio = self.audio.as_mut()?;
-        loop {
-            while self.chunker.needs_more() {
-                let (sample, at) = audio.pop().ok()?;
-                let ticks = self.zero.ticks(at, SAMPLE_RATE);
-                self.chunker.push(ticks, stereo(&sample));
-            }
-            if let Some(timestamp) = self.chunker.take(into) {
-                return Some(timestamp);
-            }
-        }
+        self.clock.next_audio(into, |clock| {
+            let (sample, at) = audio.pop().ok()?;
+            clock.push_audio(at, stereo(&sample));
+            Some(())
+        })
     }
 }
 
@@ -341,33 +328,6 @@ fn stereo(sample: &CMSampleBuffer) -> Vec<f32> {
     out
 }
 
-/// Copies `rows` rows of `row_bytes` from plane `index` into a tightly packed buffer.
-fn copy_plane(
-    guard: &screencapturekit::cv::CVPixelBufferLockGuard<'_>,
-    index: usize,
-    row_bytes: usize,
-    rows: usize,
-    out: &mut [u8],
-) {
-    let Some(base) = guard.base_address_of_plane(index) else {
-        return;
-    };
-    let stride = guard.bytes_per_row_of_plane(index);
-    let rows = rows.min(guard.height_of_plane(index));
-    for row in 0..rows {
-        let Some(dst) = out.get_mut(row * row_bytes..(row + 1) * row_bytes) else {
-            return;
-        };
-        // SAFETY: the buffer is locked, and plane `index` has `height_of_plane` rows of
-        // `stride` bytes, each at least `row_bytes` long.
-        let src =
-            unsafe { std::slice::from_raw_parts(base.add(row * stride), row_bytes.min(stride)) };
-        if let Some(d) = dst.get_mut(..src.len()) {
-            d.copy_from_slice(src);
-        }
-    }
-}
-
 impl Drop for MacCapture {
     fn drop(&mut self) {
         self.stream.stop_capture().ok();
@@ -399,7 +359,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::media::capture::Capture;
+    use crate::media::capture::{Capture, frames_within};
 
     #[test]
     fn a_pixel_buffer_shrinks_like_a_frame() {
@@ -419,18 +379,10 @@ mod tests {
         };
         let mut capture = main_display(config);
         let mut frame = VideoFrame::blank(1280, 720);
-        let mut timestamps = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while Instant::now() < deadline && timestamps.len() < 30 {
-            if capture.next_frame(&mut frame) {
-                timestamps.push(frame.timestamp);
-            } else {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        }
+        let timestamps = frames_within(&mut capture, &mut frame, 30);
         assert!(
             timestamps.len() >= 10,
-            "only {} frames in 3 s",
+            "only {} frames in 5 s",
             timestamps.len()
         );
         assert!(timestamps.windows(2).all(|w| w[1] > w[0]));

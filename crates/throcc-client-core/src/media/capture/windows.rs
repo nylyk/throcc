@@ -65,9 +65,10 @@ use windows::Win32::UI::Shell::IInitializeWithWindow;
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 use windows::core::{HRESULT, IInspectable, Interface, Owned, Ref, implement};
 
-use super::clock::{AudioChunker, ShareZero};
-use super::{Capture, CaptureConfig, CaptureError};
-use crate::media::audio::{FRAME, SAMPLE_RATE};
+use super::audio_ring::{AudioConsumer, AudioProducer, audio_ring};
+use super::clock::{FrameLimiter, ShareClock};
+use super::{Capture, CaptureConfig, CaptureError, copy_nv12, failed};
+use crate::media::audio::SAMPLE_RATE;
 use crate::media::share_audio::STEREO_FRAME;
 use crate::media::video::frame::{VideoFrame, share_size};
 use throcc_proto::frame::VIDEO_CLOCK_HZ;
@@ -78,9 +79,6 @@ const RING: usize = 2;
 const POOL_BUFFERS: i32 = RING as i32 + 1;
 const POOL_FORMAT: DirectXPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
 const TIME_SPAN_HZ: i128 = 10_000_000;
-/// Captured audio packets of up to 20 ms waiting for the share thread. A full ring drops
-/// the newest.
-const AUDIO_RING: usize = 32;
 /// How much audio WASAPI holds for the capture thread, in 100 ns units.
 const AUDIO_BUFFER: i64 = 1_000_000;
 /// How often the audio thread checks for stop while no audio arrives, in milliseconds.
@@ -91,8 +89,8 @@ pub struct WinCapture {
     /// Paced frames with their `SystemRelativeTime`, in 100 ns QPC units.
     frames: rtrb::Consumer<(Direct3D11CaptureFrame, i64)>,
     audio: Option<LoopbackAudio>,
-    zero: ShareZero,
-    chunker: AudioChunker,
+    /// Counts from QPC time, in 100 ns units.
+    clock: ShareClock,
     dropped: Arc<AtomicU64>,
     ended: Arc<AtomicBool>,
     converter: Converter,
@@ -148,7 +146,7 @@ fn capture(item: &GraphicsCaptureItem, config: CaptureConfig) -> windows::core::
     // collision counts as a drop.
     let feed = Mutex::new(Feed {
         frames: producer,
-        pacer: Pacer::new(config.fps),
+        limiter: FrameLimiter::new(config.fps),
     });
     let dropped = Arc::new(AtomicU64::new(0));
     let callback_dropped = dropped.clone();
@@ -191,8 +189,7 @@ fn capture(item: &GraphicsCaptureItem, config: CaptureConfig) -> windows::core::
     Ok(WinCapture {
         frames,
         audio,
-        zero: ShareZero::new(TIME_SPAN_HZ as i64),
-        chunker: AudioChunker::default(),
+        clock: ShareClock::new(TIME_SPAN_HZ as i64),
         dropped,
         ended,
         converter,
@@ -262,51 +259,18 @@ fn d3d_device() -> windows::core::Result<ID3D11Device> {
     Ok(device)
 }
 
-fn failed(e: impl std::fmt::Display) -> CaptureError {
-    CaptureError::Failed(e.to_string())
-}
-
 struct Feed {
     frames: rtrb::Producer<(Direct3D11CaptureFrame, i64)>,
-    pacer: Pacer,
+    limiter: FrameLimiter,
 }
 
 impl Feed {
-    /// Queues `frame`, taken at `time` in 100 ns units, if the pacer admits it. False only
-    /// when the ring was full.
+    /// Queues `frame`, taken at `time` in 100 ns units, if the limiter admits it. False
+    /// only when the ring was full.
     fn offer(&mut self, frame: Direct3D11CaptureFrame, time: i64) -> bool {
-        let ticks = (i128::from(time) * i128::from(VIDEO_CLOCK_HZ) / TIME_SPAN_HZ) as i64;
-        !self.pacer.admit(ticks) || self.frames.push((frame, time)).is_ok()
-    }
-}
-
-/// Thins frames, given their 90 kHz capture times, to the share's rate on average.
-struct Pacer {
-    start: Option<i64>,
-    due: i64,
-    interval: i64,
-}
-
-impl Pacer {
-    fn new(fps: u32) -> Self {
-        Self {
-            start: None,
-            due: 0,
-            interval: i64::from(VIDEO_CLOCK_HZ / fps.max(1)),
-        }
-    }
-
-    fn admit(&mut self, ticks: i64) -> bool {
-        let since = ticks - *self.start.get_or_insert(ticks);
-        if since < self.due - self.interval / 4 {
-            return false;
-        }
-        self.due = if since - self.due > self.interval {
-            since + self.interval
-        } else {
-            self.due + self.interval
-        };
-        true
+        // Wraps like media timestamps, which the limiter compares as such.
+        let ticks = (i128::from(time) * i128::from(VIDEO_CLOCK_HZ) / TIME_SPAN_HZ) as u32;
+        !self.limiter.admits(ticks) || self.frames.push((frame, time)).is_ok()
     }
 }
 
@@ -315,11 +279,9 @@ impl Capture for WinCapture {
         let Ok((frame, time)) = self.frames.pop() else {
             return false;
         };
-        let ticks = self.zero.ticks(time, VIDEO_CLOCK_HZ);
-        if ticks < 0 {
+        let Some(timestamp) = self.clock.video(time) else {
             return false;
-        }
-        let timestamp = ticks as u32;
+        };
         match self.convert(frame, into) {
             Ok(()) => {
                 into.timestamp = timestamp;
@@ -332,8 +294,8 @@ impl Capture for WinCapture {
         }
     }
 
-    fn dropped(&self) -> Arc<AtomicU64> {
-        self.dropped.clone()
+    fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     fn ended(&self) -> bool {
@@ -346,16 +308,11 @@ impl Capture for WinCapture {
 
     fn next_audio(&mut self, into: &mut [f32; STEREO_FRAME]) -> Option<u32> {
         let audio = self.audio.as_mut()?;
-        loop {
-            while self.chunker.needs_more() {
-                let packet = audio.packets.pop().ok()?;
-                let ticks = self.zero.ticks(packet.at, SAMPLE_RATE);
-                self.chunker.push(ticks, packet.samples().iter().copied());
-            }
-            if let Some(timestamp) = self.chunker.take(into) {
-                return Some(timestamp);
-            }
-        }
+        self.clock.next_audio(into, |clock| {
+            let (at, samples) = audio.captured.pop()?;
+            clock.push_audio(at, samples);
+            Some(())
+        })
     }
 }
 
@@ -566,9 +523,6 @@ impl Converter {
 
     fn read_back(&self, into: &mut VideoFrame) -> windows::core::Result<()> {
         let (width, height) = (self.output.0 as usize, self.output.1 as usize);
-        if into.width != width || into.height != height {
-            *into = VideoFrame::blank(width, height);
-        }
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         // SAFETY: both textures are on `device`, and `mapped` outlives the call.
         unsafe {
@@ -585,13 +539,8 @@ impl Converter {
                 pitch * (height + height / 2),
             )
         };
-        copy_rows(data, pitch, width, &mut into.y);
-        copy_rows(
-            data.get(pitch * height..).unwrap_or_default(),
-            pitch,
-            width,
-            &mut into.uv,
-        );
+        let uv = data.get(pitch * height..).unwrap_or_default();
+        copy_nv12(into, (data, pitch), (uv, pitch), (width, height));
         // SAFETY: `staging` was mapped above, and `data` is not used past here.
         unsafe { self.context.Unmap(&self.staging, 0) };
         Ok(())
@@ -633,18 +582,6 @@ fn nv12_texture(
     texture.ok_or_else(|| windows::core::Error::from(E_POINTER))
 }
 
-/// Copies rows of `row_bytes` from a buffer with `pitch` bytes a row into a tightly packed one.
-fn copy_rows(src: &[u8], pitch: usize, row_bytes: usize, out: &mut [u8]) {
-    if row_bytes == 0 || pitch < row_bytes {
-        return;
-    }
-    for (dst, src) in out.chunks_exact_mut(row_bytes).zip(src.chunks(pitch)) {
-        if let Some(src) = src.get(..row_bytes) {
-            dst.copy_from_slice(src);
-        }
-    }
-}
-
 /// The largest rectangle with the aspect ratio of `source`, centred in `target`.
 fn fit(source: (u32, u32), target: (u32, u32)) -> RECT {
     let (sw, sh) = (u64::from(source.0.max(1)), u64::from(source.1.max(1)));
@@ -666,15 +603,16 @@ fn fit(source: (u32, u32), target: (u32, u32)) -> RECT {
 /// Everything played on the machine except throcc's own process tree, captured by
 /// process loopback on a thread of its own.
 struct LoopbackAudio {
-    packets: rtrb::Consumer<AudioPacket>,
+    /// Stamped with QPC time, in 100 ns units.
+    captured: AudioConsumer,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl LoopbackAudio {
     /// Starts the capture thread and waits until the stream runs or fails to open.
-    fn start(dropped: Arc<AtomicU64>) -> Result<Self, String> {
-        let (mut producer, packets) = rtrb::RingBuffer::new(AUDIO_RING);
+    fn start(dropped: Arc<AtomicU64>) -> Result<Self, CaptureError> {
+        let (mut producer, captured) = audio_ring();
         let stop = Arc::new(AtomicBool::new(false));
         let (ready, opened) = mpsc::sync_channel(1);
         let thread_stop = stop.clone();
@@ -699,19 +637,19 @@ impl LoopbackAudio {
                     unsafe { CoUninitialize() };
                 }
             })
-            .map_err(|e| e.to_string())?;
+            .map_err(failed)?;
         let mut audio = Self {
-            packets,
+            captured,
             stop,
             thread: Some(thread),
         };
         match opened.recv_timeout(AUDIO_SETUP_TIMEOUT) {
             Ok(Ok(())) => Ok(audio),
-            Ok(Err(e)) => Err(format!("process loopback: {e}")),
+            Ok(Err(e)) => Err(failed(format!("process loopback: {e}"))),
             Err(_) => {
                 // Activation can hang, and joining the thread would hang with it.
                 audio.thread.take();
-                Err("process loopback didn't start".into())
+                Err(failed("process loopback didn't start"))
             }
         }
     }
@@ -724,46 +662,6 @@ impl Drop for LoopbackAudio {
             thread.join().ok();
         }
     }
-}
-
-/// Up to 20 ms of interleaved stereo, taken at `at` in 100 ns QPC units.
-struct AudioPacket {
-    at: i64,
-    frames: usize,
-    samples: [f32; STEREO_FRAME],
-}
-
-impl AudioPacket {
-    fn samples(&self) -> &[f32] {
-        self.samples.get(..self.frames * 2).unwrap_or_default()
-    }
-}
-
-/// Queues `frames` frames of interleaved stereo taken at `at` as packets of at most 20 ms.
-/// Missing `samples` queue silence. Returns how many packets the full ring dropped.
-fn queue_audio(
-    producer: &mut rtrb::Producer<AudioPacket>,
-    at: i64,
-    frames: usize,
-    samples: Option<&[f32]>,
-) -> u64 {
-    let mut dropped = 0;
-    for start in (0..frames).step_by(FRAME) {
-        let count = (frames - start).min(FRAME);
-        let mut packet = AudioPacket {
-            at: at + (start as i128 * TIME_SPAN_HZ / i128::from(SAMPLE_RATE)) as i64,
-            frames: count,
-            samples: [0.0; STEREO_FRAME],
-        };
-        let source = samples.and_then(|s| s.get(start * 2..(start + count) * 2));
-        if let (Some(source), Some(target)) = (source, packet.samples.get_mut(..count * 2)) {
-            target.copy_from_slice(source);
-        }
-        if producer.push(packet).is_err() {
-            dropped += 1;
-        }
-    }
-    dropped
 }
 
 struct Loopback {
@@ -812,12 +710,7 @@ impl Loopback {
     }
 
     /// Moves captured audio into `producer` until `stop` is set or the stream fails.
-    fn run(
-        &self,
-        producer: &mut rtrb::Producer<AudioPacket>,
-        stop: &AtomicBool,
-        dropped: &AtomicU64,
-    ) {
+    fn run(&self, producer: &mut AudioProducer, stop: &AtomicBool, dropped: &AtomicU64) {
         while !stop.load(Ordering::Relaxed) {
             // SAFETY: the event handle is open for as long as `self`.
             if unsafe { WaitForSingleObject(*self.event, AUDIO_WAIT_MS) } != WAIT_OBJECT_0 {
@@ -832,7 +725,7 @@ impl Loopback {
 
     fn drain(
         &self,
-        producer: &mut rtrb::Producer<AudioPacket>,
+        producer: &mut AudioProducer,
         dropped: &AtomicU64,
     ) -> windows::core::Result<()> {
         // SAFETY: every out-pointer is a local that outlives its call, and each buffer is
@@ -849,9 +742,14 @@ impl Loopback {
                 // `frames` frames holds `2 * frames` aligned floats.
                 let samples = (!silent && !data.is_null())
                     .then(|| std::slice::from_raw_parts(data.cast::<f32>(), count * 2));
-                if flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32 == 0 {
-                    let lost = queue_audio(producer, qpc as i64, count, samples);
-                    dropped.fetch_add(lost, Ordering::Relaxed);
+                let at = qpc as i64;
+                let queued = flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32 != 0
+                    || match samples {
+                        Some(samples) => producer.push(at, count, samples.iter().copied()),
+                        None => producer.push(at, count, std::iter::repeat_n(0.0, count * 2)),
+                    };
+                if !queued {
+                    dropped.fetch_add(1, Ordering::Relaxed);
                 }
                 self.capture.ReleaseBuffer(frames)?;
             }
@@ -965,36 +863,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-
-    fn admitted(pacer: &mut Pacer, input_hz: i64, seconds: i64) -> Vec<i64> {
-        let step = i64::from(VIDEO_CLOCK_HZ) / input_hz;
-        (0..input_hz * seconds)
-            .map(|n| 1_000_000 + n * step)
-            .filter(|&ticks| pacer.admit(ticks))
-            .collect()
-    }
-
-    #[test]
-    fn pacer_thins_a_fast_display_to_the_share_rate() {
-        let kept = admitted(&mut Pacer::new(60), 144, 2);
-        assert!((118..=122).contains(&kept.len()), "{} frames", kept.len());
-        assert_eq!(kept[0], 1_000_000);
-    }
-
-    #[test]
-    fn pacer_keeps_every_frame_at_or_below_the_share_rate() {
-        assert_eq!(admitted(&mut Pacer::new(60), 60, 2).len(), 120);
-        assert_eq!(admitted(&mut Pacer::new(60), 30, 2).len(), 60);
-    }
-
-    #[test]
-    fn pacer_tolerates_jitter() {
-        let mut pacer = Pacer::new(60);
-        let kept = (0..120)
-            .filter(|n: &i64| pacer.admit(n * 1500 + if n % 2 == 0 { 150 } else { -150 }))
-            .count();
-        assert_eq!(kept, 120);
-    }
+    use crate::media::capture::frames_within;
 
     #[test]
     fn fit_letterboxes_and_pillarboxes() {
@@ -1012,39 +881,6 @@ mod tests {
     }
 
     #[test]
-    fn audio_is_queued_in_packets_of_at_most_20_ms() {
-        let (mut producer, mut packets) = rtrb::RingBuffer::new(4);
-        let samples: Vec<f32> = (0..2 * 1200).map(|i| i as f32).collect();
-        assert_eq!(
-            queue_audio(&mut producer, 5_000_000, 1200, Some(&samples)),
-            0
-        );
-        let first = packets.pop().unwrap();
-        let second = packets.pop().unwrap();
-        assert_eq!((first.at, first.frames), (5_000_000, 960));
-        assert_eq!((second.at, second.frames), (5_200_000, 240));
-        assert_eq!(second.samples()[0], 1920.0);
-        assert!(packets.pop().is_err());
-    }
-
-    #[test]
-    fn silent_audio_is_queued_as_zeros_and_a_full_ring_drops() {
-        let (mut producer, mut packets) = rtrb::RingBuffer::new(1);
-        assert_eq!(queue_audio(&mut producer, 0, 1920, None), 1);
-        let packet = packets.pop().unwrap();
-        assert_eq!(packet.samples().len(), STEREO_FRAME);
-        assert!(packet.samples().iter().all(|&s| s == 0.0));
-    }
-
-    #[test]
-    fn copy_rows_drops_the_pitch_padding() {
-        let src = [1, 2, 0, 0, 3, 4, 0, 0];
-        let mut out = [9; 4];
-        copy_rows(&src, 4, 2, &mut out);
-        assert_eq!(out, [1, 2, 3, 4]);
-    }
-
-    #[test]
     #[ignore = "needs a display and a GPU"]
     fn primary_monitor_delivers_frames() {
         let config = CaptureConfig {
@@ -1055,18 +891,10 @@ mod tests {
         };
         let mut capture = primary_monitor(config);
         let mut frame = VideoFrame::blank(1280, 720);
-        let mut timestamps = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while Instant::now() < deadline && timestamps.len() < 30 {
-            if capture.next_frame(&mut frame) {
-                timestamps.push(frame.timestamp);
-            } else {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        }
+        let timestamps = frames_within(&mut capture, &mut frame, 30);
         assert!(
             timestamps.len() >= 10,
-            "only {} frames in 3 s; move something on screen",
+            "only {} frames in 5 s; move something on screen",
             timestamps.len()
         );
         assert!(timestamps.windows(2).all(|w| w[1] > w[0]));

@@ -16,82 +16,45 @@ use pw::spa;
 use pw::spa::buffer::ChunkFlags;
 use pw::spa::param::ParamType;
 use pw::spa::param::audio::{AudioFormat, AudioInfoRaw};
-use pw::spa::pod::{Object, Pod};
+use pw::spa::pod::Object;
 use pw::spa::utils::dict::DictRef;
 use pw::spa::utils::{Direction, SpaTypes};
 use pw::stream::{Stream, StreamBox, StreamFlags};
 use pw::types::ObjectType;
 
-use super::{failed, serialize};
+use super::{failed, pods, serialize, spawn_ready};
 use crate::media::audio::SAMPLE_RATE;
 use crate::media::capture::CaptureError;
+use crate::media::capture::audio_ring::{AudioConsumer, AudioProducer, audio_ring};
 
-/// Captured samples waiting for the share thread: one second of stereo.
-const SAMPLE_RING: usize = SAMPLE_RATE as usize * 2;
-/// Captured buffers waiting for the share thread.
-const BUFFER_RING: usize = 64;
-
-/// Everything the desktop plays except this process's own playback, mixed to 48 kHz stereo.
+/// Everything the desktop plays except this process's own playback, mixed to 48 kHz stereo
+/// and stamped with PipeWire time in nanoseconds.
 pub(super) struct DesktopAudio {
-    buffers: rtrb::Consumer<Captured>,
-    samples: rtrb::Consumer<f32>,
+    captured: AudioConsumer,
     quit: pw::channel::Sender<()>,
     thread: Option<JoinHandle<()>>,
-}
-
-/// One buffer of interleaved stereo in the sample ring, stamped with its graph cycle's
-/// PipeWire time in nanoseconds.
-#[derive(Clone, Copy)]
-struct Captured {
-    at: i64,
-    frames: usize,
 }
 
 impl DesktopAudio {
     /// Counts buffers the process callback drops into `dropped`.
     pub(super) fn start(dropped: Arc<AtomicU64>) -> Result<Self, CaptureError> {
-        let (buffers_tx, buffers) = rtrb::RingBuffer::new(BUFFER_RING);
-        let (samples_tx, samples) = rtrb::RingBuffer::new(SAMPLE_RING);
+        let (producer, captured) = audio_ring();
         let state = AudioState {
-            buffers: buffers_tx,
-            samples: samples_tx,
+            captured: producer,
             dropped,
         };
         let (quit, quit_rx) = pw::channel::channel();
-        let (ready_tx, ready) = mpsc::sync_channel(1);
-        let thread = std::thread::Builder::new()
-            .name("throcc-pw-audio".into())
-            .spawn(move || {
-                if let Err(e) = run(state, quit_rx, &ready_tx) {
-                    ready_tx.send(Err(e)).ok();
-                }
-            })
-            .map_err(failed)?;
-        match ready.recv() {
-            Ok(Ok(())) => Ok(Self {
-                buffers,
-                samples,
-                quit,
-                thread: Some(thread),
-            }),
-            Ok(Err(e)) => {
-                thread.join().ok();
-                Err(e)
-            }
-            Err(_) => {
-                thread.join().ok();
-                Err(CaptureError::Failed(
-                    "the PipeWire audio thread stopped".into(),
-                ))
-            }
-        }
+        let thread = spawn_ready("throcc-pw-audio", move |ready| run(state, quit_rx, ready))?;
+        Ok(Self {
+            captured,
+            quit,
+            thread: Some(thread),
+        })
     }
 
     /// The oldest captured buffer, interleaved stereo, with its PipeWire time in nanoseconds.
     pub(super) fn pop(&mut self) -> Option<(i64, rtrb::chunks::ReadChunk<'_, f32>)> {
-        let Captured { at, frames } = self.buffers.pop().ok()?;
-        let samples = self.samples.read_chunk(frames * 2).ok()?;
-        Some((at, samples))
+        self.captured.pop()
     }
 }
 
@@ -105,8 +68,7 @@ impl Drop for DesktopAudio {
 }
 
 struct AudioState {
-    buffers: rtrb::Producer<Captured>,
-    samples: rtrb::Producer<f32>,
+    captured: AudioProducer,
     dropped: Arc<AtomicU64>,
 }
 
@@ -139,14 +101,12 @@ fn run(
         .register()
         .map_err(failed)?;
     let format = serialize(format_param())?;
-    let format = Pod::from_bytes(&format)
-        .ok_or_else(|| CaptureError::Failed("bad audio format parameters".into()))?;
     stream
         .connect(
             Direction::Input,
             None,
             StreamFlags::MAP_BUFFERS,
-            &mut [format],
+            &mut pods(std::slice::from_ref(&format))?,
         )
         .map_err(failed)?;
 
@@ -223,30 +183,14 @@ fn on_process(stream: &Stream, state: &mut AudioState) {
     else {
         return;
     };
-    let frames = bytes.len() / 8;
-    if frames == 0 {
-        return;
-    }
-    let slots = match state.samples.write_chunk_uninit(frames * 2) {
-        Ok(slots) if !state.buffers.is_full() => slots,
-        _ => {
-            state.dropped.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-    };
     let samples = bytes
         .as_chunks::<4>()
         .0
         .iter()
         .map(|b| f32::from_le_bytes(*b));
-    let written = slots.fill_from_iter(samples);
-    state
-        .buffers
-        .push(Captured {
-            at: time.now(),
-            frames: written / 2,
-        })
-        .ok();
+    if !state.captured.push(time.now(), bytes.len() / 8, samples) {
+        state.dropped.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// The stereo side a playback port's channel is mixed into.
@@ -278,14 +222,19 @@ struct Port {
     side: Option<Side>,
 }
 
+/// A client bound to read the process id in its info.
+struct BoundClient {
+    _proxy: Client,
+    _listener: ClientListener,
+    /// Whether it belongs to this process, once its info arrived.
+    ours: Option<bool>,
+}
+
 /// The playback streams in the PipeWire graph and the links from them into our capture node.
 struct Graph {
     own_name: String,
     own_node: Option<u32>,
-    /// Clients by id, bound to read the process id in their info.
-    clients: HashMap<u32, (Client, ClientListener)>,
-    /// Whether each client whose info arrived belongs to this process.
-    client_is_ours: HashMap<u32, bool>,
+    clients: HashMap<u32, BoundClient>,
     /// Playback stream nodes by id, with the client that made them.
     playback: HashMap<u32, Option<u32>>,
     ports: HashMap<u32, Port>,
@@ -299,7 +248,6 @@ impl Graph {
             own_name,
             own_node: None,
             clients: HashMap::new(),
-            client_is_ours: HashMap::new(),
             playback: HashMap::new(),
             ports: HashMap::new(),
             links: HashMap::new(),
@@ -311,7 +259,6 @@ impl Graph {
             self.own_node = None;
         }
         self.clients.remove(&id);
-        self.client_is_ours.remove(&id);
         self.playback.remove(&id);
         self.ports.remove(&id);
         self.links
@@ -321,7 +268,7 @@ impl Graph {
     /// Whether `node` is a playback stream of another process.
     fn is_source(&self, node: u32) -> bool {
         match self.playback.get(&node) {
-            Some(Some(client)) => self.client_is_ours.get(client) == Some(&false),
+            Some(Some(client)) => self.clients.get(client).and_then(|c| c.ours) == Some(false),
             Some(None) => true,
             None => false,
         }
@@ -384,7 +331,12 @@ fn on_global(
         ObjectType::Client => {
             if let Ok(client) = registry.bind::<Client, _>(global) {
                 let listener = watch_client(&client, global.id, Rc::downgrade(graph), core);
-                graph_ref.clients.insert(global.id, (client, listener));
+                let bound = BoundClient {
+                    _proxy: client,
+                    _listener: listener,
+                    ours: None,
+                };
+                graph_ref.clients.insert(global.id, bound);
             }
         }
         ObjectType::Node => {
@@ -433,7 +385,9 @@ fn watch_client(
             let ours = props.get(*pw::keys::APP_PROCESS_ID) == Some(own_pid.as_str());
             if let (Some(graph), Some(core)) = (graph.upgrade(), core.upgrade()) {
                 let mut graph = graph.borrow_mut();
-                graph.client_is_ours.insert(id, ours);
+                if let Some(client) = graph.clients.get_mut(&id) {
+                    client.ours = Some(ours);
+                }
                 graph.relink(&core);
             }
         })

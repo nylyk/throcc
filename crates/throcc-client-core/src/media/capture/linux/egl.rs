@@ -19,7 +19,7 @@ pub fn dmabuf_modifiers(fourcc: u32) -> Vec<u64> {
     static ALL: OnceLock<Vec<(u32, Vec<u64>)>> = OnceLock::new();
     ALL.get_or_init(|| {
         // SAFETY: `query` only calls EGL entry points with the signatures EGL defines.
-        unsafe { query(&super::DMABUF_FOURCCS) }.unwrap_or_default()
+        unsafe { query(&super::DMABUF_FORMATS.map(|(_, fourcc)| fourcc)) }.unwrap_or_default()
     })
     .iter()
     .find(|(known, _)| *known == fourcc)

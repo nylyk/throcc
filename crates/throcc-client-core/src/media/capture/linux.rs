@@ -34,12 +34,10 @@ use pw::spa::utils::{
     Choice, ChoiceEnum, ChoiceFlags, Direction, Fraction, Id, Rectangle, SpaTypes,
 };
 use pw::stream::{Stream, StreamBox, StreamFlags};
-use throcc_proto::frame::{VIDEO_CLOCK_HZ, timestamp_before};
 use tracing::warn;
 
-use super::clock::{AudioChunker, ShareZero};
-use super::{Capture, CaptureConfig, CaptureError};
-use crate::media::audio::SAMPLE_RATE;
+use super::clock::ShareClock;
+use super::{Capture, CaptureConfig, CaptureError, copy_nv12, failed, resize};
 use crate::media::share_audio::STEREO_FRAME;
 use crate::media::video::frame::VideoFrame;
 use crate::settings::Settings;
@@ -58,104 +56,42 @@ const DMABUF_FORMATS: [(VideoFormat, u32); 4] = [
     (VideoFormat::RGBx, fourcc(b"XB24")),
     (VideoFormat::RGBA, fourcc(b"AB24")),
 ];
-const DMABUF_FOURCCS: [u32; 4] = [
-    DMABUF_FORMATS[0].1,
-    DMABUF_FORMATS[1].1,
-    DMABUF_FORMATS[2].1,
-    DMABUF_FORMATS[3].1,
-];
 const MAX_SIDE: u32 = 8192;
-const NANOS: i128 = 1_000_000_000;
+const NANOS: i64 = 1_000_000_000;
 
-/// A portal screen cast: the session the person picked and the PipeWire stream reading it.
-pub struct LinuxCapture {
-    stream: PipeWireCapture,
-    session: Session<Screencast>,
-}
-
-pub fn start(config: CaptureConfig) -> Result<LinuxCapture, CaptureError> {
+/// Shows the portal's picker, or reuses the choice kept from last time, and reads the
+/// stream it shares.
+pub(super) fn start(config: CaptureConfig) -> Result<PipeWireCapture, CaptureError> {
     let dir = crate::keystore::config_dir().ok();
     let token = dir
         .as_deref()
         .and_then(|dir| Settings::load(dir).ok()?.screencast_restore_token);
-    let shared = async_io::block_on(share(token.as_deref()))?;
-    if let (Some(dir), Some(token)) = (&dir, &shared.token) {
-        save_token(dir, token);
-    }
-    match PipeWireCapture::start(shared.node, Some(shared.fd), config) {
-        Ok(stream) => Ok(LinuxCapture {
-            stream,
-            session: shared.session,
-        }),
-        Err(e) => {
-            async_io::block_on(shared.session.close()).ok();
-            Err(e)
+    async_io::block_on(async {
+        let portal = Screencast::new().await.map_err(portal_error)?;
+        let session = portal
+            .create_session(Default::default())
+            .await
+            .map_err(portal_error)?;
+        let started =
+            pick(&portal, &session, token.as_deref())
+                .await
+                .and_then(|(node, fd, kept)| {
+                    if let (Some(dir), Some(kept)) = (&dir, &kept) {
+                        save_token(dir, kept);
+                    }
+                    PipeWireCapture::start(node, Some(fd), config)
+                });
+        match started {
+            Ok(mut capture) => {
+                capture.portal = Some(session);
+                Ok(capture)
+            }
+            Err(e) => {
+                session.close().await.ok();
+                Err(e)
+            }
         }
-    }
-}
-
-impl Capture for LinuxCapture {
-    fn next_frame(&mut self, into: &mut VideoFrame) -> bool {
-        self.stream.next_frame(into)
-    }
-
-    fn next_dmabuf(&mut self) -> Option<&DmaBuf> {
-        self.stream.next_dmabuf()
-    }
-
-    fn refuse_dmabuf(&mut self, modifier: Option<u64>) {
-        self.stream.refuse_dmabuf(modifier);
-    }
-
-    fn dropped(&self) -> Arc<AtomicU64> {
-        self.stream.dropped()
-    }
-
-    fn ended(&self) -> bool {
-        self.stream.ended()
-    }
-
-    fn captures_audio(&self) -> bool {
-        self.stream.captures_audio()
-    }
-
-    fn next_audio(&mut self, into: &mut [f32; STEREO_FRAME]) -> Option<u32> {
-        self.stream.next_audio(into)
-    }
-}
-
-impl Drop for LinuxCapture {
-    fn drop(&mut self) {
-        async_io::block_on(self.session.close()).ok();
-    }
-}
-
-struct Shared {
-    session: Session<Screencast>,
-    node: u32,
-    fd: OwnedFd,
-    token: Option<String>,
-}
-
-/// Shows the portal's picker, or reuses the choice behind `token`, and opens its stream.
-async fn share(token: Option<&str>) -> Result<Shared, CaptureError> {
-    let portal = Screencast::new().await.map_err(portal_error)?;
-    let session = portal
-        .create_session(Default::default())
-        .await
-        .map_err(portal_error)?;
-    match pick(&portal, &session, token).await {
-        Ok((node, fd, token)) => Ok(Shared {
-            session,
-            node,
-            fd,
-            token,
-        }),
-        Err(e) => {
-            session.close().await.ok();
-            Err(e)
-        }
-    }
+    })
 }
 
 async fn pick(
@@ -217,97 +153,72 @@ fn save_token(dir: &Path, token: &str) {
     }
 }
 
-fn failed(e: impl std::fmt::Display) -> CaptureError {
-    CaptureError::Failed(e.to_string())
-}
-
 /// A PipeWire video stream read on its own thread and main loop, with the desktop's audio
 /// when the config asks for it.
-pub(crate) struct PipeWireCapture {
+pub(super) struct PipeWireCapture {
     filled: rtrb::Consumer<Slot>,
     free: rtrb::Producer<Slot>,
     dropped: Arc<AtomicU64>,
     ended: Arc<AtomicBool>,
     control: pw::channel::Sender<Control>,
     thread: Option<JoinHandle<()>>,
+    /// The portal session that shares the stream, closed when capturing stops.
+    portal: Option<Session<Screencast>>,
     /// The frame in GPU memory last handed out, held until the next one is asked for.
     current: Option<HeldDmaBuf>,
+    /// Modifiers of frames in GPU memory the share refused, or `None` for all of them.
+    refused: Vec<Option<u64>>,
     audio: Option<DesktopAudio>,
-    /// PipeWire time, in nanoseconds, that both media clocks count from.
-    zero: ShareZero,
-    chunker: AudioChunker,
-    last_frame: Option<u32>,
+    /// Counts from CLOCK_MONOTONIC, in nanoseconds, which PipeWire's times are on too.
+    clock: ShareClock,
 }
 
 impl PipeWireCapture {
     /// Connects to `node`, on the remote behind `fd` or on the default PipeWire daemon.
-    pub(crate) fn start(
-        node: u32,
-        fd: Option<OwnedFd>,
-        config: CaptureConfig,
-    ) -> Result<Self, CaptureError> {
+    fn start(node: u32, fd: Option<OwnedFd>, config: CaptureConfig) -> Result<Self, CaptureError> {
         let (mut free, free_rx) = rtrb::RingBuffer::new(POOL);
         let (filled_tx, filled) = rtrb::RingBuffer::new(POOL);
         for _ in 0..POOL {
             free.push(Slot::new(config.width * config.height * 4)).ok();
         }
         let dropped = Arc::new(AtomicU64::new(0));
-        let counted = dropped.clone();
         let ended = Arc::new(AtomicBool::new(false));
-        let stopped = ended.clone();
         let (control, control_rx) = pw::channel::channel();
-        let (ready_tx, ready) = mpsc::sync_channel(1);
-        let thread = std::thread::Builder::new()
-            .name("throcc-pipewire".into())
-            .spawn(move || {
-                let state = StreamState {
-                    layout: None,
-                    free: free_rx,
-                    filled: filled_tx,
-                    spare: None,
-                    dropped: counted,
-                    lent: Rc::default(),
-                };
-                if let Err(e) = run(node, fd, config, state, stopped, control_rx, &ready_tx) {
-                    ready_tx.send(Err(e)).ok();
-                }
-            })
-            .map_err(failed)?;
-        let audio = config
-            .audio
-            .then(|| DesktopAudio::start(dropped.clone()))
-            .and_then(|audio| {
-                audio
-                    .inspect_err(|e| warn!("sharing without sound: {e}"))
-                    .ok()
-            });
-        match ready.recv() {
-            Ok(Ok(())) => Ok(Self {
-                filled,
-                free,
-                dropped,
-                ended,
-                control,
-                thread: Some(thread),
-                current: None,
-                audio,
-                zero: ShareZero::new(NANOS as i64),
-                chunker: AudioChunker::default(),
-                last_frame: None,
-            }),
-            Ok(Err(e)) => {
-                thread.join().ok();
-                Err(e)
-            }
-            Err(_) => {
-                thread.join().ok();
-                Err(CaptureError::Failed("the PipeWire thread stopped".into()))
-            }
-        }
+        let counted = dropped.clone();
+        let stopped = ended.clone();
+        let thread = spawn_ready("throcc-pipewire", move |ready| {
+            let state = StreamState {
+                layout: None,
+                free: free_rx,
+                filled: filled_tx,
+                spare: None,
+                dropped: counted,
+                lent: Rc::default(),
+            };
+            run(node, fd, config, state, stopped, control_rx, ready)
+        })?;
+        let audio = if config.audio {
+            DesktopAudio::start(dropped.clone())
+                .inspect_err(|e| warn!("sharing without sound: {e}"))
+                .ok()
+        } else {
+            None
+        };
+        Ok(Self {
+            filled,
+            free,
+            dropped,
+            ended,
+            control,
+            thread: Some(thread),
+            portal: None,
+            current: None,
+            refused: Vec::new(),
+            audio,
+            clock: ShareClock::new(NANOS),
+        })
     }
-}
 
-impl PipeWireCapture {
     /// Hands the frame in GPU memory last given out back to the PipeWire thread.
     fn give_back(&mut self) {
         if let Some(held) = self.current.take() {
@@ -318,33 +229,74 @@ impl PipeWireCapture {
     fn next_is_dmabuf(&self) -> bool {
         self.filled.peek().is_ok_and(|slot| slot.dmabuf.is_some())
     }
+
+    /// The oldest captured frame if it is in GPU memory, its slot back in the pool.
+    fn pop_dmabuf(&mut self) -> Option<HeldDmaBuf> {
+        if !self.next_is_dmabuf() {
+            return None;
+        }
+        let mut slot = self.filled.pop().ok()?;
+        let held = slot.dmabuf.take();
+        self.free.push(slot).ok();
+        held
+    }
+
+    fn is_refused(&self, frame: &DmaBuf) -> bool {
+        self.refused
+            .iter()
+            .any(|refused| refused.is_none_or(|modifier| modifier == frame.modifier))
+    }
+}
+
+/// Runs `body` on a thread named `name` and waits until it sends `Ok` through its argument
+/// or stops. Returns the thread, or the error it stopped with.
+fn spawn_ready(
+    name: &str,
+    body: impl FnOnce(&mpsc::SyncSender<Result<(), CaptureError>>) -> Result<(), CaptureError>
+    + Send
+    + 'static,
+) -> Result<JoinHandle<()>, CaptureError> {
+    let (ready_tx, ready) = mpsc::sync_channel(1);
+    let thread = std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            if let Err(e) = body(&ready_tx) {
+                ready_tx.send(Err(e)).ok();
+            }
+        })
+        .map_err(failed)?;
+    let stopped = || CaptureError::Failed(format!("the {name} thread stopped"));
+    match ready.recv().unwrap_or_else(|_| Err(stopped())) {
+        Ok(()) => Ok(thread),
+        Err(e) => {
+            thread.join().ok();
+            Err(e)
+        }
+    }
 }
 
 impl Capture for PipeWireCapture {
     fn next_dmabuf(&mut self) -> Option<&DmaBuf> {
         self.give_back();
-        while self.next_is_dmabuf() {
-            let Ok(mut slot) = self.filled.pop() else {
-                break;
+        while let Some(held) = self.pop_dmabuf() {
+            let timestamp = if self.is_refused(&held.frame) {
+                None
+            } else {
+                self.clock.video(held.at)
             };
-            let held = slot.dmabuf.take();
-            self.free.push(slot).ok();
-            let Some(mut held) = held else {
-                continue;
-            };
-            let ticks = self.zero.ticks(held.at, VIDEO_CLOCK_HZ);
-            if ticks < 0 {
+            let Some(timestamp) = timestamp else {
                 self.control.send(Control::Return(held.lease)).ok();
                 continue;
-            }
-            held.frame.timestamp = strictly_after(self.last_frame, ticks as u32);
-            self.last_frame = Some(held.frame.timestamp);
-            return Some(&self.current.insert(held).frame);
+            };
+            let held = self.current.insert(held);
+            held.frame.timestamp = timestamp;
+            return Some(&held.frame);
         }
         None
     }
 
     fn refuse_dmabuf(&mut self, modifier: Option<u64>) {
+        self.refused.push(modifier);
         self.control.send(Control::Refuse(modifier)).ok();
     }
 
@@ -353,15 +305,13 @@ impl Capture for PipeWireCapture {
         while !self.next_is_dmabuf()
             && let Ok(mut slot) = self.filled.pop()
         {
-            let picture = slot.picture.take();
-            let stamped = picture.as_ref().and_then(|picture| {
-                let ticks = self.zero.ticks(picture.at, VIDEO_CLOCK_HZ);
-                (ticks >= 0).then_some((picture, ticks as u32))
-            });
+            let stamped = slot
+                .picture
+                .take()
+                .and_then(|picture| Some((picture, self.clock.video(picture.at)?)));
             if let Some((picture, timestamp)) = stamped {
-                convert(&slot.bytes, picture, into);
-                into.timestamp = strictly_after(self.last_frame, timestamp);
-                self.last_frame = Some(into.timestamp);
+                convert(&slot.bytes, &picture, into);
+                into.timestamp = timestamp;
             }
             if slot.bytes.len() < slot.needed {
                 slot.bytes.resize(slot.needed, 0);
@@ -374,8 +324,8 @@ impl Capture for PipeWireCapture {
         false
     }
 
-    fn dropped(&self) -> Arc<AtomicU64> {
-        self.dropped.clone()
+    fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     fn ended(&self) -> bool {
@@ -388,24 +338,11 @@ impl Capture for PipeWireCapture {
 
     fn next_audio(&mut self, into: &mut [f32; STEREO_FRAME]) -> Option<u32> {
         let audio = self.audio.as_mut()?;
-        loop {
-            while self.chunker.needs_more() {
-                let (at, samples) = audio.pop()?;
-                let ticks = self.zero.ticks(at, SAMPLE_RATE);
-                self.chunker.push(ticks, samples);
-            }
-            if let Some(timestamp) = self.chunker.take(into) {
-                return Some(timestamp);
-            }
-        }
-    }
-}
-
-/// `timestamp`, or the tick after `last` when it isn't later.
-fn strictly_after(last: Option<u32>, timestamp: u32) -> u32 {
-    match last {
-        Some(last) if !timestamp_before(last, timestamp) => last.wrapping_add(1),
-        _ => timestamp,
+        self.clock.next_audio(into, |clock| {
+            let (at, samples) = audio.pop()?;
+            clock.push_audio(at, samples);
+            Some(())
+        })
     }
 }
 
@@ -417,11 +354,14 @@ fn monotonic_nanos() -> i64 {
     };
     // SAFETY: clock_gettime only writes the timespec it is given.
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
-    now.tv_sec * NANOS as i64 + now.tv_nsec
+    now.tv_sec * NANOS + now.tv_nsec
 }
 
 impl Drop for PipeWireCapture {
     fn drop(&mut self) {
+        if let Some(portal) = self.portal.take() {
+            async_io::block_on(portal.close()).ok();
+        }
         self.control.send(Control::Quit).ok();
         if let Some(thread) = self.thread.take() {
             thread.join().ok();
@@ -1065,7 +1005,7 @@ pub struct DmaBufPlane {
 struct HeldDmaBuf {
     lease: Lease,
     frame: DmaBuf,
-    /// PipeWire time of the graph cycle that delivered the picture, in nanoseconds.
+    /// CLOCK_MONOTONIC when the picture was taken from the stream, in nanoseconds.
     at: i64,
 }
 
@@ -1084,7 +1024,7 @@ const fn fourcc(code: &[u8; 4]) -> u32 {
 struct Picture {
     layout: Layout,
     planes: [Plane; 2],
-    /// PipeWire time of the graph cycle that delivered the picture, in nanoseconds.
+    /// CLOCK_MONOTONIC when the picture was taken from the stream, in nanoseconds.
     at: i64,
 }
 
@@ -1155,35 +1095,18 @@ fn convert(bytes: &[u8], picture: &Picture, into: &mut VideoFrame) {
         height,
         ..
     } = picture.layout;
-    if into.width != width || into.height != height {
-        *into = VideoFrame::blank(width, height);
-    }
     let [y, uv] = picture
         .planes
-        .map(|plane| Some((bytes.get(plane.offset..)?, plane.stride)));
-    let Some((y, y_stride)) = y else {
-        return;
-    };
+        .map(|plane| (bytes.get(plane.offset..).unwrap_or_default(), plane.stride));
     match format {
-        Format::Nv12 => {
-            copy_rows(y, y_stride, width, &mut into.y);
-            if let Some((uv, uv_stride)) = uv {
-                copy_rows(uv, uv_stride, width, &mut into.uv);
-            }
+        Format::Nv12 => copy_nv12(into, y, uv, (width, height)),
+        Format::Bgr => {
+            resize(into, width, height);
+            rgb_to_nv12(y.0, y.1, into, |[b, g, r, _]| [r, g, b]);
         }
-        Format::Bgr => rgb_to_nv12(y, y_stride, into, |[b, g, r, _]| [r, g, b]),
-        Format::Rgb => rgb_to_nv12(y, y_stride, into, |[r, g, b, _]| [r, g, b]),
-    }
-}
-
-/// Copies rows of `row_bytes` from `src`, `stride` apart, into the tightly packed `dst`.
-fn copy_rows(src: &[u8], stride: usize, row_bytes: usize, dst: &mut [u8]) {
-    if stride < row_bytes || row_bytes == 0 {
-        return;
-    }
-    for (src, dst) in src.chunks(stride).zip(dst.chunks_exact_mut(row_bytes)) {
-        if let Some(src) = src.get(..row_bytes) {
-            dst.copy_from_slice(src);
+        Format::Rgb => {
+            resize(into, width, height);
+            rgb_to_nv12(y.0, y.1, into, |[r, g, b, _]| [r, g, b]);
         }
     }
 }
@@ -1228,24 +1151,21 @@ fn luma_row(pixels: &[[u8; 4]], out: &mut [u8], rgb: impl Fn([u8; 4]) -> [u8; 3]
     }
 }
 
-/// Writes one interleaved U, V pair per 2×2 block of `top` and `bottom`.
+/// Writes one interleaved U, V pair per 2×2 block of `top` and `bottom`, which are rows
+/// of the same width.
 fn chroma_row(
     top: &[[u8; 4]],
     bottom: &[[u8; 4]],
     out: &mut [u8],
     rgb: impl Fn([u8; 4]) -> [u8; 3],
 ) {
-    let pairs = top.chunks(2).zip(bottom.chunks(2));
-    for ((top, bottom), uv) in pairs.zip(out.as_chunks_mut::<2>().0) {
-        let mut sum = [0i32; 3];
-        let mut count = 0i32;
-        for pixel in top.iter().chain(bottom) {
-            for (sum, value) in sum.iter_mut().zip(rgb(*pixel)) {
-                *sum += i32::from(value);
-            }
-            count += 1;
-        }
-        let [r, g, b] = sum.map(|sum| (sum + count / 2) / count.max(1));
+    let blocks = top.as_chunks::<2>().0.iter().zip(bottom.as_chunks::<2>().0);
+    for (([tl, tr], [bl, br]), uv) in blocks.zip(out.as_chunks_mut::<2>().0) {
+        let [r, g, b] = [*tl, *tr, *bl, *br]
+            .map(|pixel| rgb(pixel).map(i32::from))
+            .into_iter()
+            .fold([0; 3], |[r, g, b], [pr, pg, pb]| [r + pr, g + pg, b + pb])
+            .map(|sum| (sum + 2) >> 2);
         let chroma = |kr: i32, kg: i32, kb: i32| {
             ((kr * r + kg * g + kb * b + 128) >> 8)
                 .saturating_add(128)
@@ -1266,15 +1186,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-
-    #[test]
-    fn frame_timestamps_only_move_forward() {
-        assert_eq!(strictly_after(None, 0), 0);
-        assert_eq!(strictly_after(Some(0), 0), 1);
-        assert_eq!(strictly_after(Some(10), 4), 11);
-        assert_eq!(strictly_after(Some(10), 1500), 1500);
-        assert_eq!(strictly_after(Some(u32::MAX), 3), 3);
-    }
+    use crate::media::audio::SAMPLE_RATE;
+    use crate::media::capture::frames_within;
+    use throcc_proto::frame::VIDEO_CLOCK_HZ;
 
     #[test]
     fn the_monotonic_clock_advances() {
@@ -1681,19 +1595,6 @@ mod tests {
         }
     }
 
-    fn frames_within(capture: &mut dyn Capture, frame: &mut VideoFrame, want: usize) -> Vec<u32> {
-        let mut timestamps = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline && timestamps.len() < want {
-            if capture.next_frame(frame) {
-                timestamps.push(frame.timestamp);
-            } else {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        }
-        timestamps
-    }
-
     #[test]
     #[ignore = "needs a PipeWire daemon and a session manager"]
     fn pipewire_source_delivers_converted_frames() {
@@ -1718,11 +1619,11 @@ mod tests {
                 .chunks(2)
                 .all(|uv| uv[0].abs_diff(99) <= 1 && uv[1] == 255)
         );
-        let resized = capture.dropped().load(Ordering::Relaxed);
+        let resized = capture.dropped();
         assert!(resized > 0, "a 32×24 pool fits no 64×48 frame");
 
         std::thread::sleep(Duration::from_millis(500));
-        assert!(capture.dropped().load(Ordering::Relaxed) > resized);
+        assert!(capture.dropped() > resized);
         assert!(frames_within(&mut capture, &mut frame, 10).len() >= 10);
         drop(capture);
     }

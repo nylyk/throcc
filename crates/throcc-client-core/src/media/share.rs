@@ -6,12 +6,11 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use throcc_proto::frame::{VIDEO_CLOCK_HZ, timestamp_before};
 use throcc_proto::messages::{Recovery, Share, ShareConfig};
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 
-use super::capture::{Capture, CaptureConfig, CaptureError};
+use super::capture::{Capture, CaptureConfig, CaptureError, FrameLimiter};
 use super::engine::{Kind, MediaEngine, Outgoing, Received};
 use super::share_audio::{Playout, STEREO_FRAME, ShareAudioEncoder, due_frames};
 use super::video::decode::{Decoder, MAX_PIXELS};
@@ -98,41 +97,6 @@ impl RecoveryPacer {
         let kind = self.wanted.take()?;
         self.last = Some(now);
         Some(kind)
-    }
-}
-
-/// Lets captured frames through at no more than the share's frame rate on average,
-/// judged by their media timestamps.
-struct FrameLimiter {
-    interval: u32,
-    next: Option<u32>,
-}
-
-impl FrameLimiter {
-    fn new(fps: u32) -> Self {
-        Self {
-            interval: VIDEO_CLOCK_HZ / fps.max(1),
-            next: None,
-        }
-    }
-
-    fn admits(&mut self, timestamp: u32) -> bool {
-        let Some(next) = self.next else {
-            self.next = Some(timestamp.wrapping_add(self.interval));
-            return true;
-        };
-        // A frame up to a quarter interval early still counts, so a source running at
-        // exactly the share's rate loses nothing to capture jitter.
-        if timestamp_before(timestamp, next.wrapping_sub(self.interval / 4)) {
-            return false;
-        }
-        let on_schedule = next.wrapping_add(self.interval);
-        self.next = Some(if timestamp_before(timestamp, on_schedule) {
-            on_schedule
-        } else {
-            timestamp.wrapping_add(self.interval)
-        });
-        true
     }
 }
 
@@ -230,8 +194,6 @@ impl ShareSender {
                 preview: preview.clone(),
             },
             tally: Tally::new(),
-            #[cfg(target_os = "linux")]
-            refused: Vec::new(),
             #[cfg(target_os = "macos")]
             pixel_buffers,
         };
@@ -285,9 +247,6 @@ struct Sending {
     self_view: watch::Sender<Option<Arc<VideoFrame>>>,
     admission: Admission,
     tally: Tally,
-    /// Frames in GPU memory the share no longer takes.
-    #[cfg(target_os = "linux")]
-    refused: Vec<Refusal>,
     /// Whether captured pixel buffers go to the encoder uncopied.
     #[cfg(target_os = "macos")]
     pixel_buffers: bool,
@@ -340,11 +299,6 @@ impl Sending {
             return false;
         };
         let modifier = frame.modifier;
-        if self.refused.contains(&Refusal::All)
-            || self.refused.contains(&Refusal::Modifier(modifier))
-        {
-            return true;
-        }
         let Some(self_view) = self.admission.admit(frame.timestamp) else {
             return true;
         };
@@ -363,7 +317,6 @@ impl Sending {
             Err(e) => match refusal(&e, modifier) {
                 Some(refused) => {
                     warn!(?refused, "falling back to frames in shared memory: {e}");
-                    self.refused.push(refused);
                     self.capture.refuse_dmabuf(match refused {
                         Refusal::Modifier(modifier) => Some(modifier),
                         Refusal::All => None,
@@ -622,64 +575,6 @@ mod refusal_tests {
 #[cfg(test)]
 mod pacer_tests {
     use super::*;
-
-    /// How many of `count` frames at `source_fps` from `start` a 60 fps limiter admits.
-    fn admitted(limiter: &mut FrameLimiter, start: u32, source_fps: u32, count: u32) -> u32 {
-        (0..count)
-            .filter(|n| {
-                let offset = u64::from(*n) * u64::from(VIDEO_CLOCK_HZ) / u64::from(source_fps);
-                limiter.admits(start.wrapping_add(offset as u32))
-            })
-            .count() as u32
-    }
-
-    #[test]
-    fn a_faster_source_is_cut_to_the_share_rate() {
-        for source_fps in [75, 90, 120, 144, 165, 180, 240] {
-            let mut limiter = FrameLimiter::new(60);
-            let kept = admitted(&mut limiter, 0, source_fps, source_fps * 10);
-            assert!(
-                (599..=601).contains(&kept),
-                "{source_fps} fps kept {kept} in 10 s"
-            );
-        }
-    }
-
-    #[test]
-    fn a_source_at_or_below_the_share_rate_loses_nothing() {
-        for source_fps in [24, 30, 59, 60] {
-            let mut limiter = FrameLimiter::new(60);
-            let kept = admitted(&mut limiter, 0, source_fps, source_fps * 10);
-            assert_eq!(kept, source_fps * 10, "{source_fps} fps");
-        }
-        let mut limiter = FrameLimiter::new(60);
-        let jitter = [0, 300, -300, 200, -200, 0];
-        let kept = (0..600i64)
-            .filter(|n| {
-                let at = n * 1500 + jitter[*n as usize % jitter.len()] + 1000;
-                limiter.admits(at as u32)
-            })
-            .count();
-        assert_eq!(kept, 600);
-    }
-
-    #[test]
-    fn a_pause_does_not_let_a_burst_through_afterwards() {
-        let mut limiter = FrameLimiter::new(60);
-        admitted(&mut limiter, 0, 60, 60);
-        let kept = admitted(&mut limiter, 5 * VIDEO_CLOCK_HZ, 240, 240);
-        assert!(
-            (60..=61).contains(&kept),
-            "kept {kept} in the second after a pause"
-        );
-    }
-
-    #[test]
-    fn the_limit_holds_across_timestamp_wrap() {
-        let mut limiter = FrameLimiter::new(60);
-        let kept = admitted(&mut limiter, u32::MAX - VIDEO_CLOCK_HZ, 180, 360);
-        assert!((119..=121).contains(&kept), "kept {kept} in 2 s");
-    }
 
     #[test]
     fn recoveries_merge_until_a_second_has_passed() {
