@@ -186,6 +186,7 @@ impl Render for PopOut {
                     seed: user.0,
                     picture: sharer_picture,
                     details: details.into(),
+                    width: window.viewport_size().width,
                     title_inset: if fullscreen { px(0.) } else { TRAFFIC_LIGHTS },
                     buttons,
                     controls,

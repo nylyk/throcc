@@ -17,9 +17,7 @@ const TOO_SLOW_HINT: &str = "Frames are dropping. Ask the sharer for a lower bit
 /// Where a share is drawn, which sizes its overlay.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Place {
-    /// A small tile in the strip under a focused share.
-    Strip,
-    /// A tile in the room's grid, or the focused share on its stage.
+    /// A tile in the room's grid, on its stage or in the strip under it.
     Tile,
     /// Fullscreen, or a window of its own.
     Player,
@@ -34,18 +32,24 @@ struct Metrics {
     name: theme::TextStyle,
     button: Size,
     warning_icon: Pixels,
+    warning_text: theme::TextStyle,
+    details_min_width: Pixels,
+    warning_text_min_width: Pixels,
 }
 
 impl Place {
     fn metrics(self) -> Metrics {
         match self {
-            Place::Strip | Place::Tile => Metrics {
+            Place::Tile => Metrics {
                 inset: px(8.),
                 label_height: px(28.),
                 avatar: px(18.),
                 name: theme::CALLOUT,
                 button: Size::Medium,
                 warning_icon: px(14.),
+                warning_text: theme::CAPTION,
+                details_min_width: px(240.),
+                warning_text_min_width: px(360.),
             },
             Place::Player => Metrics {
                 inset: px(16.),
@@ -54,6 +58,9 @@ impl Place {
                 name: theme::BODY,
                 button: Size::Large,
                 warning_icon: px(16.),
+                warning_text: theme::CALLOUT,
+                details_min_width: px(320.),
+                warning_text_min_width: px(520.),
             },
         }
     }
@@ -66,6 +73,8 @@ pub struct ShareOverlay {
     pub seed: u64,
     pub picture: Option<Arc<RenderImage>>,
     pub details: SharedString,
+    /// How wide the share is drawn, which decides how much of each label fits.
+    pub width: Pixels,
     /// Room kept clear left of the name, for the macOS traffic lights.
     pub title_inset: Pixels,
     pub buttons: Vec<Button>,
@@ -112,7 +121,7 @@ impl ShareOverlay {
     }
 
     fn title(&self, m: &Metrics) -> Div {
-        let details = (self.place != Place::Strip && !self.details.is_empty())
+        let details = (self.width >= m.details_min_width && !self.details.is_empty())
             .then(|| caption(self.details.clone()).min_w_0().truncate());
         pill()
             .min_w_0()
@@ -132,13 +141,9 @@ impl ShareOverlay {
     }
 
     fn warning(&self, m: &Metrics) -> Stateful<Div> {
-        let label = (self.place != Place::Strip).then(|| {
+        let label = (self.width >= m.warning_text_min_width).then(|| {
             div()
-                .typeset(if self.place == Place::Player {
-                    theme::CALLOUT
-                } else {
-                    theme::CAPTION
-                })
+                .typeset(m.warning_text)
                 .font_weight(FontWeight::MEDIUM)
                 .whitespace_nowrap()
                 .child(TOO_SLOW)

@@ -83,6 +83,7 @@ fn fullscreen(
             .map(|c| share_label(&c))
             .unwrap_or_default()
             .into(),
+        width: window.viewport_size().width,
         title_inset: if window.is_fullscreen() {
             px(0.)
         } else {
@@ -728,7 +729,7 @@ fn grid(
                 .flex_none()
                 .w(tile_size.width)
                 .h(tile_size.height)
-                .child(tile(app, t, Layout::Grid, tile_size.height, window, cx))
+                .child(tile(app, t, Layout::Grid, tile_size, window, cx))
         }))
         .into_any_element()
 }
@@ -754,7 +755,7 @@ fn focused(
         STRIP_HEIGHT + TILE_GAP
     };
     let stage_size = fit_aspect(size(area.width, area.height - strip_room), aspect);
-    let stage = focused.map(|t| tile(app, t, Layout::Stage, stage_size.height, window, cx));
+    let stage = focused.map(|t| tile(app, t, Layout::Stage, stage_size, window, cx));
     let fitting_width = (area.width - TILE_GAP * others.len().saturating_sub(1) as f32)
         / others.len().max(1) as f32;
     let tile_width = fitting_width
@@ -776,7 +777,7 @@ fn focused(
                     .flex_none()
                     .w(strip_tile.width)
                     .h(strip_tile.height)
-                    .child(tile(app, t, Layout::Strip, STRIP_HEIGHT, window, cx))
+                    .child(tile(app, t, Layout::Strip, strip_tile, window, cx))
             }))
     });
     div()
@@ -815,7 +816,7 @@ fn tile(
     app: &mut ThroccApp,
     t: &Tile,
     layout: Layout,
-    height: Pixels,
+    size: Area<Pixels>,
     window: &mut Window,
     cx: &mut Context<ThroccApp>,
 ) -> AnyElement {
@@ -850,7 +851,7 @@ fn tile(
     if !t.shows_stream {
         return frame
             .bg(theme::surface())
-            .child(person_card(t, height, compact, cx))
+            .child(person_card(t, size.height, compact, cx))
             .children(speaking_ring)
             .into_any_element();
     }
@@ -886,7 +887,7 @@ fn tile(
         pop_out.into_iter().chain([stop, fullscreen]).collect()
     };
     let overlay = ShareOverlay {
-        place: if compact { Place::Strip } else { Place::Tile },
+        place: Place::Tile,
         name: t.person.name.clone().into(),
         seed: user.0,
         picture: t.picture.clone(),
@@ -896,6 +897,7 @@ fn tile(
             .map(|c| share_label(&c))
             .unwrap_or_default()
             .into(),
+        width: size.width,
         title_inset: px(0.),
         buttons,
         controls: app.shows_overlay(user),
