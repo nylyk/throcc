@@ -170,7 +170,8 @@
               FFMPEG_BINDING_PATH = "${ffmpeg}/binding.rs";
             }
             // lib.optionalAttrs stdenv.hostPlatform.isDarwin {
-              RUSTFLAGS = "-C linker=${xcode}/bin/apple-cc";
+              # RUSTFLAGS replaces .cargo/config.toml's rustflags, so this repeats its Swift rpath.
+              RUSTFLAGS = "-C linker=${xcode}/bin/apple-cc -C link-arg=-Wl,-rpath,/usr/lib/swift";
             };
             postInstall = lib.optionalString stdenv.hostPlatform.isLinux ''
               wrapProgram $out/bin/throcc-client \

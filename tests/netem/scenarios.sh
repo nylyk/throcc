@@ -76,18 +76,25 @@ start_server() {
 # Runs one scenario: receivers a, b and c watch the sender's 10 Mbps share and hear its mic.
 run_share() {
     local name=$1
-    local receivers=()
+    local -A pids=() status=()
     for ns in a b c; do
         cli "$ns" recv "$SERVER" General --from Sender --with-audio --count "$DURATION_UNITS" --idle 5 \
             >"$WORK/$name-$ns.out" 2>&1 &
-        receivers+=($!)
+        pids[$ns]=$!
     done
     sleep 2
+    status[s]=0
     timeout 60 ip netns exec s throcc-cli --profile "$WORK/s" send-synthetic "$SERVER" General --size "$VIDEO_SIZE" --rate 60 --count "$DURATION_UNITS" \
-        --with-audio >"$WORK/$name-s.out" 2>&1
-    wait "${receivers[@]}"
+        --with-audio >"$WORK/$name-s.out" 2>&1 || status[s]=$?
+    for ns in a b c; do
+        status[$ns]=0
+        wait "${pids[$ns]}" || status[$ns]=$?
+    done
     for ns in s a b c; do
         printf '%-28s %s %s\n' "$name" "$ns" "$(grep RESULT "$WORK/$name-$ns.out" || tail -1 "$WORK/$name-$ns.out")"
+    done
+    for ns in s a b c; do
+        check "$ns exits cleanly" eq "${status[$ns]}" 0
     done
 }
 

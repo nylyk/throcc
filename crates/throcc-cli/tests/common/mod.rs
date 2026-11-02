@@ -72,7 +72,7 @@ pub struct ProcessLikeServer {
     pub addr: SocketAddr,
     pub bootstrap: Option<InviteCode>,
     stop: std::sync::mpsc::Sender<()>,
-    thread: std::thread::JoinHandle<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
     dir: Option<TempDir>,
 }
 
@@ -102,7 +102,7 @@ impl ProcessLikeServer {
             addr,
             bootstrap,
             stop,
-            thread,
+            thread: Some(thread),
             dir: None,
         }
     }
@@ -110,16 +110,26 @@ impl ProcessLikeServer {
     /// A fresh server keeping its data in a directory that goes away with it.
     pub fn start_temp() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let server = Self::start(dir.path(), "127.0.0.1:0".parse().unwrap());
-        Self {
-            dir: Some(dir),
-            ..server
-        }
+        let mut server = Self::start(dir.path(), "127.0.0.1:0".parse().unwrap());
+        server.dir = Some(dir);
+        server
     }
 
     pub fn stop(self) {
-        self.stop.send(()).unwrap();
-        self.thread.join().unwrap();
+        drop(self);
+    }
+}
+
+/// Joins the server thread, so it is gone before its data directory is removed.
+impl Drop for ProcessLikeServer {
+    fn drop(&mut self) {
+        self.stop.send(()).ok();
+        if let Some(thread) = self.thread.take() {
+            let joined = thread.join();
+            if !std::thread::panicking() {
+                joined.expect("server thread panicked");
+            }
+        }
     }
 }
 
@@ -425,7 +435,7 @@ pub async fn read_message<T: DeserializeOwned>(recv: &mut quinn::RecvStream) -> 
 
 /// Client transport settings with stream and connection receive windows of `window` bytes.
 pub fn small_window_transport(window: u32) -> quinn::TransportConfig {
-    let mut transport = connection::transport_config(0);
+    let mut transport = connection::transport_config();
     transport
         .stream_receive_window(window.into())
         .receive_window(window.into());

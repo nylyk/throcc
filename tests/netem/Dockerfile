@@ -3,9 +3,11 @@ FROM rust:1.98.1-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends libasound2-dev libpipewire-0.3-dev libclang-dev libdbus-1-dev pkg-config && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
+# Built apart: one build would unify features and give the server throcc-crypto's media feature.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p throcc-server -p throcc-cli \
+    cargo build --release -p throcc-server \
+    && cargo build --release -p throcc-cli \
     && cp target/release/throcc-server target/release/throcc-cli /usr/local/bin/
 
 FROM debian:bookworm-slim

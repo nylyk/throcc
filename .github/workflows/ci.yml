@@ -51,7 +51,13 @@ jobs:
         shell: bash
       - run: ./scripts/ci-run.sh cargo test --workspace --no-fail-fast ${{ matrix.features }}
         shell: bash
-      - run: ./scripts/ci-run.sh cargo test --release -p throcc-cli --test media ten_seconds_of_frames_at_20_mbps_arrive_intact
+      # libtest passes when a filter matches nothing, so check the test ran.
+      - run: |
+          ./scripts/ci-run.sh cargo test --release -p throcc-cli --test media -- --exact ten_seconds_of_frames_at_15_mbps_arrive_intact
+          grep -q ' 1 passed;' ci-run.log || { echo "::error::the throughput test did not run"; exit 1; }
+        shell: bash
+      - if: runner.os == 'Linux'
+        run: ./scripts/ci-run.sh cargo check --locked --manifest-path fuzz/Cargo.toml --target-dir target
         shell: bash
 
   linux-video:

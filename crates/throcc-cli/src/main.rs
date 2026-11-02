@@ -317,6 +317,7 @@ async fn read_commands(link: &mut Link) -> Result<()> {
             event = link.events.recv() => {
                 let Some(event) = event else { bail!("disconnected") };
                 print_event(&event);
+                follow(&mut link.welcome, &event);
                 if let Event::Kicked { .. } = event {
                     return Ok(());
                 }
@@ -419,6 +420,32 @@ fn print_rooms(rooms: &[Room], presence: &[Presence]) {
     }
 }
 
+/// Keeps the sign-in snapshot's rooms and people current, so `rooms` and `join` see changes.
+fn follow(welcome: &mut Welcome, event: &Event) {
+    match event {
+        Event::PresenceChanged(p) => {
+            match welcome.presence.iter_mut().find(|old| old.user == p.user) {
+                Some(old) => *old = p.clone(),
+                None => welcome.presence.push(p.clone()),
+            }
+        }
+        Event::PresenceEnded(user) => welcome.presence.retain(|p| p.user != *user),
+        Event::RoomCreated(room) => welcome.rooms.push(room.clone()),
+        Event::RoomRenamed { room, name } => {
+            if let Some(r) = welcome.rooms.iter_mut().find(|r| r.id == *room) {
+                r.name = name.clone();
+            }
+        }
+        Event::RoomLocked { room, locked } => {
+            if let Some(r) = welcome.rooms.iter_mut().find(|r| r.id == *room) {
+                r.locked = *locked;
+            }
+        }
+        Event::RoomDeleted(room) => welcome.rooms.retain(|r| r.id != *room),
+        _ => {}
+    }
+}
+
 fn print_event(event: &Event) {
     match event {
         Event::PresenceChanged(p) => println!(
@@ -447,5 +474,83 @@ fn print_event(event: &Event) {
         }
         Event::Kicked { reason } => println!("* disconnected: {reason}"),
         other => println!("* {other:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use throcc_proto::ids::{Epoch, Role, UserId};
+    use throcc_proto::messages::{Placed, ServerProfile};
+
+    fn welcome() -> Welcome {
+        Welcome {
+            me: UserId(1),
+            role: Role::Admin,
+            rooms: vec![],
+            presence: vec![],
+            placed: Placed {
+                room: None,
+                epoch: Epoch(0),
+                tracks: None,
+                peers: vec![],
+            },
+            server: ServerProfile::default(),
+        }
+    }
+
+    fn presence(user: u64, room: Option<RoomId>) -> Presence {
+        Presence {
+            user: UserId(user),
+            name: format!("user {user}"),
+            avatar: None,
+            room,
+            mic: false,
+            deafened: false,
+            sharing: false,
+            role: Role::User,
+        }
+    }
+
+    #[test]
+    fn rooms_created_after_sign_in_can_be_joined() {
+        let mut welcome = welcome();
+        let room = Room {
+            id: RoomId(7),
+            name: "Foo".into(),
+            locked: false,
+        };
+        follow(&mut welcome, &Event::RoomCreated(room));
+        assert_eq!(
+            find_room(room_names(&welcome.rooms), "foo").unwrap(),
+            RoomId(7)
+        );
+
+        let renamed = Event::RoomRenamed {
+            room: RoomId(7),
+            name: "Bar".into(),
+        };
+        follow(&mut welcome, &renamed);
+        assert_eq!(
+            find_room(room_names(&welcome.rooms), "Bar").unwrap(),
+            RoomId(7)
+        );
+
+        follow(&mut welcome, &Event::RoomDeleted(RoomId(7)));
+        assert!(find_room(room_names(&welcome.rooms), "7").is_err());
+    }
+
+    #[test]
+    fn presence_follows_people() {
+        let mut welcome = welcome();
+        follow(&mut welcome, &Event::PresenceChanged(presence(2, None)));
+        follow(
+            &mut welcome,
+            &Event::PresenceChanged(presence(2, Some(RoomId(3)))),
+        );
+        assert_eq!(welcome.presence, [presence(2, Some(RoomId(3)))]);
+
+        follow(&mut welcome, &Event::PresenceEnded(UserId(2)));
+        assert!(welcome.presence.is_empty());
     }
 }

@@ -72,7 +72,12 @@ pub async fn send(call: &mut Call, room: RoomId, options: SendOptions) -> Result
     } = options;
     let (placed, _) = call.join(Some(room), None).await?;
     let tracks = placed.tracks.context("joined without tracks")?;
-    let media_id = track.pick((tracks.mic, tracks.shares[0].video));
+    let share_video = tracks
+        .shares
+        .first()
+        .context("joined without a share track")?
+        .video;
+    let media_id = track.pick((tracks.mic, share_video));
     let kind = track.kind();
     let share = matches!(track, Track::Video).then(|| ShareConfig {
         audio: false,
@@ -276,7 +281,7 @@ fn find_user(presence: &[Presence], query: &str) -> Option<UserId> {
 fn peer_tracks(call: &Call, user: UserId) -> Option<(MediaId, MediaId)> {
     let keys = call.engine.keys();
     let tracks = keys.keys.peer_tracks(user)?;
-    Some((tracks.mic, tracks.shares[0].video))
+    Some((tracks.mic, tracks.shares.first()?.video))
 }
 
 /// Reads events until this call trusts `user`'s tracks. The call updates its keys from each

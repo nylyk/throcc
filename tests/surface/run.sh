@@ -9,9 +9,9 @@ out=target/surface
 rm -rf "$out"
 mkdir -p "$out"
 
-icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -1)
-[ -n "$icd" ] || { echo "FAIL  no lavapipe ICD in /usr/share/vulkan/icd.d"; exit 1; }
-export VK_ICD_FILENAMES=$icd
+icds=(/usr/share/vulkan/icd.d/lvp_icd*.json)
+[ -e "${icds[0]}" ] || { echo "FAIL  no lavapipe ICD in /usr/share/vulkan/icd.d"; exit 1; }
+export VK_ICD_FILENAMES=${icds[0]}
 export XDG_RUNTIME_DIR=$PWD/$out/xdg WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman
 mkdir -m 700 "$XDG_RUNTIME_DIR"
 printf 'output * resolution 1280x800\ndefault_border none\nxwayland disable\n' >"$out/sway.conf"
@@ -22,7 +22,8 @@ sway_pid=$!
 client_pid=
 trap 'kill $client_pid $sway_pid 2>/dev/null || true' EXIT
 for _ in $(seq 50); do
-    WAYLAND_DISPLAY=$(ls "$XDG_RUNTIME_DIR" | grep -E '^wayland-[0-9]+$' | head -1) && break
+    WAYLAND_DISPLAY=$(find "$XDG_RUNTIME_DIR" -maxdepth 1 -regex '.*/wayland-[0-9]+' -printf '%f\n' | head -1)
+    [ -n "$WAYLAND_DISPLAY" ] && break
     sleep 0.2
 done
 [ -n "${WAYLAND_DISPLAY:-}" ] || { echo "FAIL  sway did not start"; tail -20 "$out/sway.log"; exit 1; }
