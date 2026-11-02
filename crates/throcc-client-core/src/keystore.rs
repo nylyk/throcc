@@ -218,7 +218,8 @@ fn new_enc_key(path: &Path, now: u64) -> Result<(EncKeyPair, u64)> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WhenMissing {
     Refuse,
-    /// The user agreed to start over: the servers and the encryption key go first.
+    /// The user agreed to start over: a new identity with a new encryption key, and no
+    /// servers.
     StartOver,
 }
 
@@ -293,19 +294,20 @@ fn first_keychain_identity(
     if let Some(seed) = keychain.read()? {
         return Ok(Found::kept(seed_to_key(&seed)?));
     }
-    if found.new && when_missing == WhenMissing::StartOver {
-        forget_old_identity(dir)?;
+    if !(found.new && when_missing == WhenMissing::StartOver) {
+        keychain.write(found.key.seed().as_slice())?;
+        return Ok(found);
     }
-    keychain.write(found.key.seed().as_slice())?;
-    Ok(found)
-}
-
-/// Drops what belongs to an identity being replaced: the servers that knew it, and the
-/// encryption key it signed, which would tie the new identity to the old one.
-fn forget_old_identity(dir: &Path) -> Result<()> {
-    KnownServers::load(dir)?.forget_all()?;
+    // Starting over drops what belonged to the old identity: the encryption key it signed,
+    // which would tie the new identity to it, and the servers that knew it. Each step leaves
+    // a state that is safe on its own: a renewed encryption key is routine, and the servers
+    // go only once the new identity is in the keychain, so a refused or interrupted write
+    // never leaves the old identity coming back to an empty server list.
+    let mut known = KnownServers::load(dir)?;
     new_enc_key(&dir.join(ENC_KEY_FILE), unix_now()?)?;
-    Ok(())
+    keychain.write(found.key.seed().as_slice())?;
+    known.forget_all()?;
+    Ok(found)
 }
 
 /// The identity key in `dir`. A missing one is created only while no server is known.
@@ -379,6 +381,7 @@ mod tests {
         held: RefCell<Option<Vec<u8>>>,
         hidden: RefCell<Option<Vec<u8>>>,
         writes: Cell<usize>,
+        refuses_writes: bool,
     }
 
     impl FakeEntry {
@@ -386,6 +389,14 @@ mod tests {
             let entry = Self::default();
             *entry.hidden.borrow_mut() = Some(seed.to_vec());
             entry
+        }
+
+        /// One whose writes fail, as when the user dismisses the keychain's prompt.
+        fn refusing_writes() -> Self {
+            Self {
+                refuses_writes: true,
+                ..Self::default()
+            }
         }
 
         fn held(&self) -> Option<Vec<u8>> {
@@ -404,6 +415,9 @@ mod tests {
 
         fn write(&self, seed: &[u8]) -> Result<()> {
             self.writes.set(self.writes.get() + 1);
+            if self.refuses_writes {
+                bail!("the keychain refused the write");
+            }
             *self.held.borrow_mut() = Some(seed.to_vec());
             Ok(())
         }
@@ -487,6 +501,35 @@ mod tests {
         assert_eq!(entry.held().unwrap(), found.key.seed().as_slice());
         assert!(!knows_servers(dir.path()).unwrap());
         assert_ne!(enc_key_file(dir.path()), old_enc_key);
+    }
+
+    #[test]
+    fn a_failed_write_while_starting_over_keeps_the_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        knowing_a_server(dir.path());
+        let entry = FakeEntry::refusing_writes();
+        assert!(identity_in(&entry, dir.path(), WhenMissing::StartOver).is_err());
+        assert_eq!(entry.writes.get(), 1);
+        assert_eq!(entry.held(), None);
+        assert!(knows_servers(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn starting_over_keeps_an_identity_kept_in_a_file_and_everything_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        knowing_a_server(dir.path());
+        let kept = file_identity(dir.path()).unwrap();
+        load_enc_key(&dir.path().join(ENC_KEY_FILE)).unwrap();
+        let old_enc_key = enc_key_file(dir.path());
+
+        let entry = FakeEntry::default();
+        let found = identity_in(&entry, dir.path(), WhenMissing::StartOver).unwrap();
+        assert_eq!(found.key.public(), kept.public());
+        assert!(!found.new);
+        assert_eq!(entry.held().unwrap(), kept.seed().as_slice());
+        assert!(knows_servers(dir.path()).unwrap());
+        assert_eq!(enc_key_file(dir.path()), old_enc_key);
+        assert_eq!(file_identity(dir.path()).unwrap().public(), kept.public());
     }
 
     #[test]

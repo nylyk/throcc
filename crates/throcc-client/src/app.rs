@@ -1653,8 +1653,8 @@ impl ThroccApp {
     /// lost, personmenu, addserver, removeserver, room, alone, emptylobby, focus, fullscreen,
     /// popout, share, connection, verify, verifychanged, keychange, pinmismatch, settings,
     /// appearance, servers, newroom, editroom, roompassword, deleteroom, profile, server, keys,
-    /// members, invites, removeuser, leaveserver, identitymissing or startedover. Any other
-    /// name leaves the lobby.
+    /// members, invites, removeuser, leaveserver, identitymissing, identityback or startedover.
+    /// Any other name leaves the lobby.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         let room = RoomId(1);
         let joined = |app: &mut Self| {
@@ -1798,6 +1798,11 @@ impl ThroccApp {
             "identitymissing" => {
                 offline(self);
                 self.show_identity_missing();
+            }
+            "identityback" => {
+                offline(self);
+                self.show_identity_missing();
+                self.start_over = StartOver::Done(StartedOver::Recovered);
             }
             "startedover" => {
                 offline(self);

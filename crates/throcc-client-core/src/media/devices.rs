@@ -109,7 +109,8 @@ fn open_rate(default: &SupportedStreamConfig) -> u32 {
 
 /// The configs to open a device with, best first: one at `rate` in a sample format the
 /// callbacks take, preferring the default's channel count and then F32; then the default
-/// config as it is.
+/// config as it is, unless the audio thread's 10 ms pulls don't divide its rate into whole
+/// frames, which would make the audio drift.
 fn configs<E>(
     default: SupportedStreamConfig,
     supported: Result<impl Iterator<Item = SupportedStreamConfigRange>, E>,
@@ -130,7 +131,7 @@ fn configs<E>(
         .min_by_key(|(other_channels, rank, _)| (*other_channels, *rank))
         .map(|(.., config)| config);
     let mut configs = Vec::from_iter(at_rate);
-    if !configs.contains(&default) {
+    if default.sample_rate().is_multiple_of(100) && !configs.contains(&default) {
         configs.push(default);
     }
     configs
@@ -141,7 +142,9 @@ fn open_first<T>(
     configs: Vec<SupportedStreamConfig>,
     mut open: impl FnMut(&SupportedStreamConfig) -> Result<T, DeviceError>,
 ) -> Result<T, DeviceError> {
-    let mut last = DeviceError::Cpal("the device offers no stream config".into());
+    let mut last = DeviceError::Cpal(format!(
+        "the device offers no stream config at {SAMPLE_RATE} Hz or another rate divisible by 100"
+    ));
     for config in configs {
         match open(&config) {
             Ok(opened) => return Ok(opened),
@@ -381,6 +384,22 @@ mod tests {
             configs::<()>(default, Ok(only_48k.iter().copied()), 44_100),
             [default]
         );
+    }
+
+    #[test]
+    fn a_default_at_a_rate_without_whole_10_ms_pulls_is_never_a_fallback() {
+        use SampleFormat::F32;
+        let default = config(2, 22_050, F32);
+        let ranges = [range(2, (22_050, 22_050), F32)];
+        assert!(picked(default, &ranges).is_empty());
+        let unknown: Result<std::iter::Empty<_>, ()> = Err(());
+        assert!(configs(default, unknown, SAMPLE_RATE).is_empty());
+
+        let ranges = [
+            range(2, (22_050, 22_050), F32),
+            range(1, (8_000, 48_000), F32),
+        ];
+        assert_eq!(picked(default, &ranges), [config(1, 48_000, F32)]);
     }
 
     #[test]

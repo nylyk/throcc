@@ -656,20 +656,26 @@ fn remove_server(app: &ThroccApp, address: String, cx: &mut Context<ThroccApp>) 
 }
 
 fn identity_missing(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
-    let (heading, outcome) = match &app.start_over {
+    let (heading, outcome, rejoin) = match &app.start_over {
         StartOver::Done(StartedOver::Recovered) => (
             "Your identity is back",
             "Your keychain had it after all. Your servers are still on your list.",
+            true,
         ),
         StartOver::Done(StartedOver::NewIdentity) => (
             "You have a new identity",
             "Your servers have left your list. Add each one again with a new invite.",
+            false,
         ),
         _ => return identity_still_missing(app, cx),
     };
+    let join = rejoin.then(|| {
+        primary("join", "Join")
+            .on_click(cx.listener(|app, _, window, cx| app.try_again(window, cx)))
+    });
     body(heading)
         .child(description(outcome))
-        .child(actions("Close", cx))
+        .child(actions("Close", cx).children(join))
         .into_any_element()
 }
 

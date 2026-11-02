@@ -1,6 +1,6 @@
 # throcc-cli
 
-A headless client for scripts, tests and network measurements. `throcc-cli --help` lists its commands. Among them are a voice call through the real audio path, and `send-synthetic` and `recv`, which push fake media through the real encrypted path.
+A headless client for scripts, tests and network measurements. `throcc-cli --help` lists its commands. Among them are a voice call through the real audio path, and `send-synthetic` and `recv`, which push fake media through the real encrypted path. `start-over` starts a new identity after the OS keychain lost yours; it asks you to type `start over` first, or takes `--yes` in a script.
 
 | File | Holds |
 | --- | --- |

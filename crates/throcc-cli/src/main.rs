@@ -23,10 +23,6 @@ struct Cli {
     /// Directory holding this client's keys. Defaults to the platform data directory.
     #[arg(long, global = true)]
     profile: Option<PathBuf>,
-    /// Starts a new identity after the keychain lost yours, forgetting every server: joining
-    /// them again needs new invites. Keeps the identity instead if the keychain has it again.
-    #[arg(long, global = true, conflicts_with = "profile")]
-    start_over: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -77,6 +73,15 @@ enum Command {
     },
     /// Lists audio devices.
     Devices,
+    /// Starts a new identity after the keychain lost yours, forgetting every server: joining
+    /// them again needs new invites. Changes nothing while the keychain has your identity.
+    ///
+    /// Asks you to type `start over` first.
+    StartOver {
+        /// Starts over without asking, for scripts.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Joins a room and sends fake access units through the encrypted media path.
     SendSynthetic {
         address: String,
@@ -139,8 +144,11 @@ async fn run(cli: Cli) -> Result<()> {
             println!("outputs:\n  {}", outputs.join("\n  "));
             return Ok(());
         }
+        (Command::StartOver { .. }, Some(_)) => {
+            bail!("start-over is for the identity in the OS keychain; a profile keeps its own")
+        }
+        (Command::StartOver { yes }, None) => return start_over(*yes).await,
         (_, Some(dir)) => Keystore::open_in(dir)?,
-        (_, None) if cli.start_over => start_over()?,
         (_, None) => Keystore::open_default().map_err(offer_start_over)?,
     };
 
@@ -189,6 +197,7 @@ async fn run(cli: Cli) -> Result<()> {
             .await??;
         }
         Command::Devices => unreachable!("listed before the keystore opens"),
+        Command::StartOver { .. } => unreachable!("done before the keystore opens"),
         Command::SendSynthetic {
             address,
             room,
@@ -578,17 +587,46 @@ fn print_event(event: &Event) {
     }
 }
 
-fn start_over() -> Result<Keystore> {
-    let (keystore, started) = Keystore::start_over()?;
+const NOTHING_CHANGED: &str = "your identity is in the keychain; nothing was changed";
+const START_OVER_CONFIRMATION: &str = "start over";
+
+/// Starts over, but only while the keychain still lacks the identity and once the user
+/// confirmed at a terminal, or `confirmed` beforehand.
+async fn start_over(confirmed: bool) -> Result<()> {
+    if !confirmed && !std::io::stdin().is_terminal() {
+        bail!("start-over asks for confirmation at a terminal; pass --yes to skip it");
+    }
+    match Keystore::open_default() {
+        Ok(_) => {
+            eprintln!("{NOTHING_CHANGED}");
+            return Ok(());
+        }
+        Err(e) if !e.is::<IdentityMissing>() => return Err(e),
+        Err(e) => eprintln!("{e:#}."),
+    }
+    if !confirmed {
+        eprint!(
+            "Starting over makes a new identity and forgets every server; joining them again \
+             needs new invites. Type `{START_OVER_CONFIRMATION}` to go on: "
+        );
+        let mut line = String::new();
+        BufReader::new(tokio::io::stdin())
+            .read_line(&mut line)
+            .await?;
+        if line.trim() != START_OVER_CONFIRMATION {
+            bail!("not confirmed; nothing was changed");
+        }
+    }
+    let (_, started) = Keystore::start_over()?;
     eprintln!(
         "{}",
         match started {
-            StartedOver::Recovered => "your identity is back; your servers are kept",
+            StartedOver::Recovered => NOTHING_CHANGED,
             StartedOver::NewIdentity =>
                 "started a new identity and forgot every server; join them again with new invites",
         }
     );
-    Ok(keystore)
+    Ok(())
 }
 
 fn offer_start_over(e: anyhow::Error) -> anyhow::Error {
@@ -596,7 +634,7 @@ fn offer_start_over(e: anyhow::Error) -> anyhow::Error {
         return e;
     }
     anyhow::anyhow!(
-        "{e:#}. If it is gone for good, run again with --start-over: that starts a new identity \
+        "{e:#}. If it is gone for good, run `throcc-cli start-over`: that starts a new identity \
          and forgets every server, and joining them again needs new invites"
     )
 }
@@ -658,6 +696,21 @@ mod tests {
             sharing: false,
             role: Role::User,
         }
+    }
+
+    #[test]
+    fn starting_over_is_its_own_command_and_never_rides_along() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["throcc-cli"], args].concat());
+        assert!(parse(&["--start-over", "rooms", "voice.example.net"]).is_err());
+        assert!(parse(&["rooms", "voice.example.net", "--start-over"]).is_err());
+        assert!(matches!(
+            parse(&["start-over"]).unwrap().command,
+            Command::StartOver { yes: false }
+        ));
+        assert!(matches!(
+            parse(&["start-over", "--yes"]).unwrap().command,
+            Command::StartOver { yes: true }
+        ));
     }
 
     #[test]
