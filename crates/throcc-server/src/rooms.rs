@@ -57,7 +57,7 @@ const ROOM_CHANGES_PER_SECOND: f64 = 0.5;
 /// A new encryption key re-keys the user's room. Clients replace theirs once a month.
 const ENC_KEY_CHANGE_BURST: f64 = 3.0;
 const ENC_KEY_CHANGES_PER_SECOND: f64 = 1.0 / 60.0;
-/// Starting or stopping a share sends the room's state to every member.
+/// Starting or changing a share sends the room's state to every member. Stopping is free.
 const SHARE_CHANGE_BURST: f64 = 5.0;
 const SHARE_CHANGES_PER_SECOND: f64 = 1.0;
 /// Sender keys a member may publish for one epoch outside the request allowance: one,
@@ -310,8 +310,7 @@ impl Hub {
         );
         let placed = want_room
             .filter(|room| self.may_rejoin(user, *room))
-            .filter(|_| self.room_changes.take(user, 1.0, Instant::now()))
-            .and_then(|room| self.place(user, Some(room)).ok())
+            .and_then(|room| self.rejoin(user, room))
             .unwrap_or_else(lobby);
         let server = self.db.server_profile().unwrap_or_else(|e| {
             warn!("reading the server profile: {e:#}");
@@ -624,7 +623,7 @@ impl Hub {
         password: Option<String>,
     ) -> Result<Handled, Refusal> {
         let now = Instant::now();
-        if self.session(user)?.room != target && !self.room_changes.holds(user, 1.0, now) {
+        if self.enters_another_room(user, target)? && !self.room_changes.holds(user, 1.0, now) {
             return Err(changing_rooms_too_fast());
         }
         let needed = match target {
@@ -705,7 +704,7 @@ impl Hub {
     }
 
     fn enter(&mut self, user: UserId, target: Option<RoomId>) -> Outcome {
-        let moving = self.session(user)?.room != target;
+        let moving = self.enters_another_room(user, target)?;
         if moving && !self.room_changes.take(user, 1.0, Instant::now()) {
             return Err(changing_rooms_too_fast());
         }
@@ -715,6 +714,13 @@ impl Hub {
             None => self.last_joined.remove(&user),
         };
         Ok(Response::Placed(placed))
+    }
+
+    /// Whether moving `user` to `target` enters a room they aren't in, which counts against
+    /// their room changes. Leaving is never limited: it takes their mic out of the room, and
+    /// follows an entry that was counted.
+    fn enters_another_room(&self, user: UserId, target: Option<RoomId>) -> Result<bool, Refusal> {
+        Ok(target.is_some() && self.session(user)?.room != target)
     }
 
     /// The hash of the password `user` needs to enter `room`, if they need one. Members
@@ -728,6 +734,22 @@ impl Hub {
             return Ok(None);
         }
         Ok(Some(hash.clone()))
+    }
+
+    /// Puts a reconnecting `user` back into `room`. Returning to the room they last joined
+    /// is free, so a flapping link never strands them in the lobby; arrival limits and
+    /// sign-in already bound how often that can happen. Any other room counts as a change.
+    fn rejoin(&mut self, user: UserId, room: RoomId) -> Option<Placed> {
+        let returning = self.last_joined.get(&user) == Some(&room);
+        let now = Instant::now();
+        if !returning && !self.room_changes.holds(user, 1.0, now) {
+            return None;
+        }
+        let placed = self.place(user, Some(room)).ok()?;
+        if !returning {
+            self.room_changes.take(user, 1.0, now);
+        }
+        Some(placed)
     }
 
     /// Whether a reconnect may put `user` back into `room` without its password.
@@ -982,25 +1004,33 @@ impl Hub {
         Ok(Response::Ok)
     }
 
+    /// Mic and deafen always apply, since push-to-talk sends `SetMedia`. Only starting or
+    /// changing a share counts against the share allowance; over it, the rest still applies,
+    /// the share stays as it was, and the reply says so. Stopping is never refused: stops are
+    /// bounded by starts, and a stop shrinks fan-out.
     fn set_media(&mut self, user: UserId, media: MediaState) -> Outcome {
         let room = self.current_room(user)?;
-        let session = self.session(user)?;
-        let share_changed = session.media.share != media.share;
-        let deafened_changed = session.media.deafened != media.deafened;
-        if share_changed && !self.share_changes.take(user, 1.0, Instant::now()) {
-            return Err(Refusal::new(
-                ErrorCode::RateLimited,
-                "sharing changes too often; wait a moment",
-            ));
-        }
-        self.session_mut(user)?.media = media;
-        if share_changed {
+        let stored = self.session(user)?.media;
+        let starting = media.share.is_some() && media.share != stored.share;
+        let refused = starting && !self.share_changes.take(user, 1.0, Instant::now());
+        let applied = MediaState {
+            share: if refused { stored.share } else { media.share },
+            ..media
+        };
+        self.session_mut(user)?.media = applied;
+        if applied.share != stored.share {
             self.broadcast_room_state(room, None);
         }
-        if deafened_changed {
+        if applied.deafened != stored.deafened {
             self.rebuild_routes();
         }
         self.announce_presence(user);
+        if refused {
+            return Err(Refusal::new(
+                ErrorCode::RateLimited,
+                "too many share starts; the share stays as it was, try again in a moment",
+            ));
+        }
         Ok(Response::Ok)
     }
 

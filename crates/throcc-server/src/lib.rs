@@ -39,11 +39,12 @@ pub const CONNECTIONS: Caps = Caps {
     per_network: 128,
     total: 1024,
 };
-/// Connections from their first packet until they have signed in. A network gets a 32nd
-/// of them, so filling them takes hosts in 32 networks.
+/// Connections from their first packet until they have signed in. A network gets a 16th
+/// of them, so filling them takes hosts in 16 networks; a source gets as many as its
+/// network, so an office behind one address gets back in at once after a restart.
 pub const UNAUTHENTICATED: Caps = Caps {
-    per_source: 16,
-    per_network: 16,
+    per_source: 32,
+    per_network: 32,
     total: 512,
 };
 pub const HANDSHAKES: Caps = Caps {

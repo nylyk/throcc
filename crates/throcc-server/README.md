@@ -31,6 +31,7 @@ Ingress polices each sender; egress shares each receiver's link. A well-behaved 
 - Datagrams beyond 6,000 a second per connection are dropped and counted. 25 Mbps of full-size datagrams is about 2,600.
 - Each audio track may send 150 packets and 80 KiB a second, with bursts of 2,500 packets and 256 KiB. That covers Opus at its 510 kbps ceiling, and a flush of a client's whole 64 KiB datagram send buffer after a stall. Packets over it are dropped and counted, and the connection stays open. This is admission policing of a sender that doesn't conform, not an egress drop policy.
 - Egress never drops audio by policy. Each receiver queues audio per track and sends one packet per track in turn. Its 2,000-packet cap guards against a receiver that stops reading; at the cap the longest track's oldest packet goes, so a track that floods only loses its own packets.
-- Egress drops video only as whole units that haven't started sending, beyond the 150 ms budget. Every step costs at most a logarithm of the queue, so tiny datagrams can't make a receiver's task expensive.
+- Egress drops video in whole units. Beyond the 150 ms budget it drops only units that haven't started sending. A unit that has started is dropped only at the 8 MiB hard cap, a guard against a receiver that stops reading, or when it can't arrive whole anyway: one of its fragments is lost, none comes for a second, or it grows past 4,096 fragments.
+- Work per packet is logarithmic in the queue, and the periodic sweeps are bounded, so tiny datagrams can't make a receiver's task expensive.
 
 The server never depends on codecs, capture, audio or media crypto. `scripts/check-server-deps.sh` checks this. Its integration tests live in `throcc-cli/tests/`.

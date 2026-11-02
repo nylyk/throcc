@@ -801,8 +801,29 @@ async fn hopping_between_rooms_is_rate_limited() {
     };
     assert_error(&refused, ErrorCode::RateLimited);
     assert_eq!(hops, 5);
-    tokio::time::sleep(Duration::from_millis(2100)).await;
     assert_eq!(alice.join(None).await.room, None);
+}
+
+#[tokio::test]
+async fn a_reconnect_returns_to_the_room_it_left_even_after_hopping() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let one = create_room(&mut alice, "One").await;
+    let two = create_room(&mut alice, "Two").await;
+    let mut last = None;
+    for room in [one, two].into_iter().cycle().take(100) {
+        match alice.set_room(Some(room), None).await {
+            Response::Placed(_) => last = Some(room),
+            other => {
+                assert_error(&other, ErrorCode::RateLimited);
+                break;
+            }
+        }
+    }
+    for _ in 0..3 {
+        alice.reconnect(&server.addr, last).await;
+        assert_eq!(alice.link.welcome.placed.room, last);
+    }
 }
 
 #[tokio::test]
@@ -867,6 +888,37 @@ async fn wrong_room_passwords_make_that_guesser_wait() {
     );
     let placed = carol.set_room(Some(private), Some("hunter2")).await;
     assert!(matches!(placed, Response::Placed(p) if p.room == Some(private)));
+}
+
+#[tokio::test]
+async fn joins_waiting_for_the_password_workers_all_finish() {
+    let server = start_server();
+    let alice = admin(&server).await;
+    let mut bob = invited(&server, &alice).await;
+    let carol = invited(&server, &alice).await;
+    let dave = invited(&server, &alice).await;
+    let erin = invited(&server, &alice).await;
+    let create = Request::CreateRoom {
+        name: "Private".into(),
+        password: Some("hunter2".into()),
+    };
+    assert_eq!(alice.request(create).await, Response::Ok);
+    let private = bob
+        .event(|e| match e {
+            Event::RoomCreated(room) => Some(room.id),
+            _ => None,
+        })
+        .await;
+    let (b, c, d, e) = tokio::join!(
+        bob.set_room(Some(private), Some("hunter2")),
+        carol.set_room(Some(private), Some("hunter2")),
+        dave.set_room(Some(private), Some("hunter2")),
+        erin.set_room(Some(private), Some("guess")),
+    );
+    for placed in [b, c, d] {
+        assert!(matches!(placed, Response::Placed(p) if p.room == Some(private)));
+    }
+    assert_error(&e, ErrorCode::WrongPassword);
 }
 
 #[tokio::test]
@@ -945,33 +997,52 @@ async fn a_demoted_manager_needs_the_password_to_return_to_a_locked_room() {
 }
 
 #[tokio::test]
-async fn starting_and_stopping_a_share_is_rate_limited_but_the_mic_is_not() {
+async fn share_starts_are_rate_limited_but_stops_and_the_mic_are_not() {
     let server = start_server();
     let mut alice = admin(&server).await;
+    let alice_id = alice.link.welcome.me;
     let general = create_room(&mut alice, "General").await;
+    let mut bob = invited(&server, &alice).await;
     alice.join(Some(general)).await;
+    bob.join(Some(general)).await;
     let share = sharing(share_1080p60(Codec::H264, 8000));
-    let media = |n: usize| {
-        if n.is_multiple_of(2) {
-            share
-        } else {
-            MediaState::default()
-        }
-    };
-    let mut changes = 0;
+    let stop = MediaState::default();
+    let mut starts = 0;
     let refused = loop {
-        match alice.request(Request::SetMedia(media(changes))).await {
-            Response::Ok if changes < 100 => changes += 1,
+        match alice.request(Request::SetMedia(share)).await {
+            Response::Ok if starts < 100 => starts += 1,
             other => break other,
         }
+        assert_eq!(alice.request(Request::SetMedia(stop)).await, Response::Ok);
     };
     assert_error(&refused, ErrorCode::RateLimited);
-    assert_eq!(changes, 5);
-    for mic in [true, false, true, false, true, false] {
-        let toggled = MediaState { mic, ..share };
-        assert_eq!(
-            alice.request(Request::SetMedia(toggled)).await,
-            Response::Ok
-        );
+    assert_eq!(starts, 5);
+
+    // The client still believes it is sharing, so its push-to-talk toggles carry the share
+    // the server refused. The mic applies anyway, and the share only once there is room.
+    let alice_presence = |mic: Option<bool>| {
+        move |e: &Event| match e {
+            Event::PresenceChanged(p) if p.user == alice_id && mic.is_none_or(|m| p.mic == m) => {
+                Some(p.sharing)
+            }
+            _ => None,
+        }
+    };
+    let ptt = |mic| Request::SetMedia(MediaState { mic, ..share });
+    assert_error(&alice.request(ptt(true)).await, ErrorCode::RateLimited);
+    assert!(!bob.event(alice_presence(Some(true))).await);
+    let mut started = false;
+    for mic in [false, true, false] {
+        let response = alice.request(ptt(mic)).await;
+        started |= response == Response::Ok;
+        if !started {
+            assert_error(&response, ErrorCode::RateLimited);
+        }
+        let seen = bob.event(alice_presence(None)).await;
+        assert_eq!(seen, started);
     }
+
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_eq!(alice.request(ptt(true)).await, Response::Ok);
+    assert!(bob.event(alice_presence(Some(true))).await);
 }
