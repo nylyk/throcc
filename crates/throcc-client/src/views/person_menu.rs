@@ -27,6 +27,10 @@ pub fn render(
     let position = menu.position;
     let person = app.state.person(user).cloned()?;
     let mine = Some(user) == app.state.me;
+    let in_popout = app
+        .popouts
+        .values()
+        .any(|popout| AnyWindowHandle::from(*popout) == menu.window);
     let streams_audio = person.sharing.is_some_and(|c| c.audio);
     let panel = div()
         .id("person-menu")
@@ -61,13 +65,23 @@ pub fn render(
                 cx,
             )
         }))
+        .children((!in_popout).then(|| {
+            group().child(
+                action("person-menu-profile", "circle-user", "Profile").on_click(cx.listener(
+                    move |app, _, _, cx| {
+                        app.close_person_menu(cx);
+                        app.open_profile(user, cx);
+                    },
+                )),
+            )
+        }))
         .children(
             person
                 .sharing
                 .is_some()
                 .then(|| stream_actions(app, user, mine, cx)),
         )
-        .children(moderation(app, user, &person, cx));
+        .children(moderation(app, user, &person, in_popout, cx));
     let menu = div()
         .id("person-menu-backdrop")
         .absolute()
@@ -199,6 +213,7 @@ fn moderation(
     app: &ThroccApp,
     user: UserId,
     person: &Person,
+    in_popout: bool,
     cx: &mut Context<ThroccApp>,
 ) -> Option<Div> {
     let me = app.state.role?;
@@ -207,11 +222,6 @@ fn moderation(
         .room
         .filter(|_| other && permissions::can_kick_from_room(me, person.role));
     let kick = kick_room.is_some();
-    let in_popout = app.person_menu.as_ref().is_some_and(|menu| {
-        app.popouts
-            .values()
-            .any(|popout| AnyWindowHandle::from(*popout) == menu.window)
-    });
     let remove = other && permissions::can_remove(me, person.role) && !in_popout;
     if !kick && !remove {
         return None;
@@ -250,7 +260,7 @@ fn group() -> Div {
     div()
         .flex()
         .flex_col()
-        .pt_1()
+        .pt_2()
         .mt_1()
         .border_t_1()
         .border_color(theme::control())

@@ -202,11 +202,11 @@ pub struct PlaybackControl {
 pub enum Dialog {
     Share,
     Connection,
-    /// Comparing our safety number with `user`'s. `shown` is the identity key the number on
-    /// screen is for, with the number, once they presented one; `key_changed` once another
-    /// key replaced it while open, until the user goes on to compare the new number. Marking
-    /// waits for that, so a click meant for one number can't land on the next.
-    Verify {
+    /// `user`'s profile, with our safety number for them. `shown` is the identity key the
+    /// number on screen is for, with the number, once they presented one; `key_changed` once
+    /// another key replaced it while open, until the user goes on to compare the new number.
+    /// Marking waits for that, so a click meant for one number can't land on the next.
+    Profile {
         user: UserId,
         shown: Option<(Fingerprint, String)>,
         key_changed: bool,
@@ -234,6 +234,7 @@ pub enum Dialog {
     RemoveServer(String),
     /// The keychain lost the identity our servers know us by; offers to start over.
     IdentityMissing,
+    OwnProfile,
 }
 
 /// How starting over after a lost identity goes, shown in its dialog.
@@ -701,7 +702,7 @@ impl ThroccApp {
             }
             Event::LeftServer => self.end_session(window, cx),
         }
-        self.follow_verified_key();
+        self.follow_presented_key();
         cx.notify();
     }
 
@@ -716,6 +717,22 @@ impl ThroccApp {
             .iter()
             .filter_map(|(user, p)| Some((*user, self.picture(p.avatar, cx)?)))
             .collect()
+    }
+
+    /// Our name, avatar seed and picture: as the server shows us, or from our profile
+    /// outside a server.
+    pub fn own_look(&mut self, cx: &mut Context<Self>) -> (String, u64, Option<Arc<RenderImage>>) {
+        let me = self.state.me;
+        let person = me.and_then(|m| self.state.person(m));
+        let name = person
+            .map(|p| p.name.clone())
+            .or_else(|| self.state.profile_name.clone())
+            .unwrap_or_else(|| "You".into());
+        let avatar = person.and_then(|p| p.avatar);
+        let picture = self
+            .picture(avatar, cx)
+            .or_else(|| self.picture(self.state.profile_picture, cx));
+        (name, me.map_or(0, |m| m.0), picture)
     }
 
     /// The decoded profile picture behind `avatar`, once the client has it and it has decoded.
@@ -1074,31 +1091,35 @@ impl ThroccApp {
         self.dialog = Some(Dialog::IdentityMissing);
     }
 
-    /// Opens the dialog comparing our safety number with `user`'s.
-    pub fn open_verify(&mut self, user: UserId, cx: &mut Context<Self>) {
-        self.dialog = Some(Dialog::Verify {
-            user,
-            shown: None,
-            key_changed: false,
+    /// Opens `user`'s profile, or our own when `user` is us.
+    pub fn open_profile(&mut self, user: UserId, cx: &mut Context<Self>) {
+        self.dialog = Some(if self.state.me == Some(user) {
+            Dialog::OwnProfile
+        } else {
+            Dialog::Profile {
+                user,
+                shown: None,
+                key_changed: false,
+            }
         });
-        self.follow_verified_key();
+        self.follow_presented_key();
         cx.notify();
     }
 
-    /// Lets the user mark the person in the verify dialog again, now comparing the number
+    /// Lets the user mark the person in the profile again, now comparing the number
     /// that replaced the one they had.
     pub fn compare_again(&mut self, cx: &mut Context<Self>) {
-        if let Some(Dialog::Verify { key_changed, .. }) = &mut self.dialog {
+        if let Some(Dialog::Profile { key_changed, .. }) = &mut self.dialog {
             *key_changed = false;
             cx.notify();
         }
     }
 
-    /// Keeps the verify dialog's number on the key its person presents now. Their key
+    /// Keeps the profile's number on the key its person presents now. Their key
     /// arrives with a room state, and the server may present another at any time, so this
     /// follows every event.
-    fn follow_verified_key(&mut self) {
-        let Some(Dialog::Verify {
+    fn follow_presented_key(&mut self) {
+        let Some(Dialog::Profile {
             user,
             shown,
             key_changed,
@@ -1653,10 +1674,10 @@ impl ThroccApp {
 
     /// Opens a screen of the mock client by name, for screenshots: welcome, join, joinfailed,
     /// lost, personmenu, addserver, removeserver, room, alone, emptylobby, focus, fullscreen,
-    /// popout, share, connection, verify, verifychanged, keychange, pinmismatch, settings,
-    /// appearance, servers, newroom, editroom, roompassword, deleteroom, profile, server, keys,
-    /// members, invites, removeuser, leaveserver, identitymissing, identityback or startedover.
-    /// Any other name leaves the lobby.
+    /// popout, share, connection, person, personverified, personchanged, keychange, ownprofile,
+    /// pinmismatch, settings, appearance, servers, newroom, editroom, roompassword, deleteroom,
+    /// profile, server, keys, members, invites, removeuser, leaveserver, identitymissing,
+    /// identityback or startedover. Any other name leaves the lobby.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         let room = RoomId(1);
         let joined = |app: &mut Self| {
@@ -1667,6 +1688,12 @@ impl ThroccApp {
         let offline = |app: &mut Self| {
             app.client = None;
             app.screen = Screen::Join;
+        };
+        let with_picture = |app: &mut Self| {
+            app.command(Command::SetProfile {
+                name: None,
+                picture: Some(Some(crate::avatar::sample())),
+            });
         };
         match screen {
             "welcome" => {
@@ -1769,14 +1796,20 @@ impl ThroccApp {
                 joined(self);
                 self.dialog = Some(Dialog::Connection);
             }
-            "verify" => self.open_verify(UserId(4), cx),
-            "verifychanged" => {
-                self.open_verify(UserId(4), cx);
-                if let Some(Dialog::Verify { key_changed, .. }) = &mut self.dialog {
+            "person" => self.open_profile(UserId(4), cx),
+            "personverified" => self.open_profile(UserId(2), cx),
+            "personchanged" => {
+                self.open_profile(UserId(4), cx);
+                if let Some(Dialog::Profile { key_changed, .. }) = &mut self.dialog {
                     *key_changed = true;
                 }
             }
-            "keychange" => self.open_verify(UserId(3), cx),
+            "keychange" => self.open_profile(UserId(3), cx),
+            "ownprofile" => {
+                joined(self);
+                with_picture(self);
+                self.dialog = Some(Dialog::OwnProfile);
+            }
             "pinmismatch" => {
                 offline(self);
                 self.dialog = Some(Dialog::PinMismatch {
@@ -1800,10 +1833,7 @@ impl ThroccApp {
             "profile" => {
                 self.screen = Screen::Settings(SettingsPage::Profile);
                 joined(self);
-                self.command(Command::SetProfile {
-                    name: None,
-                    picture: Some(Some(crate::avatar::sample())),
-                });
+                with_picture(self);
             }
             "server" => self.screen = Screen::Server(ServerPage::Overview),
             "keys" => {

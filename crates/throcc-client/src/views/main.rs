@@ -125,7 +125,7 @@ fn sidebar(
     let server_address = state.server.as_ref().map_or("", |s| s.address.as_str());
     let server_title = state.server.as_ref().map_or("", |s| s.title());
     let named = state.server.as_ref().is_some_and(|s| s.name.is_some());
-    let own_picture = app.picture(state.profile_picture, cx);
+    let (my_name, my_seed, my_picture) = app.own_look(cx);
     let current_room = state.current.as_ref().map(|c| c.room);
     let manages = app.manages_rooms();
     let rooms = state.rooms.iter().map(|room| {
@@ -166,13 +166,6 @@ fn sidebar(
             }))
     });
 
-    let me = state.me;
-    let my_person = me.and_then(|m| state.person(m));
-    let my_name = my_person
-        .map(|p| p.name.as_str())
-        .or(state.profile_name.as_deref())
-        .unwrap_or("You");
-    let my_picture = me.and_then(|m| pictures.get(&m).cloned()).or(own_picture);
     let (mic, deafened) = (state.mic, state.deafened);
     let in_room = state.current.is_some();
 
@@ -236,21 +229,21 @@ fn sidebar(
                 )
         });
 
-    let speaking = my_person.is_some_and(|p| p.speaking);
+    let speaking = state
+        .me
+        .and_then(|m| state.person(m))
+        .is_some_and(|p| p.speaking);
     let profile = div()
+        .id("own-profile")
         .flex_1()
         .min_w_0()
         .flex()
         .items_center()
         .gap_2()
         .px_2()
-        .child(avatar(
-            my_name,
-            me.map_or(0, |m| m.0),
-            my_picture,
-            px(36.),
-            speaking,
-        ))
+        .cursor_pointer()
+        .on_click(cx.listener(|app, _, _, cx| app.set_dialog(Some(Dialog::OwnProfile), cx)))
+        .child(avatar(&my_name, my_seed, my_picture, px(36.), speaking))
         .child(
             div()
                 .min_w_0()
@@ -260,7 +253,7 @@ fn sidebar(
                     div()
                         .truncate()
                         .font_weight(FontWeight::MEDIUM)
-                        .child(my_name.to_owned()),
+                        .child(my_name),
                 )
                 .child(caption(if in_room { "Connected" } else { "In the lobby" }).truncate()),
         );
@@ -370,14 +363,19 @@ fn occupant(
     picture: Option<std::sync::Arc<gpui::RenderImage>>,
     trust: Trust,
     cx: &Context<ThroccApp>,
-) -> Div {
+) -> Stateful<Div> {
     div()
+        .id(("occupant", user.0 as usize))
         .flex()
         .items_center()
         .gap_2p5()
         .pl(px(24.))
         .pr_2()
         .min_h(px(36.))
+        .rounded(theme::RADIUS_ROW)
+        .cursor_pointer()
+        .hover(|s| s.bg(theme::raised()))
+        .on_click(cx.listener(move |app, _, _, cx| app.open_profile(user, cx)))
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |app, event: &MouseDownEvent, window, cx| {
@@ -398,15 +396,15 @@ fn occupant(
                 .text_color(theme::text_2_muted())
                 .child(person.name.clone()),
         )
-        .children(trust_marker(user, trust, cx))
+        .children(trust_marker(user, trust))
         .child(div().flex_1())
         .children(person.sharing.is_some().then(|| sharing_icon(px(16.))))
         .children(muted_icon(person, px(16.)))
 }
 
-/// The sign beside the name of someone not verified, or whose verified key changed, which
-/// opens their key dialog: a danger sign for a changed key, a quiet one otherwise.
-fn trust_marker(user: UserId, trust: Trust, cx: &Context<ThroccApp>) -> Option<Stateful<Div>> {
+/// The sign beside the name of someone not verified, or whose verified key changed: a danger
+/// sign for a changed key, a quiet one otherwise.
+fn trust_marker(user: UserId, trust: Trust) -> Option<Stateful<Div>> {
     let (name, size, color, label) = match trust {
         Trust::KeyChanged => ("triangle-alert", 16., theme::danger_text(), "Key changed"),
         Trust::Unverified => ("shield-question-mark", 14., theme::text_3(), "Not verified"),
@@ -416,10 +414,8 @@ fn trust_marker(user: UserId, trust: Trust, cx: &Context<ThroccApp>) -> Option<S
         .id(("trust", user.0 as usize))
         .flex()
         .flex_none()
-        .cursor_pointer()
         .child(icon(name).size(px(size)).text_color(color))
-        .tooltip(move |window, cx| Tooltip::new(label).build(window, cx))
-        .on_click(cx.listener(move |app, _, _, cx| app.open_verify(user, cx)));
+        .tooltip(move |window, cx| Tooltip::new(label).build(window, cx));
     Some(marker)
 }
 

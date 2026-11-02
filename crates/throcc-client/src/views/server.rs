@@ -159,7 +159,7 @@ fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                                     chip("Not verified", theme::raised(), theme::text_3())
                                 }
                             })
-                            .on_click(cx.listener(move |app, _, _, cx| app.open_verify(user, cx)))
+                            .on_click(cx.listener(move |app, _, _, cx| app.open_profile(user, cx)))
                     },
                 )),
         )

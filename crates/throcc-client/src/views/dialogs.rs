@@ -1,7 +1,10 @@
+use std::sync::Arc;
+
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Context, Div, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, div, px, relative,
+    ParentElement, RenderImage, SharedString, StatefulInteractiveElement, Styled, div, px,
+    relative,
 };
 use gpui_component::Disableable;
 use gpui_component::button::Button;
@@ -16,23 +19,27 @@ use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::messages::Codec;
 
 use super::common::{
-    Typeset, caption, card, chip, danger, description, error_box, field_error, mono, primary, rate,
-    secondary, section, title, verified_as,
+    Typeset, avatar, caption, card, chip, danger, description, error_box, field_error, mono,
+    primary, rate, secondary, title, verified_as,
 };
 use super::page::{field, field_label, segmented};
-use crate::app::{Dialog, StartOver, ThroccApp, typed_name, typed_password};
+use crate::app::{Dialog, Screen, SettingsPage, StartOver, ThroccApp, typed_name, typed_password};
 use crate::theme;
 
 /// The modal for `dialog`, over a dimmed window.
 pub fn render(app: &mut ThroccApp, dialog: Dialog, cx: &mut Context<ThroccApp>) -> AnyElement {
+    let width = match dialog {
+        Dialog::Profile { .. } | Dialog::OwnProfile => px(420.),
+        _ => px(560.),
+    };
     let body = match dialog {
         Dialog::Share => share(app, cx),
         Dialog::Connection => connection(app, cx),
-        Dialog::Verify {
+        Dialog::Profile {
             user,
             shown,
             key_changed,
-        } => verify(app, user, shown, key_changed, cx),
+        } => profile(app, user, shown, key_changed, cx),
         Dialog::Remove {
             user,
             name,
@@ -51,6 +58,7 @@ pub fn render(app: &mut ThroccApp, dialog: Dialog, cx: &mut Context<ThroccApp>) 
         Dialog::AddServer => add_server(app, cx),
         Dialog::RemoveServer(address) => remove_server(app, address, cx),
         Dialog::IdentityMissing => identity_missing(app, cx),
+        Dialog::OwnProfile => own_profile(app, cx),
     };
     div()
         .id("scrim")
@@ -68,7 +76,7 @@ pub fn render(app: &mut ThroccApp, dialog: Dialog, cx: &mut Context<ThroccApp>) 
         .child(
             card()
                 .id("dialog")
-                .w(px(560.))
+                .w(width)
                 .max_w(relative(0.9))
                 .max_h(relative(0.9))
                 .overflow_y_scroll()
@@ -438,13 +446,15 @@ fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .into_any_element()
 }
 
-fn verify(
-    app: &ThroccApp,
+fn profile(
+    app: &mut ThroccApp,
     user: UserId,
     shown: Option<(Fingerprint, String)>,
     key_changed: bool,
     cx: &mut Context<ThroccApp>,
 ) -> AnyElement {
+    let avatar = app.state.person(user).and_then(|p| p.avatar);
+    let picture = app.picture(avatar, cx);
     let person = app.state.person(user);
     let name = person.map_or(format!("User {}", user.0), |p| p.name.clone());
     let verified = person.is_some_and(|p| p.verified);
@@ -459,19 +469,21 @@ fn verify(
         .iter()
         .find(|w| w.user == user)
         .map(|w| (w.verified, w.now));
-    let mut content = body(name.clone()).child(
-        div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(if change.is_some() {
-                chip("Key changed", theme::danger_bg(), theme::danger_text())
-            } else if verified {
-                chip("Verified", theme::ok_bg(), theme::ok_text())
-            } else {
-                chip("Not verified", theme::raised(), theme::text_3())
-            })
-            .children(verified_as),
+    let mut content = profile_column().child(
+        profile_header(&name, user.0, picture).child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(if change.is_some() {
+                    chip("Key changed", theme::danger_bg(), theme::danger_text())
+                } else if verified {
+                    chip("Verified", theme::ok_bg(), theme::ok_text())
+                } else {
+                    chip("Not verified", theme::raised(), theme::text_3())
+                })
+                .children(verified_as),
+        ),
     );
     let key = |label: &'static str, key: String| {
         div()
@@ -484,20 +496,23 @@ fn verify(
     if let Some((before, now)) = change {
         content = content.child(
             danger_box()
-                .child(div().typeset(theme::HEADLINE).child(format!("{name}’s key changed")))
-                .child(format!(
-                    "You verified {name} with another key. An honest server only shows a new one after it was rebuilt and gave their account to someone else, so someone may be trying to listen in."
-                ))
+                .w_full()
+                .child(
+                    div()
+                        .typeset(theme::HEADLINE)
+                        .child(format!("{name}’s key changed")),
+                )
+                .child(format!("{name}’s new key doesn’t match the one you verified. Someone might be listening in."))
                 .child(key("Before", before.short()))
-                .child(key("Now", now.short()))
-                .child(caption("The new key still hears what you say and sees what you share, like anyone not verified.")),
+                .child(key("Now", now.short())),
         );
     }
     if key_changed {
         content = content.child(
             warning_box()
+                .w_full()
                 .child(format!(
-                    "{name}’s key changed while this was open, so this is a new number. Compare it again before you mark them verified."
+                    "{name}’s key changed while this was open, so this is a new number. Compare it again."
                 ))
                 .child(div().flex().justify_end().child(
                     secondary("compare-again", "Compare Again")
@@ -509,7 +524,52 @@ fn verify(
         .as_ref()
         .map(|(_, number)| safety_groups(number))
         .unwrap_or_default();
-    let mut buttons = actions("Done", cx);
+    let mark = if verified {
+        secondary("mark-verified", "Mark as Not Verified")
+    } else {
+        primary("mark-verified", "Mark as Verified")
+    }
+    .disabled(key_changed || shown_key.is_none() || shown_key != presented)
+    .on_click(cx.listener(move |app, _, _, cx| {
+        if let Some(key) = shown_key {
+            app.command(Command::SetVerified {
+                user,
+                key,
+                verified: !verified,
+            });
+        }
+        cx.notify();
+    }));
+    let number = div()
+        .w_full()
+        .p_6()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap_5()
+        .rounded(theme::RADIUS_CARD)
+        .bg(theme::raised())
+        .child(if groups.is_empty() {
+            description("Their safety number appears once you share a room.").into_any_element()
+        } else {
+            div()
+                .grid()
+                .grid_cols(4)
+                .gap_x_4()
+                .gap_y_2()
+                .font_family(theme::mono_font())
+                .typeset(theme::TITLE_3)
+                .font_weight(FontWeight::NORMAL)
+                .children(
+                    groups
+                        .into_iter()
+                        .map(|g| div().whitespace_nowrap().child(g)),
+                )
+                .into_any_element()
+        })
+        .child(mark);
+    let new_key_shown = change.is_some_and(|(_, now)| Some(now) == shown_key);
+    let mut buttons = actions("Done", cx).w_full();
     if change.is_some() {
         buttons = buttons.child(
             secondary("dismiss-key-change", "Dismiss Warning")
@@ -523,44 +583,60 @@ fn verify(
                 })),
         );
     }
-    let new_key_shown = change.is_some_and(|(_, now)| Some(now) == shown_key);
-    content
-        .child(section("Safety number"))
-        .child(if groups.is_empty() {
-            caption("You haven’t seen this person’s key in a room yet.").into_any_element()
-        } else {
-            div()
-                .grid()
-                .grid_cols(4)
-                .gap_3()
-                .font_family(theme::mono_font())
-                .typeset(theme::TITLE_2)
-                .font_weight(FontWeight::NORMAL)
-                .children(groups.into_iter().map(|g| div().child(g)))
-                .into_any_element()
-        })
-        .child(description(if new_key_shown {
-            format!(
-                "This number belongs to the new key. Only if it matches {name}’s is the new key really theirs."
-            )
-        } else {
-            format!(
-                "Compare this with {name} in person or through another app. If both match, nobody between you is swapping keys. Verifying them here counts on every server."
-            )
-        }))
-        .child(
-            buttons.child(
-                primary("mark-verified", if verified { "Mark as Not Verified" } else { "Mark as Verified" })
-                    .disabled(key_changed || shown_key.is_none() || shown_key != presented)
-                    .on_click(cx.listener(move |app, _, _, cx| {
-                        if let Some(key) = shown_key {
-                            app.command(Command::SetVerified { user, key, verified: !verified });
-                        }
-                        cx.notify();
-                    })),
-            ),
+    let explanation = if new_key_shown {
+        format!(
+            "This number belongs to {name}’s new key. Compare it with theirs in person or through another app before you trust it."
         )
+    } else {
+        format!(
+            "To check that your calls with {name} are end-to-end encrypted, compare these numbers with theirs in person or through another app."
+        )
+    };
+    content
+        .child(number)
+        .children(
+            shown
+                .is_some()
+                .then(|| description(explanation).text_center()),
+        )
+        .child(buttons)
         .into_any_element()
+}
+
+fn own_profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
+    let (name, seed, picture) = app.own_look(cx);
+    profile_column()
+        .child(profile_header(&name, seed, picture))
+        .child(
+            description(
+                "To verify your safety number with someone, open their profile while they open yours. You have a separate number with each person.",
+            )
+            .text_center(),
+        )
+        .child(actions("Done", cx).w_full().child(
+            secondary("edit-profile", "Edit Profile").on_click(cx.listener(
+                |app, _, window, cx| {
+                    app.set_dialog(None, cx);
+                    app.show_screen(Screen::Settings(SettingsPage::Profile), window, cx);
+                },
+            )),
+        ))
+        .into_any_element()
+}
+
+fn profile_column() -> Div {
+    div().flex().flex_col().items_center().gap_4()
+}
+
+/// The person's large picture with their name below it.
+fn profile_header(name: &str, seed: u64, picture: Option<Arc<RenderImage>>) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap_2()
+        .child(avatar(name, seed, picture, px(96.), false))
+        .child(div().typeset(theme::LARGE_TITLE).child(name.to_owned()))
 }
 
 fn safety_groups(number: &str) -> Vec<String> {

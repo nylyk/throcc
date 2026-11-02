@@ -85,4 +85,4 @@ Taken from the client's sample data (`throcc-client --mock`) with `scripts/scree
 | ![A share in focus](docs/screens/focus.png) | ![Share your screen](docs/screens/share.png) |
 | ![Connection](docs/screens/connection.png) | ![Audio settings](docs/screens/settings.png) |
 | ![Appearance](docs/screens/appearance.png) | ![Members and invites](docs/screens/members.png) |
-| ![Safety number](docs/screens/verify.png) | ![A member's key changed](docs/screens/keychange.png) |
+| ![A profile with its safety number](docs/screens/person.png) | ![A member's key changed](docs/screens/keychange.png) |
