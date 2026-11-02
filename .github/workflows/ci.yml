@@ -18,13 +18,13 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: rustup toolchain install
       - run: cargo fmt --all --check
       - run: ./scripts/check-server-deps.sh
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
 
   test:
     strategy:
@@ -40,7 +40,7 @@ jobs:
     env:
       FFMPEG_PKG_CONFIG_PATH: ${{ matrix.ffmpeg_pkg_config }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - if: runner.os == 'macOS'
@@ -53,7 +53,7 @@ jobs:
             libxcb-shm0-dev libxcb-xfixes0-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev libgbm-dev \
             libegl-dev libssl-dev libzstd-dev pkg-config mesa-vulkan-drivers
       - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: ./scripts/ci-run.sh cargo clippy --locked --workspace --all-targets ${{ matrix.features }} -- -D warnings
         shell: bash
       - run: ./scripts/ci-run.sh cargo test --locked --workspace --no-fail-fast ${{ matrix.features }}
@@ -74,7 +74,7 @@ jobs:
       FFMPEG_BINDING_PATH: ${{ github.workspace }}/deps/ffmpeg-lgpl/binding.rs
       LD_LIBRARY_PATH: ${{ github.workspace }}/deps/ffmpeg-lgpl/lib
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: |
@@ -86,12 +86,12 @@ jobs:
       - id: versions
         run: echo "libs=$(pkg-config --modversion libva dav1d vpx | tr '\n' '-')" >>"$GITHUB_OUTPUT"
       - id: ffmpeg
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: deps/ffmpeg-lgpl
           key: linux-ffmpeg-${{ steps.versions.outputs.libs }}-${{ hashFiles('packaging/ffmpeg/build.sh', 'packaging/ffmpeg/patches/*', 'packaging/ffmpeg/bindings.sh') }}
       - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - if: steps.ffmpeg.outputs.cache-hit != 'true'
         name: ffmpeg
         run: |
@@ -100,7 +100,7 @@ jobs:
           ./scripts/ci-run.sh packaging/ffmpeg/bindings.sh deps/ffmpeg-lgpl deps/ffmpeg-lgpl/binding.rs
         shell: bash
       - if: steps.ffmpeg.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: deps/ffmpeg-lgpl
           key: ${{ steps.ffmpeg.outputs.cache-primary-key }}
@@ -112,7 +112,7 @@ jobs:
   surface:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: |
@@ -122,11 +122,11 @@ jobs:
             libxcb-shm0-dev libxcb-xfixes0-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev libgbm-dev \
             libegl-dev libssl-dev libzstd-dev pkg-config mesa-vulkan-drivers sway grim fonts-dejavu-core
       - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: ./scripts/ci-run.sh tests/surface/run.sh
         shell: bash
       - if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: surface
           path: target/surface/*.ppm
@@ -135,7 +135,7 @@ jobs:
   netem:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: ./scripts/ci-run.sh tests/netem/run.sh

@@ -28,21 +28,21 @@ jobs:
   macos-app:
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: brew install dav1d libvpx pkgconf
       - id: dav1d
         run: echo "version=$(brew list --versions dav1d libvpx | tr ' \n' '--')" >>"$GITHUB_OUTPUT"
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: deps/ffmpeg-lgpl
           key: macos-ffmpeg-${{ steps.dav1d.outputs.version }}-${{ hashFiles('packaging/ffmpeg/build.sh', 'packaging/ffmpeg/patches/*') }}
       - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: ./scripts/ci-run.sh packaging/macos/bundle.sh
         shell: bash
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: throcc-macos
           path: target/macos/throcc.dmg
@@ -51,12 +51,12 @@ jobs:
   windows-app:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
       - id: deps
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: deps
           key: windows-deps-nv13.0.19.0-${{ hashFiles('packaging/ffmpeg/build.sh', 'packaging/ffmpeg/patches/*', 'packaging/ffmpeg/bindings.sh', 'packaging/windows/build-deps.sh', 'packaging/windows/requirements.txt') }}
@@ -69,7 +69,7 @@ jobs:
           export PATH="/c/Program Files/NASM:$PATH"
           ./scripts/ci-run.sh packaging/windows/build-deps.sh
       - if: steps.deps.outputs.cache-hit != 'true'
-        uses: msys2/setup-msys2@v2
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         with:
           msystem: MSYS
           path-type: inherit
@@ -85,7 +85,7 @@ jobs:
           export PKG_CONFIG_PATH="$(cygpath -m "$PWD/deps/lib/pkgconfig")"
           ./scripts/ci-run.sh packaging/ffmpeg/build.sh deps/ffmpeg-lgpl
       - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - if: steps.deps.outputs.cache-hit != 'true'
         name: bindings
         shell: bash
@@ -94,7 +94,7 @@ jobs:
           ./scripts/ci-run.sh cargo install bindgen-cli --version 0.72.1 --locked
           ./scripts/ci-run.sh packaging/ffmpeg/bindings.sh deps/ffmpeg-lgpl deps/ffmpeg-lgpl/binding.rs
       - if: steps.deps.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: deps
           key: ${{ steps.deps.outputs.cache-primary-key }}
@@ -103,7 +103,7 @@ jobs:
         run: |
           export PATH="$(dirname "$(command -v cl)"):$PATH"
           ./scripts/ci-run.sh pwsh -NoProfile -File packaging/windows/package.ps1
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: throcc-windows
           path: target/windows/throcc-windows.zip
