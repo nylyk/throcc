@@ -42,6 +42,7 @@ Each crate's `README.md` explains its modules and how they fit together. Update 
 - **Frozen; changes need a human decision:** the media header, the media AEAD and track-key derivation, HPKE sender-key wrapping and its info, the signed encryption key, and the safety-number construction.
 - Never weaken a security property to make a test pass. Stop and ask instead.
 - Audio and capture callbacks never block, allocate, lock, await or panic. Cross into tokio only with a bounded channel, `try_send`, drop on full and a counter.
+  The one exception is outside our code: screencapturekit's own dispatcher on macOS takes a lock and allocates before our handler runs. Our handler itself stays lock-free (`try_lock` only).
 - SFU egress never drops audio by policy, and drops video only as whole access units.
 - No GPL or AGPL dependencies. `cargo deny` enforces this.
 - Crypto, protocol and SFU changes get reviewed by a subagent that didn't write them.
@@ -49,7 +50,7 @@ Each crate's `README.md` explains its modules and how they fit together. Update 
 ## UI
 
 - Every colour lives in `throcc-client/theme.rs`: an 8-colour palette the user picks, everything else mixed from it in Oklab.
-- Quiet and minimal: one accent, no gradients, no shadows beyond focus rings, no emoji.
+- Quiet and minimal: one accent, no gradients, no shadows beyond focus rings, no emoji. The one gradient is the shade behind controls over video, which keeps them readable on any picture.
 - Geist and Geist Mono; mono for addresses, codes, fingerprints, numbers and codecs. Spacing on a 4 px grid.
 - Match the existing screens. Add a `--mock --screen` sample for any new screen or dialog.
 
