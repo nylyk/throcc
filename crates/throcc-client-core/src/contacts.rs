@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -29,8 +30,6 @@ pub enum ContactStatus {
     Changed { pinned: PublicKey },
 }
 
-/// Identity keys pinned per user on one server, on first sight. Changes are kept in
-/// memory at once and reach the file through [`UnsavedPins::save`].
 /// How many names are noted per pinned user. The first ones are kept, so a server can't
 /// flush out a name by renaming someone over and over.
 const MAX_NAMES: usize = 4;
@@ -38,6 +37,8 @@ const MAX_NAMES: usize = 4;
 /// than forgetting anyone: a forgotten pin would let a server swap that user's key unseen.
 pub const MAX_CONTACTS: usize = 4096;
 
+/// Identity keys pinned per user on one server, on first sight. Changes are kept in
+/// memory at once and reach the file through [`UnsavedPins::save`].
 pub struct Contacts {
     pins: BTreeMap<UserId, Contact>,
     unsaved: Arc<UnsavedPins>,
@@ -52,6 +53,8 @@ pub struct UnsavedPins {
     /// Held across a write, so the pins taken later land later.
     writing: Mutex<()>,
     failure: Mutex<SaveFailure>,
+    /// Set once the last write is done, as before the server's data is removed.
+    finished: AtomicBool,
 }
 
 #[derive(Default)]
@@ -71,7 +74,7 @@ impl UnsavedPins {
     pub fn save(&self) -> Result<()> {
         let _writing = lock(&self.writing);
         let pins = std::mem::take(&mut *lock(&self.pins));
-        if pins.is_empty() {
+        if pins.is_empty() || self.finished.load(Ordering::Relaxed) {
             return Ok(());
         }
         let saved = Servers::update(&self.dir, |s| {
@@ -90,6 +93,15 @@ impl UnsavedPins {
                 }
             }
         }
+        saved
+    }
+
+    /// Writes the pins changed so far, and none after: the server's data may be about to
+    /// go, and a later write would bring it back.
+    pub fn save_last(&self) -> Result<()> {
+        let saved = self.save();
+        let _writing = lock(&self.writing);
+        self.finished.store(true, Ordering::Relaxed);
         saved
     }
 
@@ -118,6 +130,7 @@ impl Contacts {
             pins: Mutex::default(),
             writing: Mutex::default(),
             failure: Mutex::default(),
+            finished: AtomicBool::new(false),
         };
         Ok(Self {
             pins,
@@ -173,20 +186,24 @@ impl Contacts {
         }
     }
 
-    /// Notes a name a pinned user is shown with, until [`MAX_NAMES`] are noted.
-    pub fn remember_name(&mut self, user: UserId, name: &str) {
+    /// Notes a name a pinned user is shown with, until [`MAX_NAMES`] are noted. True when
+    /// that name wasn't noted for them, whether or not there was room to note it.
+    pub fn remember_name(&mut self, user: UserId, name: &str) -> bool {
         let Some(name) = valid_name(name) else {
-            return;
+            return false;
         };
         let Some(c) = self.pins.get(&user) else {
-            return;
+            return false;
         };
-        let noted = c.names.iter().any(|n| same_name(n, name));
-        if !noted && c.names.len() < MAX_NAMES {
+        if c.names.iter().any(|n| same_name(n, name)) {
+            return false;
+        }
+        if c.names.len() < MAX_NAMES {
             let mut contact = c.clone();
             contact.names.push(name.to_owned());
             self.keep(user, contact);
         }
+        true
     }
 
     /// Someone pinned here other than `user` who goes by `name`: by a name noted for them,
@@ -294,6 +311,28 @@ mod tests {
     }
 
     #[test]
+    fn nothing_is_written_after_the_last_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Fingerprint([7; 32]);
+        let mut contacts = Contacts::load(dir.path(), &server).unwrap();
+        contacts.pin(UserId(4), [1; 32]);
+        contacts.unsaved().save_last().unwrap();
+        assert!(
+            Contacts::load(dir.path(), &server)
+                .unwrap()
+                .get(UserId(4))
+                .is_some()
+        );
+        Servers::update(dir.path(), |s| {
+            s.servers.clear();
+        })
+        .unwrap();
+        contacts.pin(UserId(5), [2; 32]);
+        contacts.unsaved().save().unwrap();
+        assert!(Servers::load(dir.path()).unwrap().servers.is_empty());
+    }
+
+    #[test]
     fn an_earlier_connections_contacts_carry_over_only_on_the_same_server() {
         let dir = tempfile::tempdir().unwrap();
         let server = Fingerprint([7; 32]);
@@ -344,9 +383,15 @@ mod tests {
         let mut contacts = Contacts::load(dir.path(), &Fingerprint([7; 32])).unwrap();
         let (bob, carol, ghost, stranger) = (UserId(2), UserId(3), UserId(9), UserId(10));
         contacts.pin(bob, [2; 32]);
-        for name in ["user2", "Bob", "bob", "Robert", "R", "Rob", "Bobby"] {
-            contacts.remember_name(bob, name);
-        }
+        let unnoted: Vec<bool> = ["user2", "Bob", "bob", "Robert", "R", "Rob", "Bobby", "R"]
+            .into_iter()
+            .map(|name| contacts.remember_name(bob, name))
+            .collect();
+        assert_eq!(
+            unnoted,
+            [true, true, false, true, true, true, true, false],
+            "names past the record are still new"
+        );
         assert_eq!(
             contacts.get(bob).unwrap().names,
             ["user2", "Bob", "Robert", "R"]

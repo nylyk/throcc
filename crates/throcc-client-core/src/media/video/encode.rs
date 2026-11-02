@@ -550,35 +550,87 @@ impl Fitter {
         let rows = self.source_size.1 as i32;
         self.scaler
             .scale_frame(&self.source, 0, rows, &mut self.scaled)?;
-        fill_black(frame, self.input);
-        let (x, y, width, height) = self.rectangle;
-        // (plane, x in bytes, y in rows, bytes per row, rows) of the rectangle in each plane.
-        let planes = match self.input {
-            Input::Nv12 => vec![(0, x, y, width, height), (1, x, y / 2, width, height / 2)],
-            Input::Yuv420p => vec![
-                (0, x, y, width, height),
-                (1, x / 2, y / 2, width / 2, height / 2),
-                (2, x / 2, y / 2, width / 2, height / 2),
-            ],
-        };
-        for (plane, x, y, bytes, rows) in planes {
+        for area in plane_areas(frame, self.input, self.rectangle) {
             let (from_stride, to_stride) = (
-                self.scaled.linesize[plane] as usize,
-                frame.linesize[plane] as usize,
+                self.scaled.linesize[area.plane] as usize,
+                frame.linesize[area.plane] as usize,
             );
-            for row in 0..rows {
-                // SAFETY: `scaled` holds the rectangle's size in this plane's layout, and
-                // `fitted` keeps the rectangle inside `frame` with even offsets.
+            for row in 0..area.rows {
+                // SAFETY: `plane_areas` keeps every row within the plane's width and every
+                // row index within its height, and `scaled` holds the rectangle's size in
+                // this plane's layout.
                 unsafe {
+                    let line = frame.data[area.plane].add(row * to_stride);
+                    if !(area.y..area.y + area.height).contains(&row) {
+                        std::ptr::write_bytes(line, area.black, area.row_bytes);
+                        continue;
+                    }
+                    std::ptr::write_bytes(line, area.black, area.x);
                     std::ptr::copy_nonoverlapping(
-                        self.scaled.data[plane].add(row * from_stride),
-                        frame.data[plane].add((y + row) * to_stride + x),
-                        bytes,
+                        self.scaled.data[area.plane].add((row - area.y) * from_stride),
+                        line.add(area.x),
+                        area.width,
                     );
+                    let right = area.x + area.width;
+                    std::ptr::write_bytes(line.add(right), area.black, area.row_bytes - right);
                 }
             }
         }
         Ok(())
+    }
+}
+
+/// A frame's plane, and where a fitted rectangle lies in it, in bytes and rows.
+struct PlaneArea {
+    plane: usize,
+    /// The plane's value for full-range black.
+    black: u8,
+    row_bytes: usize,
+    rows: usize,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+}
+
+/// Each plane of `frame` with the part `rectangle` covers. `fitted` makes the rectangle's
+/// offsets and size even, so it halves exactly in the chroma planes.
+fn plane_areas(
+    frame: &AVFrame,
+    input: Input,
+    (x, y, width, height): (usize, usize, usize, usize),
+) -> Vec<PlaneArea> {
+    let (frame_width, frame_height) = (frame.width as usize, frame.height as usize);
+    let luma = PlaneArea {
+        plane: 0,
+        black: 0,
+        row_bytes: frame_width,
+        rows: frame_height,
+        x,
+        y,
+        width,
+        height,
+    };
+    let chroma = |plane, row_bytes, x, width| PlaneArea {
+        plane,
+        black: 128,
+        row_bytes,
+        rows: frame_height.div_ceil(2),
+        x,
+        y: y / 2,
+        width,
+        height: height / 2,
+    };
+    match input {
+        Input::Nv12 => vec![luma, chroma(1, frame_width.div_ceil(2) * 2, x, width)],
+        Input::Yuv420p => {
+            let half = frame_width.div_ceil(2);
+            vec![
+                luma,
+                chroma(1, half, x / 2, width / 2),
+                chroma(2, half, x / 2, width / 2),
+            ]
+        }
     }
 }
 
@@ -900,6 +952,13 @@ mod tests {
                 picture.y.fill(200);
                 let mut fitter = Fitter::new(source, target, input).unwrap();
                 let mut frame = new_frame(target.0, target.1, input).unwrap();
+                for (plane, rows) in [(0, target.1), (1, target.1 / 2), (2, target.1 / 2)] {
+                    if !frame.data[plane].is_null() {
+                        let bytes = frame.linesize[plane] as usize * rows;
+                        // SAFETY: each plane holds `rows` rows of `linesize` bytes.
+                        unsafe { std::ptr::write_bytes(frame.data[plane], 77, bytes) };
+                    }
+                }
                 fitter.fit(&picture, &mut frame).unwrap();
                 fitter.fit(&picture, &mut frame).unwrap();
 
@@ -924,6 +983,21 @@ mod tests {
                     .filter(|&(col, row)| col < target.0 && row < target.1)
                 {
                     assert_eq!(luma(col, row), 0, "{input:?} {source:?} at {col},{row}");
+                }
+                let in_picture = |&(col, row): &(usize, usize)| {
+                    col >= x && col < right && row >= y && row < bottom
+                };
+                for (col, row) in [(0, 0), (target.0 - 1, target.1 - 1)]
+                    .into_iter()
+                    .filter(|corner| !in_picture(corner))
+                {
+                    assert_eq!(luma(col, row), 0, "{input:?} {source:?} corner");
+                    let chroma_col = match input {
+                        Input::Nv12 => col / 2 * 2,
+                        Input::Yuv420p => col / 2,
+                    };
+                    let chroma = sample(1, chroma_col, row / 2);
+                    assert_eq!(chroma, 128, "{input:?} {source:?} corner chroma");
                 }
             }
         }

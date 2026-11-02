@@ -501,6 +501,15 @@ fn someone_new_using_a_known_persons_name_is_warned_of_until_verified() {
     wait_for(&alice, "the warning gone once verified", |s| {
         s.key_warnings.is_empty()
     });
+
+    let (_renamed, renamed_id, _r) = joined_as("Bob", true);
+    let warning = KeyWarning {
+        user: renamed_id,
+        cause: WarningCause::SameName { known: bob_id },
+    };
+    wait_for(&alice, "a warning for a rename after joining", |s| {
+        s.key_warnings.contains(&warning)
+    });
 }
 
 #[test]

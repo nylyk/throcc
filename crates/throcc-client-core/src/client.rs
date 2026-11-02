@@ -296,6 +296,17 @@ impl MockClient {
         }
     }
 
+    /// The sample client, as if connected at `address`.
+    pub fn at(address: &str) -> Self {
+        let client = Self::new();
+        client.update(|s| {
+            if let Some(server) = s.server.as_mut() {
+                server.address = address.to_owned();
+            }
+        });
+        client
+    }
+
     fn update(&self, change: impl FnOnce(&mut State)) {
         self.shared.update(change);
     }
@@ -521,6 +532,7 @@ fn sample_state() -> State {
         (5, "Teo", Some(2)),
         (6, "Ren", Some(2)),
         (7, "Kaya", Some(4)),
+        (8, "Mara", Some(4)),
     ] {
         people.insert(UserId(id), person(name, room));
     }
@@ -563,13 +575,19 @@ fn sample_state() -> State {
         current: None,
         mic: true,
         deafened: false,
-        key_warnings: vec![KeyWarning {
-            user: UserId(3),
-            cause: WarningCause::KeyChanged {
-                pinned: Fingerprint([0x7c; 32]),
-                now: Fingerprint([0xb8; 32]),
+        key_warnings: vec![
+            KeyWarning {
+                user: UserId(3),
+                cause: WarningCause::KeyChanged {
+                    pinned: Fingerprint([0x7c; 32]),
+                    now: Fingerprint([0xb8; 32]),
+                },
             },
-        }],
+            KeyWarning {
+                user: UserId(8),
+                cause: WarningCause::SameName { known: UserId(2) },
+            },
+        ],
         health: Health {
             rtt_ms: 18.0,
             download_kbps: 10_480,

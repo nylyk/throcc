@@ -288,13 +288,28 @@ impl MediaEngine {
         self.with_keys(|_, contacts, _| contacts.set_verified(user, verified));
     }
 
-    /// Notes the names pinned people are shown with.
-    pub fn remember_names<'a>(&self, shown: impl IntoIterator<Item = (UserId, &'a str)>) {
+    /// Notes the names pinned people are shown with. Returns the unverified ones shown
+    /// with a name not noted for them before.
+    pub fn remember_names<'a>(
+        &self,
+        shown: impl IntoIterator<Item = (UserId, &'a str)>,
+    ) -> Vec<UserId> {
         self.with_keys(|_, contacts, _| {
+            let mut renamed = Vec::new();
             for (user, name) in shown {
-                contacts.remember_name(user, name);
+                if contacts.remember_name(user, name)
+                    && contacts.get(user).is_some_and(|c| !c.verified)
+                {
+                    renamed.push(user);
+                }
             }
-        });
+            renamed
+        })
+    }
+
+    /// Writes the pins not yet saved, and none after, waiting for any write under way.
+    pub fn save_last_pins(&self) -> anyhow::Result<()> {
+        self.pins.save_last()
     }
 
     /// Why pins stopped reaching the file, once per run of failed writes.

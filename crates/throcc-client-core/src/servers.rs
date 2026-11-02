@@ -18,6 +18,10 @@ const FILE: &str = "servers.json";
 pub(crate) struct Servers {
     /// Pinned server fingerprints, by the address they were pinned at.
     pub known: BTreeMap<String, Hex>,
+    /// The fingerprint an address had before the user trusted its new one, until our
+    /// account signs in under the new one.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub replaced: BTreeMap<String, Hex>,
     pub servers: BTreeMap<Hex, Server>,
 }
 

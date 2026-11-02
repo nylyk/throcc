@@ -194,6 +194,7 @@ async fn run(cli: Cli) -> Result<()> {
             with_audio,
         } => {
             track.check_with_audio(with_audio)?;
+            track.check_size(size)?;
             let (mut call, room) = start_call(&keystore, &address, &room).await?;
             let options = synthetic::SendOptions {
                 track,

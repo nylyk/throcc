@@ -47,6 +47,7 @@ pub async fn sign_in(
         .ok_or_else(|| SignInError::NotEnrolled(address.to_owned()))?;
     let connected = connection::connect(address, Some(pin)).await?;
     let link = control::login(connected, keystore.identity(), want_room).await?;
+    keystore.known_servers.signed_in(address)?;
     let server = &link.connected.fingerprint;
     publish_enc_key(keystore, &link.requester, server, link.welcome.me).await?;
     Ok(link)

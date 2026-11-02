@@ -80,7 +80,12 @@ pub(super) fn start(
             .await
             .map_err(portal_error)?;
         let started = async {
-            let closed = closed_signal(&portal, &session).await?;
+            // Without the signal a share stopped outside throcc is only noticed when its
+            // stream ends, which is no reason to refuse sharing.
+            let closed = closed_signal(&portal, &session)
+                .await
+                .inspect_err(|e| warn!("not watching for the share being stopped elsewhere: {e}"))
+                .ok();
             let (node, fd, kept) = pick(&portal, &session, token.as_deref()).await?;
             if let Some(kept) = &kept {
                 save_token(settings, kept);
@@ -191,7 +196,7 @@ struct PortalSession {
     session: Session<Screencast>,
     /// The session's Closed signal, which comes when the person or the system stops the
     /// share outside throcc, as from the desktop's sharing indicator.
-    closed: RefCell<MessageStream>,
+    closed: RefCell<Option<MessageStream>>,
 }
 
 impl PortalSession {
@@ -201,10 +206,13 @@ impl PortalSession {
         let Ok(mut closed) = self.closed.try_borrow_mut() else {
             return false;
         };
+        let Some(closed) = closed.as_mut() else {
+            return false;
+        };
         let mut context = Context::from_waker(Waker::noop());
         // An error or the end of the stream means the D-Bus connection, and with it the
         // session, is gone.
-        Pin::new(&mut *closed).poll_next(&mut context).is_ready()
+        Pin::new(closed).poll_next(&mut context).is_ready()
     }
 }
 

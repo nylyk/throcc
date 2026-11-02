@@ -675,12 +675,12 @@ fn remove_server(app: &ThroccApp, address: String, cx: &mut Context<ThroccApp>) 
     let server = app.server_name(&address).unwrap_or_else(|| address.clone());
     body(format!("Remove “{server}”?"))
         .child(description(
-            "It leaves your list, but you stay a member. Add it again with its address, no invite needed. To end your membership, connect and choose Leave Server.",
+            "It leaves your list, but you stay a member. Adding it again needs an invite. To end your membership, connect and choose Leave Server.",
         ))
         .child(
             actions("Cancel", cx).child(
                 danger("confirm-remove-server", "Remove").on_click(cx.listener(
-                    move |app, _, _, cx| app.remove_server(&address, cx),
+                    move |app, _, window, cx| app.remove_server(&address, window, cx),
                 )),
             ),
         )

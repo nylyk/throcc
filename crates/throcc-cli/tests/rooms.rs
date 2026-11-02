@@ -827,6 +827,71 @@ async fn a_reconnect_returns_to_the_room_it_left_even_after_hopping() {
 }
 
 #[tokio::test]
+async fn reconnects_return_to_the_room_left_only_so_often() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let general = create_room(&mut alice, "General").await;
+    alice.join(Some(general)).await;
+    for _ in 0..10 {
+        alice.reconnect(&server.addr, Some(general)).await;
+        assert_eq!(alice.link.welcome.placed.room, Some(general));
+    }
+    alice.reconnect(&server.addr, Some(general)).await;
+    assert_eq!(alice.link.welcome.placed.room, None);
+}
+
+#[tokio::test]
+async fn a_reconnect_lands_in_the_lobby_once_the_room_left_is_locked_or_deleted() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let locked = create_room(&mut alice, "Locked").await;
+    let deleted = create_room(&mut alice, "Deleted").await;
+    let mut bob = invited(&server, &alice).await;
+    for room in [locked, deleted] {
+        bob.join(Some(room)).await;
+        bob.disconnect();
+        let change = if room == locked {
+            Request::SetRoomPassword {
+                room,
+                password: Some("hunter2".into()),
+            }
+        } else {
+            Request::DeleteRoom(room)
+        };
+        assert_eq!(alice.request(change).await, Response::Ok);
+        bob.reconnect(&server.addr, Some(room)).await;
+        assert_eq!(bob.link.welcome.placed.room, None, "{room:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_reconnect_does_not_return_to_a_locked_room_one_was_kicked_from() {
+    let server = start_server();
+    let alice = admin(&server).await;
+    let mut bob = invited(&server, &alice).await;
+    let create = Request::CreateRoom {
+        name: "Private".into(),
+        password: Some("hunter2".into()),
+    };
+    assert_eq!(alice.request(create).await, Response::Ok);
+    let private = bob
+        .event(|e| match e {
+            Event::RoomCreated(room) => Some(room.id),
+            _ => None,
+        })
+        .await;
+    let joined = bob.set_room(Some(private), Some("hunter2")).await;
+    assert!(matches!(joined, Response::Placed(_)), "{joined:?}");
+    let kick = Request::KickFromRoom {
+        user: bob.link.welcome.me,
+        room: private,
+    };
+    assert_eq!(alice.request(kick).await, Response::Ok);
+    bob.reconnect(&server.addr, Some(private)).await;
+    assert_eq!(bob.link.welcome.placed.room, None);
+}
+
+#[tokio::test]
 async fn sender_keys_for_the_current_epoch_need_no_request_allowance() {
     let server = start_server();
     let mut alice = admin(&server).await;

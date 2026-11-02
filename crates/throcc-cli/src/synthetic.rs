@@ -5,6 +5,9 @@ use anyhow::{Context, Result, bail};
 use throcc_client_core::call::{Call, CallEvent};
 use throcc_client_core::control;
 use throcc_client_core::media::engine::{Kind, Outgoing, Received};
+use throcc_client_core::media::fragment::{
+    MAX_AUDIO_UNIT_FRAGMENTS, MAX_VIDEO_UNIT_FRAGMENTS, max_unit_bytes,
+};
 use throcc_proto::frame::{AUDIO_CLOCK_HZ, VIDEO_CLOCK_HZ};
 use throcc_proto::ids::{MediaId, RoomId, UserId};
 use throcc_proto::messages::{Codec, Event, MediaState, Presence, Request, ShareConfig};
@@ -38,6 +41,18 @@ impl Track {
             Track::Mic => mic,
             Track::Video => video,
         }
+    }
+
+    /// Refuses a unit size receivers would drop, before anything connects.
+    pub fn check_size(self, size: usize) -> Result<()> {
+        let most = max_unit_bytes(match self {
+            Track::Mic => MAX_AUDIO_UNIT_FRAGMENTS,
+            Track::Video => MAX_VIDEO_UNIT_FRAGMENTS,
+        });
+        if size > most {
+            bail!("--size can be at most {most} bytes on this track; receivers drop longer units");
+        }
+        Ok(())
     }
 
     /// Refuses `--with-audio` beside `--track mic`, before anything connects.

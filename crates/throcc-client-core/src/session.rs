@@ -565,6 +565,12 @@ impl Session {
                 .notice("Couldn't leave this server: the connection dropped. Try again.");
             return false;
         }
+        if let Err(e) = self.call.engine.save_last_pins() {
+            warn!("saving contacts before leaving: {e:#}");
+        }
+        if let Err(e) = self.saved_playback.save_last() {
+            warn!("saving playback before leaving: {e:#}");
+        }
         if let Err(e) = self.keystore.known_servers.leave(&self.address) {
             warn!("forgetting the server: {e:#}");
         }
@@ -660,7 +666,15 @@ impl Session {
                     self.start_voice();
                     self.cue(Cue::Reconnected);
                     let welcome = self.call.welcome.clone();
+                    let wanted = want_room.map(|room| (room, self.room_name(room)));
                     self.apply_welcome(&welcome);
+                    if let Some((room, name)) = wanted
+                        && welcome.placed.room != Some(room)
+                    {
+                        self.shared.notice(format!(
+                            "Reconnected, but not back into {name}; you're in the lobby."
+                        ));
+                    }
                     self.push_media().await;
                     if self.room.is_some() && self.room == room_before {
                         self.watching = watching_before;
@@ -672,6 +686,13 @@ impl Session {
             }
         }
         None
+    }
+
+    fn room_name(&self, room: RoomId) -> String {
+        let state = self.shared.state();
+        state
+            .room(room)
+            .map_or("your room".to_owned(), |r| r.name.clone())
     }
 
     /// Leaves our room here after the server took us out of it.
@@ -704,8 +725,6 @@ impl Session {
 
     fn apply_welcome(&mut self, welcome: &Welcome) {
         let fingerprint = self.call.server();
-        let names = welcome.presence.iter().map(|p| (p.user, p.name.as_str()));
-        self.call.engine.remember_names(names);
         self.remember_server(welcome.server.name.clone(), welcome.server.avatar);
         let address = self.address.clone();
         let media = self.media;
@@ -732,6 +751,7 @@ impl Session {
             }
             s.current = None;
         });
+        self.note_names(welcome.presence.iter().map(|p| (p.user, p.name.as_str())));
         self.refresh_verified();
         if welcome.placed.room.is_some() {
             self.after_join(&welcome.placed);
@@ -1146,7 +1166,7 @@ impl Session {
         self.show_shares();
         let response = self.call.request(Request::SetMedia(media)).await;
         if refuses_share_start(&response, media.share, self.server_share) {
-            self.undo_refused_share();
+            self.undo_refused_share().await;
             return;
         }
         match response {
@@ -1156,8 +1176,9 @@ impl Session {
     }
 
     /// Stops a share the server wouldn't start. Leaving it running would carry the refused
-    /// start in every later `SetMedia`, such as each push-to-talk press.
-    fn undo_refused_share(&mut self) {
+    /// start in every later `SetMedia`, such as each push-to-talk press. A share the server
+    /// still holds from before is stopped there too, which it never refuses.
+    async fn undo_refused_share(&mut self) {
         self.stop_share();
         self.shared.update(|s| {
             if let Some(c) = s.current.as_mut() {
@@ -1167,6 +1188,9 @@ impl Session {
         self.show_shares();
         self.shared
             .notice("Sharing was started too often. Try again in a moment.");
+        if self.server_share.is_some() {
+            Box::pin(self.push_media()).await;
+        }
     }
 
     async fn push_watching(&mut self) {
@@ -1303,7 +1327,12 @@ impl Session {
     /// the user picking what to share, so it reports back through [`ShareStarts`].
     #[cfg(feature = "ffmpeg")]
     fn start_share(&mut self, wanted: ShareConfig) {
-        if self.sharing.is_some() || self.share_starts.wanted.is_some() {
+        if self.share_starts.wanted.is_some() {
+            self.shared
+                .notice("Already choosing what to share. Finish in the picker that's open.");
+            return;
+        }
+        if self.sharing.is_some() {
             return;
         }
         let Some(tracks) = self
@@ -1512,13 +1541,24 @@ impl Session {
                 KeyNotice::TooManyPeers => self.shared.notice(format!(
                     "The server described the room with more than {MAX_ROOM_PEERS} people, so the call is paused until it sends a valid one."
                 )),
+                KeyNotice::OldEpoch => self.shared.notice(
+                    "The server put this room back to keys older than ones you've used here, as a restored backup or a replayed call would. You won't hear anyone here until the room moves past them, or until you restart throcc.",
+                ),
             }
         }
     }
 
-    /// Warns, until they are verified, when someone met for the first time goes by the name
-    /// of someone pinned here before: a server can show a new account of its own under the
-    /// name of a person we know.
+    /// Notes the names pinned people are shown with, and checks those not verified for a
+    /// namesake whenever they show up under a name not noted for them.
+    fn note_names<'a>(&self, shown: impl IntoIterator<Item = (UserId, &'a str)>) {
+        for user in self.call.engine.remember_names(shown) {
+            self.warn_of_namesake(user);
+        }
+    }
+
+    /// Warns, until they are verified, when someone met for the first time, or renamed
+    /// since, goes by the name of someone else pinned here: a server can show a new account
+    /// of its own under the name of a person we know.
     fn warn_of_namesake(&self, user: UserId) {
         let state = self.shared.state();
         let Some(name) = state.person(user).map(|p| p.name.as_str()) else {
@@ -1536,7 +1576,7 @@ impl Session {
         warn!(
             user = user.0,
             known = known.0,
-            "a new contact has the name of a known one"
+            "a contact not verified has the name of a known one"
         );
         let warning = KeyWarning {
             user,
@@ -1579,7 +1619,6 @@ impl Session {
                     .contacts
                     .get(p.user)
                     .is_some_and(|c| c.verified);
-                self.call.engine.remember_names([(p.user, p.name.as_str())]);
                 let saved = &self.saved_playback;
                 let sharing = self.sharing_of(p.user);
                 self.shared.update(|s| {
@@ -1592,6 +1631,7 @@ impl Session {
                     };
                     s.add_person(p.user, updated);
                 });
+                self.note_names([(p.user, p.name.as_str())]);
                 self.follow_room().await;
             }
             ServerEvent::PresenceEnded(user) => {

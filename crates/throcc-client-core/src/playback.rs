@@ -17,6 +17,8 @@ pub struct SavedPlayback {
     server: Fingerprint,
     people: BTreeMap<UserId, PersonPlayback>,
     unsaved: BTreeSet<UserId>,
+    /// Set once the last write is done, as before the server's data is removed.
+    finished: bool,
 }
 
 impl SavedPlayback {
@@ -26,6 +28,7 @@ impl SavedPlayback {
             server: *server,
             people: BTreeMap::new(),
             unsaved: BTreeSet::new(),
+            finished: false,
         }
     }
 
@@ -66,7 +69,7 @@ impl SavedPlayback {
     /// Writes the changes made since the last save. Changes a failed save missed stay for
     /// the next one.
     pub fn save(&mut self) -> Result<()> {
-        if self.unsaved.is_empty() {
+        if self.unsaved.is_empty() || self.finished {
             return Ok(());
         }
         Servers::update(&self.dir, |s| {
@@ -80,6 +83,14 @@ impl SavedPlayback {
         })?;
         self.unsaved.clear();
         Ok(())
+    }
+
+    /// Writes the changes made so far, and none after: the server's data may be about to
+    /// go, and a later write would bring it back.
+    pub fn save_last(&mut self) -> Result<()> {
+        let saved = self.save();
+        self.finished = true;
+        saved
     }
 }
 
@@ -128,6 +139,26 @@ mod tests {
         assert_eq!(saved.person(UserId(5)), PersonPlayback::default());
         let other = SavedPlayback::load(dir.path(), &Fingerprint([8; 32])).unwrap();
         assert_eq!(other.person(UserId(4)), PersonPlayback::default());
+    }
+
+    #[test]
+    fn nothing_is_written_after_the_last_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Fingerprint([7; 32]);
+        let mut saved = SavedPlayback::load(dir.path(), &server).unwrap();
+        let quiet = Playback {
+            volume: 0.3,
+            muted: false,
+        };
+        saved.set(UserId(4), Sound::Voice, quiet);
+        saved.save_last().unwrap();
+        Servers::update(dir.path(), |s| {
+            s.servers.clear();
+        })
+        .unwrap();
+        saved.set(UserId(5), Sound::Voice, quiet);
+        drop(saved);
+        assert!(Servers::load(dir.path()).unwrap().servers.is_empty());
     }
 
     #[test]

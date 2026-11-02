@@ -291,7 +291,6 @@ pub fn danger_menu_item(label: &'static str, icon_name: &'static str) -> PopupMe
         .icon(icon(icon_name).text_color(theme::danger_text()))
 }
 
-/// What went wrong, in the warning colours.
 /// Why what was typed in the field above can't be used.
 pub fn field_error(error: impl Into<SharedString>) -> Div {
     div()
@@ -300,6 +299,7 @@ pub fn field_error(error: impl Into<SharedString>) -> Div {
         .child(error.into())
 }
 
+/// What went wrong, in the warning colours.
 pub fn error_box(error: String) -> Div {
     div()
         .p_3()

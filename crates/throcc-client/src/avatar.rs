@@ -14,14 +14,20 @@ const MAX_CHOSEN_SIDE: u32 = 8192;
 const MAX_CHOSEN_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_SHOWN_SIDE: u32 = 512;
 const MAX_SHOWN_BYTES: u64 = 4 * 1024 * 1024;
+/// The formats [`prepare`] writes, and so the only ones pictures from others are read in.
+/// gpui turns on many more of `image`'s decoders.
+const STORED_FORMATS: &[ImageFormat] = &[ImageFormat::Png, ImageFormat::Jpeg];
 
-/// Turns any PNG or JPEG into a centred 128 px square that fits the server's size cap.
+/// Turns a picture the user chose, in any format `image` reads, into a centred 128 px PNG
+/// or JPEG square that fits the server's size cap.
 pub fn prepare(file: &[u8]) -> Result<Vec<u8>, String> {
-    let picture = decode_within(file, MAX_CHOSEN_SIDE, MAX_CHOSEN_BYTES).map_err(|e| match e {
-        ImageError::Limits(_) => format!(
-            "That picture is too large. Pick one up to {MAX_CHOSEN_SIDE}×{MAX_CHOSEN_SIDE} pixels."
-        ),
-        _ => "That isn’t a PNG or JPEG picture.".into(),
+    let picture = decode_within(file, MAX_CHOSEN_SIDE, MAX_CHOSEN_BYTES, None).map_err(|e| {
+        match e {
+            ImageError::Limits(_) => format!(
+                "That picture is too large. Pick one up to {MAX_CHOSEN_SIDE}×{MAX_CHOSEN_SIDE} pixels."
+            ),
+            _ => "That file isn’t a picture throcc can read.".into(),
+        }
     })?;
     let side = picture.width().min(picture.height());
     let square = picture.crop_imm(
@@ -61,7 +67,8 @@ pub fn sample() -> Vec<u8> {
 /// A picture over 512 px a side is refused before its pixels are allocated, and one over
 /// the 128 px every picture is prepared at is shrunk to it, so each one kept stays small.
 pub fn decode(bytes: &[u8]) -> Option<Arc<RenderImage>> {
-    let mut picture = decode_within(bytes, MAX_SHOWN_SIDE, MAX_SHOWN_BYTES).ok()?;
+    let mut picture =
+        decode_within(bytes, MAX_SHOWN_SIDE, MAX_SHOWN_BYTES, Some(STORED_FORMATS)).ok()?;
     if picture.width().max(picture.height()) > SIDE {
         picture = picture.thumbnail(SIDE, SIDE);
     }
@@ -74,14 +81,20 @@ pub fn decode(bytes: &[u8]) -> Option<Arc<RenderImage>> {
     ])))
 }
 
-fn decode_within(bytes: &[u8], max_side: u32, max_bytes: u64) -> ImageResult<DynamicImage> {
+/// Decodes `bytes` within the size limits, in one of `formats` if given.
+fn decode_within(
+    bytes: &[u8],
+    max_side: u32,
+    max_bytes: u64,
+    formats: Option<&[ImageFormat]>,
+) -> ImageResult<DynamicImage> {
     let mut limits = Limits::default();
     limits.max_image_width = Some(max_side);
     limits.max_image_height = Some(max_side);
     limits.max_alloc = Some(max_bytes);
     let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
-    // gpui turns on many more of `image`'s decoders; pictures from others only reach two.
-    if !matches!(reader.format(), Some(ImageFormat::Png | ImageFormat::Jpeg)) {
+    let refused = |format| formats.is_some_and(|allowed| !allowed.contains(&format));
+    if reader.format().is_none_or(refused) {
         let hint = reader
             .format()
             .map_or(ImageFormatHint::Unknown, ImageFormatHint::Exact);
@@ -171,11 +184,11 @@ mod tests {
         assert!(bomb.len() < 100);
         let started = std::time::Instant::now();
         assert!(matches!(
-            decode_within(&bomb, MAX_SHOWN_SIDE, MAX_SHOWN_BYTES),
+            decode_within(&bomb, MAX_SHOWN_SIDE, MAX_SHOWN_BYTES, Some(STORED_FORMATS)),
             Err(ImageError::Limits(_))
         ));
         assert!(matches!(
-            decode_within(&bomb, MAX_CHOSEN_SIDE, MAX_CHOSEN_BYTES),
+            decode_within(&bomb, MAX_CHOSEN_SIDE, MAX_CHOSEN_BYTES, None),
             Err(ImageError::Limits(_))
         ));
         assert!(decode(&bomb).is_none());
@@ -206,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn only_png_and_jpeg_are_decoded() {
+    fn only_png_and_jpeg_are_decoded_from_others_but_any_picture_can_be_chosen() {
         for format in [
             ImageFormat::Bmp,
             ImageFormat::Gif,
@@ -219,7 +232,8 @@ mod tests {
                 "{format:?} can be decoded at all"
             );
             assert!(decode(&other).is_none(), "{format:?}");
-            assert!(prepare(&other).unwrap_err().contains("PNG or JPEG"));
+            let prepared = prepare(&other).unwrap();
+            assert!(decode(&prepared).is_some(), "{format:?} prepared");
         }
     }
 

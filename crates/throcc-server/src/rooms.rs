@@ -54,6 +54,11 @@ const PASSWORDS_PER_SECOND: f64 = 0.2;
 /// re-key, and uses up media ids that are never reused. Plenty for clicking around.
 const ROOM_CHANGE_BURST: f64 = 5.0;
 const ROOM_CHANGES_PER_SECOND: f64 = 0.5;
+/// Returning to the room left behind on a reconnect re-keys it as well. A flapping link,
+/// with the client's backoff, stays well inside this; a scripted churn is cut to about
+/// the rate of room hopping.
+const REJOIN_BURST: f64 = 10.0;
+const REJOINS_PER_SECOND: f64 = 0.1;
 /// A new encryption key re-keys the user's room. Clients replace theirs once a month.
 const ENC_KEY_CHANGE_BURST: f64 = 3.0;
 const ENC_KEY_CHANGES_PER_SECOND: f64 = 1.0 / 60.0;
@@ -226,6 +231,7 @@ pub struct Hub {
     password_tries: Buckets<UserId>,
     guesses: room_password::Guesses,
     room_changes: Buckets<UserId>,
+    rejoins: Buckets<UserId>,
     enc_key_changes: Buckets<UserId>,
     share_changes: Buckets<UserId>,
     /// The room each user last moved into themselves, which a reconnect may return them to
@@ -266,6 +272,7 @@ impl Hub {
             password_tries: Buckets::new(PASSWORD_BURST, PASSWORDS_PER_SECOND),
             guesses: room_password::Guesses::default(),
             room_changes: Buckets::new(ROOM_CHANGE_BURST, ROOM_CHANGES_PER_SECOND),
+            rejoins: Buckets::new(REJOIN_BURST, REJOINS_PER_SECOND),
             enc_key_changes: Buckets::new(ENC_KEY_CHANGE_BURST, ENC_KEY_CHANGES_PER_SECOND),
             share_changes: Buckets::new(SHARE_CHANGE_BURST, SHARE_CHANGES_PER_SECOND),
             last_joined: HashMap::new(),
@@ -737,19 +744,25 @@ impl Hub {
     }
 
     /// Puts a reconnecting `user` back into `room`. Returning to the room they last joined
-    /// is free, so a flapping link never strands them in the lobby; arrival limits and
-    /// sign-in already bound how often that can happen. Any other room counts as a change.
+    /// takes from an allowance of its own, so a flapping link never strands them in the
+    /// lobby after hopping between rooms. Any other room counts as a room change.
     fn rejoin(&mut self, user: UserId, room: RoomId) -> Option<Placed> {
         let returning = self.last_joined.get(&user) == Some(&room);
         let now = Instant::now();
-        if !returning && !self.room_changes.holds(user, 1.0, now) {
+        if !self.rejoin_allowance(returning).holds(user, 1.0, now) {
             return None;
         }
         let placed = self.place(user, Some(room)).ok()?;
-        if !returning {
-            self.room_changes.take(user, 1.0, now);
-        }
+        self.rejoin_allowance(returning).take(user, 1.0, now);
         Some(placed)
+    }
+
+    fn rejoin_allowance(&mut self, returning: bool) -> &mut Buckets<UserId> {
+        if returning {
+            &mut self.rejoins
+        } else {
+            &mut self.room_changes
+        }
     }
 
     /// Whether a reconnect may put `user` back into `room` without its password.

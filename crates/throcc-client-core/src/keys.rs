@@ -51,6 +51,10 @@ pub enum KeyNotice {
     /// The room state listed more than [`MAX_ROOM_PEERS`] peers. Nobody gets our key until
     /// a valid one arrives.
     TooManyPeers,
+    /// We were placed in a room at an epoch no newer than one we took part in there
+    /// before, which only a server restored from a backup or replaying an old call does.
+    /// Keys and media are refused until the room's epoch passes it.
+    OldEpoch,
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -80,8 +84,8 @@ impl EpochFloors {
         FLOORS.get_or_init(Self::default).clone()
     }
 
-    fn get(&self, at: FloorAt) -> Epoch {
-        lock(&self.0).get(&at).copied().unwrap_or(Epoch(0))
+    fn get(&self, at: FloorAt) -> Option<Epoch> {
+        lock(&self.0).get(&at).copied()
     }
 
     fn raise(&self, at: FloorAt, epoch: Epoch) {
@@ -117,8 +121,10 @@ pub struct KeyManager {
     epoch: Epoch,
     epoch_since: Instant,
     floors: EpochFloors,
-    /// The newest epoch we took part in for this room, in this process.
-    high_water: Epoch,
+    /// The newest epoch this process took part in for this room before we were placed in
+    /// it. Nothing at or before it is accepted: no epoch from before a room change can be
+    /// one we belong to.
+    floor: Option<Epoch>,
     my_tracks: Option<Tracks>,
     peers: BTreeMap<UserId, Peer>,
     owners: HashMap<MediaId, UserId>,
@@ -157,7 +163,7 @@ impl KeyManager {
             epoch: Epoch(0),
             epoch_since: Instant::now(),
             floors,
-            high_water: Epoch(0),
+            floor: None,
             my_tracks: None,
             peers: BTreeMap::new(),
             owners: HashMap::new(),
@@ -261,13 +267,15 @@ impl KeyManager {
             self.room_peers.clear();
             self.unwrappable.clear();
             self.epoch = Epoch(0);
-            self.high_water = room.map_or(Epoch(0), |room| self.floors.get(self.floor_at(room)));
-            if self.below_floor(epoch) {
-                warn!(
-                    room = room.map(|r| r.0),
-                    "placed in an older epoch than one we took part in; its keys are refused"
-                );
-            }
+            self.floor = room.and_then(|room| self.floors.get(self.floor_at(room)));
+        }
+        let mut notices = Vec::new();
+        if room.is_some() && self.below_floor(epoch) {
+            warn!(
+                room = room.map(|r| r.0),
+                "placed in an epoch no newer than one we took part in; its keys are refused"
+            );
+            notices.push(KeyNotice::OldEpoch);
         }
         self.room = room;
         self.my_tracks = tracks;
@@ -276,9 +284,10 @@ impl KeyManager {
         self.wrapped_to.clear();
         let Some(room) = room else {
             self.stashed = None;
-            return (Vec::new(), Vec::new());
+            return (Vec::new(), notices);
         };
-        let (first, mut notices) = self.room_state(room, epoch, peers, contacts, now);
+        let (first, more) = self.room_state(room, epoch, peers, contacts, now);
+        notices.extend(more);
         let mut requests: Vec<Request> = first.into_iter().collect();
         if let Some((stashed_room, stashed_epoch, stashed_peers)) = self.stashed.take()
             && stashed_room == room
@@ -396,6 +405,7 @@ impl KeyManager {
         let listed: HashSet<UserId> = peers.iter().map(|p| p.user).collect();
         self.checked_signatures
             .retain(|user, _| listed.contains(user));
+        self.unwrappable.retain(|user, _| listed.contains(user));
         let mut notices = Vec::new();
         let mut trusted = BTreeMap::new();
         let unix_now = crate::unix_now().unwrap_or(0);
@@ -470,7 +480,6 @@ impl KeyManager {
             self.epoch = epoch;
             self.epoch_since = now;
             if let Some(room) = self.room {
-                self.high_water = self.high_water.max(epoch);
                 self.floors.raise(self.floor_at(room), epoch);
             }
         }
@@ -499,10 +508,10 @@ impl KeyManager {
         (self.server, self.me, room)
     }
 
-    /// True for an epoch before the one preceding the newest we took part in here, whose
-    /// sender keys and media can only be a replay.
+    /// True for an epoch whose sender keys and media can only be a replay: one at or before
+    /// the floor, or before the one preceding ours.
     fn below_floor(&self, epoch: Epoch) -> bool {
-        epoch.0.saturating_add(1) < self.high_water.max(self.epoch).0
+        self.floor.is_some_and(|floor| epoch <= floor) || epoch.0.saturating_add(1) < self.epoch.0
     }
 
     /// Wraps our secret to the peers that lack it. Returns the request, and the peers whose
@@ -836,11 +845,18 @@ pub(crate) mod tests {
     }
 
     /// Places `m` in `room` at `epoch` with `peers`, as a `SetRoom` reply would.
-    fn place(m: &mut Member, room: Option<RoomId>, epoch: u32, peers: &[RoomPeer], now: Instant) {
+    fn place(
+        m: &mut Member,
+        room: Option<RoomId>,
+        epoch: u32,
+        peers: &[RoomPeer],
+        now: Instant,
+    ) -> Vec<KeyNotice> {
         show(&mut m.keys, peers);
         let tracks = room.map(|_| m.tracks.clone());
         m.keys
-            .placed(room, Epoch(epoch), tracks, peers, &mut m.contacts, now);
+            .placed(room, Epoch(epoch), tracks, peers, &mut m.contacts, now)
+            .1
     }
 
     #[test]
@@ -910,6 +926,56 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_last_epoch_before_the_lobby_is_refused_when_placed_just_past_it() {
+        let now = Instant::now();
+        let (mut a, mut b) = (member(1), member(2));
+        rekey(&mut [&mut a, &mut b], 5, now);
+        let recorded = blob(&rekey(&mut [&mut a, &mut b], 9, now), a.id, b.id);
+        let datagram = mic_datagram(&a);
+
+        place(&mut b, None, 0, &[], now);
+        let peers = [peer(&a), peer(&b)];
+        assert!(!place(&mut b, Some(ROOM), 10, &peers, now).contains(&KeyNotice::OldEpoch));
+        assert_eq!(
+            b.keys.sender_key(a.id, recorded.0, &recorded.1, now),
+            Err(KeyError::Stale)
+        );
+        assert!(!opens(&mut b, a.tracks.mic, &datagram));
+    }
+
+    #[test]
+    fn the_last_epoch_before_a_reconnect_is_refused_when_placed_just_past_it() {
+        let now = Instant::now();
+        let (mut a, mut b) = (member(1), member(2));
+        let recorded = blob(&rekey(&mut [&mut a, &mut b], 9, now), a.id, b.id);
+        let datagram = mic_datagram(&a);
+
+        let enc = EncKeyPair::from_secret(&b.keys.enc.secret()).unwrap();
+        b.keys = KeyManager::new(b.id, enc, SERVER, b.keys.floors.clone());
+        let peers = [peer(&a), peer(&b)];
+        place(&mut b, Some(ROOM), 10, &peers, now);
+        assert_eq!(
+            b.keys.sender_key(a.id, recorded.0, &recorded.1, now),
+            Err(KeyError::Stale)
+        );
+        assert!(!opens(&mut b, a.tracks.mic, &datagram));
+    }
+
+    #[test]
+    fn a_placement_at_or_before_the_floor_is_told() {
+        let now = Instant::now();
+        let (mut a, mut b) = (member(1), member(2));
+        rekey(&mut [&mut a, &mut b], 9, now);
+        let peers = [peer(&a), peer(&b)];
+        for epoch in [9, 3] {
+            place(&mut b, None, 0, &[], now);
+            assert!(place(&mut b, Some(ROOM), epoch, &peers, now).contains(&KeyNotice::OldEpoch));
+        }
+        place(&mut b, None, 0, &[], now);
+        assert!(!place(&mut b, Some(ROOM), 11, &peers, now).contains(&KeyNotice::OldEpoch));
+    }
+
+    #[test]
     fn only_the_epoch_just_before_ours_is_accepted_late() {
         let now = Instant::now();
         let (mut a, mut b) = (member(1), member(2));
@@ -964,6 +1030,9 @@ pub(crate) mod tests {
         let still = a.keys.send_key(a.tracks.mic).unwrap().1;
         assert!(Arc::ptr_eq(&first, &still), "the secret was replaced");
         assert!(can_read(&mut b, &a, 1));
+
+        rekey(&mut [&mut a, &mut b], 2, now);
+        assert!(a.keys.unwrappable.is_empty(), "kept for someone not listed");
     }
 
     /// `newcomer` joins `present` at `epoch`, with events in the server's order: the

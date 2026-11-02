@@ -21,12 +21,11 @@ use throcc_client_core::media::devices;
 use throcc_client_core::server_look::ServerLook;
 use throcc_client_core::settings::Settings;
 use throcc_client_core::state::{
-    ConnectionStatus, KeyWarning, MAX_VOLUME, Playback, ServerView, ShareChoice, Sound, State,
-    WarningCause,
+    ConnectionStatus, MAX_VOLUME, Playback, ServerView, ShareChoice, Sound, State,
 };
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
 use throcc_proto::invite::{self, InviteCode};
-use throcc_proto::messages::{MAX_NAME_CHARS, User, valid_name, valid_password};
+use throcc_proto::messages::{MAX_NAME_CHARS, User, name_key, valid_name, valid_password};
 use throcc_proto::{Fingerprint, permissions};
 
 use crate::theme;
@@ -153,6 +152,18 @@ impl PictureForm {
     /// Drops the picture still decoding, if one is.
     fn outdate_pick(&mut self) {
         self.pick += 1;
+    }
+
+    /// Applies the picture prepared for pick number `pick`, unless something overtook it.
+    fn picked(&mut self, pick: u64, prepared: Result<PictureEdit, String>) -> bool {
+        if self.pick != pick {
+            return false;
+        }
+        match prepared {
+            Ok(edit) => self.edit = Some(edit),
+            Err(message) => self.status = Some(SaveStatus::Failed(message)),
+        }
+        true
     }
 
     /// The picture Save would set: `Some(None)` removes it.
@@ -285,6 +296,7 @@ fn known_servers() -> Vec<(String, Fingerprint)> {
 const PICTURES_KEPT: usize = 256;
 const NAME_TOO_LONG: &str = "Names can be at most 32 characters.";
 const NAME_HIDES_TEXT: &str = "Names can’t contain control or invisible characters.";
+const NAME_SHOWS_NOTHING: &str = "Names need at least one visible character.";
 const PASSWORD_TOO_LONG: &str = "Passwords can be at most 128 characters.";
 
 /// A typed name: `Ok(None)` when empty, and why the server would refuse it if it would.
@@ -295,6 +307,8 @@ fn checked_name(typed: &str) -> Result<Option<String>, &'static str> {
     match valid_name(typed) {
         Some(name) => Ok(Some(name.to_owned())),
         None if typed.trim().chars().count() > MAX_NAME_CHARS => Err(NAME_TOO_LONG),
+        // The key drops the characters a name may hold that draw nothing.
+        None if name_key(typed).chars().all(char::is_whitespace) => Err(NAME_SHOWS_NOTHING),
         None => Err(NAME_HIDES_TEXT),
     }
 }
@@ -1320,15 +1334,9 @@ impl ThroccApp {
                 })
                 .await;
             this.update(cx, |app, cx| {
-                let form = app.form_mut(target);
-                if form.pick != pick {
-                    return;
+                if app.form_mut(target).picked(pick, prepared) {
+                    cx.notify();
                 }
-                match prepared {
-                    Ok(edit) => form.edit = Some(edit),
-                    Err(message) => form.status = Some(SaveStatus::Failed(message)),
-                }
-                cx.notify();
             })
             .ok();
         })
@@ -1398,7 +1406,7 @@ impl ThroccApp {
             self.dialog = dialog;
         }
         if self.mock {
-            self.attach(Arc::new(MockClient::new()), window, cx);
+            self.attach(Arc::new(MockClient::at(&address)), window, cx);
             return;
         }
         self.joining = true;
@@ -1464,7 +1472,7 @@ impl ThroccApp {
     ) {
         if self.mock
             || Keystore::default_known_servers()
-                .and_then(|mut known| known.trust(address, actual))
+                .and_then(|mut known| known.trust_new_key(address, actual))
                 .is_ok()
         {
             self.set_dialog(None, cx);
@@ -1498,8 +1506,9 @@ impl ThroccApp {
         self.reload_known_servers();
     }
 
-    /// Takes the server at `address` off our list without leaving it, abandoning a join to it.
-    pub fn remove_server(&mut self, address: &str, cx: &mut Context<Self>) {
+    /// Takes the server at `address` off our list without leaving it, abandoning a join to
+    /// it and a session that gave up on it.
+    pub fn remove_server(&mut self, address: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.joining && self.address.read(cx).value() == address {
             self.joining = false;
             self.join_attempt += 1;
@@ -1509,6 +1518,10 @@ impl ThroccApp {
         } else if let Err(e) = Keystore::default_known_servers().and_then(|mut k| k.forget(address))
         {
             tracing::warn!("forgetting {address}: {e:#}");
+        }
+        let attached = self.state.server.as_ref().map(|s| s.address.as_str());
+        if self.client.is_some() && attached == Some(address) {
+            self.disconnect(window, cx);
         }
         self.reload_known_servers();
         self.set_dialog(None, cx);
@@ -1617,14 +1630,7 @@ impl ThroccApp {
             }
             "verify" => self.open_verify(UserId(2), cx),
             "keychange" => self.open_verify(UserId(3), cx),
-            "samename" => {
-                let warning = KeyWarning {
-                    user: UserId(7),
-                    cause: WarningCause::SameName { known: UserId(2) },
-                };
-                Arc::make_mut(&mut self.state).key_warnings.push(warning);
-                self.open_verify(UserId(7), cx);
-            }
+            "samename" => self.open_verify(UserId(8), cx),
             "pinmismatch" => {
                 offline(self);
                 self.dialog = Some(Dialog::PinMismatch {
@@ -1878,6 +1884,15 @@ mod tests {
         assert_eq!(checked_name(&format!("{longest}x")), Err(NAME_TOO_LONG));
         assert_eq!(checked_name("a\tb"), Err(NAME_HIDES_TEXT));
         assert_eq!(checked_name("adm\u{202E}nimda"), Err(NAME_HIDES_TEXT));
+        assert_eq!(checked_name("\u{200B}"), Err(NAME_HIDES_TEXT));
+        for blank in [
+            "\u{2800}",
+            "\u{200D}",
+            "\u{FE0F}\u{FE0F}",
+            "\u{2800} \u{200C}",
+        ] {
+            assert_eq!(checked_name(blank), Err(NAME_SHOWS_NOTHING), "{blank:?}");
+        }
         assert!(NAME_TOO_LONG.contains(&MAX_NAME_CHARS.to_string()));
     }
 
@@ -1895,11 +1910,23 @@ mod tests {
     }
 
     #[test]
-    fn a_reset_outdates_a_pick_still_decoding() {
+    fn only_a_pick_nothing_overtook_is_applied() {
+        let edit = || {
+            Ok(PictureEdit {
+                image: None,
+                bytes: Some(vec![1]),
+            })
+        };
         let mut form = PictureForm::default();
+        for overtake in [PictureForm::reset, PictureForm::outdate_pick] {
+            form.outdate_pick();
+            let pick = form.pick;
+            overtake(&mut form);
+            assert!(!form.picked(pick, edit()));
+            assert!(form.edit.is_none());
+        }
         form.outdate_pick();
-        let pick = form.pick;
-        form.reset();
-        assert_ne!(form.pick, pick);
+        assert!(form.picked(form.pick, edit()));
+        assert_eq!(form.change(), Some(Some(vec![1])));
     }
 }

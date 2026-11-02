@@ -166,7 +166,15 @@ pub struct Unit {
 pub const MAX_VIDEO_UNIT_FRAGMENTS: usize = 4096;
 /// The longest audio unit, in fragments: an Opus packet from either audio track fits.
 pub const MAX_AUDIO_UNIT_FRAGMENTS: usize = 4;
+/// The most fragments buffered, and for a track whose units are short, how many units'
+/// worth of them.
 const MAX_BUFFERED: usize = 4096;
+const BUFFERED_UNITS: usize = 64;
+
+/// The longest unit, in bytes, that fits in `max_fragments` fragments.
+pub const fn max_unit_bytes(max_fragments: usize) -> usize {
+    max_fragments * BODY_BYTES - TIMESTAMP_BYTES
+}
 
 /// Rebuilds access units from decrypted fragments that may arrive out of order.
 /// A unit is emitted only for an unbroken run from a first to a last fragment that is no
@@ -176,6 +184,7 @@ const MAX_BUFFERED: usize = 4096;
 /// receivers rescan everything they hold for each datagram.
 pub struct Reassembler {
     max_fragments: u32,
+    max_buffered: usize,
     fragments: BTreeMap<u32, (Flags, Vec<u8>)>,
     firsts: BTreeSet<u32>,
     lasts: BTreeSet<u32>,
@@ -187,6 +196,7 @@ impl Reassembler {
     pub fn new(max_fragments: usize) -> Self {
         Self {
             max_fragments: u32::try_from(max_fragments.max(1)).unwrap_or(u32::MAX),
+            max_buffered: MAX_BUFFERED.min(max_fragments.max(1).saturating_mul(BUFFERED_UNITS)),
             fragments: BTreeMap::new(),
             firsts: BTreeSet::new(),
             lasts: BTreeSet::new(),
@@ -195,7 +205,7 @@ impl Reassembler {
     }
 
     pub fn push(&mut self, seq: u32, flags: Flags, plaintext: &[u8]) -> Option<Unit> {
-        if self.fragments.len() >= MAX_BUFFERED
+        if self.fragments.len() >= self.max_buffered
             && !self.fragments.contains_key(&seq)
             && let Some(&oldest) = self.fragments.keys().next()
         {
@@ -203,7 +213,10 @@ impl Reassembler {
         }
         self.insert(seq, flags, plaintext);
         let (lo, hi) = self.span_of(seq)?;
-        let last = *self.lasts.range(seq..=hi).next()?;
+        let Some(&last) = self.lasts.range(seq..=hi).next() else {
+            self.drop_unfinishable(lo, hi);
+            return None;
+        };
         let first = self.firsts.range(lo..=seq).next_back().copied();
         match first {
             Some(first) if last - first < self.max_fragments => self.take_unit(first, last),
@@ -285,6 +298,15 @@ impl Reassembler {
         for seq in first..=last {
             self.firsts.remove(&seq);
             self.lasts.remove(&seq);
+        }
+    }
+
+    /// Drops the fragments of the span `lo..=hi` that no unit can hold any more: those after
+    /// its last LAST and too far before its end to reach a LAST that comes after it.
+    fn drop_unfinishable(&mut self, lo: u32, hi: u32) {
+        let after_last = self.lasts.range(lo..=hi).next_back().map_or(lo, |l| l + 1);
+        if hi - after_last >= self.max_fragments - 1 {
+            self.drop_run(after_last, hi - (self.max_fragments - 1));
         }
     }
 
@@ -449,6 +471,15 @@ mod tests {
     }
 
     #[test]
+    fn the_longest_unit_of_a_limit_fills_exactly_that_many_fragments() {
+        for max in [1, MAX_AUDIO_UNIT_FRAGMENTS, 100] {
+            let longest = max_unit_bytes(max);
+            assert_eq!(fragment(&unit(longest), 0, false).len(), max);
+            assert_eq!(fragment(&unit(longest + 1), 0, false).len(), max + 1);
+        }
+    }
+
+    #[test]
     fn units_longer_than_the_limit_are_dropped() {
         let fits = numbered(fragment(&unit(3000), 1, false), 0);
         assert_eq!(fits.len(), 3);
@@ -482,6 +513,34 @@ mod tests {
         let mut reassembler = Reassembler::new(MAX_AUDIO_UNIT_FRAGMENTS);
         assert!(push_all(&mut reassembler, &last_only).is_empty());
         assert!(reassembler.buffered() < MAX_AUDIO_UNIT_FRAGMENTS);
+    }
+
+    #[test]
+    fn audio_fragments_that_cannot_complete_do_not_pile_up() {
+        let first_only = |seq| {
+            (
+                seq,
+                Fragment {
+                    flags: Flags::FIRST,
+                    timestamp: Some([0; TIMESTAMP_BYTES]),
+                    body: Bytes::from_static(b"x"),
+                },
+            )
+        };
+        let mut reassembler = Reassembler::new(MAX_AUDIO_UNIT_FRAGMENTS);
+        let unbroken: Vec<_> = (0..20_000).map(first_only).collect();
+        assert!(push_all(&mut reassembler, &unbroken).is_empty());
+        assert!(reassembler.buffered() < MAX_AUDIO_UNIT_FRAGMENTS);
+
+        let mut reassembler = Reassembler::new(MAX_AUDIO_UNIT_FRAGMENTS);
+        let gapped: Vec<_> = (0..20_000).map(|i| first_only(i * 2)).collect();
+        assert!(push_all(&mut reassembler, &gapped).is_empty());
+        assert!(reassembler.buffered() <= MAX_AUDIO_UNIT_FRAGMENTS * BUFFERED_UNITS);
+
+        let mut then_a_unit = unbroken[..6].to_vec();
+        then_a_unit.extend(numbered(fragment(&unit(1500), 1, false), 6));
+        let mut reassembler = Reassembler::new(MAX_AUDIO_UNIT_FRAGMENTS);
+        assert_eq!(push_all(&mut reassembler, &then_a_unit).len(), 1);
     }
 
     /// The scan this replaced took ~160 µs per datagram for these streams once the buffer
