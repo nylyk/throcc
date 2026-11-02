@@ -347,8 +347,8 @@ fn with_room_menu(
     let this = cx.entity().downgrade();
     element
         .context_menu(move |menu, _, _| {
-            let leave = this.clone();
-            let menu = menu.when(joined, |menu| {
+            let (leave, edit, delete) = (this.clone(), this.clone(), this.clone());
+            menu.when(joined, |menu| {
                 menu.item(
                     PopupMenuItem::new("Leave Room")
                         .icon(icon("phone-off"))
@@ -358,14 +358,10 @@ fn with_room_menu(
                                 .ok();
                         }),
                 )
-            });
-            if !manages {
-                return menu;
-            }
-            let edit = this.clone();
-            let delete = this.clone();
-            menu.when(joined, |menu| menu.separator())
-                .item(
+            })
+            .when(joined && manages, |menu| menu.separator())
+            .when(manages, |menu| {
+                menu.item(
                     PopupMenuItem::new("Edit Room…")
                         .icon(icon("pencil"))
                         .on_click(move |_, window, cx| {
@@ -383,6 +379,7 @@ fn with_room_menu(
                             .ok();
                     }),
                 )
+            })
         })
         .into_any_element()
 }

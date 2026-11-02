@@ -41,7 +41,7 @@ pub fn render(
         SettingsPage::Profile => profile(app, cx),
         SettingsPage::Audio => audio(app, cx),
         SettingsPage::Appearance => appearance(app, cx),
-        SettingsPage::Verified => verified_people(app, cx),
+        SettingsPage::Verified => verified(app, cx),
     };
     frame(
         app.sidebar_width,
@@ -452,7 +452,7 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
 
 /// Everyone verified on this computer, on any server, each with the servers they were seen
 /// on and a way to take them off.
-fn verified_people(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
+fn verified(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let address_of = |server: &Fingerprint| {
         app.known_servers
             .iter()

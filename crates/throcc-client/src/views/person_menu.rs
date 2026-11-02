@@ -76,12 +76,15 @@ pub fn render(
                     )),
                 )
                 .children(mine.then(|| {
-                    action("person-menu-audio", "audio-lines", "Audio Settings").on_click(
-                        cx.listener(|app, _, window, cx| {
-                            app.close_person_menu(cx);
-                            app.show_screen(Screen::Settings(SettingsPage::Audio), window, cx);
-                        }),
+                    action(
+                        "person-menu-audio",
+                        SettingsPage::Audio.icon(),
+                        "Audio Settings",
                     )
+                    .on_click(cx.listener(|app, _, window, cx| {
+                        app.close_person_menu(cx);
+                        app.show_screen(Screen::Settings(SettingsPage::Audio), window, cx);
+                    }))
                 }))
         }))
         .children(

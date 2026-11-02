@@ -244,7 +244,7 @@ fn save(change: impl FnOnce(&mut Settings)) {
     let saved =
         throcc_client_core::keystore::config_dir().and_then(|dir| Settings::update(&dir, change));
     if let Err(e) = saved {
-        tracing::warn!("could not save the theme: {e:#}");
+        tracing::warn!("could not save the appearance: {e:#}");
     }
 }
 
