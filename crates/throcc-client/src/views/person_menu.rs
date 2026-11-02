@@ -9,7 +9,7 @@ use throcc_client_core::state::{Person, Sound};
 use throcc_proto::ids::UserId;
 use throcc_proto::permissions;
 
-use super::common::{Typeset, gain_to_loudness, icon, mono, section, toggle_icon};
+use super::common::{CONTROLS_LINGER, Typeset, gain_to_loudness, icon, mono, section, toggle_icon};
 use crate::app::{Dialog, PlaybackControl, ThroccApp};
 use crate::theme;
 
@@ -164,7 +164,7 @@ fn stream_actions(app: &ThroccApp, user: UserId, mine: bool, cx: &mut Context<Th
                 if app.fullscreen_stream() == Some(user) {
                     app.exit_fullscreen(window, cx);
                 }
-                app.pop_out(user, cx);
+                app.pop_out(user, CONTROLS_LINGER, cx);
             },
         ))
     }))

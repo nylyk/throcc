@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton,
-    ObjectFit, ParentElement, Pixels, Point, RenderImage, SharedString, Stateful, Styled,
-    StyledImage, TitlebarOptions, WindowBackgroundAppearance, WindowOptions, div, img, px,
-    relative,
+    Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, ObjectFit,
+    ParentElement, Pixels, Point, RenderImage, SharedString, Styled, StyledImage, TitlebarOptions,
+    WindowBackgroundAppearance, WindowOptions, div, img, px, relative,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::PopupMenuItem;
@@ -412,93 +411,6 @@ pub fn moves_window<E: InteractiveElement>(element: E) -> E {
 pub const CONTROLS_LINGER: std::time::Duration = std::time::Duration::from_secs(3);
 /// How long a tile's overlay stays after the pointer leaves the tile.
 pub const OVERLAY_LINGER: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// A stream as a video player shows it: the picture on black, `title` over a shade at the
-/// top and `controls` over a shade at the bottom, both while `shown`.
-pub fn player(picture: AnyElement, title: Div, controls: Div, shown: bool) -> Div {
-    let edge = || {
-        div()
-            .absolute()
-            .left_0()
-            .right_0()
-            .flex()
-            .items_center()
-            .gap_3()
-            .px_6()
-    };
-    div()
-        .size_full()
-        .relative()
-        .bg(theme::player_bg())
-        .text_color(theme::player_text())
-        .child(picture)
-        .children(shown.then(|| {
-            edge()
-                .top_0()
-                .h(px(96.))
-                .pb_8()
-                .bg(theme::player_shade(false))
-                .child(title)
-        }))
-        .children(shown.then(|| {
-            edge()
-                .bottom_0()
-                .h(px(112.))
-                .pt_8()
-                .justify_end()
-                .bg(theme::player_shade(true))
-                .child(controls)
-        }))
-}
-
-/// The sharer's picture over "`name`’s Screen" and `details`, for the top of a player.
-pub fn player_title(
-    name: &str,
-    seed: u64,
-    picture: Option<Arc<RenderImage>>,
-    details: impl Into<SharedString>,
-) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap_3()
-        .child(avatar(name, seed, picture, px(28.), false))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .typeset(theme::TITLE_3)
-                        .child(format!("{name}’s Screen")),
-                )
-                .child(
-                    div()
-                        .typeset(theme::CAPTION)
-                        .opacity(0.75)
-                        .child(details.into()),
-                ),
-        )
-}
-
-/// A round icon button over a fullscreen stream.
-pub fn player_button(id: impl Into<ElementId>, icon_name: &'static str) -> Stateful<Div> {
-    div()
-        .id(id)
-        .size(px(44.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_full()
-        .cursor_pointer()
-        .hover(|s| s.bg(theme::player_hover()))
-        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-        .child(
-            icon(icon_name)
-                .size(px(22.))
-                .text_color(theme::player_text()),
-        )
-}
 
 #[cfg(test)]
 mod tests {

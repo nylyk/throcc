@@ -400,30 +400,13 @@ fn danger_hover() -> Hsla {
 pub fn player_bg() -> Hsla {
     gpui::black()
 }
-/// Text and icons over a fullscreen stream.
-pub fn player_text() -> Hsla {
-    gpui::white()
-}
-pub fn player_hover() -> Hsla {
-    gpui::white().opacity(0.16)
-}
-/// The shade behind a fullscreen stream's controls, darkest at the window's edge: the
-/// bottom one when `at_bottom`, else the top one.
-pub fn player_shade(at_bottom: bool) -> gpui::Background {
-    let angle = if at_bottom { 180. } else { 0. };
-    gpui::linear_gradient(
-        angle,
-        gpui::linear_color_stop(gpui::black().opacity(0.0), 0.0),
-        gpui::linear_color_stop(gpui::black().opacity(0.75), 1.0),
-    )
-}
 /// Dims the window behind a dialog.
 pub fn scrim() -> Hsla {
     gpui::black().opacity(0.6)
 }
 /// Labels laid over a stream.
 pub fn overlay() -> Hsla {
-    surface().opacity(0.85)
+    surface().opacity(0.7)
 }
 
 /// Avatar hues mixed from the palette, picked by user id.

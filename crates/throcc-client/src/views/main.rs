@@ -5,7 +5,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Context, Div, FontFeatures, FontWeight, InteractiveElement, IntoElement,
     MouseButton, MouseDownEvent, ParentElement, Pixels, RenderImage, Size as Area, Stateful,
-    StatefulInteractiveElement, Styled, Window, canvas, div, px, relative, size,
+    StatefulInteractiveElement, Styled, Window, canvas, div, px, size,
 };
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
@@ -16,11 +16,12 @@ use throcc_client_core::state::{Person, State, share_label};
 use throcc_proto::ids::{RoomId, UserId};
 
 use super::common::{
-    Trust, Typeset, avatar, bottom_bar, caption, danger_menu_item, description, ghost_icon, icon,
-    player, player_button, player_title, primary, rate, section, sharing_icon, toggle_icon,
-    top_bar, trust,
+    CONTROLS_LINGER, TRAFFIC_LIGHTS, Trust, Typeset, avatar, bottom_bar, caption, danger_menu_item,
+    description, ghost_icon, icon, primary, rate, section, sharing_icon, toggle_icon, top_bar,
+    trust,
 };
 use super::mascot;
+use super::overlay::{Place, ShareOverlay};
 use super::page::{resize_handle, sidebar_column};
 use crate::app::{Dialog, Screen, ServerPage, ThroccApp, ToggleDeafen, ToggleMic};
 use crate::theme;
@@ -66,31 +67,39 @@ fn fullscreen(
     let state = app.state.clone();
     let person = state.person(user);
     let picture = app.picture(person.and_then(|p| p.avatar), cx);
-    let name = person.map_or("Someone", |p| &p.name);
-    let config = person
-        .and_then(|p| p.sharing)
-        .map(|c| share_label(&c))
-        .unwrap_or_default();
-    let title = player_title(name, user.0, picture, config);
-    let buttons = div()
-        .flex()
-        .gap_2()
-        .child(
-            player_button("fullscreen-stop-watching", "eye-off").on_click(
-                cx.listener(move |app, _, window, cx| app.stop_watching(user, window, cx)),
-            ),
-        )
-        .child(
-            player_button("exit-fullscreen", "minimize-2")
-                .on_click(cx.listener(|app, _, window, cx| app.exit_fullscreen(window, cx))),
-        );
-    let controls = std::time::Instant::now() < app.controls_until;
+    let buttons = vec![
+        ghost_icon("fullscreen-stop-watching", "eye-off", "Stop Watching")
+            .on_click(cx.listener(move |app, _, window, cx| app.stop_watching(user, window, cx))),
+        ghost_icon("exit-fullscreen", "minimize-2", "Exit Full Screen")
+            .on_click(cx.listener(|app, _, window, cx| app.exit_fullscreen(window, cx))),
+    ];
+    let overlay = ShareOverlay {
+        place: Place::Player,
+        name: person.map_or("Someone", |p| &p.name).to_owned().into(),
+        seed: user.0,
+        picture,
+        details: person
+            .and_then(|p| p.sharing)
+            .map(|c| share_label(&c))
+            .unwrap_or_default()
+            .into(),
+        title_inset: if window.is_fullscreen() {
+            px(0.)
+        } else {
+            TRAFFIC_LIGHTS
+        },
+        buttons,
+        controls: std::time::Instant::now() < app.controls_until,
+        too_slow: state.health.slow_shares.contains(&user),
+    };
     let stream = app
         .feeds
         .surface(app.client.as_ref(), user, px(0.), window, cx);
     div()
         .id("fullscreen")
         .size_full()
+        .relative()
+        .bg(theme::player_bg())
         .on_mouse_move(cx.listener(|app, _, _, cx| app.show_controls(cx)))
         .on_mouse_down(
             MouseButton::Right,
@@ -98,7 +107,8 @@ fn fullscreen(
                 app.open_person_menu(user, event.position, window, cx)
             }),
         )
-        .child(player(stream, title, buttons, controls))
+        .child(stream)
+        .children(overlay.render())
 }
 
 fn people_in(state: &State, room: RoomId) -> Vec<(UserId, &Person)> {
@@ -844,81 +854,53 @@ fn tile(
             .children(speaking_ring)
             .into_any_element();
     }
-    let config = t
-        .person
-        .sharing
-        .map(|c| share_label(&c))
-        .unwrap_or_default();
-    let label = div()
-        .absolute()
-        .top_2()
-        .left_2()
-        .max_w(relative(0.9))
-        .flex()
-        .items_center()
-        .gap_2()
-        .px_2()
-        .py_1()
-        .rounded(theme::RADIUS_ROW)
-        .bg(theme::overlay())
-        .child(avatar(
-            &t.person.name,
-            user.0,
-            t.picture.clone(),
-            px(18.),
-            false,
-        ))
-        .child(
-            div()
-                .typeset(theme::CALLOUT)
-                .font_weight(FontWeight::MEDIUM)
-                .truncate()
-                .child(t.person.name.clone()),
-        )
-        .children((!compact).then(|| caption(config)));
     let mine = t.mine;
-    let buttons = (!compact).then(|| {
-        div()
-            .absolute()
-            .bottom_2()
-            .right_2()
-            .flex()
-            .gap_1()
-            .p_1()
-            .rounded(theme::RADIUS_ROW)
-            .bg(theme::overlay())
-            .children((!mine).then(|| {
-                ghost_icon(
-                    ("pop-out", user.0 as usize),
-                    "picture-in-picture-2",
-                    "Pop Out",
-                )
-                .on_click(cx.listener(move |app, _, _, cx| {
-                    cx.stop_propagation();
-                    app.pop_out(user, cx);
-                }))
+    let buttons = if compact {
+        Vec::new()
+    } else {
+        let pop_out = (!mine).then(|| {
+            ghost_icon(
+                ("pop-out", user.0 as usize),
+                "picture-in-picture-2",
+                "Pop Out",
+            )
+            .on_click(cx.listener(move |app, _, _, cx| {
+                cx.stop_propagation();
+                app.pop_out(user, CONTROLS_LINGER, cx);
             }))
-            .child(
-                ghost_icon(
-                    ("stop-watching", user.0 as usize),
-                    "eye-off",
-                    "Stop Watching",
-                )
-                .on_click(cx.listener(move |app, _, window, cx| {
-                    cx.stop_propagation();
-                    app.stop_watching(user, window, cx);
-                })),
-            )
-            .child(
-                ghost_icon(("fullscreen", user.0 as usize), "maximize-2", "Full Screen").on_click(
-                    cx.listener(move |app, _, window, cx| {
-                        cx.stop_propagation();
-                        app.enter_fullscreen(user, window, cx);
-                    }),
-                ),
-            )
-    });
-    let overlay = app.shows_overlay(user);
+        });
+        let stop = ghost_icon(
+            ("stop-watching", user.0 as usize),
+            "eye-off",
+            "Stop Watching",
+        )
+        .on_click(cx.listener(move |app, _, window, cx| {
+            cx.stop_propagation();
+            app.stop_watching(user, window, cx);
+        }));
+        let fullscreen = ghost_icon(("fullscreen", user.0 as usize), "maximize-2", "Full Screen")
+            .on_click(cx.listener(move |app, _, window, cx| {
+                cx.stop_propagation();
+                app.enter_fullscreen(user, window, cx);
+            }));
+        pop_out.into_iter().chain([stop, fullscreen]).collect()
+    };
+    let overlay = ShareOverlay {
+        place: if compact { Place::Strip } else { Place::Tile },
+        name: t.person.name.clone().into(),
+        seed: user.0,
+        picture: t.picture.clone(),
+        details: t
+            .person
+            .sharing
+            .map(|c| share_label(&c))
+            .unwrap_or_default()
+            .into(),
+        title_inset: px(0.),
+        buttons,
+        controls: app.shows_overlay(user),
+        too_slow: app.state.health.slow_shares.contains(&user),
+    };
     let radius = theme::RADIUS_TILE - px(1.);
     let picture = app
         .feeds
@@ -927,9 +909,8 @@ fn tile(
         .cursor_pointer()
         .bg(theme::surface())
         .child(picture)
+        .children(overlay.render())
         .children(speaking_ring)
-        .children(overlay.then_some(label))
-        .children(buttons.filter(|_| overlay))
         .on_hover(cx.listener(move |app, hovered: &bool, _, cx| app.hover_tile(user, *hovered, cx)))
         .on_click(cx.listener(move |app, _, _, cx| {
             app.focus = (layout != Layout::Stage).then_some(user);

@@ -1,10 +1,9 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::{
     App, AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, StatefulInteractiveElement,
-    Styled, Subscription, WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions, div,
-    point, px, size,
+    MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, Styled, Subscription,
+    WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions, div, point, px, size,
 };
 use gpui_component::Root;
 use throcc_client_core::state::share_label;
@@ -14,9 +13,9 @@ use crate::app::ThroccApp;
 use crate::theme;
 use crate::video::Feeds;
 use crate::views::common::{
-    CONTROLS_LINGER, TRAFFIC_LIGHTS, Typeset, app_titlebar, caption, moves_window, player,
-    player_button, player_title,
+    CONTROLS_LINGER, TRAFFIC_LIGHTS, Typeset, app_titlebar, caption, ghost_icon, moves_window,
 };
+use crate::views::overlay::{Place, ShareOverlay};
 
 const TRAFFIC_LIGHTS_AT: Point<Pixels> = point(px(20.), px(25.));
 
@@ -36,6 +35,7 @@ impl PopOut {
         app: WeakEntity<ThroccApp>,
         user: UserId,
         title: String,
+        controls_for: Duration,
         cx: &mut App,
     ) -> Option<WindowHandle<Root>> {
         let bounds = Bounds::centered(None, size(px(960.), px(588.)), cx);
@@ -55,7 +55,7 @@ impl PopOut {
                 app,
                 user,
                 feeds: Feeds::default(),
-                controls_until: Instant::now(),
+                controls_until: Instant::now() + controls_for,
                 traffic_lights_shown: true,
                 focus: cx.focus_handle(),
                 _released: cx.on_release(move |this: &mut Self, cx| {
@@ -129,31 +129,20 @@ impl Render for PopOut {
                 .child(caption(format!("{name} stopped sharing.")))
                 .into_any_element()
         };
-        let title = player_title(name, user.0, sharer_picture, details).pl(if fullscreen {
-            px(0.)
+        let (fullscreen_icon, fullscreen_tooltip) = if fullscreen {
+            ("minimize-2", "Exit Full Screen")
         } else {
-            TRAFFIC_LIGHTS
-        });
-        let buttons = div()
-            .flex()
-            .gap_2()
-            .child(
-                player_button("return", "panel-top-open")
-                    .on_click(|_, window, _| window.remove_window()),
-            )
-            .child(
-                player_button(
-                    "popout-fullscreen",
-                    if fullscreen {
-                        "minimize-2"
-                    } else {
-                        "maximize-2"
-                    },
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
+            ("maximize-2", "Full Screen")
+        };
+        let buttons = vec![
+            ghost_icon("return", "panel-top-open", "Back to Room")
+                .on_click(|_, window, _| window.remove_window()),
+            ghost_icon("popout-fullscreen", fullscreen_icon, fullscreen_tooltip).on_click(
+                cx.listener(move |this, _, window, cx| {
                     this.set_fullscreen(!fullscreen, window, cx)
-                })),
-            );
+                }),
+            ),
+        ];
         let controls = Instant::now() < self.controls_until;
         if controls != self.traffic_lights_shown {
             show_traffic_lights(window, controls);
@@ -162,7 +151,8 @@ impl Render for PopOut {
         moves_window(div().id("popout"))
             .track_focus(&self.focus)
             .size_full()
-            .bg(theme::bg())
+            .relative()
+            .bg(theme::player_bg())
             .text_color(theme::text())
             .font_family(theme::font())
             .typeset(theme::BODY)
@@ -188,7 +178,21 @@ impl Render for PopOut {
                     }
                 }
             }))
-            .child(player(picture, title, buttons, controls))
+            .child(picture)
+            .children(
+                ShareOverlay {
+                    place: Place::Player,
+                    name: name.to_owned().into(),
+                    seed: user.0,
+                    picture: sharer_picture,
+                    details: details.into(),
+                    title_inset: if fullscreen { px(0.) } else { TRAFFIC_LIGHTS },
+                    buttons,
+                    controls,
+                    too_slow: config.is_some() && state.health.slow_shares.contains(&user),
+                }
+                .render(),
+            )
             .children(app.update(cx, |app, cx| {
                 crate::views::person_menu::render(app, window, cx)
             }))

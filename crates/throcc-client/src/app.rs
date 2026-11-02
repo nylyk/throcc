@@ -963,8 +963,9 @@ impl ThroccApp {
         (slider, changes)
     }
 
-    /// Moves a watched share into a window of its own.
-    pub fn pop_out(&mut self, user: UserId, cx: &mut Context<Self>) {
+    /// Moves a watched share into a window of its own, showing its controls for
+    /// `controls_for`.
+    pub fn pop_out(&mut self, user: UserId, controls_for: Duration, cx: &mut Context<Self>) {
         if self.popouts.contains_key(&user) {
             return;
         }
@@ -975,7 +976,8 @@ impl ThroccApp {
         let title = format!("{name}’s Screen");
         let app = cx.entity().downgrade();
         cx.defer(move |cx| {
-            let Some(window) = crate::popout::PopOut::open(app.clone(), user, title, cx) else {
+            let opened = crate::popout::PopOut::open(app.clone(), user, title, controls_for, cx);
+            let Some(window) = opened else {
                 return;
             };
             app.update(cx, |app, cx| {
@@ -1724,7 +1726,40 @@ impl ThroccApp {
             }
             "popout" => {
                 joined(self);
-                after_a_moment(cx, |app, cx| app.pop_out(UserId(4), cx));
+                after_a_moment(cx, |app, cx| {
+                    app.pop_out(UserId(4), Duration::from_secs(60), cx)
+                });
+            }
+            "slow" => {
+                joined(self);
+                after_a_moment(cx, |app, _| {
+                    app.overlay = Some((UserId(4), Some(Instant::now() + Duration::from_secs(60))));
+                    Arc::make_mut(&mut app.state)
+                        .health
+                        .slow_shares
+                        .insert(UserId(4));
+                });
+            }
+            "slowpopout" => {
+                joined(self);
+                after_a_moment(cx, |app, cx| {
+                    Arc::make_mut(&mut app.state)
+                        .health
+                        .slow_shares
+                        .insert(UserId(4));
+                    app.pop_out(UserId(4), Duration::from_secs(60), cx);
+                });
+            }
+            "slowfullscreen" => {
+                joined(self);
+                after_a_moment(cx, |app, _| {
+                    app.fullscreen = Some(UserId(4));
+                    app.controls_until = Instant::now() + Duration::from_secs(60);
+                    Arc::make_mut(&mut app.state)
+                        .health
+                        .slow_shares
+                        .insert(UserId(4));
+                });
             }
             "share" => {
                 joined(self);
