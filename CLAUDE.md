@@ -59,3 +59,7 @@ Each crate's `README.md` explains its modules and how they fit together. Update 
 - If signing fails or asks for a passphrase, commit unsigned (`git commit --no-gpg-sign`) and carry on. Don't retry signing or rewrite history; the human signs those commits later.
 - Clean, small, readable code. Clear names over comments.
 - Comment only what the code can't say: why, invariants, safety. No comments that restate the code.
+
+## Review baseline
+
+The whole workspace was simplified, deep-reviewed line by line and security-reviewed through commit `23d29b533ff116c6e032e9ea57c4b116fc85604e` (2026-11-02). Later deep reviews start from there: `git diff 23d29b5..HEAD`.
