@@ -12,14 +12,6 @@ pub fn safety_number(a: &PublicKey, b: &PublicKey) -> String {
     if a <= b { a + &b } else { b + &a }
 }
 
-/// The safety number in 12 groups of 5 digits.
-pub fn groups(number: &str) -> Vec<&str> {
-    (0..number.len())
-        .step_by(5)
-        .filter_map(|i| number.get(i..i + 5))
-        .collect()
-}
-
 fn half(key: &PublicKey) -> String {
     let mut hash = Sha512::new()
         .chain_update(VERSION)
@@ -57,14 +49,9 @@ mod tests {
     }
 
     #[test]
-    fn groups_into_twelve() {
+    fn is_sixty_digits() {
         let number = safety_number(&[1; 32], &[2; 32]);
-        let groups = groups(&number);
-        assert_eq!(groups.len(), 12);
-        assert!(
-            groups
-                .iter()
-                .all(|g| g.len() == 5 && g.bytes().all(|b| b.is_ascii_digit()))
-        );
+        assert_eq!(number.len(), 60);
+        assert!(number.bytes().all(|b| b.is_ascii_digit()));
     }
 }

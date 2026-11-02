@@ -14,16 +14,15 @@ media = ["dep:hpke", "dep:aes-gcm"]
 
 [dependencies]
 aes-gcm = { workspace = true, optional = true }
-throcc-proto.workspace = true
 ed25519-dalek.workspace = true
 getrandom.workspace = true
 hkdf.workspace = true
 hmac.workspace = true
+hpke = { workspace = true, optional = true }
 sha2.workspace = true
 spake2.workspace = true
-subtle.workspace = true
 thiserror.workspace = true
-hpke = { workspace = true, optional = true }
+throcc-proto.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

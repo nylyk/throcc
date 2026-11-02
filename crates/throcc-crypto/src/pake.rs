@@ -52,12 +52,7 @@ pub struct ClientPake {
 impl ClientPake {
     /// Starts a run with the invite's secret. Returns the state and `pake_a`.
     pub fn start(code_id: &str, secret: &str) -> (Self, Vec<u8>) {
-        let (id_a, id_b) = identities(code_id);
-        let (state, pake_a) = Spake2::<Ed25519Group>::start_a(
-            &Password::new(secret.as_bytes()),
-            &Identity::new(&id_a),
-            &Identity::new(&id_b),
-        );
+        let (state, pake_a) = spake2_start(Spake2::start_a, code_id, secret);
         (Self { state }, pake_a)
     }
 
@@ -87,12 +82,7 @@ pub struct ServerPake {
 
 impl ServerPake {
     pub fn respond(code_id: &str, secret: &str, pake_a: &[u8]) -> Result<Self, PakeError> {
-        let (id_a, id_b) = identities(code_id);
-        let (state, pake_b) = Spake2::<Ed25519Group>::start_b(
-            &Password::new(secret.as_bytes()),
-            &Identity::new(&id_a),
-            &Identity::new(&id_b),
-        );
+        let (state, pake_b) = spake2_start(Spake2::start_b, code_id, secret);
         let key = Zeroizing::new(state.finish(pake_a).map_err(|_| PakeError::Malformed)?);
         Ok(Self { key, pake_b })
     }
@@ -122,10 +112,14 @@ impl ServerConfirm {
     }
 }
 
-fn identities(code_id: &str) -> (Vec<u8>, Vec<u8>) {
-    (
-        [b"throcc/client/".as_slice(), code_id.as_bytes()].concat(),
-        [b"throcc/server/".as_slice(), code_id.as_bytes()].concat(),
+type Start = fn(&Password, &Identity, &Identity) -> (Spake2<Ed25519Group>, Vec<u8>);
+
+fn spake2_start(side: Start, code_id: &str, secret: &str) -> (Spake2<Ed25519Group>, Vec<u8>) {
+    let identity = |role: &[u8]| Identity::new(&[role, code_id.as_bytes()].concat());
+    side(
+        &Password::new(secret),
+        &identity(b"throcc/client/"),
+        &identity(b"throcc/server/"),
     )
 }
 
@@ -152,7 +146,7 @@ impl ConfirmKeys {
 
 fn transcript_hmac(key: &[u8; 32], transcript: &[u8]) -> Hmac<Sha256> {
     <Hmac<Sha256> as KeyInit>::new_from_slice(key)
-        .unwrap_or_else(|_| unreachable!())
+        .expect("HMAC takes a key of any length")
         .chain_update(transcript)
 }
 
