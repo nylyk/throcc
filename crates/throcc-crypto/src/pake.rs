@@ -166,6 +166,35 @@ fn verify(key: &[u8; 32], transcript: &[u8], tag: &[u8; 32]) -> Result<(), PakeE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand_core::{CryptoRng, RngCore};
+
+    /// A seeded stand-in for the OS RNG, so a whole SPAKE2 run is reproducible.
+    struct Lcg(u64);
+
+    impl RngCore for Lcg {
+        fn next_u32(&mut self) -> u32 {
+            self.next_u64() as u32
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0
+        }
+
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            rand_core::impls::fill_bytes_via_next(self, dest)
+        }
+
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+            self.fill_bytes(dest);
+            Ok(())
+        }
+    }
+
+    impl CryptoRng for Lcg {}
 
     fn transcript<'a>(
         pake_a: &'a [u8],
@@ -218,6 +247,40 @@ mod tests {
             ServerPake::respond("K7Q", "M2XPD", &[0; 7]),
             Err(PakeError::Malformed)
         ));
+    }
+
+    /// Pins the identities, the password encoding and the client/server roles, which every
+    /// already-enrolled client depends on.
+    #[test]
+    fn spake2_start_is_pinned() {
+        let (a, pake_a) = spake2_start(
+            |p, id_a, id_b| Spake2::start_a_with_rng(p, id_a, id_b, Lcg(1)),
+            "K7Q",
+            "M2XPD",
+        );
+        let (b, pake_b) = spake2_start(
+            |p, id_a, id_b| Spake2::start_b_with_rng(p, id_a, id_b, Lcg(2)),
+            "K7Q",
+            "M2XPD",
+        );
+        let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        assert_eq!(
+            hex(&pake_a),
+            "41bac7d1092946476da64a1878384f9d38f455baec30131d726374561bf50a42df"
+        );
+        assert_eq!(
+            hex(&pake_b),
+            "4220fad3e7cb3bf5f845405963010a1866507dce36befbc2ac97686579e5a28889"
+        );
+        let key = "3c4fb8e3bc9489b9ddbeda5c88f6aaae524f987285b802fe789897ef5eee369c";
+        assert_eq!(hex(&a.finish(&pake_b).unwrap()), key);
+        assert_eq!(hex(&b.finish(&pake_a).unwrap()), key);
+
+        // SPAKE2 tags each message with its side: the client is A, the server B.
+        let (_, pake_a) = ClientPake::start("K7Q", "M2XPD");
+        assert_eq!(pake_a[0], b'A');
+        let server = ServerPake::respond("K7Q", "M2XPD", &pake_a).unwrap();
+        assert_eq!(server.pake_b[0], b'B');
     }
 
     #[test]

@@ -168,7 +168,7 @@ fn new_enc_key(path: &Path, now: u64) -> Result<(EncKeyPair, u64)> {
 fn keychain_identity() -> Result<IdentityKey> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_IDENTITY)?;
     match entry.get_secret() {
-        Ok(secret) => seed_to_key(&secret),
+        Ok(secret) => seed_to_key(&Zeroizing::new(secret)),
         Err(keyring::Error::NoEntry) => {
             let key = IdentityKey::generate();
             entry.set_secret(key.seed().as_slice())?;

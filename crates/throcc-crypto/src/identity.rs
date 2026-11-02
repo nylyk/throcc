@@ -12,7 +12,8 @@ pub struct IdentityKey(SigningKey);
 
 impl IdentityKey {
     pub fn generate() -> Self {
-        Self(SigningKey::from_bytes(&random()))
+        let seed = Zeroizing::new(random());
+        Self(SigningKey::from_bytes(&seed))
     }
 
     pub fn from_seed(seed: &[u8; 32]) -> Self {
@@ -94,6 +95,64 @@ mod tests {
         assert_eq!(verify(&key.public(), &message, &signature), Ok(()));
         let other = auth_message(&[1; 32], &[2; 32], &[4; 32]);
         assert_eq!(verify(&key.public(), &other, &signature), Err(BadSignature));
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn auth_message_and_its_signature_are_pinned() {
+        let message = auth_message(&[1; 32], &[2; 32], &[3; 32]);
+        assert_eq!(
+            hex(&message),
+            concat!(
+                "7468726f63632f617574682f31",
+                "0101010101010101010101010101010101010101010101010101010101010101",
+                "0202020202020202020202020202020202020202020202020202020202020202",
+                "0303030303030303030303030303030303030303030303030303030303030303",
+            )
+        );
+        assert_eq!(
+            hex(&IdentityKey::from_seed(&[4; 32]).sign(&message)),
+            concat!(
+                "20cf9e1910d859fabedd3b31ee3cfbf430e2e485c456c2f119a0794f04614010",
+                "c7fbab7ff0174574efe9e9d2bce68d02b9a3494209538356a9996de007a4e900",
+            )
+        );
+    }
+
+    /// The signed encryption key is frozen: peers and the server verify these exact bytes.
+    #[test]
+    fn enc_key_message_and_its_signature_are_pinned() {
+        let message = enc_key_message(
+            &[1; 32],
+            UserId(0x0102_0304_0506_0708),
+            0x1122_3344_5566_7788,
+            &[2; 32],
+        );
+        assert_eq!(
+            hex(&message),
+            concat!(
+                "7468726f63632f656e632d6b65792f31",
+                "0101010101010101010101010101010101010101010101010101010101010101",
+                "0102030405060708",
+                "1122334455667788",
+                "0202020202020202020202020202020202020202020202020202020202020202",
+            )
+        );
+        let key = IdentityKey::from_seed(&[3; 32]);
+        assert_eq!(
+            hex(&key.public()),
+            "ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1"
+        );
+        assert_eq!(
+            hex(&key.sign(&message)),
+            concat!(
+                "ece8743eeedded9e657f1755b8e2e18f29428939a768067d5076f2430120a655",
+                "85f34284689dd7132236b949b5a7c2d8325322af79d91e7ffbd1e87e3da9e006",
+            )
+        );
     }
 
     #[test]

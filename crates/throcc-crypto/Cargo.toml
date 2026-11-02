@@ -27,4 +27,6 @@ zeroize.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+# The version spake2 0.4 takes for its seeded starts.
+rand_core = "0.6.4"
 ring.workspace = true
