@@ -117,14 +117,28 @@ fn verify_in_a_room(alice_dir: &Path, bob_dir: &Path, address: &str, admin: &Inv
     let bob_id = bob.state().me.unwrap();
     alice.command(Command::Join(Some(room)));
     bob.command(Command::Join(Some(room)));
-    wait_for(&alice, "bob's key", |s| {
-        s.person(bob_id).is_some_and(|p| p.identity_key.is_some())
-    });
-    alice.command(Command::SetVerified(bob_id, true));
+    let key = key_of(&alice, bob_id);
+    alice.command(verify(bob_id, key));
     wait_for(&alice, "bob verified", |s| {
         s.person(bob_id).is_some_and(|p| p.verified)
     });
     bob_id
+}
+
+/// Waits for the identity key `user` presents to `viewer`.
+fn key_of(viewer: &Client, user: UserId) -> PublicKey {
+    wait_for(viewer, "their key", |s| {
+        s.person(user).is_some_and(|p| p.identity_key.is_some())
+    });
+    viewer.state().person(user).unwrap().identity_key.unwrap()
+}
+
+fn verify(user: UserId, key: PublicKey) -> Command {
+    Command::SetVerified {
+        user,
+        key: Fingerprint(key),
+        verified: true,
+    }
 }
 
 fn wait_connected(client: &Client, what: &str) {
@@ -226,13 +240,10 @@ fn two_clients_see_each_other_join_and_unmute() {
     });
 
     let alice_id = alice.state().me.unwrap();
-    wait_for(&bob, "alice's key", |_| {
-        bob.safety_number(alice_id).is_some()
-    });
-    wait_for(&alice, "bob's key", |_| {
-        alice.safety_number(bob_id).is_some()
-    });
-    assert_eq!(bob.safety_number(alice_id), alice.safety_number(bob_id));
+    assert_eq!(
+        bob.safety_number(&key_of(&bob, alice_id)),
+        alice.safety_number(&key_of(&alice, bob_id))
+    );
 
     bob.command(Command::Disconnect);
     wait_for(&alice, "bob gone", |s| s.person(bob_id).is_none());
@@ -510,19 +521,58 @@ fn a_verified_contact_stays_verified_in_the_next_session() {
     alice.command(Command::Join(Some(room)));
     bob.command(Command::Join(Some(room)));
     let alice_id = alice.state().me.unwrap();
-    wait_for(&bob, "alice's key", |_| {
-        bob.safety_number(alice_id).is_some()
-    });
-    bob.command(Command::SetVerified(alice_id, true));
+    bob.command(verify(alice_id, key_of(&bob, alice_id)));
     wait_for(&bob, "alice verified", |s| {
         s.person(alice_id).is_some_and(|p| p.verified)
     });
     drop(bob);
 
     let bob = client_in(bob_dir.path(), &address, None);
+    wait_connected(&bob, "bob back");
+    assert!(
+        bob.state()
+            .person(alice_id)
+            .is_some_and(|p| !p.verified && p.identity_key.is_none()),
+        "verified before alice presented her key"
+    );
+    bob.command(Command::Join(Some(room)));
     wait_for(&bob, "alice still verified", |s| {
         s.person(alice_id).is_some_and(|p| p.verified)
     });
+}
+
+#[test]
+fn only_the_key_whose_number_was_compared_is_verified() {
+    let (address, bootstrap, _server) = server();
+    let (alice, _a) = client(&address, &bootstrap);
+    wait_connected(&alice, "connected");
+    let room = create_room(&alice);
+    let (bob, _b) = client(&address, &invite(&alice));
+    let bob_id = bob.state().me.unwrap();
+    alice.command(Command::Join(Some(room)));
+    bob.command(Command::Join(Some(room)));
+    let presented = key_of(&alice, bob_id);
+
+    let compared = [9; 32];
+    command_then(&alice, verify(bob_id, compared), "no notice", refused);
+    assert!(alice.state().verified.is_empty());
+    assert!(!alice.state().person(bob_id).unwrap().verified);
+
+    alice.command(verify(bob_id, presented));
+    wait_for(&alice, "bob verified", |s| {
+        s.person(bob_id).is_some_and(|p| p.verified)
+    });
+    let unverify = Command::SetVerified {
+        user: bob_id,
+        key: Fingerprint(compared),
+        verified: false,
+    };
+    command_then(&alice, unverify, "no notice", refused);
+    assert!(alice.state().person(bob_id).unwrap().verified);
+}
+
+fn refused(event: Event) -> Option<()> {
+    matches!(event, Event::Notice(n) if n.contains("before you confirmed")).then_some(())
 }
 
 #[test]
@@ -569,15 +619,35 @@ fn a_new_key_for_a_verified_persons_user_id_is_warned_of_and_still_hears_us() {
     let alice = client_in(alice_dir.path(), &address, Some(&rebuilt.admin_invite()));
     wait_connected(&alice, "alice on the rebuilt server");
     let room = create_room(&alice);
+    alice.command(Command::CreateRoom("Elsewhere".into(), None));
+    wait_for(&alice, "the other room", |s| s.rooms.len() == 2);
+    let elsewhere = alice
+        .state()
+        .rooms
+        .iter()
+        .find(|r| r.id != room)
+        .unwrap()
+        .id;
     alice.command(Command::Join(Some(room)));
     wait_for(&alice, "alice in the room", |s| s.current.is_some());
     let alice_id = alice.state().me.unwrap();
     let code = invite(&alice);
     let runtime = Runtime::new().unwrap();
     let carol_dir = tempfile::tempdir().unwrap();
-    let carol = call_in(&runtime, carol_dir.path(), &address, &code, room);
+    let carol = call_in(&runtime, carol_dir.path(), &address, &code, elsewhere);
     assert_eq!(carol.me(), bob_id, "carol didn't get bob's old user id");
 
+    wait_for(&alice, "carol in the other room", |s| {
+        s.person(bob_id).is_some_and(|p| p.room == Some(elsewhere))
+    });
+    let shown = alice.state().person(bob_id).cloned().unwrap();
+    assert!(
+        !shown.verified && shown.identity_key.is_none(),
+        "carol shown with bob's verified key: {shown:?}"
+    );
+    assert!(alice.state().key_warnings.is_empty());
+
+    runtime.block_on(carol.join(Some(room), None)).unwrap();
     let warning = KeyWarning {
         user: bob_id,
         verified: Fingerprint(identity_in(bob_dir.path())),
@@ -588,6 +658,13 @@ fn a_new_key_for_a_verified_persons_user_id_is_warned_of_and_still_hears_us() {
     });
     wait_until("carol to hold alice's key", || {
         holds_key_of(&carol, alice_id)
+    });
+
+    drop(alice);
+    let alice = client_in(alice_dir.path(), &address, None);
+    wait_connected(&alice, "alice back in the lobby");
+    wait_for(&alice, "the warning after a restart", |s| {
+        s.key_warnings == [warning.clone()]
     });
 
     alice.command(Command::DismissKeyChange(bob_id));
@@ -691,15 +768,71 @@ fn an_epoch_floor_outlives_a_restart_and_refuses_a_replayed_sender_key() {
             .engine
             .keys()
             .sender_key(alice_id, epoch, &wrapped, Instant::now());
+        let used = holds_key_of(&bob, alice_id);
         runtime.block_on(bob.close());
-        (notices, taken)
+        (notices, taken, used)
     };
-    let (notices, taken) = replayed(bob_dir.path());
+    let (notices, taken, used) = replayed(bob_dir.path());
     assert!(notices.contains("OldEpoch"), "{notices}");
-    assert!(taken.is_err(), "the replayed sender key was taken");
-    let (notices, taken) = replayed(unsaved_dir.path());
+    assert!(taken.is_err() && !used, "the replayed sender key was taken");
+    let (notices, taken, used) = replayed(unsaved_dir.path());
     assert!(!notices.contains("OldEpoch"), "{notices}");
-    assert!(taken.is_ok(), "{taken:?}");
+    assert!(taken.is_ok() && used, "{taken:?}");
+}
+
+#[test]
+fn enrolling_again_takes_a_new_encryption_key_and_drops_that_accounts_floors() {
+    let first_dir = tempfile::tempdir().unwrap();
+    let first = ProcessLikeServer::start(first_dir.path(), "127.0.0.1:0".parse().unwrap());
+    let (addr, address) = (first.addr, first.addr.to_string());
+    let alice_dir = tempfile::tempdir().unwrap();
+    let enc_key = || {
+        Keystore::open_in(alice_dir.path())
+            .unwrap()
+            .enc_key()
+            .public()
+    };
+    let before = enc_key();
+    let alice = client_in(alice_dir.path(), &address, Some(&first.admin_invite()));
+    wait_connected(&alice, "alice connected");
+    let first_key = enc_key();
+    assert_ne!(first_key, before, "enrolled with the old encryption key");
+    let room = create_room(&alice);
+    alice.command(Command::Join(Some(room)));
+    wait_for(&alice, "alice in the room", |s| s.current.is_some());
+    drop(alice);
+    first.stop();
+
+    // The same key with a fresh database, as a rebuilt server: its user ids and rooms
+    // start over, so a floor kept for alice's user id there would silence her new room.
+    let rebuilt_dir = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        first_dir.path().join(KEY_FILE),
+        rebuilt_dir.path().join(KEY_FILE),
+    )
+    .unwrap();
+    let rebuilt = ProcessLikeServer::start(rebuilt_dir.path(), addr);
+    let runtime = Runtime::new().unwrap();
+    let notices = runtime.block_on(async {
+        let mut keystore = Keystore::open_in(alice_dir.path()).unwrap();
+        let link = account::enroll(&mut keystore, &address, &rebuilt.admin_invite())
+            .await
+            .unwrap();
+        assert_ne!(keystore.enc_key().public(), first_key);
+        let call = Call::start(link, &keystore).unwrap();
+        let created = call
+            .request(Request::CreateRoom {
+                name: "General".into(),
+                password: None,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(created, Response::Ok), "{created:?}");
+        let (_, notices) = call.join(Some(room), None).await.unwrap();
+        call.close().await;
+        notices
+    });
+    assert!(!format!("{notices:?}").contains("OldEpoch"), "{notices:?}");
 }
 
 #[test]

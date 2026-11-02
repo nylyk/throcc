@@ -112,12 +112,18 @@ impl Keystore {
 
     /// Replaces the encryption key when it expires within a week. True if it was replaced.
     pub fn renew_enc_key_if_due(&mut self) -> Result<bool> {
-        let now = unix_now()?;
-        if !renewal_due(self.enc_key_created, now) {
+        if !renewal_due(self.enc_key_created, unix_now()?) {
             return Ok(false);
         }
-        (self.enc_key, self.enc_key_created) = new_enc_key(&self.dir.join(ENC_KEY_FILE), now)?;
+        self.renew_enc_key()?;
         Ok(true)
+    }
+
+    /// Replaces the encryption key, so nothing wrapped to the old one opens any more.
+    pub fn renew_enc_key(&mut self) -> Result<()> {
+        (self.enc_key, self.enc_key_created) =
+            new_enc_key(&self.dir.join(ENC_KEY_FILE), unix_now()?)?;
+        Ok(())
     }
 
     /// The encryption key, signed for one server and user until it expires.

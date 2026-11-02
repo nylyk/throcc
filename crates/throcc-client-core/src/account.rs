@@ -2,6 +2,7 @@ use throcc_proto::Fingerprint;
 use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::Request;
+use tracing::warn;
 
 use crate::connection::{self, ConnectError};
 use crate::control::{self, Link, LinkError, LoginError, Requester};
@@ -58,19 +59,26 @@ pub async fn sign_in(
     Ok(link)
 }
 
-/// Enrolls with an invite code and pins the server the PAKE proved. Epoch floors kept for
-/// that server go: they were for an earlier account, as on a server rebuilt with the same
-/// key, whose user ids and rooms now stand for others.
+/// Enrolls with an invite code and pins the server the PAKE proved. The server may give us
+/// a user id that stood for an earlier account of ours, as on a server rebuilt with the same
+/// key, whose rooms now stand for others too. So we enroll with a new encryption key, which
+/// no sender key recorded for that account opens, and drop that user id's epoch floors.
 pub async fn enroll(
     keystore: &mut Keystore,
     address: &str,
     code: &InviteCode,
 ) -> Result<Link, SignInError> {
+    keystore.renew_enc_key()?;
     let connected = connection::connect(address, None).await?;
     let link = control::enroll(connected, keystore.identity(), code).await?;
     let server = &link.connected.fingerprint;
     keystore.known_servers.trust(address, *server)?;
-    EpochFloors::forget(keystore.dir(), server)?;
+    // The invite is spent by now, so this can't fail the enrollment. Floors left behind
+    // only keep rooms silent until they pass them; the new encryption key already keeps
+    // the old account's sender keys shut.
+    if let Err(e) = EpochFloors::forget(keystore.dir(), server, link.welcome.me) {
+        warn!("dropping the epoch floors of an earlier account: {e:#}");
+    }
     publish_enc_key(keystore, &link.requester, server, link.welcome.me).await?;
     Ok(link)
 }

@@ -16,7 +16,7 @@ use throcc_proto::messages::Codec;
 
 use super::common::{
     Typeset, caption, card, chip, danger, description, error_box, field_error, mono, primary, rate,
-    secondary, section, title,
+    secondary, section, title, verified_as,
 };
 use super::page::{field, field_label, segmented};
 use crate::app::{Dialog, ThroccApp, typed_name, typed_password};
@@ -27,7 +27,11 @@ pub fn render(app: &mut ThroccApp, dialog: Dialog, cx: &mut Context<ThroccApp>) 
     let body = match dialog {
         Dialog::Share => share(app, cx),
         Dialog::Connection => connection(app, cx),
-        Dialog::Verify { user, number } => verify(app, user, number, cx),
+        Dialog::Verify {
+            user,
+            shown,
+            key_changed,
+        } => verify(app, user, shown, key_changed, cx),
         Dialog::Remove {
             user,
             name,
@@ -436,27 +440,38 @@ fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
 fn verify(
     app: &ThroccApp,
     user: UserId,
-    number: Option<String>,
+    shown: Option<(Fingerprint, String)>,
+    key_changed: bool,
     cx: &mut Context<ThroccApp>,
 ) -> AnyElement {
-    let name = app
-        .state
-        .person(user)
-        .map_or(format!("User {}", user.0), |p| p.name.clone());
-    let verified = app.state.person(user).is_some_and(|p| p.verified);
+    let person = app.state.person(user);
+    let name = person.map_or(format!("User {}", user.0), |p| p.name.clone());
+    let verified = person.is_some_and(|p| p.verified);
+    let presented = person.and_then(|p| p.identity_key).map(Fingerprint);
+    let shown_key = shown.as_ref().map(|(key, _)| *key);
+    let verified_as = person
+        .and_then(|p| verified_as(&app.state, p))
+        .map(|name| caption(format!("Verified as {name}")));
     let change = app
         .state
         .key_warnings
         .iter()
         .find(|w| w.user == user)
         .map(|w| (w.verified, w.now));
-    let mut content = body(name.clone()).child(div().flex().gap_2().child(if change.is_some() {
-        chip("Key changed", theme::danger_bg(), theme::danger_text())
-    } else if verified {
-        chip("Verified", theme::ok_bg(), theme::ok_text())
-    } else {
-        chip("Not verified", theme::raised(), theme::text_3())
-    }));
+    let mut content = body(name.clone()).child(
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(if change.is_some() {
+                chip("Key changed", theme::danger_bg(), theme::danger_text())
+            } else if verified {
+                chip("Verified", theme::ok_bg(), theme::ok_text())
+            } else {
+                chip("Not verified", theme::raised(), theme::text_3())
+            })
+            .children(verified_as),
+    );
     let key = |label: &'static str, key: String| {
         div()
             .flex()
@@ -477,7 +492,15 @@ fn verify(
                 .child(caption("The new key still hears what you say and sees what you share, like anyone not verified.")),
         );
     }
-    let groups: Vec<String> = number.as_deref().map(safety_groups).unwrap_or_default();
+    if key_changed {
+        content = content.child(warning_box().child(format!(
+            "{name}’s key changed while this was open, so this is a new number. Compare it again before you mark them verified."
+        )));
+    }
+    let groups: Vec<String> = shown
+        .as_ref()
+        .map(|(_, number)| safety_groups(number))
+        .unwrap_or_default();
     let mut buttons = actions("Done", cx);
     if change.is_some() {
         buttons = buttons.child(secondary("dismiss-key-change", "Dismiss Warning").on_click(
@@ -487,6 +510,7 @@ fn verify(
             }),
         ));
     }
+    let new_key_shown = change.is_some_and(|(_, now)| Some(now) == shown_key);
     content
         .child(section("Safety number"))
         .child(if groups.is_empty() {
@@ -502,7 +526,7 @@ fn verify(
                 .children(groups.into_iter().map(|g| div().child(g)))
                 .into_any_element()
         })
-        .child(description(if change.is_some() {
+        .child(description(if new_key_shown {
             format!(
                 "This number belongs to the new key. Only if it matches {name}’s is the new key really theirs."
             )
@@ -514,9 +538,11 @@ fn verify(
         .child(
             buttons.child(
                 primary("mark-verified", if verified { "Mark as Not Verified" } else { "Mark as Verified" })
-                    .disabled(!verified && number.is_none())
+                    .disabled(shown_key.is_none() || shown_key != presented)
                     .on_click(cx.listener(move |app, _, _, cx| {
-                        app.command(Command::SetVerified(user, !verified));
+                        if let Some(key) = shown_key {
+                            app.command(Command::SetVerified { user, key, verified: !verified });
+                        }
                         cx.notify();
                     })),
             ),

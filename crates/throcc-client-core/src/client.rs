@@ -76,9 +76,14 @@ pub enum Command {
         user: UserId,
         cascade: bool,
     },
-    /// Verifies the identity key the server shows for this user, on every server, or takes
-    /// it off the verified ones.
-    SetVerified(UserId, bool),
+    /// Verifies `key`, the identity key whose safety number the user compared with `user`,
+    /// on every server, or takes it off the verified ones. Refused with a notice once `user`
+    /// presents another key.
+    SetVerified {
+        user: UserId,
+        key: Fingerprint,
+        verified: bool,
+    },
     /// Stops warning that this user's verified key changed, leaving the new key unverified.
     DismissKeyChange(UserId),
     /// Takes a verified identity key off the verified ones, on every server.
@@ -130,8 +135,8 @@ pub trait ClientApi: Send + Sync {
     fn command(&self, command: Command);
     fn events(&self) -> broadcast::Receiver<Event>;
     fn state(&self) -> Arc<State>;
-    /// The 60-digit safety number with `user`, once their identity key is known.
-    fn safety_number(&self, user: UserId) -> Option<String>;
+    /// The 60-digit safety number with whoever holds the identity key `key`.
+    fn safety_number(&self, key: &PublicKey) -> String;
     /// The newest picture of `user`'s share while watched, or of ours while sharing.
     fn picture(&self, user: UserId) -> Option<Picture>;
     /// Tells the core `user`'s picture is on screen. Our own share builds its preview only
@@ -233,9 +238,8 @@ impl ClientApi for Client {
         self.shared.state()
     }
 
-    fn safety_number(&self, user: UserId) -> Option<String> {
-        let key = self.state().person(user)?.identity_key?;
-        Some(safety::safety_number(&self.identity, &key))
+    fn safety_number(&self, key: &PublicKey) -> String {
+        safety::safety_number(&self.identity, key)
     }
 
     fn picture(&self, user: UserId) -> Option<Picture> {
@@ -444,15 +448,21 @@ impl ClientApi for MockClient {
             Command::ListUsers | Command::SetRole(..) | Command::RemoveUser { .. } => {
                 self.shared.emit(Event::Users(sample_users()));
             }
-            Command::SetVerified(user, verified) => self.update(|s| {
+            Command::SetVerified {
+                user,
+                key,
+                verified,
+            } => self.update(|s| {
                 let Some(p) = s.people.get_mut(&user) else {
                     return;
                 };
+                if p.identity_key.map(Fingerprint) != Some(key) {
+                    return;
+                }
                 p.verified = verified;
-                let key = p.identity_key.map(Fingerprint);
                 let name = p.name.clone();
-                s.verified.retain(|v| Some(v.key) != key);
-                if let Some(key) = key.filter(|_| verified) {
+                s.verified.retain(|v| v.key != key);
+                if verified {
                     let server = s.server.as_ref().map(|s| s.fingerprint);
                     s.verified.push(VerifiedIdentity {
                         key,
@@ -467,6 +477,7 @@ impl ClientApi for MockClient {
             }
             Command::Unverify(key) => self.update(|s| {
                 s.verified.retain(|v| v.key != key);
+                s.key_warnings.retain(|w| w.verified != key);
                 for p in s.people.values_mut() {
                     if p.identity_key.map(Fingerprint) == Some(key) {
                         p.verified = false;
@@ -494,8 +505,8 @@ impl ClientApi for MockClient {
         self.shared.state()
     }
 
-    fn safety_number(&self, _user: UserId) -> Option<String> {
-        Some("482139057716024733195580241196087436295031487266089415270031".into())
+    fn safety_number(&self, _key: &PublicKey) -> String {
+        "482139057716024733195580241196087436295031487266089415270031".into()
     }
 
     fn picture(&self, _user: UserId) -> Option<Picture> {

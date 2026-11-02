@@ -18,6 +18,7 @@ mod servers;
 mod session;
 pub mod settings;
 pub mod state;
+mod trust;
 mod verified;
 
 use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};

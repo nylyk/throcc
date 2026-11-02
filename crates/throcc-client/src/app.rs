@@ -202,10 +202,13 @@ pub struct PlaybackControl {
 pub enum Dialog {
     Share,
     Connection,
-    /// `number` is our safety number with `user`, once we know their identity key.
+    /// Comparing our safety number with `user`'s. `shown` is the identity key the number on
+    /// screen is for, with the number, once they presented one; `key_changed` once another
+    /// key replaced it while open.
     Verify {
         user: UserId,
-        number: Option<String>,
+        shown: Option<(Fingerprint, String)>,
+        key_changed: bool,
     },
     Remove {
         user: UserId,
@@ -684,12 +687,7 @@ impl ThroccApp {
             }
             Event::LeftServer => self.end_session(window, cx),
         }
-        // Their key arrives with a room state, so any event may be the first with the number.
-        if let Some(Dialog::Verify { user, number }) = &mut self.dialog
-            && number.is_none()
-        {
-            *number = self.client.as_ref().and_then(|c| c.safety_number(*user));
-        }
+        self.follow_verified_key();
         cx.notify();
     }
 
@@ -1050,8 +1048,38 @@ impl ThroccApp {
 
     /// Opens the dialog comparing our safety number with `user`'s.
     pub fn open_verify(&mut self, user: UserId, cx: &mut Context<Self>) {
-        let number = self.client.as_ref().and_then(|c| c.safety_number(user));
-        self.set_dialog(Some(Dialog::Verify { user, number }), cx);
+        self.dialog = Some(Dialog::Verify {
+            user,
+            shown: None,
+            key_changed: false,
+        });
+        self.follow_verified_key();
+        cx.notify();
+    }
+
+    /// Keeps the verify dialog's number on the key its person presents now. Their key
+    /// arrives with a room state, and the server may present another at any time, so this
+    /// follows every event.
+    fn follow_verified_key(&mut self) {
+        let Some(Dialog::Verify {
+            user,
+            shown,
+            key_changed,
+        }) = &mut self.dialog
+        else {
+            return;
+        };
+        let Some(key) = self.state.person(*user).and_then(|p| p.identity_key) else {
+            return;
+        };
+        let Some(client) = &self.client else {
+            return;
+        };
+        if shown.as_ref().is_some_and(|(shown, _)| shown.0 == key) {
+            return;
+        }
+        *key_changed |= shown.is_some();
+        *shown = Some((Fingerprint(key), client.safety_number(&key)));
     }
 
     fn on_room_field(

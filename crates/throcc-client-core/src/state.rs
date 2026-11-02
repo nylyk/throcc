@@ -154,10 +154,10 @@ pub struct Person {
     pub sharing: Option<ShareConfig>,
     pub speaking: bool,
     pub playback: PersonPlayback,
-    /// Whether the user verified the identity key the server shows for them.
+    /// Whether the user verified the identity key they presented this session.
     pub verified: bool,
-    /// Their identity key: the one the server showed this session, or else the verified one
-    /// last seen as them. None until either is known.
+    /// The identity key they presented this session, in a room with us. None until then,
+    /// even for someone verified before: nothing else ties their account here to that key.
     pub identity_key: Option<PublicKey>,
     pub role: Role,
 }
@@ -231,9 +231,10 @@ pub struct CurrentRoom {
     pub watching: Vec<UserId>,
 }
 
-/// The server shows `user`, whose identity key `verified` was verified, with another key
-/// that isn't. The new key still gets our media: it is only unverified, like anyone new.
-/// Shown until the new key is verified or the user dismisses it.
+/// The server showed `user`, whose identity key `verified` was verified, with another key
+/// `now` that isn't. The new key still gets our media: it is only unverified, like anyone
+/// new. Kept, across restarts and even once `verified` is shown again, until the new key is
+/// verified or the user dismisses it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyWarning {
     pub user: UserId,

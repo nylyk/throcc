@@ -19,8 +19,9 @@ const MAX_SEEN: usize = 256;
 
 /// The identity keys the user verified, for this whole install: a key verified once is
 /// verified on every server that shows it. Each key also keeps the server and user pairs it
-/// was seen under, so a server later showing another key for one of them is noticed.
-/// Every change is written at once.
+/// was seen under, so a server later showing another key for one of them is noticed, and
+/// that change is kept until the user verifies the new key or dismisses it. Every change is
+/// written at once.
 pub(crate) struct VerifiedKeys {
     dir: PathBuf,
     file: VerifiedFile,
@@ -30,6 +31,9 @@ pub(crate) struct VerifiedKeys {
 #[serde(default)]
 struct VerifiedFile {
     people: BTreeMap<Hex, Verified>,
+    /// Pairs seen under a verified key that later showed another, unverified key. Each is
+    /// one of a verified key's `seen` pairs, so they are bounded alike.
+    changed: Vec<Changed>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -44,6 +48,14 @@ struct Verified {
 struct SeenAs {
     server: Hex,
     user: UserId,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct Changed {
+    #[serde(flatten)]
+    at: SeenAs,
+    /// The key shown there last that wasn't the verified one.
+    now: Hex,
 }
 
 impl VerifiedFile {
@@ -64,6 +76,14 @@ impl VerifiedFile {
                 verified.seen.remove(&seen);
             }
         }
+    }
+
+    fn changed_at(&self, at: SeenAs) -> Option<PublicKey> {
+        self.changed.iter().find(|c| c.at == at).map(|c| c.now.0)
+    }
+
+    fn forget_change(&mut self, at: SeenAs) {
+        self.changed.retain(|c| c.at != at);
     }
 }
 
@@ -98,15 +118,34 @@ impl VerifiedKeys {
             .map(|(key, _)| key.0)
     }
 
-    /// Notes that `server` shows `key`, validly signed, as `user`. Written only for a
-    /// verified key that wasn't noted there yet.
-    pub fn seen(&mut self, server: &Fingerprint, user: UserId, key: &PublicKey) -> Result<()> {
-        let seen = seen_as(server, user);
-        let noted = self.verified_at(server, user) == Some(*key);
-        if noted || !self.is_verified(key) {
+    /// The unverified key `server` showed as `user` last, where a verified key was seen
+    /// before, until the user verifies it or dismisses the change. It outlives that key
+    /// being shown again, so a server switching back and forth can't hide it.
+    pub fn changed_at(&self, server: &Fingerprint, user: UserId) -> Option<PublicKey> {
+        self.file.changed_at(seen_as(server, user))
+    }
+
+    /// Notes that `server` shows `key`, validly signed, as `user`: where it is verified, or
+    /// where it replaces a verified key seen there. Written only when that is new.
+    pub fn presented(&mut self, server: &Fingerprint, user: UserId, key: &PublicKey) -> Result<()> {
+        let at = seen_as(server, user);
+        let expected = self.verified_at(server, user);
+        if self.is_verified(key) {
+            if expected == Some(*key) {
+                return Ok(());
+            }
+            return self.change(|file| {
+                file.see(key, at);
+                file.forget_change(at);
+            });
+        }
+        if expected.is_none() || self.changed_at(server, user) == Some(*key) {
             return Ok(());
         }
-        self.change(|file| file.see(key, seen))
+        self.change(|file| {
+            file.forget_change(at);
+            file.changed.push(Changed { at, now: Hex(*key) });
+        })
     }
 
     /// Verifies `key`, which `server` shows as `user` under `name`.
@@ -117,23 +156,32 @@ impl VerifiedKeys {
         key: &PublicKey,
         name: &str,
     ) -> Result<()> {
+        let at = seen_as(server, user);
         self.change(|file| {
             file.people.entry(Hex(*key)).or_default().name = name.to_owned();
-            file.see(key, seen_as(server, user));
+            file.see(key, at);
+            file.forget_change(at);
+            file.changed.retain(|c| c.now.0 != *key);
         })
     }
 
-    /// Takes `key` off the verified ones, on every server.
+    /// Takes `key` off the verified ones, on every server, with the changes noted against it.
     pub fn unverify(&mut self, key: &PublicKey) -> Result<()> {
         self.change(|file| {
-            file.people.remove(&Hex(*key));
+            if let Some(verified) = file.people.remove(&Hex(*key)) {
+                file.changed.retain(|c| !verified.seen.contains(&c.at));
+            }
         })
     }
 
     /// Stops expecting the verified key last seen as `user` on `server` there, after the
     /// user accepted that it changed.
     pub fn dismiss_change(&mut self, server: &Fingerprint, user: UserId) -> Result<()> {
-        self.change(|file| file.forget_seen(seen_as(server, user), None))
+        let at = seen_as(server, user);
+        self.change(|file| {
+            file.forget_seen(at, None);
+            file.forget_change(at);
+        })
     }
 
     /// Every verified key, with the servers it was seen on.
@@ -194,7 +242,7 @@ mod tests {
         assert_eq!(reloaded.verified_at(&HERE, UserId(4)), Some([4; 32]));
         assert_eq!(reloaded.verified_at(&THERE, UserId(9)), None);
 
-        verified.seen(&THERE, UserId(9), &[4; 32]).unwrap();
+        verified.presented(&THERE, UserId(9), &[4; 32]).unwrap();
         let reloaded = VerifiedKeys::load(dir.path()).unwrap();
         assert_eq!(reloaded.verified_at(&THERE, UserId(9)), Some([4; 32]));
         assert_eq!(reloaded.list()[0].servers, [HERE, THERE]);
@@ -205,7 +253,7 @@ mod tests {
     fn an_unverified_key_is_not_noted() {
         let dir = tempfile::tempdir().unwrap();
         let mut verified = VerifiedKeys::load(dir.path()).unwrap();
-        verified.seen(&HERE, UserId(4), &[4; 32]).unwrap();
+        verified.presented(&HERE, UserId(4), &[4; 32]).unwrap();
         assert_eq!(verified.verified_at(&HERE, UserId(4)), None);
         assert!(!dir.path().join(FILE).exists());
     }
@@ -216,7 +264,7 @@ mod tests {
         let mut verified = VerifiedKeys::load(dir.path()).unwrap();
         verified.verify(&HERE, UserId(4), &[4; 32], "Mara").unwrap();
         verified.verify(&HERE, UserId(5), &[5; 32], "Teo").unwrap();
-        verified.seen(&HERE, UserId(4), &[5; 32]).unwrap();
+        verified.presented(&HERE, UserId(4), &[5; 32]).unwrap();
         assert_eq!(verified.verified_at(&HERE, UserId(4)), Some([5; 32]));
 
         verified.dismiss_change(&HERE, UserId(4)).unwrap();
@@ -228,6 +276,37 @@ mod tests {
         assert!(!reloaded.is_verified(&[5; 32]));
         assert_eq!(reloaded.verified_at(&HERE, UserId(5)), None);
         assert!(reloaded.is_verified(&[4; 32]));
+    }
+
+    #[test]
+    fn a_changed_key_stays_noted_until_verified_or_dismissed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut verified = VerifiedKeys::load(dir.path()).unwrap();
+        verified.verify(&HERE, UserId(4), &[4; 32], "Mara").unwrap();
+        verified.presented(&HERE, UserId(4), &[9; 32]).unwrap();
+        verified.presented(&HERE, UserId(4), &[4; 32]).unwrap();
+        let reloaded = VerifiedKeys::load(dir.path()).unwrap();
+        assert_eq!(reloaded.changed_at(&HERE, UserId(4)), Some([9; 32]));
+        assert_eq!(reloaded.verified_at(&HERE, UserId(4)), Some([4; 32]));
+        assert_eq!(reloaded.changed_at(&THERE, UserId(4)), None);
+
+        verified
+            .verify(&THERE, UserId(2), &[9; 32], "Mara")
+            .unwrap();
+        assert_eq!(
+            verified.changed_at(&HERE, UserId(4)),
+            None,
+            "the new key verified"
+        );
+
+        verified.presented(&HERE, UserId(4), &[8; 32]).unwrap();
+        verified.dismiss_change(&HERE, UserId(4)).unwrap();
+        assert_eq!(verified.changed_at(&HERE, UserId(4)), None);
+
+        verified.presented(&HERE, UserId(4), &[4; 32]).unwrap();
+        verified.presented(&HERE, UserId(4), &[8; 32]).unwrap();
+        verified.unverify(&[4; 32]).unwrap();
+        assert_eq!(verified.changed_at(&HERE, UserId(4)), None);
     }
 
     #[test]

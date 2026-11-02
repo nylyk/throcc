@@ -10,7 +10,7 @@ use throcc_proto::{Fingerprint, permissions};
 
 use super::common::{
     Trust, Typeset, avatar, caption, card, chip, field_error, ghost_icon, mono, primary, secondary,
-    section, server_seed, trust,
+    section, server_seed, trust, verified_as,
 };
 use super::page::{field, frame, nav, picture_editor, save_line, segmented};
 use crate::app::{Dialog, PictureFor, Screen, ServerPage, ThroccApp, typed_name};
@@ -119,6 +119,7 @@ fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .children(state.people.iter().filter(|(u, _)| Some(**u) != me).map(
                     |(user, person)| {
                         let user = *user;
+                        let verified_as = verified_as(&state, person);
                         div()
                             .id(("contact", user.0 as usize))
                             .flex()
@@ -136,7 +137,17 @@ fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                                 px(28.),
                                 false,
                             ))
-                            .child(div().flex_1().child(person.name.clone()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().truncate().child(person.name.clone()))
+                                    .children(verified_as.map(|name| {
+                                        caption(format!("Verified as {name}")).truncate()
+                                    })),
+                            )
                             .child(match trust(&state, user) {
                                 Trust::KeyChanged => {
                                     chip("Key changed", theme::danger_bg(), theme::danger_text())

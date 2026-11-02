@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use throcc_crypto::identity::random;
-use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, MediaId, RoomId, UserId};
 use throcc_proto::messages::{
     AuthError, ErrorCode, Event as ServerEvent, MediaState, Placed, Presence, PublicKey, Recovery,
@@ -32,10 +31,11 @@ use crate::playback::SavedPlayback;
 use crate::profile::Profile;
 use crate::server_look::ServerLook;
 use crate::state::{
-    ConnectionStatus, CurrentRoom, Health, KeyWarning, MAX_PEOPLE, MIC_KBPS, Person, Playback,
+    ConnectionStatus, CurrentRoom, Health, KeyWarning, MIC_KBPS, Person, Playback,
     SHARE_AUDIO_DETAIL, SHARE_AUDIO_KBPS, SentTrack, ServerView, Sound, State, TrackHealth,
     VOICE_DETAIL, person_name, room_name, share_detail, shown_name,
 };
+use crate::trust::Trust;
 use crate::verified::VerifiedKeys;
 
 const LEVELS_EVERY: Duration = Duration::from_millis(100);
@@ -224,10 +224,7 @@ pub(crate) struct Session {
     server_share: Option<ShareConfig>,
     /// The peers our key is wrapped to, whose tracks we follow.
     peers: BTreeMap<UserId, RoomPeer>,
-    /// The identity key each user last presented this session, with an encryption key it
-    /// validly signed for them here.
-    identities: HashMap<UserId, PublicKey>,
-    verified: VerifiedKeys,
+    trust: Trust,
     watching: Vec<UserId>,
     /// The shares we receive, by who shares them.
     watched_shares: HashMap<UserId, WatchedShare>,
@@ -366,8 +363,7 @@ impl Session {
             },
             server_share: None,
             peers: BTreeMap::new(),
-            identities: HashMap::new(),
-            verified,
+            trust: Trust::new(server, verified),
             watching: Vec::new(),
             watched_shares: HashMap::new(),
             mic_test: false,
@@ -682,6 +678,7 @@ impl Session {
             match Call::restart(link, &self.keystore, &self.call) {
                 Ok(call) => {
                     self.call = call;
+                    self.trust.forget_presented();
                     self.reset_room();
                     self.start_voice();
                     self.cue(Cue::Reconnected);
@@ -789,6 +786,11 @@ impl Session {
     }
 
     fn after_join(&mut self, placed: &Placed) {
+        // The floor of a new placement is what a replaying server wants lost, so it isn't
+        // left to the next health tick.
+        if let Err(e) = self.call.floors.save() {
+            warn!("saving epoch floors: {e:#}");
+        }
         self.reset_room();
         self.room = placed.room;
         self.my_tracks = placed.tracks.clone();
@@ -852,29 +854,16 @@ impl Session {
     }
 
     /// Notes the identity keys of the peers our key is wrapped to, then shows who is
-    /// verified and whose verified key changed. Once [`MAX_PEOPLE`] keys are noted, only
-    /// those of the people in our room stay, so they are always checked.
+    /// verified and whose verified key changed.
     fn note_identities(&mut self) {
-        let server = self.call.server();
-        let new = |(user, peer): (&UserId, &RoomPeer)| {
-            (self.identities.get(user) != Some(&peer.identity_key))
-                .then_some((*user, peer.identity_key))
-        };
-        let new: Vec<(UserId, PublicKey)> = self.peers.iter().filter_map(new).collect();
-        if new.is_empty() {
-            return;
+        let presented: Vec<(UserId, PublicKey)> = self
+            .peers
+            .iter()
+            .map(|(user, peer)| (*user, peer.identity_key))
+            .collect();
+        if self.trust.note(&presented) {
+            self.refresh_trust();
         }
-        if self.identities.len() + new.len() > MAX_PEOPLE {
-            self.identities
-                .retain(|user, _| self.peers.contains_key(user));
-        }
-        for (user, key) in new {
-            self.identities.insert(user, key);
-            if let Err(e) = self.verified.seen(&server, user, &key) {
-                warn!("noting where a verified key was seen: {e:#}");
-            }
-        }
-        self.refresh_trust();
     }
 
     /// Follows a change in who we share keys with, and in the shares we watch from them.
@@ -890,22 +879,16 @@ impl Session {
         let trust: BTreeMap<UserId, (bool, Option<PublicKey>)> = state
             .people
             .keys()
-            .map(|user| (*user, self.trust_of(*user)))
+            .map(|user| (*user, self.trust.of(*user)))
             .collect();
-        let server = self.call.server();
-        let warnings: Vec<KeyWarning> = trust
-            .iter()
-            .filter_map(|(user, (verified, _))| {
-                let now = self.identities.get(user).filter(|_| !verified)?;
-                let before = self.verified.verified_at(&server, *user)?;
-                Some(KeyWarning {
-                    user: *user,
-                    verified: Fingerprint(before),
-                    now: Fingerprint(*now),
-                })
-            })
+        let me = self.call.me();
+        let warnings: Vec<KeyWarning> = state
+            .people
+            .keys()
+            .filter(|user| **user != me)
+            .filter_map(|user| self.trust.warning(*user))
             .collect();
-        let everyone = self.verified.list();
+        let everyone = self.trust.list();
         self.shared.update(|s| {
             for (user, person) in &mut s.people {
                 if let Some(&(verified, key)) = trust.get(user) {
@@ -917,35 +900,22 @@ impl Session {
         });
     }
 
-    /// Whether `user` is verified, and their identity key: the one presented this session,
-    /// or else the verified one last seen as them here.
-    fn trust_of(&self, user: UserId) -> (bool, Option<PublicKey>) {
-        match self.identities.get(&user) {
-            Some(key) => (self.verified.is_verified(key), Some(*key)),
-            None => {
-                let verified = self.verified.verified_at(&self.call.server(), user);
-                (verified.is_some(), verified)
-            }
-        }
-    }
-
-    /// Verifies the key shown for `user`, or takes it off the verified ones.
-    fn set_verified(&mut self, user: UserId, verified: bool) {
-        let (_, key) = self.trust_of(user);
-        let Some(key) = key else {
-            self.shared
-                .notice("You haven't seen their key in a room yet, so it can't be verified.");
+    /// Verifies `key`, whose safety number the user compared, or takes it off the verified
+    /// ones, while `user` still presents it.
+    fn set_verified(&mut self, user: UserId, key: &PublicKey, verified: bool) {
+        let name = self
+            .shared
+            .state()
+            .person(user)
+            .map_or_else(|| person_name(user, ""), |p| p.name.clone());
+        let changed = self.trust.set_verified(user, key, verified, &name);
+        if let Ok(false) = changed {
+            self.shared.notice(format!(
+                "{name}'s key changed before you confirmed, so nothing changed. Compare the new safety number."
+            ));
             return;
-        };
-        let name = self.shared.state().person(user).map(|p| p.name.clone());
-        let server = self.call.server();
-        let saved = if verified {
-            let name = name.unwrap_or_else(|| person_name(user, ""));
-            self.verified.verify(&server, user, &key, &name)
-        } else {
-            self.verified.unverify(&key)
-        };
-        self.after_trust_change(saved);
+        }
+        self.after_trust_change(changed.map(drop));
     }
 
     fn after_trust_change(&mut self, saved: anyhow::Result<()>) {
@@ -1075,13 +1045,17 @@ impl Session {
                 self.simple(Request::RemoveUser { user, cascade }).await;
                 self.list_users().await;
             }
-            Command::SetVerified(user, verified) => self.set_verified(user, verified),
+            Command::SetVerified {
+                user,
+                key,
+                verified,
+            } => self.set_verified(user, &key.0, verified),
             Command::DismissKeyChange(user) => {
-                let dismissed = self.verified.dismiss_change(&self.call.server(), user);
+                let dismissed = self.trust.dismiss_change(user);
                 self.after_trust_change(dismissed);
             }
             Command::Unverify(key) => {
-                let unverified = self.verified.unverify(&key.0);
+                let unverified = self.trust.unverify(&key.0);
                 self.after_trust_change(unverified);
             }
             Command::Voice(settings) => {
@@ -1628,7 +1602,7 @@ impl Session {
             }
             ServerEvent::PresenceChanged(p) => {
                 self.room_cue(p.user, p.room);
-                let (verified, identity_key) = self.trust_of(p.user);
+                let (verified, identity_key) = self.trust.of(p.user);
                 let saved = &self.saved_playback;
                 let sharing = self.sharing_of(p.user);
                 self.shared.update(|s| {

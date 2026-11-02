@@ -53,11 +53,14 @@ impl EpochFloors {
 
     pub fn raise(&self, user: UserId, room: RoomId, epoch: Epoch) {
         let mut floors = lock(&self.0);
-        let floor = floors.at.entry((user, room)).or_insert(epoch);
-        if *floor < epoch {
-            *floor = epoch;
+        if floors
+            .at
+            .get(&(user, room))
+            .is_none_or(|floor| *floor < epoch)
+        {
+            floors.at.insert((user, room), epoch);
+            floors.unsaved = true;
         }
-        floors.unsaved = true;
     }
 
     /// Writes the floors if any rose since the last write. Each kept floor only rises, so
@@ -95,10 +98,12 @@ impl EpochFloors {
         saved
     }
 
-    /// Drops the floors kept for `server`, as for a new account there, whose user ids and
-    /// rooms are no longer the ones they were for.
-    pub fn forget(dir: &Path, server: &Fingerprint) -> Result<()> {
-        Servers::update(dir, |s| s.server_mut(server).epochs.clear())
+    /// Drops the floors kept for `user` on `server`, as for a new account there with a user
+    /// id that once stood for an earlier one.
+    pub fn forget(dir: &Path, server: &Fingerprint, user: UserId) -> Result<()> {
+        Servers::update(dir, |s| {
+            s.server_mut(server).epochs.remove(&user);
+        })
     }
 }
 
@@ -162,11 +167,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let floors = EpochFloors::load(dir.path(), &SERVER).unwrap();
         floors.raise(ME, ROOM, Epoch(5));
+        floors.raise(UserId(5), ROOM, Epoch(3));
         floors.save_last().unwrap();
-        EpochFloors::forget(dir.path(), &SERVER).unwrap();
+        EpochFloors::forget(dir.path(), &SERVER, ME).unwrap();
         floors.raise(ME, ROOM, Epoch(6));
         floors.save().unwrap();
         let reloaded = EpochFloors::load(dir.path(), &SERVER).unwrap();
         assert_eq!(reloaded.get(ME, ROOM), None);
+        assert_eq!(reloaded.get(UserId(5), ROOM), Some(Epoch(3)));
+    }
+
+    #[test]
+    fn a_floor_that_did_not_rise_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        let floors = EpochFloors::load(&config, &SERVER).unwrap();
+        floors.raise(ME, ROOM, Epoch(5));
+        floors.save().unwrap();
+        std::fs::remove_dir_all(&config).unwrap();
+        std::fs::write(&config, b"not a directory").unwrap();
+        floors.raise(ME, ROOM, Epoch(5));
+        floors.raise(ME, ROOM, Epoch(2));
+        floors.save().expect("a write was tried");
     }
 }
