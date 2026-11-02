@@ -667,7 +667,14 @@ fn a_new_key_for_a_verified_persons_user_id_is_warned_of_and_still_hears_us() {
         s.key_warnings == [warning.clone()]
     });
 
-    alice.command(Command::DismissKeyChange(bob_id));
+    alice.command(Command::DismissKeyChange {
+        user: bob_id,
+        shown: alice
+            .state()
+            .person(bob_id)
+            .and_then(|p| p.identity_key)
+            .map(Fingerprint),
+    });
     wait_for(&alice, "the warning dismissed", |s| {
         s.key_warnings.is_empty()
     });

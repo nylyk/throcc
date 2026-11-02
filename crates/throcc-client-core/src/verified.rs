@@ -189,11 +189,23 @@ impl VerifiedKeys {
 
     /// Stops expecting the verified key last seen as `user` on `server` there, after the
     /// user accepted that it changed.
-    pub fn dismiss_change(&mut self, server: &Fingerprint, user: UserId) -> Result<()> {
+    /// Stops the warning for `user` on `server`. When `presented` is a verified key, the pair
+    /// stays watched under it, in the same write, so a later swap is still warned of.
+    pub fn dismiss_change(
+        &mut self,
+        server: &Fingerprint,
+        user: UserId,
+        presented: Option<&PublicKey>,
+    ) -> Result<()> {
         let at = seen_as(server, user);
+        let watched = presented.filter(|key| self.is_verified(key)).copied();
+        self.shown_since.remove(&at);
         self.change(|file| {
             file.forget_seen(at, None);
             file.forget_change(at);
+            if let Some(key) = &watched {
+                file.see(key, at);
+            }
         })
     }
 
@@ -287,7 +299,7 @@ mod tests {
         verified.presented(&HERE, UserId(4), &[5; 32]).unwrap();
         assert_eq!(verified.verified_at(&HERE, UserId(4)), Some([5; 32]));
 
-        verified.dismiss_change(&HERE, UserId(4)).unwrap();
+        verified.dismiss_change(&HERE, UserId(4), None).unwrap();
         assert_eq!(verified.verified_at(&HERE, UserId(4)), None);
         assert_eq!(verified.verified_at(&HERE, UserId(5)), Some([5; 32]));
 
@@ -320,7 +332,7 @@ mod tests {
         );
 
         verified.presented(&HERE, UserId(4), &[8; 32]).unwrap();
-        verified.dismiss_change(&HERE, UserId(4)).unwrap();
+        verified.dismiss_change(&HERE, UserId(4), None).unwrap();
         assert_eq!(verified.changed_at(&HERE, UserId(4)), None);
 
         verified.presented(&HERE, UserId(4), &[4; 32]).unwrap();

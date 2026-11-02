@@ -511,12 +511,17 @@ fn verify(
         .unwrap_or_default();
     let mut buttons = actions("Done", cx);
     if change.is_some() {
-        buttons = buttons.child(secondary("dismiss-key-change", "Dismiss Warning").on_click(
-            cx.listener(move |app, _, _, cx| {
-                app.command(Command::DismissKeyChange(user));
-                cx.notify();
-            }),
-        ));
+        buttons = buttons.child(
+            secondary("dismiss-key-change", "Dismiss Warning")
+                .disabled(key_changed || shown_key != presented)
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    app.command(Command::DismissKeyChange {
+                        user,
+                        shown: shown_key,
+                    });
+                    cx.notify();
+                })),
+        );
     }
     let new_key_shown = change.is_some_and(|(_, now)| Some(now) == shown_key);
     content

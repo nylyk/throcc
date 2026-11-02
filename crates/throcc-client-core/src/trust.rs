@@ -108,12 +108,16 @@ impl Trust {
 
     /// Stops warning that `user`'s verified key changed. Where the verified key is the one
     /// they present again, it is expected there anew, so a later swap is still warned of.
-    pub fn dismiss_change(&mut self, user: UserId) -> Result<()> {
-        self.verified.dismiss_change(&self.server, user)?;
-        match self.presented.get(&user) {
-            Some(key) => self.verified.presented(&self.server, user, key),
-            None => Ok(()),
+    /// Dismisses the warning for `user` if they still present `shown`, the key the user
+    /// looked at. Returns whether it was dismissed.
+    pub fn dismiss_change(&mut self, user: UserId, shown: Option<&PublicKey>) -> Result<bool> {
+        let presented = self.presented.get(&user).copied();
+        if presented.as_ref() != shown {
+            return Ok(false);
         }
+        self.verified
+            .dismiss_change(&self.server, user, presented.as_ref())?;
+        Ok(true)
     }
 
     pub fn unverify(&mut self, key: &PublicKey) -> Result<()> {
@@ -196,7 +200,7 @@ mod tests {
         assert!(next.warning(MARA).is_some(), "lost on a restart");
         next.note(&[(MARA, REAL)]);
         assert!(next.warning(MARA).is_some(), "hidden by the old key");
-        next.dismiss_change(MARA).unwrap();
+        assert!(next.dismiss_change(MARA, Some(&REAL)).unwrap());
         assert!(next.warning(MARA).is_none());
     }
 
@@ -208,7 +212,7 @@ mod tests {
         trust.set_verified(MARA, &REAL, true, "Mara").unwrap();
         trust.note(&[(MARA, IMPOSTOR)]);
         trust.note(&[(MARA, REAL)]);
-        trust.dismiss_change(MARA).unwrap();
+        assert!(trust.dismiss_change(MARA, Some(&REAL)).unwrap());
         assert!(trust.warning(MARA).is_none());
         assert_eq!(trust.of(MARA), (true, Some(REAL)));
 
@@ -224,9 +228,22 @@ mod tests {
         trust.note(&[(MARA, REAL)]);
         trust.set_verified(MARA, &REAL, true, "Mara").unwrap();
         trust.note(&[(MARA, IMPOSTOR)]);
-        trust.dismiss_change(MARA).unwrap();
+        assert!(trust.dismiss_change(MARA, Some(&IMPOSTOR)).unwrap());
         trust.note(&[(MARA, [10; 32])]);
         assert!(trust.warning(MARA).is_none());
+    }
+
+    #[test]
+    fn a_dismiss_for_a_key_no_longer_shown_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut trust = trust_in(dir.path());
+        trust.note(&[(MARA, REAL)]);
+        trust.set_verified(MARA, &REAL, true, "Mara").unwrap();
+        trust.note(&[(MARA, IMPOSTOR)]);
+        trust.note(&[(MARA, REAL)]);
+        trust.note(&[(MARA, [10; 32])]);
+        assert!(!trust.dismiss_change(MARA, Some(&REAL)).unwrap());
+        assert!(trust.warning(MARA).is_some());
     }
 
     #[test]

@@ -1053,9 +1053,21 @@ impl Session {
                 key,
                 verified,
             } => self.set_verified(user, &key.0, verified),
-            Command::DismissKeyChange(user) => {
-                let dismissed = self.trust.dismiss_change(user);
-                self.after_trust_change(dismissed);
+            Command::DismissKeyChange { user, shown } => {
+                let shown = shown.map(|key| key.0);
+                match self.trust.dismiss_change(user, shown.as_ref()) {
+                    Ok(false) => {
+                        let name = self
+                            .shared
+                            .state()
+                            .person(user)
+                            .map_or_else(|| person_name(user, ""), |p| p.name.clone());
+                        self.shared.notice(format!(
+                            "{name}'s key changed before you dismissed the warning, so it stays. Compare the new safety number."
+                        ));
+                    }
+                    dismissed => self.after_trust_change(dismissed.map(drop)),
+                }
             }
             Command::Unverify(key) => {
                 let unverified = self.trust.unverify(&key.0);

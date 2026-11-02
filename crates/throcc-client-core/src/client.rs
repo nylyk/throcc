@@ -85,7 +85,12 @@ pub enum Command {
         verified: bool,
     },
     /// Stops warning that this user's verified key changed, leaving the new key unverified.
-    DismissKeyChange(UserId),
+    /// `shown` is the key the user looked at; refused with a notice once `user` presents
+    /// another.
+    DismissKeyChange {
+        user: UserId,
+        shown: Option<Fingerprint>,
+    },
     /// Takes a verified identity key off the verified ones, on every server.
     Unverify(Fingerprint),
     Voice(VoiceSettings),
@@ -474,9 +479,11 @@ impl ClientApi for MockClient {
                     s.key_warnings.retain(|w| w.verified != key);
                 }
             }),
-            Command::DismissKeyChange(user) => {
-                self.update(|s| s.key_warnings.retain(|w| w.user != user))
-            }
+            Command::DismissKeyChange { user, shown } => self.update(|s| {
+                if s.person(user).and_then(|p| p.identity_key).map(Fingerprint) == shown {
+                    s.key_warnings.retain(|w| w.user != user);
+                }
+            }),
             Command::Unverify(key) => self.update(|s| {
                 s.verified.retain(|v| v.key != key);
                 s.key_warnings.retain(|w| w.verified != key);
