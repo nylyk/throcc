@@ -1,0 +1,153 @@
+//! Pins the encoded bytes of control messages. Postcard encodes enum variants by index and
+//! fields by position, so a reordering would break deployed peers while still round-tripping.
+
+use throcc_proto::framing;
+use throcc_proto::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
+use throcc_proto::messages::*;
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn pinned<T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug>(
+    message: T,
+    expected: &str,
+) {
+    let frame = framing::encode(&message).unwrap();
+    let body = &frame[framing::LEN_BYTES..];
+    assert_eq!(hex(body), expected, "{message:?}");
+    assert_eq!(framing::decode::<T>(body).unwrap(), message);
+}
+
+#[test]
+fn control_messages_encode_to_pinned_bytes() {
+    pinned(
+        Hello::Auth {
+            pubkey: [1; 32],
+            client_nonce: [2; 32],
+            want_room: Some(RoomId(3)),
+            signature: [4; 64],
+        },
+        "000101010101010101010101010101010101010101010101010101010101010101020202020202020202020202020202020202020202020202020202020202020201034004040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404",
+    );
+    pinned(
+        ClientMessage::Request {
+            id: 7,
+            req: Request::SetRoom {
+                room: Some(RoomId(3)),
+                password: Some("pw".into()),
+            },
+        },
+        "000700010301027077",
+    );
+    pinned(
+        ClientMessage::Request {
+            id: 300,
+            req: Request::SetMedia(MediaState {
+                mic: true,
+                deafened: false,
+                share: Some(ShareConfig {
+                    audio: true,
+                    kbps: 8000,
+                    codec: Codec::Vp9,
+                    width: 2560,
+                    height: 1440,
+                    fps: 60,
+                }),
+            }),
+        },
+        "00ac020501000101c03e038014a00b3c",
+    );
+    pinned(
+        ClientMessage::Request {
+            id: 1,
+            req: Request::RequestKeyframe {
+                media_id: MediaId(5),
+                kind: Recovery::Idr,
+            },
+        },
+        "0001070501",
+    );
+    pinned(
+        ClientMessage::Request {
+            id: 1,
+            req: Request::KickFromRoom {
+                user: UserId(2),
+                room: RoomId(3),
+            },
+        },
+        "0001130203",
+    );
+    pinned(
+        ServerMessage::Response {
+            id: 9,
+            res: Response::Err {
+                code: ErrorCode::WrongPassword,
+                message: "no".into(),
+            },
+        },
+        "00090107026e6f",
+    );
+    pinned(
+        ServerMessage::Event(Event::PresenceChanged(Presence {
+            user: UserId(2),
+            name: "a".into(),
+            avatar: Some(Hash([6; 32])),
+            room: None,
+            mic: true,
+            deafened: false,
+            sharing: true,
+            role: Role::Admin,
+        })),
+        "01000201610106060606060606060606060606060606060606060606060606060606060606060001000102",
+    );
+    pinned(
+        ServerMessage::Event(Event::KickedFromRoom {
+            by: UserId(1),
+            room: RoomId(2),
+        }),
+        "01100102",
+    );
+    pinned(AuthResult::Err(AuthError::RateLimited), "0105");
+    pinned(
+        Event::RoomState {
+            room: RoomId(1),
+            epoch: Epoch(2),
+            peers: vec![RoomPeer {
+                user: UserId(3),
+                tracks: Tracks {
+                    mic: MediaId(4),
+                    shares: vec![Share {
+                        video: MediaId(5),
+                        audio: MediaId(6),
+                    }],
+                },
+                share: None,
+                identity_key: [7; 32],
+                enc_key: SignedEncKey {
+                    key: [8; 32],
+                    not_after: 1_700_000_000,
+                    sig: [9; 64],
+                },
+            }],
+        },
+        "060102010304010506000707070707070707070707070707070707070707070707070707070707070707080808080808080808080808080808080808080808080808080808080808080880e2cfaa064009090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909",
+    );
+}
+
+#[test]
+fn stored_role_ranks_are_pinned() {
+    for (role, rank) in [(Role::User, 0), (Role::Manager, 1), (Role::Admin, 2)] {
+        assert_eq!(role.rank(), rank);
+        assert_eq!(Role::from_rank(rank), Some(role));
+    }
+    assert_eq!(Role::from_rank(3), None);
+}
+
+#[test]
+fn hash_displays_as_the_avatar_cache_file_name() {
+    assert_eq!(
+        Hash::of(b"").to_string(),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+}

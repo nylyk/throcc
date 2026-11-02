@@ -8,11 +8,23 @@ pub const MAX_NAME_CHARS: usize = 32;
 pub const MAX_PASSWORD_CHARS: usize = 128;
 
 /// `name` without surrounding whitespace, if that is 1 to [`MAX_NAME_CHARS`] characters
-/// and has no control characters.
+/// and has nothing that hides or reorders text.
 pub fn valid_name(name: &str) -> Option<&str> {
     let name = name.trim();
     let chars = name.chars().count();
-    ((1..=MAX_NAME_CHARS).contains(&chars) && !name.chars().any(char::is_control)).then_some(name)
+    ((1..=MAX_NAME_CHARS).contains(&chars) && !name.chars().any(hides_text)).then_some(name)
+}
+
+/// Control characters, and the invisible, bidi and line-breaking characters that let one
+/// name pose as another or break a single-line layout.
+fn hides_text(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+            '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{115F}' | '\u{1160}' | '\u{3164}' | '\u{FEFF}')
 }
 
 pub fn valid_password(password: &str) -> bool {
@@ -375,5 +387,44 @@ mod sig {
             }
         }
         d.deserialize_bytes(SigVisitor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_are_trimmed_and_bounded_in_characters() {
+        assert_eq!(valid_name("  Lobby "), Some("Lobby"));
+        assert_eq!(
+            valid_name(&"é".repeat(MAX_NAME_CHARS)).map(str::len),
+            Some(64)
+        );
+        assert_eq!(valid_name(&"é".repeat(MAX_NAME_CHARS + 1)), None);
+        assert_eq!(valid_name("   "), None);
+    }
+
+    #[test]
+    fn names_cannot_hide_or_reorder_text() {
+        for bad in [
+            "a\u{7}",
+            "\u{200B}",
+            "adm\u{202E}nimda",
+            "a\u{2028}b",
+            "\u{FEFF}x",
+            "\u{3164}",
+        ] {
+            assert_eq!(valid_name(bad), None, "{bad:?}");
+        }
+        assert_eq!(valid_name("Zoë Ångström"), Some("Zoë Ångström"));
+    }
+
+    #[test]
+    fn passwords_are_bounded_in_characters_and_not_trimmed() {
+        assert!(valid_password(" "));
+        assert!(valid_password(&"é".repeat(MAX_PASSWORD_CHARS)));
+        assert!(!valid_password(&"é".repeat(MAX_PASSWORD_CHARS + 1)));
+        assert!(!valid_password(""));
     }
 }
