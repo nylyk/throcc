@@ -34,24 +34,25 @@ const CUES: [Cue; 10] = [
 const A4: f32 = 440.0;
 const D5: f32 = 587.33;
 const F4: f32 = 349.23;
-const B4: f32 = 493.88;
-const E5: f32 = 659.25;
-const FS5: f32 = 739.99;
-const B5: f32 = 987.77;
+const FS4: f32 = 369.99;
 /// Each note's harmonics as multiples of its frequency, with their amplitudes.
 const PARTIALS: [(f32, f32); 3] = [(1.0, 1.0), (2.0, 0.18), (3.0, 0.06)];
+/// The harmonics of a soft note, nearly a pure sine.
+const SOFT_PARTIALS: [(f32, f32); 2] = [(1.0, 1.0), (2.0, 0.06)];
 /// The loudest sample of a cue, -20 dBFS.
 const PEAK: f32 = 0.1;
-/// The loudest sample of a chord, -16.5 dBFS, as loud on average as join.
-const CHORD_PEAK: f32 = 0.15;
+/// The loudest sample of a soft cue, -21 dBFS.
+const SOFT_PEAK: f32 = 0.089;
 const ATTACK: f32 = 0.005;
 const FADE_OUT: f32 = 0.01;
 
-/// Notes struck one after another, each `gap` seconds after the last, ringing for `length`
-/// seconds and fading by `decay`, the time to fall to 1/e, scaled to `peak`.
+/// Notes struck one after another, each `gap` seconds after the last, rising over `attack`,
+/// ringing for `length` seconds and fading by `decay`, the time to fall to 1/e, scaled to `peak`.
 struct Shape {
     notes: &'static [f32],
+    partials: &'static [(f32, f32)],
     gap: f32,
+    attack: f32,
     length: f32,
     decay: f32,
     peak: f32,
@@ -61,31 +62,39 @@ impl Cue {
     fn shape(self) -> Shape {
         let chime = |notes| Shape {
             notes,
+            partials: &PARTIALS,
             gap: 0.08,
+            attack: ATTACK,
             length: 0.2,
             decay: 0.04,
             peak: PEAK,
         };
         let tap = |notes| Shape {
             notes,
+            partials: &PARTIALS,
             gap: 0.085,
+            attack: ATTACK,
             length: 0.12,
             decay: 0.035,
             peak: PEAK,
         };
         let switch = |notes| Shape {
             notes,
+            partials: &PARTIALS,
             gap: 0.0,
+            attack: ATTACK,
             length: 0.16,
             decay: 0.05,
             peak: PEAK,
         };
-        let chord = |notes| Shape {
+        let soft = |notes| Shape {
             notes,
-            gap: 0.0,
-            length: 0.2,
-            decay: 0.04,
-            peak: CHORD_PEAK,
+            partials: &SOFT_PARTIALS,
+            gap: 0.13,
+            attack: 0.025,
+            length: 0.34,
+            decay: 0.1,
+            peak: SOFT_PEAK,
         };
         match self {
             Cue::Join | Cue::Reconnected => chime(&[A4, D5]),
@@ -95,15 +104,17 @@ impl Cue {
             Cue::Deafen => tap(&[A4, A4]),
             Cue::Undeafen => tap(&[D5, D5]),
             Cue::ConnectionLost => chime(&[D5, A4, F4]),
-            Cue::ShareStart => chord(&[E5, B5]),
-            Cue::ShareStop => chord(&[B4, FS5]),
+            Cue::ShareStart => soft(&[FS4, D5]),
+            Cue::ShareStop => soft(&[D5, FS4]),
         }
     }
 
     fn render(self) -> Vec<f32> {
         let Shape {
             notes,
+            partials,
             gap,
+            attack,
             length,
             decay,
             peak: target,
@@ -115,13 +126,13 @@ impl Cue {
         for (k, freq) in notes.iter().enumerate() {
             for (i, sample) in out.iter_mut().skip(k * offset).take(note_len).enumerate() {
                 let t = i as f32 / rate;
-                let envelope = if t < ATTACK {
-                    0.5 - 0.5 * (PI * t / ATTACK).cos()
+                let envelope = if t < attack {
+                    0.5 - 0.5 * (PI * t / attack).cos()
                 } else {
-                    (-(t - ATTACK) / decay).exp()
+                    (-(t - attack) / decay).exp()
                 };
                 let fade_out = ((note_len - i) as f32 / (FADE_OUT * rate)).min(1.0);
-                let wave: f32 = PARTIALS
+                let wave: f32 = partials
                     .iter()
                     .map(|(ratio, amplitude)| amplitude * (2.0 * PI * freq * ratio * t).sin())
                     .sum();
