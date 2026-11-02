@@ -21,9 +21,8 @@ pub fn render(
     page: ServerPage,
     cx: &mut Context<ThroccApp>,
 ) -> impl IntoElement {
-    let role = app.state.role;
     let links = nav(
-        ServerPage::ALL.map(|p| (p, p.title(role), p.icon())),
+        ServerPage::ALL.map(|p| (p, p.title(), p.icon())),
         page,
         Screen::Server,
         cx,
@@ -37,7 +36,7 @@ pub fn render(
         app.sidebar_width,
         "Server Settings",
         links,
-        page.title(role),
+        page.title(),
         content,
         cx,
     )
@@ -163,71 +162,7 @@ fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                     },
                 )),
         )
-        .child(verified_people(app, cx))
         .into_any_element()
-}
-
-/// Everyone verified on this computer, on any server, each with the servers they were seen
-/// on and a way to take them off.
-fn verified_people(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
-    let address_of = |server: &Fingerprint| {
-        app.known_servers
-            .iter()
-            .find(|(_, known)| known == server)
-            .map_or_else(|| server.short(), |(address, _)| address.clone())
-    };
-    let rows = app.state.verified.iter().enumerate().map(|(i, person)| {
-        let key = person.key;
-        let servers: Vec<String> = person.servers.iter().map(address_of).collect();
-        div()
-            .flex()
-            .items_center()
-            .gap_3()
-            .min_h(theme::TOUCH)
-            .px_2()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(div().truncate().child(person.name.clone()))
-                    .child(
-                        mono(servers.join(", "))
-                            .truncate()
-                            .typeset(theme::CAPTION)
-                            .text_color(theme::text_3()),
-                    ),
-            )
-            .child(
-                mono(key.short())
-                    .typeset(theme::CAPTION)
-                    .text_color(theme::text_3()),
-            )
-            .child(
-                ghost_icon(("unverify", i), "x", "Mark as Not Verified").on_click(cx.listener(
-                    move |app, _, _, cx| {
-                        app.command(Command::Unverify(key));
-                        cx.notify();
-                    },
-                )),
-            )
-    });
-    card()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(section("Verified"))
-        .child(caption(
-            "Verified on this computer, so they show as verified on every server where they use the same key.",
-        ))
-        .children(rows)
-        .children(
-            app.state
-                .verified
-                .is_empty()
-                .then(|| caption("Nobody yet. Compare safety numbers with someone to verify them.")),
-        )
 }
 
 fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {

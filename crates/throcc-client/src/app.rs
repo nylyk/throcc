@@ -58,17 +58,25 @@ pub enum SettingsPage {
     Profile,
     Audio,
     Appearance,
+    Verified,
     Servers,
 }
 
 impl SettingsPage {
-    pub const ALL: [Self; 4] = [Self::Profile, Self::Audio, Self::Appearance, Self::Servers];
+    pub const ALL: [Self; 5] = [
+        Self::Profile,
+        Self::Audio,
+        Self::Appearance,
+        Self::Verified,
+        Self::Servers,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
             Self::Profile => "Profile",
             Self::Audio => "Audio",
             Self::Appearance => "Appearance",
+            Self::Verified => "Verified People",
             Self::Servers => "Servers",
         }
     }
@@ -78,6 +86,7 @@ impl SettingsPage {
             Self::Profile => "circle-user",
             Self::Audio => "audio-lines",
             Self::Appearance => "palette",
+            Self::Verified => "shield-check",
             Self::Servers => "server",
         }
     }
@@ -94,13 +103,11 @@ pub enum ServerPage {
 impl ServerPage {
     pub const ALL: [Self; 3] = [Self::Overview, Self::Keys, Self::Members];
 
-    /// The page's title for someone of `role`: Members lists everyone only for those who may.
-    pub fn title(self, role: Option<Role>) -> &'static str {
+    pub fn title(self) -> &'static str {
         match self {
             Self::Overview => "Server",
             Self::Keys => "Privacy and Keys",
-            Self::Members if role.is_some_and(permissions::can_list_users) => "Members",
-            Self::Members => "Invites",
+            Self::Members => "Members",
         }
     }
 
@@ -1689,9 +1696,9 @@ impl ThroccApp {
     /// Opens a screen of the mock client by name, for screenshots: welcome, join, joinfailed,
     /// lost, personmenu, addserver, removeserver, room, alone, emptylobby, focus, fullscreen,
     /// popout, share, connection, person, personverified, personchanged, keychange, ownprofile,
-    /// pinmismatch, settings, appearance, servers, newroom, editroom, roompassword, deleteroom,
-    /// profile, server, keys, members, invites, removeuser, leaveserver, identitymissing,
-    /// identityback or startedover. Any other name leaves the lobby.
+    /// pinmismatch, settings, appearance, servers, verified, newroom, editroom, roompassword,
+    /// deleteroom, profile, server, keys, members, invites, removeuser, leaveserver,
+    /// identitymissing, identityback or startedover. Any other name leaves the lobby.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         let room = RoomId(1);
         let joined = |app: &mut Self| {
@@ -1835,6 +1842,7 @@ impl ThroccApp {
             "settings" => self.screen = Screen::Settings(SettingsPage::Audio),
             "appearance" => self.screen = Screen::Settings(SettingsPage::Appearance),
             "servers" => self.screen = Screen::Settings(SettingsPage::Servers),
+            "verified" => self.screen = Screen::Settings(SettingsPage::Verified),
             "newroom" => self.dialog = Some(Dialog::NewRoom),
             "editroom" => self.dialog = Some(Dialog::EditRoom(room)),
             "roompassword" => {

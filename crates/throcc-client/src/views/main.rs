@@ -204,6 +204,7 @@ fn sidebar(
         )
         .dropdown_menu(move |menu, _, _| {
             let settings = this.clone();
+            let invite = this.clone();
             let leave = this.clone();
             menu.min_w(px(200.))
                 .item(
@@ -214,6 +215,18 @@ fn sidebar(
                                 .update(cx, |app, cx| {
                                     let overview = Screen::Server(ServerPage::Overview);
                                     app.show_screen(overview, window, cx);
+                                })
+                                .ok();
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Invite People")
+                        .icon(icon("user-plus"))
+                        .on_click(move |_, window, cx| {
+                            invite
+                                .update(cx, |app, cx| {
+                                    let members = Screen::Server(ServerPage::Members);
+                                    app.show_screen(members, window, cx);
                                 })
                                 .ok();
                         }),
