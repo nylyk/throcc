@@ -25,8 +25,8 @@ const PROFILE_INTERVAL: Duration = Duration::from_millis(10_500);
 /// A server's address and an admin invite. It runs until the returned handle drops.
 fn server() -> (String, InviteCode, ProcessLikeServer) {
     let server = ProcessLikeServer::start_temp();
-    let invite = server.admin_invite();
-    (server.addr.to_string(), invite, server)
+    let admin_invite = server.admin_invite();
+    (server.addr.to_string(), admin_invite, server)
 }
 
 fn client(address: &str, invite: &InviteCode) -> (Client, tempfile::TempDir) {
@@ -183,8 +183,8 @@ fn create_room(client: &Client) -> RoomId {
 
 #[test]
 fn mic_and_deafen_set_outside_a_room_carry_into_it() {
-    let (address, invite, _server) = server();
-    let (alice, _a) = client(&address, &invite);
+    let (address, admin_invite, _server) = server();
+    let (alice, _a) = client(&address, &admin_invite);
     wait_connected(&alice, "connected");
     let room = create_room(&alice);
     let code = invite(&alice);
@@ -211,8 +211,8 @@ fn mic_and_deafen_set_outside_a_room_carry_into_it() {
 
 #[test]
 fn two_clients_see_each_other_join_and_unmute() {
-    let (address, invite, _server) = server();
-    let (alice, _a) = client(&address, &invite);
+    let (address, admin_invite, _server) = server();
+    let (alice, _a) = client(&address, &admin_invite);
     wait_connected(&alice, "connected");
     let room = create_room(&alice);
 
@@ -251,8 +251,8 @@ fn two_clients_see_each_other_join_and_unmute() {
 
 #[test]
 fn a_picture_chosen_in_the_lobby_reaches_others_and_survives_a_rename() {
-    let (address, invite, _server) = server();
-    let (alice, _a) = client(&address, &invite);
+    let (address, admin_invite, _server) = server();
+    let (alice, _a) = client(&address, &admin_invite);
     wait_connected(&alice, "connected");
     let picture: Vec<u8> = (0..2000u32).map(|i| (i * 7) as u8).collect();
     alice.command(Command::SetProfile {
@@ -287,8 +287,8 @@ fn a_picture_chosen_in_the_lobby_reaches_others_and_survives_a_rename() {
 
 #[test]
 fn a_share_started_mid_call_shows_without_rejoining() {
-    let (address, invite, _server) = server();
-    let (alice, _a) = client(&address, &invite);
+    let (address, admin_invite, _server) = server();
+    let (alice, _a) = client(&address, &admin_invite);
     wait_connected(&alice, "connected");
     let room = create_room(&alice);
     alice.command(Command::Join(Some(room)));
@@ -328,8 +328,8 @@ fn a_share_started_mid_call_shows_without_rejoining() {
 
 #[test]
 fn a_sharer_changing_their_mic_never_shows_as_not_sharing() {
-    let (address, invite, _server) = server();
-    let (alice, _a) = client(&address, &invite);
+    let (address, admin_invite, _server) = server();
+    let (alice, _a) = client(&address, &admin_invite);
     wait_connected(&alice, "connected");
     let room = create_room(&alice);
     alice.command(Command::Join(Some(room)));
@@ -379,8 +379,8 @@ fn a_sharer_changing_their_mic_never_shows_as_not_sharing() {
 
 #[test]
 fn a_request_too_large_to_send_fails_alone() {
-    let (address, invite, _server) = server();
-    let (alice, _a) = client(&address, &invite);
+    let (address, admin_invite, _server) = server();
+    let (alice, _a) = client(&address, &admin_invite);
     wait_connected(&alice, "connected");
     let command = Command::SetServerProfile {
         name: None,
@@ -395,8 +395,8 @@ fn a_request_too_large_to_send_fails_alone() {
 
 #[test]
 fn a_dropped_client_leaves_at_once() {
-    let (address, invite, _server) = server();
-    let (alice, _a) = client(&address, &invite);
+    let (address, admin_invite, _server) = server();
+    let (alice, _a) = client(&address, &admin_invite);
     wait_connected(&alice, "connected");
     let room = create_room(&alice);
     let code = invite(&alice);
@@ -450,8 +450,8 @@ fn the_profile_follows_us_to_the_next_server() {
 
 #[test]
 fn only_admins_name_the_server_and_everyone_sees_it() {
-    let (address, invite, _server) = server();
-    let (alice, _a) = client(&address, &invite);
+    let (address, admin_invite, _server) = server();
+    let (alice, _a) = client(&address, &admin_invite);
     wait_connected(&alice, "connected");
     alice.command(Command::SetServerProfile {
         name: Some(Some("  Moss Co-op ".into())),
@@ -511,8 +511,8 @@ fn only_admins_name_the_server_and_everyone_sees_it() {
 
 #[test]
 fn a_verified_contact_stays_verified_in_the_next_session() {
-    let (address, invite, _server) = server();
-    let (alice, _a) = client(&address, &invite);
+    let (address, admin_invite, _server) = server();
+    let (alice, _a) = client(&address, &admin_invite);
     wait_connected(&alice, "connected");
     let room = create_room(&alice);
     let code = invite(&alice);
@@ -543,8 +543,8 @@ fn a_verified_contact_stays_verified_in_the_next_session() {
 
 #[test]
 fn only_the_key_whose_number_was_compared_is_verified() {
-    let (address, invite, _server) = server();
-    let (alice, _a) = client(&address, &invite);
+    let (address, admin_invite, _server) = server();
+    let (alice, _a) = client(&address, &admin_invite);
     wait_connected(&alice, "connected");
     let room = create_room(&alice);
     let (bob, _b) = client(&address, &invite(&alice));
@@ -688,8 +688,8 @@ fn a_new_key_for_a_verified_persons_user_id_is_warned_of_and_still_hears_us() {
 
 #[test]
 fn people_not_verified_are_shown_so_and_still_hear_us() {
-    let (address, invite, _server) = server();
-    let (alice, _a) = client(&address, &invite);
+    let (address, admin_invite, _server) = server();
+    let (alice, _a) = client(&address, &admin_invite);
     wait_connected(&alice, "connected");
     let room = create_room(&alice);
     alice.command(Command::Join(Some(room)));
@@ -716,8 +716,8 @@ fn people_not_verified_are_shown_so_and_still_hear_us() {
 
 #[test]
 fn an_epoch_floor_outlives_a_restart_and_refuses_a_replayed_sender_key() {
-    let (address, invite, _server) = server();
-    let (alice, _a) = client(&address, &invite);
+    let (address, admin_invite, _server) = server();
+    let (alice, _a) = client(&address, &admin_invite);
     wait_connected(&alice, "connected");
     let room = create_room(&alice);
     alice.command(Command::Join(Some(room)));
@@ -844,8 +844,8 @@ fn enrolling_again_takes_a_new_encryption_key_and_drops_that_accounts_floors() {
 
 #[test]
 fn a_removed_member_stops_reconnecting() {
-    let (address, invite, _server) = server();
-    let (alice, _a) = client(&address, &invite);
+    let (address, admin_invite, _server) = server();
+    let (alice, _a) = client(&address, &admin_invite);
     wait_connected(&alice, "connected");
     let code = invite(&alice);
     let (bob, _b) = client(&address, &code);
