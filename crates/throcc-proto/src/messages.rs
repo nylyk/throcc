@@ -12,19 +12,15 @@ pub const MAX_PASSWORD_CHARS: usize = 128;
 pub fn valid_name(name: &str) -> Option<&str> {
     let name = name.trim();
     let chars = name.chars().count();
-    let shown = name.chars().any(|c| !blank(c) && !c.is_whitespace());
-    ((1..=MAX_NAME_CHARS).contains(&chars) && shown && !name.chars().any(hides_text))
-        .then_some(name)
+    ((1..=MAX_NAME_CHARS).contains(&chars)
+        && shows_something(name)
+        && !name.chars().any(hides_text))
+    .then_some(name)
 }
 
-/// What two names are compared by to tell whether one poses as the other: lower case,
-/// without the characters that draw nothing.
-pub fn name_key(name: &str) -> String {
-    name.trim()
-        .chars()
-        .filter(|&c| !blank(c))
-        .flat_map(char::to_lowercase)
-        .collect()
+/// Whether `name` has at least one character that draws something.
+pub fn shows_something(name: &str) -> bool {
+    name.chars().any(|c| !blank(c) && !c.is_whitespace())
 }
 
 /// Control characters, and the invisible, bidi and line-breaking characters that let one
@@ -461,13 +457,6 @@ mod tests {
         ] {
             assert_eq!(valid_name(good), Some(good), "{good:?}");
         }
-    }
-
-    #[test]
-    fn names_that_look_the_same_share_a_key() {
-        assert_eq!(name_key(" Bob "), name_key("bo\u{200C}b"));
-        assert_eq!(name_key("\u{200D}Admin"), "admin");
-        assert_ne!(name_key("Bob"), name_key("Rob"));
     }
 
     #[test]

@@ -11,12 +11,6 @@ pub const REORDER_PACKETS: u32 = 64;
 /// The same in time, as a factor of the round-trip time.
 pub const REORDER_RTT_FACTOR: f32 = 2.0;
 
-/// About 100 ms of datagrams at `kbps`, clamped to 64–512 KiB.
-pub fn client_datagram_send_buffer(kbps: u32) -> usize {
-    let bytes_per_100ms = kbps as usize * 1000 / 8 / 10;
-    bytes_per_100ms.clamp(64 * 1024, 512 * 1024)
-}
-
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum DatagramError {
     #[error("the peer does not support QUIC datagrams, which throcc needs for media")]
@@ -41,18 +35,5 @@ pub mod close {
     pub const PROTOCOL_ERROR: u32 = 2;
     pub const AUTH_FAILED: u32 = 3;
     pub const REMOVED: u32 = 4;
-    pub const SERVER_SHUTDOWN: u32 = 5;
-    pub const SERVER_BUSY: u32 = 6;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn send_buffer_is_clamped() {
-        assert_eq!(client_datagram_send_buffer(0), 64 * 1024);
-        assert_eq!(client_datagram_send_buffer(10_000), 125_000);
-        assert_eq!(client_datagram_send_buffer(1_000_000), 512 * 1024);
-    }
+    pub const SERVER_BUSY: u32 = 5;
 }

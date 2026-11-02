@@ -25,7 +25,7 @@ use throcc_client_core::state::{
 };
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
 use throcc_proto::invite::{self, InviteCode};
-use throcc_proto::messages::{MAX_NAME_CHARS, User, name_key, valid_name, valid_password};
+use throcc_proto::messages::{MAX_NAME_CHARS, User, shows_something, valid_name, valid_password};
 use throcc_proto::{Fingerprint, permissions};
 
 use crate::theme;
@@ -325,7 +325,7 @@ fn checked_name(typed: &str) -> Result<Option<String>, &'static str> {
         Some(name) => Ok(Some(name.to_owned())),
         None if typed.trim().chars().count() > MAX_NAME_CHARS => Err(NAME_TOO_LONG),
         // The key drops the characters a name may hold that draw nothing.
-        None if name_key(typed).chars().all(char::is_whitespace) => Err(NAME_SHOWS_NOTHING),
+        None if !shows_something(typed) => Err(NAME_SHOWS_NOTHING),
         None => Err(NAME_HIDES_TEXT),
     }
 }

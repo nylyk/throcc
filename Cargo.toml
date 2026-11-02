@@ -97,3 +97,10 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 gpui-pre = { path = "third_party/gpui-pre" }
 gpui-pre-wgpu = { path = "third_party/gpui-pre-wgpu" }
 gpui-pre-windows = { path = "third_party/gpui-pre-windows" }
+
+# Room-password hashing is unusably slow unoptimised; tests and debug servers hash often.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
