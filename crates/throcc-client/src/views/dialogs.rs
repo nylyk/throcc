@@ -9,7 +9,7 @@ use gpui_component::input::Input;
 use gpui_component::slider::Slider;
 use gpui_component::switch::Switch;
 use throcc_client_core::client::Command;
-use throcc_client_core::state::{FRAME_RATES, Resolution};
+use throcc_client_core::state::{FRAME_RATES, Resolution, WarningCause};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::messages::Codec;
@@ -489,38 +489,61 @@ fn verify(
         .person(user)
         .map_or(format!("User {}", user.0), |p| p.name.clone());
     let verified = app.state.person(user).is_some_and(|p| p.verified);
-    let warning = app
-        .state
-        .key_warnings
-        .iter()
-        .find(|w| w.user == user)
-        .cloned();
-    let changed = warning.is_some();
+    let causes = || {
+        app.state
+            .key_warnings
+            .iter()
+            .filter(|w| w.user == user)
+            .map(|w| &w.cause)
+    };
+    let key_change = causes().find_map(|c| match c {
+        WarningCause::KeyChanged { pinned, now } => Some((*pinned, *now)),
+        WarningCause::SameName { .. } => None,
+    });
+    let namesake = causes().find_map(|c| match c {
+        WarningCause::SameName { known } => Some(*known),
+        WarningCause::KeyChanged { .. } => None,
+    });
+    let changed = key_change.is_some();
     let mut content = body(name.clone()).child(div().flex().gap_2().child(if changed {
         chip("Key changed", theme::danger_bg(), theme::danger_text())
+    } else if namesake.is_some() {
+        chip("Same name", theme::danger_bg(), theme::danger_text())
     } else if verified {
         chip("Verified", theme::ok_bg(), theme::ok_text())
     } else {
         chip("Not verified", theme::raised(), theme::text_2())
     }));
-    if let Some(warning) = warning {
-        let key = |label: &'static str, key: String| {
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(caption(label).w(px(48.)))
-                .child(mono(key))
-        };
+    let key = |label: &'static str, key: String| {
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(caption(label).w(px(48.)))
+            .child(mono(key))
+    };
+    if let Some((pinned, now)) = key_change {
         content = content.child(
             danger_box()
                 .child(div().typeset(theme::HEADLINE).child(format!("{name}’s key changed")))
                 .child(format!(
                     "The server is showing a different key for {name} than the one you know. An honest server never does this, so someone may be trying to listen in."
                 ))
-                .child(key("Before", warning.pinned.short()))
-                .child(key("Now", warning.now.short()))
+                .child(key("Before", pinned.short()))
+                .child(key("Now", now.short()))
                 .child(caption("Nothing you say or share is encrypted to the new key, so it can’t hear or see you.")),
+        );
+    }
+    if let Some(known) = namesake {
+        content = content.child(
+            danger_box()
+                .child(div().typeset(theme::HEADLINE).child(format!("Someone you know is also called {name}")))
+                .child(
+                    "This is a new account using the name of a person you met here before. A server trying to listen in would pose as them just like this.",
+                )
+                .child(key("Known", format!("User {}", known.0)))
+                .child(key("New", format!("User {}", user.0)))
+                .child(caption("Compare safety numbers with the real person before you trust this one. Marking them verified clears this warning.")),
         );
     }
     let groups: Vec<String> = number.as_deref().map(safety_groups).unwrap_or_default();
@@ -551,6 +574,7 @@ fn verify(
         .child(
             actions("Done", cx).child(
                 primary("mark-verified", if verified { "Mark as Not Verified" } else { "Mark as Verified" })
+                    .disabled(!verified && number.is_none())
                     .on_click(cx.listener(move |app, _, _, cx| {
                         app.command(Command::SetVerified(user, !verified));
                         cx.notify();

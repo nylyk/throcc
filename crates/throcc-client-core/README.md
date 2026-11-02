@@ -17,7 +17,7 @@ Once signed in, a `Call` (`call.rs`) ties the control `Link` (`control.rs`) to t
 | `keystore.rs`, `known_servers.rs`, `contacts.rs`, `profile.rs`, `playback.rs`, `server_look.rs` | What stays on this machine: our keys, pinned servers, pinned peers, our name and picture, how loud we play each person, each server's name and picture as last seen. The identity key lives in the OS keychain (a 0600 `identity_key` file where there is none), the encryption key in `enc_key` |
 | `settings.rs`, `servers.rs`, `json_file.rs`, `files.rs` | Where it stays: in the platform config directory, app-wide settings in `settings.json`, everything per server in `servers.json`, and our picture in `profile_picture`. Every JSON change locks and re-reads the file first, so no writer undoes another. Files are written 0600 and replaced in one step |
 | `avatars.rs` | Everyone's pictures, users' and servers', in the cache directory by hash. Each use marks a picture used; ones unused for 30 days go when a client connects |
-| `keys.rs` | Sender secrets per epoch, wrapped to every trusted peer |
+| `keys.rs` | Sender secrets per epoch, wrapped to every trusted peer, and the newest epoch this process took part in per room, below which nothing is accepted |
 | `call.rs` | A signed-in connection with its media engine |
 | `media/engine.rs`, `fragment.rs`, `reorder.rs` | Sending and receiving media datagrams: fragments, the replay window, the reorder window |
 | `media/voice.rs`, `audio.rs`, `devices.rs`, `jitter.rs` | The audio thread: mic processing and Opus, the mix, device rings, jitter buffers |

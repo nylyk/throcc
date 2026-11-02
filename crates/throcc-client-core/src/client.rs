@@ -24,7 +24,7 @@ use crate::session::{AvatarSlot, Session, Shared};
 use crate::state::{
     ConnectionStatus, CurrentRoom, Health, KeyWarning, MIC_KBPS, Person, PersonPlayback, Playback,
     RoomView, SHARE_AUDIO_DETAIL, SHARE_AUDIO_KBPS, SentTrack, ServerView, Sound, State,
-    TrackHealth, VOICE_DETAIL, share_detail,
+    TrackHealth, VOICE_DETAIL, WarningCause, share_detail,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -565,8 +565,10 @@ fn sample_state() -> State {
         deafened: false,
         key_warnings: vec![KeyWarning {
             user: UserId(3),
-            pinned: Fingerprint([0x7c; 32]),
-            now: Fingerprint([0xb8; 32]),
+            cause: WarningCause::KeyChanged {
+                pinned: Fingerprint([0x7c; 32]),
+                now: Fingerprint([0xb8; 32]),
+            },
         }],
         health: Health {
             rtt_ms: 18.0,

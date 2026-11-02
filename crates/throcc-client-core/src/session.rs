@@ -33,7 +33,7 @@ use crate::server_look::ServerLook;
 use crate::state::{
     ConnectionStatus, CurrentRoom, Health, KeyWarning, MIC_KBPS, Person, Playback, RoomView,
     SHARE_AUDIO_DETAIL, SHARE_AUDIO_KBPS, SentTrack, ServerView, Sound, State, TrackHealth,
-    VOICE_DETAIL, share_detail,
+    VOICE_DETAIL, WarningCause, share_detail,
 };
 
 const LEVELS_EVERY: Duration = Duration::from_millis(100);
@@ -506,6 +506,12 @@ impl Session {
                 }
                 _ = health.tick() => {
                     self.refresh_health();
+                    self.call.engine.save_pins();
+                    if let Some(why) = self.call.engine.pin_save_failure() {
+                        self.shared.notice(format!(
+                            "Couldn't save the keys of the people you've met ({why}). They're kept while you stay connected, and saved once that works."
+                        ));
+                    }
                     if let Err(e) = self.saved_playback.save() {
                         warn!("saving playback: {e:#}");
                     }
@@ -630,7 +636,7 @@ impl Session {
                     continue;
                 }
             };
-            match Call::start(link, &self.keystore) {
+            match Call::restart(link, &self.keystore, &self.call) {
                 Ok(call) => {
                     self.call = call;
                     self.reset_room();
@@ -679,6 +685,8 @@ impl Session {
 
     fn apply_welcome(&mut self, welcome: &Welcome) {
         let fingerprint = self.call.server();
+        let names = welcome.presence.iter().map(|p| (p.user, p.name.as_str()));
+        self.call.engine.remember_names(names);
         self.remember_server(welcome.server.name.clone(), welcome.server.avatar);
         let address = self.address.clone();
         let media = self.media;
@@ -797,7 +805,10 @@ impl Session {
             state
                 .people
                 .keys()
-                .map(|user| (*user, keys.contacts.get(*user).is_some_and(|c| c.verified)))
+                .map(|user| {
+                    let verified = keys.contacts.get(*user).is_some_and(|c| c.verified);
+                    (*user, verified)
+                })
                 .collect()
         };
         self.shared.update(|s| {
@@ -927,6 +938,13 @@ impl Session {
             }
             Command::SetVerified(user, verified) => {
                 self.call.engine.set_verified(user, verified);
+                if verified {
+                    self.shared.update(|s| {
+                        s.key_warnings.retain(|w| {
+                            w.user != user || !matches!(w.cause, WarningCause::SameName { .. })
+                        })
+                    });
+                }
                 self.refresh_verified();
             }
             Command::Voice(settings) => {
@@ -1411,18 +1429,21 @@ impl Session {
                 KeyNotice::KeyChanged { user, pinned, now } => self.shared.update(|s| {
                     let warning = KeyWarning {
                         user,
-                        pinned: Fingerprint(pinned),
-                        now: Fingerprint(now),
+                        cause: WarningCause::KeyChanged {
+                            pinned: Fingerprint(pinned),
+                            now: Fingerprint(now),
+                        },
                     };
                     if !s.key_warnings.contains(&warning) {
-                        s.key_warnings.retain(|w| w.user != user);
+                        s.key_warnings.retain(|w| !is_key_change_of(w, user));
                         s.key_warnings.push(warning);
                     }
                 }),
                 KeyNotice::KeyRestored { user } => {
-                    if self.shared.state().key_warnings.iter().any(|w| w.user == user) {
+                    let state = self.shared.state();
+                    if state.key_warnings.iter().any(|w| is_key_change_of(w, user)) {
                         self.shared
-                            .update(|s| s.key_warnings.retain(|w| w.user != user));
+                            .update(|s| s.key_warnings.retain(|w| !is_key_change_of(w, user)));
                     }
                 }
                 KeyNotice::BadEncKey { user } => {
@@ -1431,15 +1452,48 @@ impl Session {
                         user.0
                     ));
                 }
-                KeyNotice::NewContact { user } => self.shared.notice(format!(
-                    "You're meeting {} here for the first time. Compare safety numbers in Privacy and keys to verify them.",
-                    self.name_of(user)
-                )),
+                KeyNotice::NewContact { user } => {
+                    self.shared.notice(format!(
+                        "You're meeting {} here for the first time. Compare safety numbers in Privacy and keys to verify them.",
+                        self.name_of(user)
+                    ));
+                    self.warn_of_namesake(user);
+                }
                 KeyNotice::ClashingTracks => self.shared.notice(
                     "The server described the room with two tracks under one id, so the call is paused until it sends a valid one.",
                 ),
             }
         }
+    }
+
+    /// Warns, until they are verified, when someone met for the first time goes by the name
+    /// of someone pinned here before: a server can show a new account of its own under the
+    /// name of a person we know.
+    fn warn_of_namesake(&self, user: UserId) {
+        let state = self.shared.state();
+        let Some(name) = state.person(user).map(|p| p.name.as_str()) else {
+            return;
+        };
+        let shown = state.people.iter().map(|(u, p)| (*u, p.name.as_str()));
+        let known = self.call.engine.keys().contacts.namesake(user, name, shown);
+        self.call.engine.remember_names([(user, name)]);
+        let Some(known) = known else {
+            return;
+        };
+        warn!(
+            user = user.0,
+            known = known.0,
+            "a new contact has the name of a known one"
+        );
+        let warning = KeyWarning {
+            user,
+            cause: WarningCause::SameName { known },
+        };
+        self.shared.update(|s| {
+            if !s.key_warnings.contains(&warning) {
+                s.key_warnings.push(warning);
+            }
+        });
     }
 
     async fn event(&mut self, event: CallEvent) {
@@ -1465,8 +1519,14 @@ impl Session {
             }
             ServerEvent::PresenceChanged(p) => {
                 self.room_cue(p.user, p.room);
-                let contact = self.call.engine.keys().contacts.get(p.user);
-                let verified = contact.is_some_and(|c| c.verified);
+                let verified = self
+                    .call
+                    .engine
+                    .keys()
+                    .contacts
+                    .get(p.user)
+                    .is_some_and(|c| c.verified);
+                self.call.engine.remember_names([(p.user, p.name.as_str())]);
                 let saved = &self.saved_playback;
                 let sharing = self.sharing_of(p.user);
                 self.shared.update(|s| {
@@ -1673,6 +1733,10 @@ fn drop_unwanted_share(started: StartResult) {
     if let Ok(Ok(sender)) = started {
         tokio::task::spawn_blocking(move || drop(sender));
     }
+}
+
+fn is_key_change_of(warning: &KeyWarning, user: UserId) -> bool {
+    warning.user == user && matches!(warning.cause, WarningCause::KeyChanged { .. })
 }
 
 /// `p` as a person, playing as loud as `saved` keeps them.

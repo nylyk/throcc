@@ -47,6 +47,18 @@ impl Servers {
     pub fn server_mut(&mut self, server: &Fingerprint) -> &mut Server {
         self.servers.entry(Hex(server.0)).or_default()
     }
+
+    /// Copies the people pinned under the server key `from` to `to`, keeping any pinned
+    /// under `to` already.
+    pub fn carry_contacts(&mut self, from: Hex, to: Hex) {
+        let Some(carried) = self.servers.get(&from).map(|s| s.contacts.clone()) else {
+            return;
+        };
+        let contacts = &mut self.servers.entry(to).or_default().contacts;
+        for (user, contact) in carried {
+            contacts.entry(user).or_insert(contact);
+        }
+    }
 }
 
 /// 32 bytes, kept as 64 hex digits.

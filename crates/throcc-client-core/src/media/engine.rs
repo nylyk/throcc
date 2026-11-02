@@ -16,7 +16,7 @@ use tracing::warn;
 use super::fragment::{Reassembler, ReplayWindow, Seen, Unit, fragment};
 use super::reorder::{Output, Reorder};
 use crate::contacts::{Contacts, UnsavedPins};
-use crate::keys::{KeyManager, KeyNotice};
+use crate::keys::{EpochFloors, KeyManager, KeyNotice};
 use crate::lock;
 
 /// How long ciphertext waits for a sender key that opens it before it counts as a
@@ -153,6 +153,7 @@ impl MediaEngine {
         enc: EncKeyPair,
         server: Fingerprint,
         contacts: Contacts,
+        floors: EpochFloors,
     ) -> (
         Self,
         mpsc::UnboundedReceiver<Request>,
@@ -160,7 +161,7 @@ impl MediaEngine {
     ) {
         let pins = contacts.unsaved();
         let keys = Arc::new(Mutex::new(KeyState {
-            keys: KeyManager::new(me, enc, server),
+            keys: KeyManager::new(me, enc, server, floors),
             contacts,
         }));
         let sinks: Sinks = Arc::default();
@@ -284,6 +285,20 @@ impl MediaEngine {
         self.with_keys(|_, contacts, _| contacts.set_verified(user, verified));
     }
 
+    /// Notes the names pinned people are shown with.
+    pub fn remember_names<'a>(&self, shown: impl IntoIterator<Item = (UserId, &'a str)>) {
+        self.with_keys(|_, contacts, _| {
+            for (user, name) in shown {
+                contacts.remember_name(user, name);
+            }
+        });
+    }
+
+    /// Why pins stopped reaching the file, once per run of failed writes.
+    pub fn pin_save_failure(&self) -> Option<String> {
+        self.pins.take_failure()
+    }
+
     /// Runs `f` on the key manager and contacts, holding the key lock only for it. Pins it
     /// changes are written afterwards, beside the async workers, so media never waits on
     /// the file.
@@ -293,6 +308,12 @@ impl MediaEngine {
             let KeyState { keys, contacts } = &mut *state;
             f(keys, contacts, Instant::now())
         };
+        self.save_pins();
+        result
+    }
+
+    /// Writes the pins not yet saved, if any, beside the async workers.
+    pub fn save_pins(&self) {
         if !self.pins.is_empty() {
             let pins = self.pins.clone();
             tokio::task::spawn_blocking(move || {
@@ -301,7 +322,6 @@ impl MediaEngine {
                 }
             });
         }
-        result
     }
 
     fn send_requests(&self, requests: impl IntoIterator<Item = Request>) {

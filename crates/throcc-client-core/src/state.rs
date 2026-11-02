@@ -183,8 +183,20 @@ pub struct CurrentRoom {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyWarning {
     pub user: UserId,
-    pub pinned: Fingerprint,
-    pub now: Fingerprint,
+    pub cause: WarningCause,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WarningCause {
+    /// Their identity key differs from the one pinned for them. They are left out until it
+    /// matches again.
+    KeyChanged {
+        pinned: Fingerprint,
+        now: Fingerprint,
+    },
+    /// They are new to us but go by the name of `known`, someone pinned here before, as
+    /// the server posing as `known` would. Shown until they are marked verified.
+    SameName { known: UserId },
 }
 
 /// The connection panel's numbers, refreshed every 2 s.

@@ -7,7 +7,7 @@ use throcc_client_core::account;
 use throcc_client_core::call::Call;
 use throcc_client_core::client::{Client, ClientApi, ClientOptions, Command, Event};
 use throcc_client_core::keystore::Keystore;
-use throcc_client_core::state::{ConnectionStatus, State};
+use throcc_client_core::state::{ConnectionStatus, KeyWarning, State, WarningCause};
 use throcc_proto::ids::RoomId;
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{Codec, MediaState, Request, Response};
@@ -452,6 +452,54 @@ fn a_verified_contact_stays_verified_in_the_next_session() {
     let bob = client_in(bob_dir.path(), &address, None);
     wait_for(&bob, "alice still verified", |s| {
         s.person(alice_id).is_some_and(|p| p.verified)
+    });
+}
+
+#[test]
+fn someone_new_using_a_known_persons_name_is_warned_of_until_verified() {
+    let (address, bootstrap, _server) = server();
+    let (alice, _a) = client(&address, &bootstrap);
+    wait_connected(&alice, "connected");
+    let room = create_room(&alice);
+    alice.command(Command::Join(Some(room)));
+    let joined_as = |name: &str, rename_after_joining: bool| {
+        let (member, dir) = client(&address, &invite(&alice));
+        let id = member.state().me.unwrap();
+        let rename = Command::SetProfile {
+            name: Some(name.into()),
+            picture: None,
+        };
+        if rename_after_joining {
+            member.command(Command::Join(Some(room)));
+            wait_for(&alice, "a pinned key for them", |_| {
+                alice.safety_number(id).is_some()
+            });
+            member.command(rename);
+        } else {
+            member.command(rename);
+            member.command(Command::Join(Some(room)));
+        }
+        wait_for(&alice, "their name", |s| {
+            s.person(id).is_some_and(|p| p.name == name)
+        });
+        (member, id, dir)
+    };
+
+    let (bob, bob_id, _b) = joined_as("Bob", true);
+    bob.command(Command::Disconnect);
+    wait_for(&alice, "bob gone", |s| s.person(bob_id).is_none());
+
+    let (_other, other_id, _o) = joined_as("BOB", false);
+    let warning = KeyWarning {
+        user: other_id,
+        cause: WarningCause::SameName { known: bob_id },
+    };
+    wait_for(&alice, "a warning naming both", |s| {
+        s.key_warnings.contains(&warning)
+    });
+    alice.command(Command::SetVerified(other_id, true));
+    wait_for(&alice, "the warning gone once verified", |s| {
+        s.key_warnings.is_empty()
     });
 }
 

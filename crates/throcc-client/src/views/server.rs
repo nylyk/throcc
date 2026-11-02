@@ -9,8 +9,8 @@ use throcc_proto::ids::Role;
 use throcc_proto::{Fingerprint, permissions};
 
 use super::common::{
-    Typeset, avatar, caption, card, chip, field_error, ghost_icon, mono, primary, secondary,
-    section, server_seed,
+    Typeset, avatar, caption, card, chip, field_error, ghost_icon, key_warning_label, mono,
+    primary, secondary, section, server_seed,
 };
 use super::page::{field, frame, nav, picture_editor, save_line, segmented};
 use crate::app::{Dialog, PictureFor, Screen, ServerPage, ThroccApp, typed_name};
@@ -119,7 +119,7 @@ fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .children(state.people.iter().filter(|(u, _)| Some(**u) != me).map(
                     |(user, person)| {
                         let user = *user;
-                        let changed = state.key_warnings.iter().any(|w| w.user == user);
+                        let warning = key_warning_label(&state, user);
                         div()
                             .id(("contact", user.0 as usize))
                             .flex()
@@ -138,8 +138,8 @@ fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                                 false,
                             ))
                             .child(div().flex_1().child(person.name.clone()))
-                            .child(if changed {
-                                chip("Key changed", theme::warn_bg(), theme::warn_text())
+                            .child(if let Some(warning) = warning {
+                                chip(warning, theme::warn_bg(), theme::warn_text())
                             } else if person.verified {
                                 chip("Verified", theme::ok_bg(), theme::ok_text())
                             } else {

@@ -10,7 +10,7 @@ use tracing::warn;
 use crate::connection::Connected;
 use crate::contacts::Contacts;
 use crate::control::{self, Link, Requester};
-use crate::keys::KeyNotice;
+use crate::keys::{EpochFloors, KeyNotice};
 use crate::keystore::Keystore;
 use crate::media::engine::MediaEngine;
 
@@ -36,6 +36,16 @@ pub struct Call {
 
 impl Call {
     pub fn start(link: Link, keystore: &Keystore) -> Result<Self> {
+        Self::start_after(link, keystore, None)
+    }
+
+    /// Starts the call that replaces `previous` after a reconnect, keeping the pins it made
+    /// even where they never reached the file, before any key is wrapped.
+    pub fn restart(link: Link, keystore: &Keystore, previous: &Call) -> Result<Self> {
+        Self::start_after(link, keystore, Some(previous))
+    }
+
+    fn start_after(link: Link, keystore: &Keystore, previous: Option<&Call>) -> Result<Self> {
         let Link {
             welcome,
             connected,
@@ -44,13 +54,17 @@ impl Call {
         } = link;
         let connection = connected.connection.clone();
         let enc = keystore.enc_key_pair()?;
-        let contacts = Contacts::load(keystore.dir(), &connected.fingerprint)?;
+        let mut contacts = Contacts::load(keystore.dir(), &connected.fingerprint)?;
+        if let Some(previous) = previous {
+            contacts.carry_from(&previous.engine.keys().contacts);
+        }
         let (engine, mut engine_requests, recovery) = MediaEngine::start(
             connection.clone(),
             welcome.me,
             enc,
             connected.fingerprint,
             contacts,
+            EpochFloors::process(),
         );
         let engine = Arc::new(engine);
 

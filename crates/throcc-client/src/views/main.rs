@@ -16,8 +16,9 @@ use throcc_client_core::state::{Person, State, share_label};
 use throcc_proto::ids::{RoomId, UserId};
 
 use super::common::{
-    Typeset, avatar, bottom_bar, caption, danger_menu_item, description, ghost_icon, icon, player,
-    player_button, player_title, primary, rate, section, sharing_icon, toggle_icon, top_bar,
+    Typeset, avatar, bottom_bar, caption, danger_menu_item, description, ghost_icon, icon,
+    key_warning_label, player, player_button, player_title, primary, rate, section, sharing_icon,
+    toggle_icon, top_bar,
 };
 use super::mascot;
 use super::page::{resize_handle, sidebar_column};
@@ -149,8 +150,8 @@ fn sidebar(
             .flex_col()
             .child(with_room_menu(row, id, manages, cx))
             .children(people.into_iter().map(|(user, person)| {
-                let changed = state.key_warnings.iter().any(|w| w.user == user);
-                occupant(user, person, pictures.get(&user).cloned(), changed, cx)
+                let warning = key_warning_label(&state, user);
+                occupant(user, person, pictures.get(&user).cloned(), warning, cx)
             }))
     });
 
@@ -356,7 +357,7 @@ fn occupant(
     user: UserId,
     person: &Person,
     picture: Option<std::sync::Arc<gpui::RenderImage>>,
-    key_changed: bool,
+    key_warning: Option<&'static str>,
     cx: &Context<ThroccApp>,
 ) -> Div {
     div()
@@ -386,14 +387,14 @@ fn occupant(
                 .text_color(theme::text_2_muted())
                 .child(person.name.clone()),
         )
-        .children(key_changed.then(|| key_changed_marker(user, cx)))
+        .children(key_warning.map(|label| key_warning_marker(user, label, cx)))
         .child(div().flex_1())
         .children(person.sharing.is_some().then(|| sharing_icon(px(16.))))
         .children(muted_icon(person, px(16.)))
 }
 
-/// The danger sign beside the name of someone whose identity key changed, opening their key dialog.
-fn key_changed_marker(user: UserId, cx: &Context<ThroccApp>) -> Stateful<Div> {
+/// The danger sign beside the name of someone with a key warning, opening their key dialog.
+fn key_warning_marker(user: UserId, label: &'static str, cx: &Context<ThroccApp>) -> Stateful<Div> {
     div()
         .id(("key-changed", user.0 as usize))
         .flex()
@@ -404,7 +405,7 @@ fn key_changed_marker(user: UserId, cx: &Context<ThroccApp>) -> Stateful<Div> {
                 .size(px(16.))
                 .text_color(theme::danger_text()),
         )
-        .tooltip(|window, cx| Tooltip::new("Key changed").build(window, cx))
+        .tooltip(move |window, cx| Tooltip::new(label).build(window, cx))
         .on_click(cx.listener(move |app, _, _, cx| app.open_verify(user, cx)))
 }
 

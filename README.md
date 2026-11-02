@@ -71,7 +71,7 @@ The packages ship an LGPL ffmpeg built by `packaging/ffmpeg/build.sh <prefix>`.
 
 ## Security
 
-Every member of a room wraps a fresh key to each other member whenever someone joins or leaves, so a newcomer can't decrypt what came before and a leaver can't decrypt what comes after. The client pins the server's key and each member's key, warns when one changes, and shows a safety number to compare out of band.
+Every member of a room wraps a fresh key to each other member whenever someone joins or leaves, so a newcomer can't decrypt what came before and a leaver can't decrypt what comes after. The client pins the server's key and each member's key, warns when one changes or when someone new takes the name of a person it knows, and shows a safety number to compare out of band.
 
 The server still sees metadata: who is in which room, when, and at what bitrate. Profiles, avatars and room names are not end-to-end encrypted.
 

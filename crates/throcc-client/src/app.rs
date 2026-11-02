@@ -21,7 +21,8 @@ use throcc_client_core::media::devices;
 use throcc_client_core::server_look::ServerLook;
 use throcc_client_core::settings::Settings;
 use throcc_client_core::state::{
-    ConnectionStatus, MAX_VOLUME, Playback, ServerView, ShareChoice, Sound, State,
+    ConnectionStatus, KeyWarning, MAX_VOLUME, Playback, ServerView, ShareChoice, Sound, State,
+    WarningCause,
 };
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
 use throcc_proto::invite::{self, InviteCode};
@@ -1610,6 +1611,14 @@ impl ThroccApp {
             }
             "verify" => self.open_verify(UserId(2), cx),
             "keychange" => self.open_verify(UserId(3), cx),
+            "samename" => {
+                let warning = KeyWarning {
+                    user: UserId(7),
+                    cause: WarningCause::SameName { known: UserId(2) },
+                };
+                Arc::make_mut(&mut self.state).key_warnings.push(warning);
+                self.open_verify(UserId(7), cx);
+            }
             "pinmismatch" => {
                 offline(self);
                 self.dialog = Some(Dialog::PinMismatch {
