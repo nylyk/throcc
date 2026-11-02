@@ -591,7 +591,15 @@ fn appearance(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .flex_col()
                 .gap_1()
                 .child(section("Sidebar"))
-                .child(row("Opacity", percent_slider(&app.sidebar_opacity, cx))),
+                .child(
+                    Switch::new("translucent-sidebar")
+                        .checked(theme::translucent_sidebar())
+                        .label("Translucent")
+                        .on_click(cx.listener(|app, on: &bool, _, cx| {
+                            app.use_translucent_sidebar(*on);
+                            cx.notify();
+                        })),
+                ),
         )
         .into_any_element()
 }

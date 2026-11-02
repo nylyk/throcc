@@ -45,8 +45,8 @@ fn main() {
                 .or_else(|| theme::picked(&settings))
                 .unwrap_or(theme::PRESETS[0]);
             theme::set(palette, cx);
-            if let Some(opacity) = settings.sidebar_opacity {
-                theme::set_sidebar_opacity(opacity);
+            if let Some(translucent) = settings.translucent_sidebar {
+                theme::set_translucent_sidebar(translucent);
             }
             app::bind_keys(cx);
             let bounds = Bounds::centered(None, window_size, cx);

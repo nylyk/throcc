@@ -443,8 +443,6 @@ pub struct ThroccApp {
     /// The share dialog's bitrate slider, over the indices of the offered bitrates.
     pub bitrate: Entity<SliderState>,
     _bitrate_changes: Subscription,
-    pub sidebar_opacity: Entity<SliderState>,
-    _sidebar_opacity_changes: Subscription,
     /// The watched share shown large, with everyone else in a strip below it.
     pub focus: Option<UserId>,
     /// Whether our own share's self-view shows in our tile.
@@ -546,7 +544,6 @@ impl ThroccApp {
         };
         let share_choice = ShareChoice::default();
         let (bitrate, bitrate_changes) = Self::bitrate_slider(share_choice, cx);
-        let (sidebar_opacity, sidebar_opacity_changes) = Self::sidebar_opacity_slider(cx);
         let (inputs, outputs) = devices::list();
         let voice = VoiceSettings {
             cue_volume: settings.cue_volume.clamp(0.0, MAX_VOLUME),
@@ -591,8 +588,6 @@ impl ThroccApp {
             share_audio: true,
             bitrate,
             _bitrate_changes: bitrate_changes,
-            sidebar_opacity,
-            _sidebar_opacity_changes: sidebar_opacity_changes,
             focus: None,
             preview_self: false,
             popouts: HashMap::new(),
@@ -811,6 +806,14 @@ impl ThroccApp {
         }
     }
 
+    /// Makes the sidebar see-through or solid and keeps the choice for next time.
+    pub fn use_translucent_sidebar(&mut self, translucent: bool) {
+        theme::set_translucent_sidebar(translucent);
+        if !self.mock {
+            theme::save_translucent_sidebar(translucent);
+        }
+    }
+
     /// Takes a typed hex colour into the Custom theme once it parses.
     fn set_palette_color(&mut self, index: usize, typed: &str, cx: &mut Context<Self>) {
         let Some(color) = theme::parse_hex(typed) else {
@@ -993,26 +996,6 @@ impl ThroccApp {
                 app.share_choice.kbps = *kbps;
                 cx.notify();
             }
-        });
-        (slider, changes)
-    }
-
-    /// The appearance page's sidebar opacity slider, in percent, which keeps the opacity
-    /// once released.
-    fn sidebar_opacity_slider(cx: &mut Context<Self>) -> (Entity<SliderState>, Subscription) {
-        let slider = cx.new(|_| {
-            SliderState::new()
-                .min(theme::MIN_SIDEBAR_OPACITY * 100.)
-                .max(100.)
-                .step(1.)
-                .default_value(theme::sidebar_opacity() * 100.)
-        });
-        let changes = cx.subscribe(&slider, |app, _, event: &SliderEvent, cx| {
-            theme::set_sidebar_opacity(slider_value(event) / 100.);
-            if matches!(event, SliderEvent::Release(_)) && !app.mock {
-                theme::save_sidebar_opacity(theme::sidebar_opacity());
-            }
-            cx.notify();
         });
         (slider, changes)
     }
