@@ -183,7 +183,7 @@ fn sidebar(
             div()
                 .max_w(server_name_width)
                 .flex()
-                .items_baseline()
+                .items_center()
                 .gap_1p5()
                 .typeset(theme::TITLE_3)
                 .child(
