@@ -7,12 +7,14 @@ pub const MAX_AVATAR_BYTES: usize = 64 * 1024;
 pub const MAX_NAME_CHARS: usize = 32;
 pub const MAX_PASSWORD_CHARS: usize = 128;
 
-/// `name` without surrounding whitespace, if that is 1 to [`MAX_NAME_CHARS`] characters
-/// and has nothing that hides or reorders text.
+/// `name` without surrounding whitespace, if that is 1 to [`MAX_NAME_CHARS`] characters,
+/// has nothing that hides or reorders text and shows at least one visible character.
 pub fn valid_name(name: &str) -> Option<&str> {
     let name = name.trim();
     let chars = name.chars().count();
-    ((1..=MAX_NAME_CHARS).contains(&chars) && !name.chars().any(hides_text)).then_some(name)
+    let shown = name.chars().any(|c| !joins_text(c) && !c.is_whitespace());
+    ((1..=MAX_NAME_CHARS).contains(&chars) && shown && !name.chars().any(hides_text))
+        .then_some(name)
 }
 
 /// Control characters, and the invisible, bidi and line-breaking characters that let one
@@ -20,11 +22,18 @@ pub fn valid_name(name: &str) -> Option<&str> {
 fn hides_text(c: char) -> bool {
     c.is_control()
         || matches!(c,
-            '\u{200B}'..='\u{200F}'
+            '\u{200B}'
+            | '\u{200E}'..='\u{200F}'
             | '\u{2028}'..='\u{202E}'
             | '\u{2060}'..='\u{2064}'
             | '\u{2066}'..='\u{2069}'
             | '\u{115F}' | '\u{1160}' | '\u{3164}' | '\u{FEFF}')
+}
+
+/// The zero-width joiners that Persian, Indic scripts and emoji sequences need inside a
+/// name, but that can't make up a name on their own.
+fn joins_text(c: char) -> bool {
+    matches!(c, '\u{200C}' | '\u{200D}')
 }
 
 pub fn valid_password(password: &str) -> bool {
@@ -417,7 +426,16 @@ mod tests {
         ] {
             assert_eq!(valid_name(bad), None, "{bad:?}");
         }
-        assert_eq!(valid_name("Zoë Ångström"), Some("Zoë Ångström"));
+        assert_eq!(valid_name("\u{200C}\u{200D}"), None);
+        for good in [
+            "Zoë Ångström",
+            "می\u{200C}خواهم",
+            "👩\u{200D}💻 dev",
+            "李小龍",
+            "שלום",
+        ] {
+            assert_eq!(valid_name(good), Some(good), "{good:?}");
+        }
     }
 
     #[test]
