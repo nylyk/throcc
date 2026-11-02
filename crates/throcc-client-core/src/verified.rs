@@ -40,6 +40,8 @@ struct VerifiedFile {
     changed: Vec<Changed>,
 }
 
+impl json_file::Format for VerifiedFile {}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 struct Verified {

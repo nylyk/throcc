@@ -47,6 +47,7 @@ Each crate's `README.md` explains its modules and how they fit together. Update 
 - SFU egress never drops audio by policy, and drops video only as whole access units.
 - No GPL or AGPL dependencies. `cargo deny` enforces this.
 - Crypto, protocol and SFU changes get reviewed by a subagent that didn't write them.
+- Released formats only change through a migration: the server schema (`MIGRATIONS` in `database.rs`) and every client JSON file (`json_file::Format::MIGRATIONS`). Version 1 of each is what 0.1 shipped; never edit it in place.
 
 ## UI
 

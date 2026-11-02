@@ -43,6 +43,7 @@ CREATE TABLE server_profile (id INTEGER PRIMARY KEY CHECK (id = 0), name TEXT, a
 type Migration = fn(&Transaction) -> rusqlite::Result<()>;
 
 /// Migration `i` moves the schema from version `i` to `i + 1`, kept in `PRAGMA user_version`.
+/// Version 1 is the schema throcc 0.1 shipped; changing the schema means adding a migration.
 const MIGRATIONS: [Migration; 1] = [to_v1];
 
 /// Creates the first schema in an empty database.

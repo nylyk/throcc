@@ -20,6 +20,8 @@ pub struct Settings {
     pub profile_name: Option<String>,
 }
 
+impl json_file::Format for Settings {}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {

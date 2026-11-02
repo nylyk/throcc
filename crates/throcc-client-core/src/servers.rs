@@ -31,6 +31,8 @@ pub(crate) struct Server {
     pub epochs: BTreeMap<UserId, BTreeMap<RoomId, Epoch>>,
 }
 
+impl json_file::Format for Servers {}
+
 impl Servers {
     pub fn load(dir: &Path) -> Result<Self> {
         json_file::load(&dir.join(FILE))
