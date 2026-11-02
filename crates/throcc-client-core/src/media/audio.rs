@@ -22,7 +22,7 @@ pub const FRAME: usize = SAMPLE_RATE as usize / 50;
 pub const PULL: usize = SAMPLE_RATE as usize / 100;
 /// Voice activation keeps sending, and the speaking ring stays lit, this long after speech stops.
 const HANGOVER_PULLS: u32 = 30;
-const MAX_PACKET: usize = 1500;
+pub(crate) const MAX_PACKET: usize = 1500;
 /// Processed mic level (dBFS) above which voice activation opens, unless configured otherwise.
 pub const DEFAULT_GATE_DBFS: f32 = -50.0;
 /// A decoded level above this (dBFS) counts as speaking for the UI's ring.

@@ -21,6 +21,9 @@ use crate::connection::Connected;
 use crate::lock;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a request waits for its reply, so a server that never answers can't hold up
+/// whoever asked.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(15);
 const EVENT_QUEUE: usize = 1024;
 const OUTGOING_QUEUE: usize = 256;
 
@@ -46,6 +49,8 @@ pub enum LinkError {
     IdsExhausted,
     #[error("that can't be sent: {0}")]
     Unsendable(FrameError),
+    #[error("the server didn't answer in time")]
+    TimedOut,
 }
 
 /// An authenticated control stream.
@@ -245,12 +250,19 @@ pub fn expect_ok(response: Response) -> Result<(), String> {
     }
 }
 
-/// Why the server answered `response` instead of what was asked for.
+/// Why the server answered `response` instead of what was asked for. Names only the kind
+/// of an unexpected reply: its contents can be secret, like an invite code, or huge.
 pub fn refusal(response: Response) -> String {
-    match response {
-        Response::Err { message, .. } => message,
-        other => format!("unexpected reply {other:?}"),
-    }
+    let kind = match response {
+        Response::Err { message, .. } => return message,
+        Response::Ok => "Ok",
+        Response::Placed(_) => "Placed",
+        Response::Invite { .. } => "Invite",
+        Response::Users(_) => "Users",
+        Response::AvatarHash(_) => "AvatarHash",
+        Response::Avatar(_) => "Avatar",
+    };
+    format!("unexpected reply {kind}")
 }
 
 /// Sends requests on the control stream. Cheap to clone; many requests may be in flight.
@@ -282,7 +294,12 @@ impl Requester {
             .send(frame)
             .await
             .map_err(|_| LinkError::Closed)?;
-        rx.await.map_err(|_| LinkError::Closed)
+        // The waiter stays registered, so a late reply is dropped rather than taken for
+        // a reply to a request never sent.
+        match tokio::time::timeout(REPLY_TIMEOUT, rx).await {
+            Ok(reply) => reply.map_err(|_| LinkError::Closed),
+            Err(_) => Err(LinkError::TimedOut),
+        }
     }
 }
 
@@ -367,6 +384,19 @@ mod tests {
         );
         let (tx, _rx) = oneshot::channel();
         assert!(matches!(pending.register(tx), Err(LinkError::Closed)));
+    }
+
+    #[test]
+    fn an_unexpected_reply_is_named_without_its_contents() {
+        let invite = Response::Invite {
+            code: "7EP-858BR".into(),
+            expires: 0,
+        };
+        assert_eq!(refusal(invite), "unexpected reply Invite");
+        assert_eq!(
+            refusal(Response::Avatar(vec![0; 1 << 20])),
+            "unexpected reply Avatar"
+        );
     }
 
     #[test]

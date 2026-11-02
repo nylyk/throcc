@@ -978,7 +978,7 @@ mod failed_open {
 
 #[cfg(test)]
 mod round_trip {
-    use super::super::decode::{Decoder, MAX_PIXELS};
+    use super::super::decode::{Decoder, MaxSize};
     use super::super::frame::{VideoFrame, luma_psnr};
     use super::*;
 
@@ -993,7 +993,7 @@ mod round_trip {
             kbps: 4000,
         };
         let mut encoder = Encoder::open_with(candidate, config)?;
-        let mut decoder = Decoder::new(codec, MAX_PIXELS).unwrap();
+        let mut decoder = Decoder::new(codec, MaxSize::ANY).unwrap();
         let mut shown = Vec::new();
         for n in 0..30u16 {
             let input = VideoFrame::test_pattern(1280, 720, n, u32::from(n) * 3000);
@@ -1092,7 +1092,7 @@ mod round_trip {
 
 #[cfg(all(test, target_os = "linux"))]
 mod gpu_input {
-    use super::super::decode::{Decoder, MAX_PIXELS};
+    use super::super::decode::{Decoder, MaxSize};
     use super::*;
 
     /// A VA-API encoder, or `None` on machines without one.
@@ -1195,7 +1195,7 @@ mod gpu_input {
             return;
         };
         let mut frame = shared_picture(&encoder, 1200, 900);
-        let mut decoder = Decoder::new(encoder.codec(), MAX_PIXELS).unwrap();
+        let mut decoder = Decoder::new(encoder.codec(), MaxSize::ANY).unwrap();
         let mut last = None;
         for n in 0..10 {
             frame.timestamp = n * 3000;
@@ -1242,7 +1242,7 @@ mod gpu_input {
 
 #[cfg(all(test, target_os = "macos"))]
 mod pixel_buffers {
-    use super::super::decode::{Decoder, MAX_PIXELS};
+    use super::super::decode::{Decoder, MaxSize};
     use super::super::frame::luma_psnr;
     use super::*;
 
@@ -1263,7 +1263,7 @@ mod pixel_buffers {
             eprintln!("no VideoToolbox HEVC encoder here; skipping");
             return;
         };
-        let mut decoder = Decoder::new(Codec::Hevc, MAX_PIXELS).unwrap();
+        let mut decoder = Decoder::new(Codec::Hevc, MaxSize::ANY).unwrap();
         let mut shown = Vec::new();
         for n in 0..30u16 {
             let input = VideoFrame::test_pattern(1280, 720, n, u32::from(n) * 3000);

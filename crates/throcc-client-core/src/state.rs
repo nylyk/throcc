@@ -1,14 +1,18 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
-use throcc_proto::messages::{Codec, Room, ShareConfig};
+use throcc_proto::messages::{Codec, Room, ShareConfig, valid_name};
 
 pub(crate) const MIC_KBPS: u32 = 64;
 pub(crate) const SHARE_AUDIO_KBPS: u32 = crate::media::share_audio::KBPS;
 pub(crate) const VOICE_DETAIL: &str = "Opus voice, mono";
 pub(crate) const SHARE_AUDIO_DETAIL: &str = "Opus music, stereo";
+/// The most people shown online, and rooms listed, from one server: far above what an
+/// honest server sends, low enough that a hostile one can't make every update expensive.
+pub(crate) const MAX_PEOPLE: usize = 2048;
+pub(crate) const MAX_ROOMS: usize = 1000;
 
 /// Everything the UI shows, rebuilt by the core and sent whole after every change.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -48,6 +52,33 @@ impl State {
 
     pub fn room_mut(&mut self, room: RoomId) -> Option<&mut RoomView> {
         self.rooms.iter_mut().find(|r| r.id == room)
+    }
+
+    /// The pictures of the server, us and everyone shown.
+    pub fn avatars_in_use(&self) -> HashSet<Hash> {
+        let server = self.server.as_ref().and_then(|s| s.avatar);
+        let people = self.people.values().filter_map(|p| p.avatar);
+        server
+            .into_iter()
+            .chain(self.profile_picture)
+            .chain(people)
+            .collect()
+    }
+
+    /// Lists `room`, or updates it if it is listed already.
+    pub(crate) fn add_room(&mut self, room: RoomView) {
+        if let Some(listed) = self.room_mut(room.id) {
+            *listed = room;
+        } else if self.rooms.len() < MAX_ROOMS {
+            self.rooms.push(room);
+        }
+    }
+
+    /// Shows `person` as `user`, unless that would show more than [`MAX_PEOPLE`].
+    pub(crate) fn add_person(&mut self, user: UserId, person: Person) {
+        if self.people.len() < MAX_PEOPLE || self.people.contains_key(&user) {
+            self.people.insert(user, person);
+        }
     }
 }
 
@@ -91,10 +122,24 @@ impl From<&Room> for RoomView {
     fn from(room: &Room) -> Self {
         Self {
             id: room.id,
-            name: room.name.clone(),
+            name: room_name(room.id, &room.name),
             locked: room.locked,
         }
     }
+}
+
+/// A name from the server as shown: as given if an honest server would have taken it,
+/// else nothing, so text that hides or reorders characters never reaches the screen.
+pub fn shown_name(name: &str) -> Option<String> {
+    valid_name(name).map(str::to_owned)
+}
+
+pub(crate) fn person_name(user: UserId, name: &str) -> String {
+    shown_name(name).unwrap_or_else(|| format!("User {}", user.0))
+}
+
+pub(crate) fn room_name(room: RoomId, name: &str) -> String {
+    shown_name(name).unwrap_or_else(|| format!("Room {}", room.0))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -372,6 +417,62 @@ pub fn share_detail(config: &ShareConfig, engine: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn named(name: &str) -> Person {
+        Person {
+            name: name.into(),
+            avatar: None,
+            room: None,
+            mic: false,
+            deafened: false,
+            sharing: None,
+            speaking: false,
+            playback: PersonPlayback::default(),
+            verified: false,
+            role: Role::User,
+        }
+    }
+
+    #[test]
+    fn names_that_hide_text_are_shown_as_their_id() {
+        assert_eq!(person_name(UserId(7), " Bob "), "Bob");
+        for hiding in [
+            "Bob\u{202E}",
+            "\u{200B}",
+            "two\nlines",
+            "",
+            &"x".repeat(200),
+        ] {
+            assert_eq!(person_name(UserId(7), hiding), "User 7");
+            assert_eq!(room_name(RoomId(3), hiding), "Room 3");
+        }
+    }
+
+    #[test]
+    fn a_repeated_room_is_listed_once_and_the_lists_stop_at_their_caps() {
+        let mut state = State::default();
+        let room = |id, name: &str| RoomView {
+            id: RoomId(id),
+            name: name.into(),
+            locked: false,
+        };
+        state.add_room(room(1, "a"));
+        state.add_room(room(1, "b"));
+        assert_eq!(state.rooms, [room(1, "b")]);
+        for id in 0..MAX_ROOMS as u64 + 10 {
+            state.add_room(room(id, "r"));
+        }
+        assert_eq!(state.rooms.len(), MAX_ROOMS);
+
+        for id in 0..MAX_PEOPLE as u64 + 10 {
+            state.add_person(UserId(id), named("p"));
+        }
+        assert_eq!(state.people.len(), MAX_PEOPLE);
+        state.add_person(UserId(0), named("renamed"));
+        assert_eq!(state.people[&UserId(0)].name, "renamed");
+        state.add_person(UserId(MAX_PEOPLE as u64), named("over"));
+        assert!(state.person(UserId(MAX_PEOPLE as u64)).is_none());
+    }
 
     #[test]
     fn bitrates_stop_at_the_cap_and_a_lower_choice_lowers_the_bitrate() {

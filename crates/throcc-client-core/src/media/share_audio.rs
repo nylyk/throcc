@@ -10,7 +10,7 @@ use super::audio::{FRAME, SAMPLE_RATE};
 pub const KBPS: u32 = 128;
 const EXPECTED_LOSS_PERCENT: u8 = 5;
 /// Bytes one encoded 20 ms stereo frame can take at most.
-const MAX_PACKET: usize = 4000;
+pub(crate) const MAX_PACKET: usize = 4000;
 
 /// Samples in one 20 ms stereo frame, left and right interleaved.
 pub const STEREO_FRAME: usize = FRAME * 2;

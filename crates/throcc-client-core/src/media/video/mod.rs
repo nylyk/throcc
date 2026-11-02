@@ -70,7 +70,7 @@ mod preview_tests {
 mod tests {
     use throcc_proto::messages::Recovery;
 
-    use super::decode::{Decoder, MAX_PIXELS};
+    use super::decode::{Decoder, MaxSize};
     use super::encode::{Encoder, EncoderConfig};
     use super::frame::{VideoFrame, luma_psnr};
 
@@ -87,7 +87,7 @@ mod tests {
             return;
         };
         eprintln!("opened {}", encoder.name());
-        let mut decoder = Decoder::new(encoder.codec(), MAX_PIXELS).unwrap();
+        let mut decoder = Decoder::new(encoder.codec(), MaxSize::ANY).unwrap();
         let mut shown = Vec::new();
         let mut keyframes = Vec::new();
         for n in 0..60u16 {
@@ -141,7 +141,7 @@ mod tests {
             return;
         };
         eprintln!("opened {}", encoder.name());
-        let mut decoder = Decoder::new(encoder.codec(), MAX_PIXELS).unwrap();
+        let mut decoder = Decoder::new(encoder.codec(), MaxSize::ANY).unwrap();
         let mut last = None;
         for (n, (width, height)) in [
             (2560, 1440),

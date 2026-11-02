@@ -45,8 +45,38 @@ fn devices() -> &'static [ffi::AVHWDeviceType] {
     }
 }
 
-/// The most pixels any decoded picture may have.
-pub const MAX_PIXELS: usize = 4096 * 4096;
+/// The widest and tallest any decoded picture may be.
+pub const MAX_SIDE: usize = 4096;
+
+/// The largest picture a decoder hands on, each side at most [`MAX_SIDE`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaxSize {
+    width: usize,
+    height: usize,
+}
+
+impl MaxSize {
+    pub const ANY: Self = Self {
+        width: MAX_SIDE,
+        height: MAX_SIDE,
+    };
+
+    pub fn new(width: usize, height: usize) -> Self {
+        Self {
+            width: width.min(MAX_SIDE),
+            height: height.min(MAX_SIDE),
+        }
+    }
+
+    fn pixels(self) -> usize {
+        self.width * self.height
+    }
+
+    fn fits(self, frame: &AVFrame) -> bool {
+        let side = |v: i32| usize::try_from(v).unwrap_or(usize::MAX);
+        side(frame.width) <= self.width && side(frame.height) <= self.height
+    }
+}
 
 /// Decodes one remote share, on the GPU where it can. Shows the newest frame;
 /// presentation time is ignored.
@@ -55,17 +85,15 @@ pub struct Decoder {
     codec: Codec,
     hardware: bool,
     engine: &'static str,
-    max_pixels: usize,
+    max_size: MaxSize,
 }
 
 impl Decoder {
-    /// Opens a decoder that refuses pictures of more than `max_pixels`, capped at
-    /// [`MAX_PIXELS`].
-    pub fn new(codec: Codec, max_pixels: usize) -> Result<Self, DecodeError> {
-        let max_pixels = max_pixels.min(MAX_PIXELS);
-        let decoder = match Self::on_hardware(codec, max_pixels) {
+    /// Opens a decoder that refuses pictures larger than `max_size`.
+    pub fn new(codec: Codec, max_size: MaxSize) -> Result<Self, DecodeError> {
+        let decoder = match Self::on_hardware(codec, max_size) {
             Some(decoder) => decoder,
-            None => Self::in_software(codec, max_pixels)?,
+            None => Self::in_software(codec, max_size)?,
         };
         let place = if decoder.hardware {
             "hardware"
@@ -76,7 +104,7 @@ impl Decoder {
         Ok(decoder)
     }
 
-    fn on_hardware(codec: Codec, max_pixels: usize) -> Option<Self> {
+    fn on_hardware(codec: Codec, max_size: MaxSize) -> Option<Self> {
         let found = AVCodec::find_decoder_by_name(decoders(codec).last()?)?;
         devices().iter().find_map(|&device_type| {
             let supported = (0..).map_while(|i| found.hw_config(i)).any(|config| {
@@ -87,7 +115,7 @@ impl Decoder {
                 return None;
             }
             let device = AVHWDeviceContext::create(device_type, None, None, 0).ok()?;
-            let mut ctx = context(&found, max_pixels);
+            let mut ctx = context(&found, max_size.pixels());
             ctx.set_hw_device_ctx(device);
             ctx.open(None).ok()?;
             Some(Self {
@@ -95,17 +123,17 @@ impl Decoder {
                 codec,
                 hardware: true,
                 engine: device_name(device_type),
-                max_pixels,
+                max_size,
             })
         })
     }
 
-    fn in_software(codec: Codec, max_pixels: usize) -> Result<Self, DecodeError> {
+    fn in_software(codec: Codec, max_size: MaxSize) -> Result<Self, DecodeError> {
         let found = decoders(codec)
             .iter()
             .find_map(|name| AVCodec::find_decoder_by_name(name))
             .ok_or(DecodeError::NoDecoder(codec))?;
-        let mut ctx = context(&found, max_pixels);
+        let mut ctx = context(&found, max_size.pixels());
         ctx.open(None)?;
         let engine = if found.name().to_bytes() == b"libdav1d" {
             "dav1d (software)"
@@ -117,7 +145,7 @@ impl Decoder {
             codec,
             hardware: false,
             engine,
-            max_pixels,
+            max_size,
         })
     }
 
@@ -143,7 +171,7 @@ impl Decoder {
         match self.decode_unit(unit, timestamp) {
             Err(e @ DecodeError::Ffmpeg(_)) if self.hardware => {
                 warn!("hardware decoding failed ({e}); decoding in software");
-                *self = Self::in_software(self.codec, self.max_pixels)?;
+                *self = Self::in_software(self.codec, self.max_size)?;
                 self.decode_unit(unit, timestamp)
             }
             result => result,
@@ -168,7 +196,7 @@ impl Decoder {
         let mut newest = None;
         loop {
             match self.ctx.receive_frame() {
-                Ok(frame) if !fits(&frame, self.max_pixels) => {
+                Ok(frame) if !self.max_size.fits(&frame) => {
                     return Err(DecodeError::TooLarge(frame.width, frame.height));
                 }
                 Ok(frame) => newest = Some(frame),
@@ -208,11 +236,6 @@ fn context(found: &AVCodec, max_pixels: usize) -> AVCodecContext {
     // SAFETY: `ctx` is a live codec context that has not been opened yet.
     unsafe { (*ctx.as_mut_ptr()).max_pixels = i64::try_from(max_pixels).unwrap_or(i64::MAX) };
     ctx
-}
-
-fn fits(frame: &AVFrame, max_pixels: usize) -> bool {
-    let side = |v: i32| usize::try_from(v).unwrap_or(usize::MAX);
-    side(frame.width).saturating_mul(side(frame.height)) <= max_pixels
 }
 
 /// Copies a 4:2:0 frame, planar or NV12, into NV12 cropped to even dimensions. `None` for
@@ -261,5 +284,27 @@ unsafe fn plane_row(frame: &AVFrame, plane: usize, row: usize, len: usize) -> &[
             frame.data[plane].add(row * frame.linesize[plane] as usize),
             len,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(width: i32, height: i32) -> AVFrame {
+        let mut frame = AVFrame::new();
+        frame.set_width(width);
+        frame.set_height(height);
+        frame
+    }
+
+    #[test]
+    fn each_side_is_bounded_not_only_the_area() {
+        let size = MaxSize::new(1920 + 64, 1080 + 64);
+        assert!(size.fits(&frame(1920, 1080)));
+        assert!(!size.fits(&frame(65_536, 16)));
+        assert!(!size.fits(&frame(16, 4096)));
+        assert!(!MaxSize::ANY.fits(&frame(MAX_SIDE as i32 + 2, 2)));
+        assert_eq!(MaxSize::new(usize::MAX, 8), MaxSize::new(MAX_SIDE, 8));
     }
 }

@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use quinn::crypto::rustls::QuicClientConfig;
-use quinn::{IdleTimeout, TransportConfig};
+use quinn::{IdleTimeout, TransportConfig, VarInt};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, verify_tls13_signature};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -16,6 +16,9 @@ const EXPORTER_LABEL: &[u8] = b"throcc/exporter/1";
 /// Kept small whatever the share's bitrate: voice queues behind video in this buffer, so a
 /// deeper one would delay voice during a share. Media waits for room rather than dropping.
 const DATAGRAM_SEND_BUFFER: usize = 64 * 1024;
+/// Room for a largest control frame and the start of the next; the control stream is the
+/// only one, so this also bounds what a server can leave unread in us.
+const CONTROL_WINDOW: u32 = 2 * throcc_proto::framing::MAX_FRAME_BYTES as u32;
 
 pub struct Connected {
     pub connection: quinn::Connection,
@@ -132,6 +135,11 @@ pub fn transport_config() -> TransportConfig {
     config
         .keep_alive_interval(Some(transport::KEEP_ALIVE))
         .datagram_send_buffer_size(DATAGRAM_SEND_BUFFER)
+        // The server opens the one control stream; it may open nothing else.
+        .max_concurrent_bidi_streams(VarInt::from_u32(1))
+        .max_concurrent_uni_streams(VarInt::from_u32(0))
+        .stream_receive_window(VarInt::from_u32(CONTROL_WINDOW))
+        .receive_window(VarInt::from_u32(CONTROL_WINDOW))
         .packet_threshold(transport::REORDER_PACKETS)
         .time_threshold(transport::REORDER_RTT_FACTOR);
     if let Ok(idle) = IdleTimeout::try_from(transport::IDLE_TIMEOUT) {

@@ -7,18 +7,22 @@ use throcc_crypto::identity::{self, random};
 use throcc_crypto::media::TrackKey;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Epoch, MediaId, RoomId, UserId};
-use throcc_proto::messages::{PublicKey, Request, RoomPeer, Tracks};
+use throcc_proto::messages::{PublicKey, Request, RoomPeer, SignedEncKey, Tracks};
 use tracing::warn;
 use zeroize::Zeroizing;
 
 use crate::contacts::{ContactStatus, Contacts};
 use crate::lock;
+use crate::state::MAX_PEOPLE;
 
 /// How long a sender's previous epoch key stays usable after it moves on.
 const OLD_KEY_GRACE: Duration = Duration::from_secs(2);
 /// How long our encryption key still unwraps secrets after a renewal replaced it.
 const RETIRED_ENC_KEPT: Duration = OLD_KEY_GRACE.saturating_mul(5);
 const MAX_EARLY: usize = 64;
+/// The most peers a room state may list: far above the rooms of about 20 this is built
+/// for, and low enough that verifying and wrapping to all of them stays cheap.
+pub const MAX_ROOM_PEERS: usize = 256;
 /// A wrapped sender secret: the 32-byte encapsulated key, then the 32-byte secret sealed
 /// with a 16-byte tag.
 const WRAPPED_BYTES: usize = 32 + 32 + 16;
@@ -41,6 +45,12 @@ pub enum KeyNotice {
     /// The room state gave two tracks the same media id. Nobody gets our key until a
     /// valid one arrives.
     ClashingTracks,
+    /// This server has as many people pinned as it may have, so people met for the first
+    /// time are left out. Told once per connection.
+    TooManyContacts,
+    /// The room state listed more than [`MAX_ROOM_PEERS`] peers. Nobody gets our key until
+    /// a valid one arrives.
+    TooManyPeers,
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -118,6 +128,12 @@ pub struct KeyManager {
     /// Peers whose encryption key HPKE refused to wrap to, with that key. They stay out
     /// until they present another, so the trusted set settles instead of re-keying.
     unwrappable: HashMap<UserId, PublicKey>,
+    /// Whether each peer of the room state last applied signed its encryption key, for the
+    /// keys it presented, so a presence change doesn't verify everyone again.
+    checked_signatures: HashMap<UserId, (PublicKey, SignedEncKey, bool)>,
+    contacts_full_told: bool,
+    #[cfg(test)]
+    signature_checks: usize,
     send_keys: HashMap<MediaId, Arc<TrackKey>>,
     received: HashMap<(UserId, Epoch), Received>,
     recv_keys: HashMap<(MediaId, Epoch), (UserId, Arc<TrackKey>)>,
@@ -148,6 +164,10 @@ impl KeyManager {
             my_secret: None,
             wrapped_to: BTreeSet::new(),
             unwrappable: HashMap::new(),
+            checked_signatures: HashMap::new(),
+            contacts_full_told: false,
+            #[cfg(test)]
+            signature_checks: 0,
             send_keys: HashMap::new(),
             received: HashMap::new(),
             recv_keys: HashMap::new(),
@@ -169,6 +189,9 @@ impl KeyManager {
     /// shown in our room, so the current room state should be applied again.
     pub fn set_presence(&mut self, user: UserId, room: Option<RoomId>) -> bool {
         let before = match room {
+            Some(_) if self.present.len() >= MAX_PEOPLE && !self.present.contains_key(&user) => {
+                return false;
+            }
             Some(room) => self.present.insert(user, room),
             None => self.present.remove(&user),
         };
@@ -293,20 +316,27 @@ impl KeyManager {
         if epoch < self.epoch {
             return (None, Vec::new());
         }
-        let (trusted, mut notices) = if self.clashing_tracks(peers) {
-            warn!(
-                room = room.0,
-                "room state reuses a media id; trusting nobody"
-            );
-            let repeated = self.room_peers == peers;
-            let notices = if repeated {
-                Vec::new()
-            } else {
-                vec![KeyNotice::ClashingTracks]
-            };
-            (BTreeMap::new(), notices)
+        let invalid = if peers.len() > MAX_ROOM_PEERS {
+            Some(KeyNotice::TooManyPeers)
+        } else if self.clashing_tracks(peers) {
+            Some(KeyNotice::ClashingTracks)
         } else {
-            self.trusted_peers(room, peers, contacts)
+            None
+        };
+        let (trusted, mut notices) = match invalid {
+            Some(notice) => {
+                warn!(
+                    room = room.0,
+                    ?notice,
+                    "invalid room state; trusting nobody"
+                );
+                let repeated = self.room_peers == peers;
+                (
+                    BTreeMap::new(),
+                    if repeated { vec![] } else { vec![notice] },
+                )
+            }
+            None => self.trusted_peers(room, peers, contacts),
         };
         self.room_peers = peers.to_vec();
         let departed: Vec<UserId> = self
@@ -358,22 +388,22 @@ impl KeyManager {
     /// current, and whose identity key matches its pin. A user seen for the first time is
     /// pinned only once their key checks out.
     fn trusted_peers(
-        &self,
+        &mut self,
         room: RoomId,
         peers: &[RoomPeer],
         contacts: &mut Contacts,
     ) -> (BTreeMap<UserId, Peer>, Vec<KeyNotice>) {
+        let listed: HashSet<UserId> = peers.iter().map(|p| p.user).collect();
+        self.checked_signatures
+            .retain(|user, _| listed.contains(user));
         let mut notices = Vec::new();
         let mut trusted = BTreeMap::new();
         let unix_now = crate::unix_now().unwrap_or(0);
         let shown = |p: &&RoomPeer| p.user != self.me && self.present.get(&p.user) == Some(&room);
-        for peer in peers.iter().filter(shown) {
+        let shown: Vec<&RoomPeer> = peers.iter().filter(shown).collect();
+        for peer in shown {
             let signed = &peer.enc_key;
-            let message =
-                identity::enc_key_message(&self.server.0, peer.user, signed.not_after, &signed.key);
-            if signed.not_after <= unix_now
-                || identity::verify(&peer.identity_key, &message, &signed.sig).is_err()
-            {
+            if signed.not_after <= unix_now || !self.signed_by_identity(peer) {
                 notices.push(KeyNotice::BadEncKey { user: peer.user });
                 continue;
             }
@@ -390,7 +420,12 @@ impl KeyManager {
                     continue;
                 }
                 ContactStatus::New => {
-                    contacts.pin(peer.user, peer.identity_key);
+                    if !contacts.pin(peer.user, peer.identity_key) {
+                        if !std::mem::replace(&mut self.contacts_full_told, true) {
+                            notices.push(KeyNotice::TooManyContacts);
+                        }
+                        continue;
+                    }
                     notices.push(KeyNotice::NewContact { user: peer.user });
                 }
                 ContactStatus::Known { .. } => {
@@ -406,6 +441,27 @@ impl KeyManager {
             );
         }
         (trusted, notices)
+    }
+
+    /// Whether `peer`'s encryption key is signed by its identity key, for this server and user.
+    fn signed_by_identity(&mut self, peer: &RoomPeer) -> bool {
+        let presented = (peer.identity_key, peer.enc_key);
+        if let Some((identity_key, enc_key, holds)) = self.checked_signatures.get(&peer.user)
+            && (*identity_key, *enc_key) == presented
+        {
+            return *holds;
+        }
+        #[cfg(test)]
+        {
+            self.signature_checks += 1;
+        }
+        let signed = &peer.enc_key;
+        let message =
+            identity::enc_key_message(&self.server.0, peer.user, signed.not_after, &signed.key);
+        let holds = identity::verify(&peer.identity_key, &message, &signed.sig).is_ok();
+        self.checked_signatures
+            .insert(peer.user, (peer.identity_key, peer.enc_key, holds));
+        holds
     }
 
     fn start_epoch(&mut self, epoch: Epoch, now: Instant) {
@@ -624,7 +680,7 @@ fn track_ids(tracks: &Tracks) -> impl Iterator<Item = MediaId> + '_ {
 pub(crate) mod tests {
     use throcc_crypto::identity::IdentityKey;
     use throcc_proto::frame::{Flags, Header};
-    use throcc_proto::messages::{Share, SignedEncKey};
+    use throcc_proto::messages::Share;
 
     use super::*;
 
@@ -1238,6 +1294,89 @@ pub(crate) mod tests {
             assert_eq!(a.keys.owner(stolen), None);
             assert!(a.keys.trusted_room_peers().is_empty());
         }
+    }
+
+    fn invented_peer(id: u64) -> RoomPeer {
+        peer(&member(id))
+    }
+
+    #[test]
+    fn a_room_state_over_the_peer_limit_trusts_nobody() {
+        let now = Instant::now();
+        let mut a = member(1);
+        let mut peers = vec![peer(&a)];
+        peers.extend((100..).take(MAX_ROOM_PEERS - 1).map(invented_peer));
+        show(&mut a.keys, &peers);
+        let tracks = Some(a.tracks.clone());
+        let (requests, _) =
+            a.keys
+                .placed(Some(ROOM), Epoch(1), tracks, &peers, &mut a.contacts, now);
+        assert_eq!(wrapped_to(requests.first()).len(), MAX_ROOM_PEERS - 1);
+
+        let crowd = invented_peer(99);
+        peers.push(crowd.clone());
+        show(&mut a.keys, &peers);
+        let (request, notices) = a
+            .keys
+            .room_state(ROOM, Epoch(2), &peers, &mut a.contacts, now);
+        assert_eq!(request, None);
+        assert_eq!(notices, [KeyNotice::TooManyPeers]);
+        assert!(a.keys.trusted_room_peers().is_empty());
+        assert_eq!(
+            a.contacts.status(crowd.user, &crowd.identity_key),
+            ContactStatus::New
+        );
+        a.keys.set_presence(UserId(100), None);
+        assert_eq!(reapply(&mut a, now), (None, vec![]));
+    }
+
+    #[test]
+    fn someone_new_is_left_out_once_the_contacts_are_full() {
+        let now = Instant::now();
+        let (mut a, b, c) = (member(1), member(2), member(3));
+        a.contacts.pin(b.id, b.identity.public());
+        for id in 1000..(1000 + crate::contacts::MAX_CONTACTS as u64 - 1) {
+            assert!(a.contacts.pin(UserId(id), [7; 32]));
+        }
+        let peers = vec![peer(&a), peer(&b), peer(&c)];
+        show(&mut a.keys, &peers);
+        let tracks = Some(a.tracks.clone());
+        let (requests, notices) =
+            a.keys
+                .placed(Some(ROOM), Epoch(1), tracks, &peers, &mut a.contacts, now);
+        assert_eq!(wrapped_to(requests.first()), [b.id]);
+        assert!(notices.contains(&KeyNotice::TooManyContacts));
+        assert!(a.keys.set_presence(b.id, None));
+        let (_, notices) = reapply(&mut a, now);
+        assert!(!notices.contains(&KeyNotice::TooManyContacts), "told twice");
+    }
+
+    #[test]
+    fn presence_changes_verify_only_keys_not_checked_before() {
+        let now = Instant::now();
+        let (mut a, b, c) = (member(1), member(2), member(3));
+        let peers = vec![peer(&a), peer(&b), peer(&c)];
+        show(&mut a.keys, &peers);
+        let tracks = Some(a.tracks.clone());
+        a.keys
+            .placed(Some(ROOM), Epoch(1), tracks, &peers, &mut a.contacts, now);
+        assert_eq!(a.keys.signature_checks, 2);
+        for room in [None, Some(ROOM), None, Some(ROOM)] {
+            assert!(a.keys.set_presence(c.id, room));
+            reapply(&mut a, now);
+        }
+        assert_eq!(a.keys.signature_checks, 2);
+        assert_eq!(a.keys.trusted_room_peers().len(), 2);
+
+        let mut forged = peer(&b);
+        forged.enc_key.key = EncKeyPair::generate().public();
+        let peers = vec![peer(&a), forged, peer(&c)];
+        let (request, notices) = a
+            .keys
+            .room_state(ROOM, Epoch(1), &peers, &mut a.contacts, now);
+        assert_eq!(wrapped_to(request.as_ref()), [c.id]);
+        assert!(notices.contains(&KeyNotice::BadEncKey { user: b.id }));
+        assert_eq!(a.keys.signature_checks, 3);
     }
 
     #[test]

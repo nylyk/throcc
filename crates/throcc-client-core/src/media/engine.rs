@@ -13,7 +13,10 @@ use throcc_proto::messages::{Event, Placed, Recovery, Request};
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use super::fragment::{Reassembler, ReplayWindow, Seen, Unit, fragment};
+use super::fragment::{
+    MAX_AUDIO_UNIT_FRAGMENTS, MAX_VIDEO_UNIT_FRAGMENTS, Reassembler, ReplayWindow, Seen, Unit,
+    fragment,
+};
 use super::reorder::{Output, Reorder};
 use crate::contacts::{Contacts, UnsavedPins};
 use crate::keys::{EpochFloors, KeyManager, KeyNotice};
@@ -491,7 +494,10 @@ impl Track {
             tried_generation: 0,
             scratch: Vec::new(),
             last_unit_overflowed: false,
-            reassembler: Reassembler::default(),
+            reassembler: Reassembler::new(match kind {
+                Kind::Audio => MAX_AUDIO_UNIT_FRAGMENTS,
+                Kind::Video => MAX_VIDEO_UNIT_FRAGMENTS,
+            }),
             reorder: Reorder::default(),
         }
     }

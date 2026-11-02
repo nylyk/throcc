@@ -281,6 +281,8 @@ fn known_servers() -> Vec<(String, Fingerprint)> {
         .unwrap_or_default()
 }
 
+/// Decoded pictures kept before the ones nothing shown uses are dropped.
+const PICTURES_KEPT: usize = 256;
 const NAME_TOO_LONG: &str = "Names can be at most 32 characters.";
 const NAME_HIDES_TEXT: &str = "Names can’t contain control or invisible characters.";
 const PASSWORD_TOO_LONG: &str = "Passwords can be at most 128 characters.";
@@ -699,6 +701,10 @@ impl ThroccApp {
             return picture.clone();
         }
         let bytes = self.client.as_ref()?.avatar(hash)?;
+        if self.pictures.len() >= PICTURES_KEPT {
+            let in_use = self.state.avatars_in_use();
+            self.pictures.retain(|hash, _| in_use.contains(hash));
+        }
         self.pictures.insert(hash, None);
         cx.spawn(async move |this, cx| {
             let picture = cx

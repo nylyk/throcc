@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::Bytes;
 use throcc_proto::frame::{BODY_BYTES, Flags, TIMESTAMP_BYTES};
@@ -162,69 +162,164 @@ pub struct Unit {
     pub data: Vec<u8>,
 }
 
+/// The longest video unit, in fragments, the SFU forwards.
+pub const MAX_VIDEO_UNIT_FRAGMENTS: usize = 4096;
+/// The longest audio unit, in fragments: an Opus packet from either audio track fits.
+pub const MAX_AUDIO_UNIT_FRAGMENTS: usize = 4;
 const MAX_BUFFERED: usize = 4096;
 
 /// Rebuilds access units from decrypted fragments that may arrive out of order.
-/// A unit is emitted only for an unbroken run from a first to a last fragment.
-#[derive(Default)]
+/// A unit is emitted only for an unbroken run from a first to a last fragment that is no
+/// longer than the track's limit.
+///
+/// Each push costs O(log n) whatever the flags: a sender must not be able to make its
+/// receivers rescan everything they hold for each datagram.
 pub struct Reassembler {
+    max_fragments: u32,
     fragments: BTreeMap<u32, (Flags, Vec<u8>)>,
+    firsts: BTreeSet<u32>,
+    lasts: BTreeSet<u32>,
+    /// Each maximal run of consecutive buffered seqs, from its first seq to its last.
+    spans: BTreeMap<u32, u32>,
 }
 
 impl Reassembler {
+    pub fn new(max_fragments: usize) -> Self {
+        Self {
+            max_fragments: u32::try_from(max_fragments.max(1)).unwrap_or(u32::MAX),
+            fragments: BTreeMap::new(),
+            firsts: BTreeSet::new(),
+            lasts: BTreeSet::new(),
+            spans: BTreeMap::new(),
+        }
+    }
+
     pub fn push(&mut self, seq: u32, flags: Flags, plaintext: &[u8]) -> Option<Unit> {
-        if self.fragments.len() >= MAX_BUFFERED {
-            self.fragments.pop_first();
+        if self.fragments.len() >= MAX_BUFFERED
+            && !self.fragments.contains_key(&seq)
+            && let Some(&oldest) = self.fragments.keys().next()
+        {
+            self.drop_run(oldest, oldest);
         }
-        self.fragments.insert(seq, (flags, plaintext.to_vec()));
-        // Looking for the end first stops after one step while fragments arrive in order.
-        let last = self.run_end(seq)?;
-        let first = self.run_start(seq)?;
-        let rest: usize = self
-            .fragments
-            .range(first..=last)
-            .skip(1)
-            .map(|(_, (_, body))| body.len())
-            .sum();
-        let (flags, mut data) = self.fragments.remove(&first)?;
-        let timestamp = u32::from_be_bytes(*data.first_chunk::<TIMESTAMP_BYTES>()?);
-        data.drain(..TIMESTAMP_BYTES);
-        data.reserve(rest);
-        for s in (first..=last).skip(1) {
-            data.extend_from_slice(&self.fragments.remove(&s)?.1);
+        self.insert(seq, flags, plaintext);
+        let (lo, hi) = self.span_of(seq)?;
+        let last = *self.lasts.range(seq..=hi).next()?;
+        let first = self.firsts.range(lo..=seq).next_back().copied();
+        match first {
+            Some(first) if last - first < self.max_fragments => self.take_unit(first, last),
+            Some(first) => {
+                self.drop_run(first, last);
+                None
+            }
+            // A unit through `last` would have to start before `lo`, which makes it too long.
+            None if last - lo >= self.max_fragments - 1 => {
+                self.drop_run(lo, last);
+                None
+            }
+            None => None,
         }
-        Some(Unit {
-            first_seq: first,
-            last_seq: last,
-            timestamp,
-            flags: flags | Flags::LAST,
-            data,
-        })
     }
 
     /// Drops buffered fragments older than `seq`, which can no longer complete in order.
     pub fn forget_before(&mut self, seq: u32) {
         self.fragments = self.fragments.split_off(&seq);
-    }
-
-    fn run_start(&self, mut seq: u32) -> Option<u32> {
-        loop {
-            let (flags, _) = self.fragments.get(&seq)?;
-            if flags.contains(Flags::FIRST) {
-                return Some(seq);
-            }
-            seq = seq.checked_sub(1)?;
+        self.firsts = self.firsts.split_off(&seq);
+        self.lasts = self.lasts.split_off(&seq);
+        let straddling = self.span_of(seq).filter(|&(lo, _)| lo < seq);
+        self.spans = self.spans.split_off(&seq);
+        if let Some((_, hi)) = straddling {
+            self.spans.insert(seq, hi);
         }
     }
 
-    fn run_end(&self, mut seq: u32) -> Option<u32> {
-        loop {
-            let (flags, _) = self.fragments.get(&seq)?;
-            if flags.contains(Flags::LAST) {
-                return Some(seq);
-            }
-            seq = seq.checked_add(1)?;
+    fn insert(&mut self, seq: u32, flags: Flags, plaintext: &[u8]) {
+        if self
+            .fragments
+            .insert(seq, (flags, plaintext.to_vec()))
+            .is_none()
+        {
+            self.join_spans(seq);
         }
+        for (set, flag) in [
+            (&mut self.firsts, Flags::FIRST),
+            (&mut self.lasts, Flags::LAST),
+        ] {
+            if flags.contains(flag) {
+                set.insert(seq);
+            } else {
+                set.remove(&seq);
+            }
+        }
+    }
+
+    /// Adds the newly buffered `seq` to the spans, merging the ones it touches.
+    fn join_spans(&mut self, seq: u32) {
+        let lo = seq
+            .checked_sub(1)
+            .and_then(|before| self.span_of(before))
+            .map_or(seq, |(lo, _)| lo);
+        let hi = seq
+            .checked_add(1)
+            .and_then(|after| self.spans.remove(&after))
+            .unwrap_or(seq);
+        self.spans.insert(lo, hi);
+    }
+
+    /// The span that holds `seq`.
+    fn span_of(&self, seq: u32) -> Option<(u32, u32)> {
+        let (&lo, &hi) = self.spans.range(..=seq).next_back()?;
+        (hi >= seq).then_some((lo, hi))
+    }
+
+    /// Removes `first..=last`, which lie in one span, from the spans and flag sets.
+    fn unlink(&mut self, first: u32, last: u32) {
+        if let Some((lo, hi)) = self.span_of(first) {
+            self.spans.remove(&lo);
+            if lo < first {
+                self.spans.insert(lo, first - 1);
+            }
+            if last < hi {
+                self.spans.insert(last + 1, hi);
+            }
+        }
+        for seq in first..=last {
+            self.firsts.remove(&seq);
+            self.lasts.remove(&seq);
+        }
+    }
+
+    fn drop_run(&mut self, first: u32, last: u32) {
+        self.unlink(first, last);
+        for seq in first..=last {
+            self.fragments.remove(&seq);
+        }
+    }
+
+    fn take_unit(&mut self, first: u32, last: u32) -> Option<Unit> {
+        self.unlink(first, last);
+        let run: Vec<(Flags, Vec<u8>)> = (first..=last)
+            .filter_map(|seq| self.fragments.remove(&seq))
+            .collect();
+        let ((flags, head), rest) = run.split_first()?;
+        let (timestamp, head) = head.split_first_chunk::<TIMESTAMP_BYTES>()?;
+        let len = head.len() + rest.iter().map(|(_, body)| body.len()).sum::<usize>();
+        let mut data = Vec::with_capacity(len);
+        data.extend_from_slice(head);
+        for (_, body) in rest {
+            data.extend_from_slice(body);
+        }
+        Some(Unit {
+            first_seq: first,
+            last_seq: last,
+            timestamp: u32::from_be_bytes(*timestamp),
+            flags: *flags | Flags::LAST,
+            data,
+        })
+    }
+
+    #[cfg(test)]
+    fn buffered(&self) -> usize {
+        self.fragments.len()
     }
 }
 
@@ -239,7 +334,7 @@ mod tests {
     }
 
     fn reassemble(fragments: &[(u32, Fragment)]) -> Vec<Unit> {
-        let mut reassembler = Reassembler::default();
+        let mut reassembler = Reassembler::new(MAX_VIDEO_UNIT_FRAGMENTS);
         fragments
             .iter()
             .filter_map(|(seq, f)| reassembler.push(*seq, f.flags, &f.plaintext_parts().concat()))
@@ -314,7 +409,7 @@ mod tests {
         .map(|(i, f)| (i as u32, f))
         .collect();
         let (first, second) = fragments.split_at(3);
-        let mut reassembler = Reassembler::default();
+        let mut reassembler = Reassembler::new(MAX_VIDEO_UNIT_FRAGMENTS);
         for (seq, f) in [&first[..2], &second[..2]].concat() {
             assert_eq!(
                 reassembler.push(seq, f.flags, &f.plaintext_parts().concat()),
@@ -330,6 +425,113 @@ mod tests {
         let (seq, f) = &second[2];
         let unit = reassembler.push(*seq, f.flags, &f.plaintext_parts().concat());
         assert_eq!(unit.map(|u| (u.first_seq, u.timestamp)), Some((3, 2)));
+    }
+
+    fn push_all(reassembler: &mut Reassembler, fragments: &[(u32, Fragment)]) -> Vec<Unit> {
+        fragments
+            .iter()
+            .filter_map(|(seq, f)| reassembler.push(*seq, f.flags, &f.plaintext_parts().concat()))
+            .collect()
+    }
+
+    fn numbered(fragments: Vec<Fragment>, from: u32) -> Vec<(u32, Fragment)> {
+        (from..).zip(fragments).collect()
+    }
+
+    #[test]
+    fn opus_packets_fit_an_audio_unit() {
+        for len in [
+            super::super::audio::MAX_PACKET,
+            super::super::share_audio::MAX_PACKET,
+        ] {
+            assert!(fragment(&unit(len), 0, false).len() <= MAX_AUDIO_UNIT_FRAGMENTS);
+        }
+    }
+
+    #[test]
+    fn units_longer_than_the_limit_are_dropped() {
+        let fits = numbered(fragment(&unit(3000), 1, false), 0);
+        assert_eq!(fits.len(), 3);
+        let mut reassembler = Reassembler::new(3);
+        let mut reversed = fits.clone();
+        reversed.reverse();
+        assert_eq!(push_all(&mut reassembler, &reversed).len(), 1);
+
+        let too_long = numbered(fragment(&unit(5000), 1, false), 10);
+        for order in [too_long.clone(), too_long.iter().rev().cloned().collect()] {
+            let mut reassembler = Reassembler::new(3);
+            assert!(push_all(&mut reassembler, &order).is_empty());
+            assert!(reassembler.buffered() < 3);
+        }
+    }
+
+    #[test]
+    fn runs_without_a_first_fragment_do_not_pile_up() {
+        let last_only: Vec<(u32, Fragment)> = (0..20_000)
+            .map(|seq| {
+                (
+                    seq,
+                    Fragment {
+                        flags: Flags::LAST,
+                        timestamp: None,
+                        body: Bytes::from_static(b"x"),
+                    },
+                )
+            })
+            .collect();
+        let mut reassembler = Reassembler::new(MAX_AUDIO_UNIT_FRAGMENTS);
+        assert!(push_all(&mut reassembler, &last_only).is_empty());
+        assert!(reassembler.buffered() < MAX_AUDIO_UNIT_FRAGMENTS);
+    }
+
+    /// The scan this replaced took ~160 µs per datagram for these streams once the buffer
+    /// filled; the bound is loose enough for a slow debug build.
+    #[test]
+    fn crafted_streams_cost_little_per_datagram() {
+        let fragment = |flags| Fragment {
+            flags,
+            timestamp: None,
+            body: Bytes::from_static(b"x"),
+        };
+        let streams: [Vec<(u32, Fragment)>; 3] = [
+            (0..20_000)
+                .map(|seq| (seq, fragment(Flags::LAST)))
+                .collect(),
+            (1..20_000)
+                .map(|seq| {
+                    (
+                        seq,
+                        fragment(if seq % 4000 == 0 {
+                            Flags::LAST
+                        } else {
+                            Flags::default()
+                        }),
+                    )
+                })
+                .collect(),
+            (0..20_000)
+                .map(|seq| {
+                    (
+                        seq,
+                        fragment(if seq % 2 == 0 {
+                            Flags::LAST
+                        } else {
+                            Flags::default()
+                        }),
+                    )
+                })
+                .collect(),
+        ];
+        let started = std::time::Instant::now();
+        for stream in &streams {
+            let mut reassembler = Reassembler::new(MAX_VIDEO_UNIT_FRAGMENTS);
+            push_all(&mut reassembler, stream);
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
@@ -425,8 +627,47 @@ mod tests {
         }
 
         #[test]
+        fn shuffled_units_within_the_limit_all_reassemble(lens in proptest::collection::vec(0usize..4000, 1..8), seed in any::<u64>()) {
+            let units: Vec<Bytes> = lens.iter().map(|&len| unit(len)).collect();
+            let fragments: Vec<Fragment> = units
+                .iter()
+                .enumerate()
+                .flat_map(|(i, data)| fragment(data, i as u32, false))
+                .collect();
+            let mut fragments = numbered(fragments, 1000);
+            let mut state = seed | 1;
+            for i in (1..fragments.len()).rev() {
+                state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+                fragments.swap(i, (state % (i as u64 + 1)) as usize);
+            }
+            let mut reassembler = Reassembler::new(MAX_AUDIO_UNIT_FRAGMENTS);
+            let mut got = push_all(&mut reassembler, &fragments);
+            got.sort_by_key(|u| u.timestamp);
+            let got: Vec<&[u8]> = got.iter().map(|u| u.data.as_slice()).collect();
+            let want: Vec<&[u8]> = units.iter().map(|u| &u[..]).collect();
+            prop_assert_eq!(got, want);
+            prop_assert_eq!(reassembler.buffered(), 0);
+        }
+
+        #[test]
+        fn emitted_units_are_whole_runs_within_the_limit(max in 1usize..6, input in proptest::collection::vec((0u32..64, 0u8..16, proptest::collection::vec(any::<u8>(), 4..8)), 0..128)) {
+            let mut reassembler = Reassembler::new(max);
+            let mut pushed = std::collections::HashMap::new();
+            for (seq, flags, body) in input {
+                pushed.insert(seq, (Flags(flags), body.len()));
+                if let Some(unit) = reassembler.push(seq, Flags(flags), &body) {
+                    prop_assert!(unit.last_seq - unit.first_seq < max as u32);
+                    prop_assert!(pushed[&unit.first_seq].0.contains(Flags::FIRST));
+                    prop_assert!(pushed[&unit.last_seq].0.contains(Flags::LAST));
+                    let len: usize = (unit.first_seq..=unit.last_seq).map(|s| pushed[&s].1).sum();
+                    prop_assert_eq!(unit.data.len() + TIMESTAMP_BYTES, len);
+                }
+            }
+        }
+
+        #[test]
         fn reassembler_never_panics(input in proptest::collection::vec((0u32..64, 0u8..16, proptest::collection::vec(any::<u8>(), 0..8)), 0..64)) {
-            let mut reassembler = Reassembler::default();
+            let mut reassembler = Reassembler::new(MAX_VIDEO_UNIT_FRAGMENTS);
             for (seq, flags, body) in input {
                 let _ = reassembler.push(seq, Flags(flags), &body);
             }

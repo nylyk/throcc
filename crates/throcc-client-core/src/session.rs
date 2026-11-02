@@ -8,7 +8,7 @@ use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, MediaId, RoomId, UserId};
 use throcc_proto::messages::{
     AuthError, Event as ServerEvent, MediaState, Placed, Presence, Recovery, Request, Response,
-    RoomPeer, Share, ShareConfig, Welcome,
+    RoomPeer, Share, ShareConfig, User, Welcome,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{Semaphore, broadcast, mpsc, watch};
@@ -18,8 +18,9 @@ use crate::account::{self, SignInError};
 use crate::avatars;
 use crate::call::{Call, CallEvent};
 use crate::client::{ClientOptions, Command, Event};
+use crate::contacts::MAX_CONTACTS;
 use crate::control::{self, LoginError};
-use crate::keys::KeyNotice;
+use crate::keys::{KeyNotice, MAX_ROOM_PEERS};
 use crate::keystore::Keystore;
 use crate::lock;
 use crate::media::cues::Cue;
@@ -31,9 +32,9 @@ use crate::playback::SavedPlayback;
 use crate::profile::Profile;
 use crate::server_look::ServerLook;
 use crate::state::{
-    ConnectionStatus, CurrentRoom, Health, KeyWarning, MIC_KBPS, Person, Playback, RoomView,
+    ConnectionStatus, CurrentRoom, Health, KeyWarning, MIC_KBPS, Person, Playback,
     SHARE_AUDIO_DETAIL, SHARE_AUDIO_KBPS, SentTrack, ServerView, Sound, State, TrackHealth,
-    VOICE_DETAIL, WarningCause, share_detail,
+    VOICE_DETAIL, WarningCause, person_name, room_name, share_detail, shown_name,
 };
 
 const LEVELS_EVERY: Duration = Duration::from_millis(100);
@@ -44,6 +45,8 @@ const MAX_QUEUED_WHILE_RECONNECTING: usize = 64;
 /// How many pictures are fetched from the server at once.
 const AVATAR_FETCHES: usize = 8;
 const EVENTS: usize = 256;
+/// Pictures kept in memory before the ones nothing shown uses are dropped.
+const AVATARS_KEPT: usize = 256;
 
 /// What the client and its session task share.
 pub(crate) struct Shared {
@@ -98,7 +101,14 @@ impl Shared {
 
     pub fn set_avatar(&self, hash: Hash, slot: AvatarSlot) {
         let ready = matches!(slot, AvatarSlot::Ready(_));
-        lock(&self.avatars).insert(hash, slot);
+        let state = self.state();
+        let mut avatars = lock(&self.avatars);
+        if avatars.len() >= AVATARS_KEPT {
+            let in_use = state.avatars_in_use();
+            avatars.retain(|h, slot| matches!(slot, AvatarSlot::Fetching) || in_use.contains(h));
+        }
+        avatars.insert(hash, slot);
+        drop(avatars);
         if ready {
             self.emit(Event::AvatarReady(hash));
         }
@@ -697,18 +707,20 @@ impl Session {
             s.server = Some(ServerView {
                 address,
                 fingerprint,
-                name: welcome.server.name.clone(),
+                name: welcome.server.name.as_deref().and_then(shown_name),
                 avatar: welcome.server.avatar,
             });
             s.connection = ConnectionStatus::Connected;
             s.me = Some(welcome.me);
             s.role = Some(welcome.role);
-            s.rooms = welcome.rooms.iter().map(RoomView::from).collect();
-            s.people = welcome
-                .presence
-                .iter()
-                .map(|p| (p.user, person(p, saved)))
-                .collect();
+            s.rooms.clear();
+            for room in &welcome.rooms {
+                s.add_room(room.into());
+            }
+            s.people.clear();
+            for p in &welcome.presence {
+                s.add_person(p.user, person(p, saved));
+            }
             s.current = None;
         });
         self.refresh_verified();
@@ -925,7 +937,7 @@ impl Session {
                 other => self.refused(other),
             },
             Command::ListUsers => match self.call.request(Request::ListUsers).await {
-                Ok(Response::Users(users)) => self.shared.emit(Event::Users(users)),
+                Ok(Response::Users(users)) => self.shared.emit(Event::Users(shown_users(users))),
                 other => self.refused(other),
             },
             Command::SetRole(user, role) => {
@@ -979,7 +991,7 @@ impl Session {
 
     async fn list_users(&mut self) {
         if let Ok(Response::Users(users)) = self.call.request(Request::ListUsers).await {
-            self.shared.emit(Event::Users(users));
+            self.shared.emit(Event::Users(shown_users(users)));
         }
     }
 
@@ -1058,6 +1070,7 @@ impl Session {
     /// Keeps the server's name and picture hash on this computer, to show while not
     /// connected.
     fn remember_server(&mut self, name: Option<String>, avatar: Option<Hash>) {
+        let name = name.as_deref().and_then(shown_name);
         let look = ServerLook { name, avatar };
         if look == self.server_look {
             return;
@@ -1462,6 +1475,12 @@ impl Session {
                 KeyNotice::ClashingTracks => self.shared.notice(
                     "The server described the room with two tracks under one id, so the call is paused until it sends a valid one.",
                 ),
+                KeyNotice::TooManyContacts => self.shared.notice(format!(
+                    "This server has shown you more than {MAX_CONTACTS} people, so anyone new there can't hear you."
+                )),
+                KeyNotice::TooManyPeers => self.shared.notice(format!(
+                    "The server described the room with more than {MAX_ROOM_PEERS} people, so the call is paused until it sends a valid one."
+                )),
             }
         }
     }
@@ -1476,7 +1495,10 @@ impl Session {
         };
         let shown = state.people.iter().map(|(u, p)| (*u, p.name.as_str()));
         let known = self.call.engine.keys().contacts.namesake(user, name, shown);
-        self.call.engine.remember_names([(user, name)]);
+        // A name that hides text is shown as the user's number, which is no name to note.
+        if name != person_name(user, "") {
+            self.call.engine.remember_names([(user, name)]);
+        }
         let Some(known) = known else {
             return;
         };
@@ -1512,7 +1534,7 @@ impl Session {
                 self.remember_server(profile.name.clone(), profile.avatar);
                 self.shared.update(|s| {
                     if let Some(server) = s.server.as_mut() {
-                        server.name = profile.name;
+                        server.name = profile.name.as_deref().and_then(shown_name);
                         server.avatar = profile.avatar;
                     }
                 });
@@ -1537,7 +1559,7 @@ impl Session {
                         sharing,
                         ..person(&p, saved)
                     };
-                    s.people.insert(p.user, updated);
+                    s.add_person(p.user, updated);
                 });
                 self.follow_room().await;
             }
@@ -1548,7 +1570,7 @@ impl Session {
                 });
                 self.follow_room().await;
             }
-            ServerEvent::RoomCreated(room) => self.shared.update(|s| s.rooms.push((&room).into())),
+            ServerEvent::RoomCreated(room) => self.shared.update(|s| s.add_room((&room).into())),
             ServerEvent::RoomLocked { room, locked } => self.shared.update(|s| {
                 if let Some(r) = s.room_mut(room) {
                     r.locked = locked;
@@ -1556,7 +1578,7 @@ impl Session {
             }),
             ServerEvent::RoomRenamed { room, name } => self.shared.update(|s| {
                 if let Some(r) = s.room_mut(room) {
-                    r.name = name;
+                    r.name = room_name(room, &name);
                 }
             }),
             ServerEvent::RoomDeleted(room) => {
@@ -1739,10 +1761,21 @@ fn is_key_change_of(warning: &KeyWarning, user: UserId) -> bool {
     warning.user == user && matches!(warning.cause, WarningCause::KeyChanged { .. })
 }
 
+/// `users` with their names as shown.
+fn shown_users(users: Vec<User>) -> Vec<User> {
+    users
+        .into_iter()
+        .map(|user| User {
+            name: person_name(user.id, &user.name),
+            ..user
+        })
+        .collect()
+}
+
 /// `p` as a person, playing as loud as `saved` keeps them.
 fn person(p: &Presence, saved: &SavedPlayback) -> Person {
     Person {
-        name: p.name.clone(),
+        name: person_name(p.user, &p.name),
         avatar: p.avatar,
         room: p.room,
         mic: p.mic,
@@ -1839,6 +1872,29 @@ fn supersedes(newer: &Command, older: &Command) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pictures_nothing_shown_uses_are_dropped_once_many_are_kept() {
+        let shown = Hash::of(b"shown");
+        let shared = Shared::new(State {
+            profile_picture: Some(shown),
+            ..State::default()
+        });
+        let ready = || AvatarSlot::Ready(Arc::from(&b"png"[..]));
+        shared.set_avatar(shown, ready());
+        let fetching = Hash::of(b"fetching");
+        shared.avatar(fetching);
+        for i in 0..AVATARS_KEPT as u32 {
+            shared.set_avatar(Hash::of(&i.to_be_bytes()), ready());
+        }
+        let kept = lock(&shared.avatars).len();
+        assert!(kept < AVATARS_KEPT, "{kept} kept");
+        assert!(shared.avatar(shown).0.is_some());
+        assert!(matches!(
+            lock(&shared.avatars).get(&fetching),
+            Some(AvatarSlot::Fetching)
+        ));
+    }
 
     #[test]
     fn only_the_latest_setting_is_replayed() {

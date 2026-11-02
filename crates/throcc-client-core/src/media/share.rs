@@ -13,7 +13,7 @@ use tracing::{info, warn};
 use super::capture::{Capture, CaptureConfig, CaptureError, FrameLimiter};
 use super::engine::{Kind, MediaEngine, Outgoing, Received};
 use super::share_audio::{Playout, STEREO_FRAME, ShareAudioEncoder, due_frames};
-use super::video::decode::{Decoder, MAX_PIXELS};
+use super::video::decode::{DecodeError, Decoder, MaxSize};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::video::encode::EncodeError;
 use super::video::encode::{EncodedUnit, Encoder, EncoderConfig};
@@ -458,10 +458,10 @@ const MAX_HELD_BYTES: usize = 256 << 20;
 /// Room above each announced side for decoders that pad pictures to their alignment.
 const DECODER_PADDING: usize = 64;
 
-/// The most pixels a decoded picture of a share announced as `config` may have.
-fn max_pixels(config: &ShareConfig) -> usize {
+/// The largest decoded picture a share announced as `config` may have.
+fn max_size(config: &ShareConfig) -> MaxSize {
     let side = |announced: u16| usize::from(announced) + DECODER_PADDING;
-    (side(config.width) * side(config.height)).min(MAX_PIXELS)
+    MaxSize::new(side(config.width), side(config.height))
 }
 
 fn frame_bytes(frame: &VideoFrame) -> usize {
@@ -491,7 +491,7 @@ pub fn receive(
     playout: Option<Arc<Playout>>,
     ask_idr: impl Fn() + Send + 'static,
 ) -> Result<(Picture, watch::Receiver<&'static str>), String> {
-    let mut decoder = Decoder::new(config.codec, max_pixels(&config)).map_err(|e| e.to_string())?;
+    let mut decoder = Decoder::new(config.codec, max_size(&config)).map_err(|e| e.to_string())?;
     let (tx, picture) = watch::channel(None);
     let (engine_tx, engine) = watch::channel(decoder.engine());
     std::thread::Builder::new()
@@ -499,6 +499,7 @@ pub fn receive(
         .spawn(move || {
             let mut held: VecDeque<Arc<VideoFrame>> = VecDeque::new();
             let mut asked = false;
+            let mut oversized: u64 = 0;
             loop {
                 let unit = if held.is_empty() {
                     let Some(unit) = units.blocking_recv() else {
@@ -527,6 +528,18 @@ pub fn receive(
                             held.push_back(Arc::new(frame));
                         }
                         Ok(None) => asked = false,
+                        // A keyframe wouldn't help: the sender chose the size.
+                        Err(DecodeError::TooLarge(width, height)) => {
+                            oversized += 1;
+                            if oversized.is_power_of_two() {
+                                warn!(
+                                    width,
+                                    height,
+                                    oversized,
+                                    "dropped pictures larger than the share announced"
+                                );
+                            }
+                        }
                         Err(e) => {
                             warn!("decoding failed: {e}");
                             if !asked {
@@ -616,9 +629,16 @@ mod receive_tests {
 
     #[test]
     fn decoded_pictures_are_bounded_by_the_announced_size() {
-        assert_eq!(max_pixels(&config(1280, 720)), (1280 + 64) * (720 + 64));
-        assert_eq!(max_pixels(&config(u16::MAX, u16::MAX)), MAX_PIXELS);
-        assert_eq!(max_pixels(&config(0, 0)), 64 * 64);
+        assert_eq!(
+            max_size(&config(1280, 720)),
+            MaxSize::new(1280 + 64, 720 + 64)
+        );
+        assert_eq!(
+            max_size(&config(u16::MAX, 16)),
+            MaxSize::new(usize::MAX, 16 + 64)
+        );
+        assert_eq!(max_size(&config(u16::MAX, u16::MAX)), MaxSize::ANY);
+        assert_eq!(max_size(&config(0, 0)), MaxSize::new(64, 64));
     }
 
     #[test]

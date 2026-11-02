@@ -48,10 +48,16 @@ impl KnownServers {
         })
     }
 
+    /// Takes `address` off the list, as the user chose. What is kept for its server key,
+    /// such as the people pinned there, goes too unless another address still uses that key.
     pub fn forget(&mut self, address: &str) -> Result<()> {
         self.pins.remove(address);
         Servers::update(&self.dir, |s| {
-            s.known.remove(address);
+            if let Some(key) = s.known.remove(address)
+                && !s.known.values().any(|other| *other == key)
+            {
+                s.servers.remove(&key);
+            }
         })
     }
 }
@@ -99,6 +105,34 @@ mod tests {
             ContactStatus::Known { verified: false },
             "a pin made under the new key was overwritten"
         );
+    }
+
+    #[test]
+    fn forgetting_a_server_drops_its_people_unless_another_address_uses_its_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let (shared, alone) = (Fingerprint([1; 32]), Fingerprint([2; 32]));
+        let mut known = KnownServers::load(dir.path()).unwrap();
+        known.trust("a.example.net", shared).unwrap();
+        known.trust("b.example.net", shared).unwrap();
+        known.trust("c.example.net", alone).unwrap();
+        for server in [shared, alone] {
+            let mut contacts = Contacts::load(dir.path(), &server).unwrap();
+            contacts.pin(UserId(4), [4; 32]);
+            contacts.unsaved().save().unwrap();
+        }
+        let pinned = |server| {
+            Contacts::load(dir.path(), &server)
+                .unwrap()
+                .get(UserId(4))
+                .is_some()
+        };
+
+        known.forget("a.example.net").unwrap();
+        known.forget("c.example.net").unwrap();
+        assert!(pinned(shared));
+        assert!(!pinned(alone));
+        known.forget("b.example.net").unwrap();
+        assert!(!pinned(shared));
     }
 
     #[test]

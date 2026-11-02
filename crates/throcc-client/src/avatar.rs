@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use gpui::RenderImage;
 use image::codecs::jpeg::JpegEncoder;
+use image::error::{ImageFormatHint, UnsupportedError};
 use image::imageops::FilterType;
 use image::{DynamicImage, ImageError, ImageFormat, ImageReader, ImageResult, Limits};
 use throcc_proto::messages::MAX_AVATAR_BYTES;
@@ -57,11 +58,14 @@ pub fn sample() -> Vec<u8> {
 }
 
 /// Decodes a stored picture for gpui, which takes pixels in BGRA order.
-/// A picture over 512 px a side is refused before its pixels are allocated.
+/// A picture over 512 px a side is refused before its pixels are allocated, and one over
+/// the 128 px every picture is prepared at is shrunk to it, so each one kept stays small.
 pub fn decode(bytes: &[u8]) -> Option<Arc<RenderImage>> {
-    let mut pixels = decode_within(bytes, MAX_SHOWN_SIDE, MAX_SHOWN_BYTES)
-        .ok()?
-        .into_rgba8();
+    let mut picture = decode_within(bytes, MAX_SHOWN_SIDE, MAX_SHOWN_BYTES).ok()?;
+    if picture.width().max(picture.height()) > SIDE {
+        picture = picture.thumbnail(SIDE, SIDE);
+    }
+    let mut pixels = picture.into_rgba8();
     for pixel in pixels.pixels_mut() {
         pixel.0.swap(0, 2);
     }
@@ -76,6 +80,13 @@ fn decode_within(bytes: &[u8], max_side: u32, max_bytes: u64) -> ImageResult<Dyn
     limits.max_image_height = Some(max_side);
     limits.max_alloc = Some(max_bytes);
     let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    // gpui turns on many more of `image`'s decoders; pictures from others only reach two.
+    if !matches!(reader.format(), Some(ImageFormat::Png | ImageFormat::Jpeg)) {
+        let hint = reader
+            .format()
+            .map_or(ImageFormatHint::Unknown, ImageFormatHint::Exact);
+        return Err(ImageError::Unsupported(UnsupportedError::from(hint)));
+    }
     reader.limits(limits);
     reader.decode()
 }
@@ -180,6 +191,36 @@ mod tests {
             assert_eq!(picture.size(0).height.0, SIDE as i32);
         }
         assert!(decode(&sample()).is_some());
+    }
+
+    #[test]
+    fn a_large_picture_is_kept_at_the_prepared_size() {
+        let picture = decode(&encoded(
+            MAX_SHOWN_SIDE,
+            MAX_SHOWN_SIDE / 2,
+            ImageFormat::Png,
+        ))
+        .unwrap();
+        assert_eq!(picture.size(0).width.0, SIDE as i32);
+        assert_eq!(picture.size(0).height.0, SIDE as i32 / 2);
+    }
+
+    #[test]
+    fn only_png_and_jpeg_are_decoded() {
+        for format in [
+            ImageFormat::Bmp,
+            ImageFormat::Gif,
+            ImageFormat::Tiff,
+            ImageFormat::Qoi,
+        ] {
+            let other = encoded(16, 16, format);
+            assert!(
+                image::load_from_memory(&other).is_ok(),
+                "{format:?} can be decoded at all"
+            );
+            assert!(decode(&other).is_none(), "{format:?}");
+            assert!(prepare(&other).unwrap_err().contains("PNG or JPEG"));
+        }
     }
 
     #[test]

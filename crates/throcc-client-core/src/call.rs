@@ -9,7 +9,7 @@ use tracing::warn;
 
 use crate::connection::Connected;
 use crate::contacts::Contacts;
-use crate::control::{self, Link, Requester};
+use crate::control::{self, Link, LinkError, Requester};
 use crate::keys::{EpochFloors, KeyNotice};
 use crate::keystore::Keystore;
 use crate::media::engine::MediaEngine;
@@ -98,6 +98,7 @@ impl Call {
                         warn!(?code, "media request refused: {message}")
                     }
                     Ok(_) => {}
+                    Err(LinkError::TimedOut) => warn!("a media request went unanswered"),
                     Err(_) => return,
                 }
             }

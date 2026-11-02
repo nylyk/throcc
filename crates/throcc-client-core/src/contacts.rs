@@ -34,6 +34,9 @@ pub enum ContactStatus {
 /// How many names are noted per pinned user. The first ones are kept, so a server can't
 /// flush out a name by renaming someone over and over.
 const MAX_NAMES: usize = 4;
+/// How many users are pinned per server at most. Beyond it nobody new is pinned, rather
+/// than forgetting anyone: a forgotten pin would let a server swap that user's key unseen.
+pub const MAX_CONTACTS: usize = 4096;
 
 pub struct Contacts {
     pins: BTreeMap<UserId, Contact>,
@@ -141,8 +144,12 @@ impl Contacts {
     }
 
     /// Pins `key` for `user`, replacing any earlier key. A replaced key starts unverified.
-    pub fn pin(&mut self, user: UserId, key: PublicKey) {
+    /// False, pinning nothing, for a new user once [`MAX_CONTACTS`] are pinned.
+    pub fn pin(&mut self, user: UserId, key: PublicKey) -> bool {
         let earlier = self.pins.get(&user);
+        if earlier.is_none() && self.pins.len() >= MAX_CONTACTS {
+            return false;
+        }
         let verified = earlier.is_some_and(|c| c.key == key && c.verified);
         let names = earlier.map(|c| c.names.clone()).unwrap_or_default();
         self.keep(
@@ -152,7 +159,8 @@ impl Contacts {
                 verified,
                 names,
             },
-        )
+        );
+        true
     }
 
     pub fn set_verified(&mut self, user: UserId, verified: bool) {
@@ -220,9 +228,12 @@ impl Contacts {
     }
 }
 
-/// True for names that are the same ignoring case and surrounding space.
+/// True for valid names that are the same ignoring case and surrounding space.
 fn same_name(a: &str, b: &str) -> bool {
-    a.trim().to_lowercase() == b.trim().to_lowercase()
+    match (valid_name(a), valid_name(b)) {
+        (Some(a), Some(b)) => a.to_lowercase() == b.to_lowercase(),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -302,6 +313,31 @@ mod tests {
     }
 
     #[test]
+    fn nobody_new_is_pinned_past_the_limit_and_nobody_pinned_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Fingerprint([7; 32]);
+        let mut contacts = Contacts::load(dir.path(), &server).unwrap();
+        for id in 0..MAX_CONTACTS as u64 {
+            assert!(contacts.pin(UserId(id), [1; 32]));
+        }
+        assert!(!contacts.pin(UserId(MAX_CONTACTS as u64), [1; 32]));
+        assert_eq!(
+            contacts.status(UserId(MAX_CONTACTS as u64), &[1; 32]),
+            ContactStatus::New
+        );
+        assert!(
+            contacts.pin(UserId(0), [2; 32]),
+            "a pinned user's key can still change"
+        );
+        contacts.unsaved().save().unwrap();
+        let reloaded = Contacts::load(dir.path(), &server).unwrap();
+        assert_eq!(
+            reloaded.status(UserId(1), &[2; 32]),
+            ContactStatus::Changed { pinned: [1; 32] }
+        );
+    }
+
+    #[test]
     fn a_namesake_is_found_by_a_name_noted_or_shown_now() {
         let dir = tempfile::tempdir().unwrap();
         let mut contacts = Contacts::load(dir.path(), &Fingerprint([7; 32])).unwrap();
@@ -327,6 +363,11 @@ mod tests {
             contacts.namesake(ghost, "Dave", [(stranger, "Dave")]),
             None,
             "someone not pinned isn't known"
+        );
+        assert_eq!(
+            contacts.namesake(ghost, "Bob\u{200B}", [(carol, "Bob\u{200B}")]),
+            None,
+            "a name that hides text matches nothing"
         );
     }
 }
