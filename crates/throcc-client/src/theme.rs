@@ -183,12 +183,24 @@ pub fn format_hex(color: u32) -> String {
     format!("#{color:06X}")
 }
 
+pub const MIN_SIDEBAR_OPACITY: f32 = 0.5;
+pub const DEFAULT_SIDEBAR_OPACITY: f32 = if cfg!(target_os = "macos") { 0.9 } else { 1.0 };
+
 thread_local! {
     static PALETTE: Cell<Palette> = const { Cell::new(PRESETS[0].1) };
+    static SIDEBAR_OPACITY: Cell<f32> = const { Cell::new(DEFAULT_SIDEBAR_OPACITY) };
 }
 
 pub fn palette() -> Palette {
     PALETTE.with(Cell::get)
+}
+
+pub fn sidebar_opacity() -> f32 {
+    SIDEBAR_OPACITY.with(Cell::get)
+}
+
+pub fn set_sidebar_opacity(opacity: f32) {
+    SIDEBAR_OPACITY.with(|o| o.set(opacity.clamp(MIN_SIDEBAR_OPACITY, 1.0)));
 }
 
 pub const CUSTOM: &str = "Custom";
@@ -225,6 +237,10 @@ pub fn save_custom(palette: Palette) {
         s.theme = Some(CUSTOM.into());
         s.palette = Some(palette.to_hex());
     });
+}
+
+pub fn save_sidebar_opacity(opacity: f32) {
+    save(|s| s.sidebar_opacity = Some(opacity));
 }
 
 fn save(change: impl FnOnce(&mut Settings)) {
@@ -298,13 +314,9 @@ fn mixed(top: u32, share: f32, base: u32) -> Hsla {
 pub fn bg() -> Hsla {
     hex(palette().bg)
 }
-/// The sidebar over the blurred desktop on macOS, solid elsewhere.
+/// The sidebar at the picked opacity, over the blurred desktop on macOS.
 pub fn sidebar_glass() -> Hsla {
-    if cfg!(target_os = "macos") {
-        surface().opacity(0.91)
-    } else {
-        surface()
-    }
+    surface().opacity(sidebar_opacity())
 }
 /// What shows behind every view: nothing on macOS, where the window blurs the desktop.
 pub fn window_bg() -> Hsla {

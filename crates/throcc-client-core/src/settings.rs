@@ -18,6 +18,8 @@ pub struct Settings {
     /// The gain on cues, where 1 plays them as recorded.
     pub cue_volume: f32,
     pub profile_name: Option<String>,
+    /// The sidebar's opacity from 0.5 to 1, unset for the platform's default.
+    pub sidebar_opacity: Option<f32>,
 }
 
 impl json_file::Format for Settings {}
@@ -29,6 +31,7 @@ impl Default for Settings {
             palette: None,
             cue_volume: 1.0,
             profile_name: None,
+            sidebar_opacity: None,
         }
     }
 }

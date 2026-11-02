@@ -585,6 +585,14 @@ fn appearance(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                     .children(colors),
             )
         })
+        .child(
+            card()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(section("Sidebar"))
+                .child(row("Opacity", percent_slider(&app.sidebar_opacity, cx))),
+        )
         .into_any_element()
 }
 
