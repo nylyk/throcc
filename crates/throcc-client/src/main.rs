@@ -9,6 +9,7 @@ mod views;
 
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, point, px, size};
 use gpui_component::Root;
+use throcc_client_core::settings::Settings;
 use views::common;
 
 fn main() {
@@ -19,29 +20,30 @@ fn main() {
         .init();
     let args: Vec<String> = std::env::args().collect();
     let mock = args.iter().any(|a| a == "--mock");
-    let theme = args
-        .iter()
-        .position(|a| a == "--theme")
-        .and_then(|i| args.get(i + 1))
-        .and_then(|name| theme::preset(name));
-    let window_size = args
-        .iter()
-        .position(|a| a == "--size")
-        .and_then(|i| args.get(i + 1))
-        .and_then(|s| s.split_once('x'))
-        .and_then(|(w, h)| Some(size(px(w.parse().ok()?), px(h.parse().ok()?))))
+    let value_of = |flag: &str| {
+        let at = args.iter().position(|a| a == flag)?;
+        args.get(at + 1).cloned()
+    };
+    let theme = value_of("--theme").and_then(|name| theme::preset(&name));
+    let window_size = value_of("--size")
+        .and_then(|s| {
+            let (w, h) = s.split_once('x')?;
+            Some(size(px(w.parse().ok()?), px(h.parse().ok()?)))
+        })
         .unwrap_or(size(px(1280.), px(800.)));
-    let screen = args
-        .iter()
-        .position(|a| a == "--screen")
-        .and_then(|i| args.get(i + 1))
-        .cloned();
+    let screen = value_of("--screen");
+    let settings = if mock {
+        Settings::default()
+    } else {
+        app::saved_settings()
+    };
     gpui_platform::application()
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
-            let saved = if mock { None } else { theme::saved() };
-            let (theme_name, palette) = theme.or(saved).unwrap_or(theme::PRESETS[0]);
+            let (theme_name, palette) = theme
+                .or_else(|| theme::picked(&settings))
+                .unwrap_or(theme::PRESETS[0]);
             theme::set(palette, cx);
             app::bind_keys(cx);
             let bounds = Bounds::centered(None, window_size, cx);
@@ -56,7 +58,8 @@ fn main() {
             );
             let opened = cx.open_window(options, |window, cx| {
                 window.set_window_title("throcc");
-                let view = cx.new(|cx| app::ThroccApp::new(mock, theme_name, window, cx));
+                let view =
+                    cx.new(|cx| app::ThroccApp::new(mock, theme_name, &settings, window, cx));
                 if let Some(screen) = &screen {
                     view.update(cx, |app, cx| app.show_sample(screen, window, cx));
                 }

@@ -11,18 +11,18 @@ pub fn render(app: &ThroccApp) -> Option<Div> {
     if matches!(app.screen, Screen::Join | Screen::Main) {
         return None;
     }
-    let (text, warn) = match &app.state.connection {
+    let (text, bg, fg) = match &app.state.connection {
         ConnectionStatus::Reconnecting { attempt, reason } => (
             format!("Reconnecting (attempt {attempt}): {reason}. You’ll be put back in your room."),
-            true,
+            theme::warn_bg(),
+            theme::warn_text(),
         ),
-        ConnectionStatus::Failed(reason) => (format!("Disconnected: {reason}"), false),
+        ConnectionStatus::Failed(reason) => (
+            format!("Disconnected: {reason}"),
+            theme::danger_bg(),
+            theme::danger_text(),
+        ),
         _ => return None,
-    };
-    let (bg, fg) = if warn {
-        (theme::warn_bg(), theme::warn_text())
-    } else {
-        (theme::danger_bg(), theme::danger_text())
     };
     Some(
         div()

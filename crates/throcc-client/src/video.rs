@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::{AnyElement, App, IntoElement, ParentElement, Pixels, Styled, Window, div};
@@ -14,9 +14,22 @@ use crate::views::common::icon;
 
 /// The share pictures shown in one window, by sharer. The only place frames meet gpui.
 #[derive(Default)]
-pub struct Feeds(HashMap<UserId, Shown>);
+pub struct Feeds {
+    shown: HashMap<UserId, Shown>,
+    /// The sharers drawn since the last [`Self::sweep`].
+    drawn: HashSet<UserId>,
+}
 
 impl Feeds {
+    /// Lets go of the last frames of shares not drawn since the last sweep, so a share that
+    /// left the window holds no memory. Called at the start of each render of the window.
+    pub fn sweep(&mut self, window: &mut Window, cx: &mut App) {
+        let drawn = std::mem::take(&mut self.drawn);
+        for (_, shown) in self.shown.extract_if(|user, _| !drawn.contains(user)) {
+            shown.release(window, cx);
+        }
+    }
+
     /// `user`'s share, as large as fits its parent with the aspect ratio kept, its corners
     /// rounded by `radius`.
     pub fn surface(
@@ -48,10 +61,11 @@ impl Feeds {
                 )
                 .into_any_element();
         };
-        let previous = self.0.get(&user);
+        self.drawn.insert(user);
+        let previous = self.shown.get(&user);
         if previous.is_none_or(|s| s.timestamp != frame.timestamp)
             && let Some(shown) = Shown::new(frame, previous)
-            && let Some(previous) = self.0.insert(user, shown)
+            && let Some(previous) = self.shown.insert(user, shown)
         {
             previous.release(window, cx);
         }
@@ -60,7 +74,7 @@ impl Feeds {
             .relative()
             .overflow_hidden()
             .rounded(radius)
-            .children(self.0.get(&user).map(|shown| shown.element(radius)))
+            .children(self.shown.get(&user).map(|shown| shown.element(radius)))
             .into_any_element()
     }
 }

@@ -5,14 +5,14 @@ use gpui::{
 use gpui_component::Disableable;
 use gpui_component::input::Input;
 use throcc_client_core::client::Command;
-use throcc_proto::Fingerprint;
 use throcc_proto::ids::Role;
+use throcc_proto::{Fingerprint, permissions};
 
 use super::common::{
     Typeset, avatar, caption, card, chip, ghost_icon, mono, primary, secondary, section,
 };
-use super::settings::{field, frame, nav_item, nav_list, save_line, segmented};
-use crate::app::{Dialog, PictureEdit, PictureFor, Screen, ServerPage, ServerStatus, ThroccApp};
+use super::page::{field, frame, nav, picture_editor, save_line, segmented};
+use crate::app::{Dialog, PictureFor, Screen, ServerPage, ThroccApp};
 use crate::theme;
 
 pub fn render(
@@ -20,37 +20,15 @@ pub fn render(
     page: ServerPage,
     cx: &mut Context<ThroccApp>,
 ) -> impl IntoElement {
-    let is_admin = app.state.role == Some(Role::Admin);
-    let item =
-        |id: &'static str, label: &'static str, target: ServerPage, cx: &mut Context<ThroccApp>| {
-            nav_item(id, label, page == target).on_click(cx.listener(move |app, _, window, cx| {
-                if target == ServerPage::Overview {
-                    app.fill_server(window, cx);
-                }
-                app.screen = Screen::Server(target);
-                if target == ServerPage::Members && app.state.role == Some(Role::Admin) {
-                    app.command(Command::ListUsers);
-                }
-                cx.notify();
-            }))
-        };
-    let links = nav_list()
-        .child(item("nav-server", "Server", ServerPage::Overview, cx))
-        .child(item("nav-keys", "Privacy and Keys", ServerPage::Keys, cx))
-        .child(item(
-            "nav-members",
-            if is_admin { "Members" } else { "Invites" },
-            ServerPage::Members,
-            cx,
-        ));
-    let page_title = match page {
-        ServerPage::Overview => "Server",
-        ServerPage::Keys => "Privacy and Keys",
-        ServerPage::Members if is_admin => "Members",
-        ServerPage::Members => "Invites",
-    };
+    let role = app.state.role;
+    let links = nav(
+        ServerPage::ALL.map(|p| (p, p.title(role))),
+        page,
+        Screen::Server,
+        cx,
+    );
     let content = match page {
-        ServerPage::Overview => overview(app, is_admin, cx),
+        ServerPage::Overview => overview(app, cx),
         ServerPage::Keys => keys(app, cx),
         ServerPage::Members => members(app, cx),
     };
@@ -58,49 +36,27 @@ pub fn render(
         app.sidebar_width,
         "Server Settings",
         links,
-        page_title,
+        page.title(role),
         content,
         cx,
     )
 }
 
-fn overview(app: &mut ThroccApp, is_admin: bool, cx: &mut Context<ThroccApp>) -> AnyElement {
+fn overview(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let Some(server) = app.state.server.clone() else {
         return div().into_any_element();
     };
-    let picture = match &app.server_picture_edit {
-        Some(edit) => edit.image.clone(),
-        None => app.picture(server.avatar, cx),
-    };
-    let has_picture = picture.is_some();
-    let saving = app.server_status == Some(ServerStatus::Saving);
-    let picture_row = div()
-        .flex()
-        .items_center()
-        .gap_4()
-        .child(avatar(server.title(), 0, picture, px(64.), false))
-        .children(is_admin.then(|| {
-            div()
-                .flex()
-                .gap_2()
-                .child(
-                    secondary("choose-server-picture", "Choose Picture…")
-                        .disabled(saving)
-                        .on_click(
-                            cx.listener(|app, _, _, cx| app.choose_picture(PictureFor::Server, cx)),
-                        ),
-                )
-                .children(has_picture.then(|| {
-                    secondary("remove-server-picture", "Remove")
-                        .disabled(saving)
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.server_status = None;
-                            app.server_picture_edit = Some(PictureEdit::removed());
-                            cx.notify();
-                        }))
-                }))
-        }));
-    let name = if is_admin {
+    let editable = app.state.role.is_some_and(permissions::can_edit_server);
+    let picture = picture_editor(
+        app,
+        PictureFor::Server,
+        server.title(),
+        0,
+        server.avatar,
+        editable,
+        cx,
+    );
+    let name = if editable {
         Input::new(&app.server_name).into_any_element()
     } else {
         div().child(server.title().to_owned()).into_any_element()
@@ -109,19 +65,14 @@ fn overview(app: &mut ThroccApp, is_admin: bool, cx: &mut Context<ThroccApp>) ->
         .flex()
         .flex_col()
         .gap_4()
-        .child(picture_row)
+        .child(picture)
         .child(field("Name", name))
         .child(field("Address", mono(server.address.clone())))
-        .children(is_admin.then(|| {
-            let status = app.server_status.clone().map(|status| match status {
-                ServerStatus::Saving => caption("Saving…"),
-                ServerStatus::Saved => caption("Saved").text_color(theme::ok_text()),
-                ServerStatus::Failed(reason) => caption(reason).text_color(theme::danger_text()),
-            });
+        .children(editable.then(|| {
             let save = primary("save-server", "Save")
-                .disabled(saving || !app.server_changed(cx))
+                .disabled(app.server_form.saving() || !app.server_changed(cx))
                 .on_click(cx.listener(|app, _, _, cx| app.save_server(cx)));
-            save_line(status, save)
+            save_line(app.server_form.status.as_ref(), str::to_owned, save)
         }))
         .into_any_element()
 }
@@ -186,10 +137,7 @@ fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                             } else {
                                 chip("Not verified", theme::raised(), theme::text_3())
                             })
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                app.dialog = Some(Dialog::Verify(user));
-                                cx.notify();
-                            }))
+                            .on_click(cx.listener(move |app, _, _, cx| app.open_verify(user, cx)))
                     },
                 )),
         )
@@ -198,7 +146,7 @@ fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
 
 fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let pictures = app.pictures_of_people(cx);
-    let is_admin = app.state.role == Some(Role::Admin);
+    let role = app.state.role;
     let invite = app.invite.clone();
     let users = app.users.clone();
     let name_of = |id| users.iter().find(|u| u.id == id).map(|u| u.name.clone());
@@ -210,20 +158,19 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .children(
             invite
                 .as_ref()
-                .map(|(code, _)| mono(code.clone()).typeset(theme::TITLE_1)),
+                .map(|code| mono(code.clone()).typeset(theme::TITLE_1)),
         )
         .children(invite.is_some().then(|| {
-            caption(if is_admin {
-                "Single use, expires in 24 hours."
-            } else {
-                "Single use, expires in 24 hours. You can make 3 a day."
+            caption(match role.and_then(permissions::invite_cap) {
+                Some(cap) => format!("Single use, expires in 24 hours. You can make {cap} a day."),
+                None => "Single use, expires in 24 hours.".to_owned(),
             })
         }))
         .child(
             div()
                 .flex()
                 .gap_2()
-                .children(invite.clone().map(|(code, _)| {
+                .children(invite.clone().map(|code| {
                     secondary("copy-invite", "Copy").on_click(cx.listener(move |_, _, _, cx| {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.clone()));
                     }))
@@ -241,7 +188,7 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 ),
         );
     let mut page = div().flex().flex_col().gap_6().child(invite_card);
-    if is_admin {
+    if let Some(me) = role.filter(|r| permissions::can_list_users(*r)) {
         let my_id = app.state.me;
         page = page.child(
             card()
@@ -252,7 +199,7 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .children(users.iter().map(|user| {
                     let id = user.id;
                     let name = user.name.clone();
-                    let editable = user.role != Role::Admin && Some(id) != my_id;
+                    let editable = Some(id) != my_id && permissions::can_remove(me, user.role);
                     div()
                         .flex()
                         .flex_wrap()
@@ -297,7 +244,11 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                                 .child(if editable {
                                     segmented(
                                         ("role", id.0),
-                                        &[(Role::Manager, "Manager"), (Role::User, "User")],
+                                        [(Role::Manager, "Manager"), (Role::User, "User")]
+                                            .into_iter()
+                                            .filter(|(role, _)| {
+                                                permissions::can_set_role(me, user.role, *role)
+                                            }),
                                         user.role,
                                         cx,
                                         move |app, role, _| app.command(Command::SetRole(id, role)),
@@ -314,12 +265,12 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                                 .children(editable.then(|| {
                                     ghost_icon(("remove", id.0 as usize), "x", "Remove").on_click(
                                         cx.listener(move |app, _, _, cx| {
-                                            app.dialog = Some(Dialog::Remove {
+                                            let dialog = Dialog::Remove {
                                                 user: id,
                                                 name: name.clone(),
                                                 cascade: false,
-                                            });
-                                            cx.notify();
+                                            };
+                                            app.set_dialog(Some(dialog), cx);
                                         }),
                                     )
                                 })),

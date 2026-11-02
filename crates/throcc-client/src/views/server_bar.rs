@@ -3,10 +3,10 @@ use gpui::{
     AnyElement, Context, Div, ElementId, InteractiveElement, IntoElement, ParentElement,
     SharedString, Stateful, StatefulInteractiveElement, Styled, div, px,
 };
-use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
+use gpui_component::menu::ContextMenuExt;
 use gpui_component::tooltip::Tooltip;
 
-use super::common::{avatar, icon, moves_window, server_label};
+use super::common::{avatar, danger_menu_item, icon, moves_window, server_label};
 use crate::app::{Dialog, Screen, SettingsPage, ThroccApp};
 use crate::theme;
 
@@ -87,9 +87,8 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
                     item("settings", "Settings".into(), in_settings)
                         .text_color(theme::text_2())
                         .child(icon("settings").size(px(20.)))
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.screen = Screen::Settings(SettingsPage::Audio);
-                            cx.notify();
+                        .on_click(cx.listener(|app, _, window, cx| {
+                            app.show_screen(Screen::Settings(SettingsPage::Audio), window, cx)
                         })),
                 ),
         )
@@ -114,20 +113,14 @@ fn with_server_menu(
             let this = this.clone();
             let address = address.clone();
             menu.item(
-                PopupMenuItem::element(move |_, _| {
-                    div().text_color(theme::danger_text()).child(label)
-                })
-                .icon(icon(icon_name).text_color(theme::danger_text()))
-                .on_click(move |_, _, cx| {
-                    this.update(cx, |app, cx| {
-                        app.dialog = Some(if here {
-                            Dialog::LeaveServer
-                        } else {
-                            Dialog::RemoveServer(address.clone())
-                        });
-                        cx.notify();
-                    })
-                    .ok();
+                danger_menu_item(label, icon_name).on_click(move |_, _, cx| {
+                    let dialog = if here {
+                        Dialog::LeaveServer
+                    } else {
+                        Dialog::RemoveServer(address.clone())
+                    };
+                    this.update(cx, |app, cx| app.set_dialog(Some(dialog), cx))
+                        .ok();
                 }),
             )
         })

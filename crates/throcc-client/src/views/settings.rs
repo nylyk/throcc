@@ -3,10 +3,9 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, AppContext, Context, Div, ElementId, Entity, FontWeight, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, Pixels, SharedString, Stateful,
-    StatefulInteractiveElement, Styled, Subscription, Window, div, px, relative,
+    IntoElement, ParentElement, SharedString, Stateful, StatefulInteractiveElement, Styled,
+    Subscription, Window, div, px, relative,
 };
-use gpui_component::button::Button;
 use gpui_component::input::Input;
 use gpui_component::select::{Select, SelectEvent, SelectState};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
@@ -18,10 +17,12 @@ use throcc_client_core::media::audio::{
 };
 
 use super::common::{
-    Typeset, avatar, caption, card, chip, gain_to_loudness, ghost_icon, key_cap, loudness_to_gain,
-    mono, moves_window, primary, secondary, section,
+    Typeset, avatar, caption, card, chip, key_cap, mono, primary, section, slider_gain,
+    slider_value, volume_slider,
 };
-use crate::app::{PictureEdit, PictureFor, ProfileStatus, Screen, SettingsPage, ThroccApp};
+use super::page::{field, frame, nav, picture_editor, row, save_line, segmented};
+use crate::app::{PictureFor, Screen, SettingsPage, ThroccApp};
+use crate::hotkey::DEFAULT_KEY_LABEL;
 use crate::theme;
 
 pub fn render(
@@ -29,244 +30,26 @@ pub fn render(
     page: SettingsPage,
     cx: &mut Context<ThroccApp>,
 ) -> impl IntoElement {
-    let item = |id: &'static str,
-                label: &'static str,
-                target: SettingsPage,
-                cx: &mut Context<ThroccApp>| {
-        nav_item(id, label, page == target).on_click(cx.listener(move |app, _, window, cx| {
-            if target == SettingsPage::Profile {
-                app.fill_profile(window, cx);
-            }
-            app.screen = Screen::Settings(target);
-            cx.notify();
-        }))
-    };
-    let links = nav_list()
-        .child(item("nav-profile", "Profile", SettingsPage::Profile, cx))
-        .child(item("nav-audio", "Audio", SettingsPage::Audio, cx))
-        .child(item(
-            "nav-appearance",
-            "Appearance",
-            SettingsPage::Appearance,
-            cx,
-        ))
-        .child(item("nav-servers", "Servers", SettingsPage::Servers, cx));
+    let links = nav(
+        SettingsPage::ALL.map(|p| (p, p.title())),
+        page,
+        Screen::Settings,
+        cx,
+    );
     let content = match page {
         SettingsPage::Profile => profile(app, cx),
         SettingsPage::Audio => audio(app, cx),
         SettingsPage::Appearance => appearance(app, cx),
         SettingsPage::Servers => servers(app),
     };
-    let page_title = match page {
-        SettingsPage::Profile => "Profile",
-        SettingsPage::Audio => "Audio",
-        SettingsPage::Appearance => "Appearance",
-        SettingsPage::Servers => "Servers",
-    };
     frame(
         app.sidebar_width,
         "Settings",
         links,
-        page_title,
+        page.title(),
         content,
         cx,
     )
-}
-
-/// A sidebar `width` wide, see-through to the blurred desktop on macOS.
-pub(super) fn sidebar_column(width: Pixels) -> Div {
-    div()
-        .relative()
-        .w(width)
-        .h_full()
-        .flex_none()
-        .flex()
-        .flex_col()
-        .bg(theme::sidebar_glass())
-        .border_r_1()
-        .border_color(theme::control())
-}
-
-/// The strip along a sidebar's right edge that drags its width.
-pub(super) fn resize_handle(cx: &mut Context<ThroccApp>) -> Stateful<Div> {
-    div()
-        .id("sidebar-resize")
-        .absolute()
-        .top_0()
-        .right_0()
-        .h_full()
-        .w(px(6.))
-        .cursor_col_resize()
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|app, _, _, cx| {
-                app.resizing_sidebar = true;
-                cx.stop_propagation();
-            }),
-        )
-}
-
-/// The column of page links in the settings sidebar.
-pub(super) fn nav_list() -> Div {
-    div().flex_1().p_3().flex().flex_col().gap_1()
-}
-
-pub(super) fn nav_item(id: &'static str, label: &'static str, selected: bool) -> Stateful<Div> {
-    div()
-        .id(id)
-        .px_3()
-        .min_h(px(36.))
-        .flex()
-        .items_center()
-        .rounded(theme::RADIUS_ROW)
-        .cursor_pointer()
-        .when(selected, |s| s.bg(theme::raised()))
-        .hover(|s| s.bg(theme::raised()))
-        .child(label)
-}
-
-/// A settings screen laid out like the main one: the sidebar under a bar with a back
-/// arrow and `heading`, the page under a bar with its `page_title`.
-pub(super) fn frame(
-    width: Pixels,
-    heading: &'static str,
-    links: Div,
-    page_title: &'static str,
-    content: AnyElement,
-    cx: &mut Context<ThroccApp>,
-) -> Div {
-    let top_bar = || {
-        moves_window(div())
-            .flex()
-            .items_center()
-            .h(theme::HEADER_HEIGHT)
-            .flex_none()
-            .border_b_1()
-            .border_color(theme::control())
-    };
-    let sidebar = sidebar_column(width)
-        .child(
-            top_bar()
-                .gap_2()
-                .px_3()
-                .child(
-                    ghost_icon("settings-back", "arrow-left", "Back").on_click(cx.listener(
-                        |app, _, _, cx| {
-                            app.screen = if app.client.is_some() {
-                                Screen::Main
-                            } else {
-                                Screen::Join
-                            };
-                            cx.notify();
-                        },
-                    )),
-                )
-                .child(div().typeset(theme::TITLE_3).child(heading)),
-        )
-        .child(links)
-        .child(resize_handle(cx));
-    let page = div()
-        .bg(theme::bg())
-        .flex_1()
-        .min_w_0()
-        .h_full()
-        .flex()
-        .flex_col()
-        .child(
-            top_bar()
-                .px_6()
-                .child(div().typeset(theme::TITLE_3).child(page_title)),
-        )
-        .child(
-            div()
-                .id("settings-content")
-                .flex_1()
-                .overflow_y_scroll()
-                .p_8()
-                .child(div().max_w(px(640.)).child(content)),
-        );
-    div().size_full().flex().child(sidebar).child(page)
-}
-
-/// A card's Save button at the bottom right, with how the last save went beside it.
-pub(super) fn save_line(status: Option<Div>, save: Button) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .justify_end()
-        .gap_3()
-        .children(status)
-        .child(save)
-}
-
-/// A labelled field, the label above the control.
-pub(super) fn field(label: &str, control: impl IntoElement) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap_1p5()
-        .child(
-            div()
-                .typeset(theme::CALLOUT)
-                .text_color(theme::text_2())
-                .child(label.to_owned()),
-        )
-        .child(control)
-}
-
-pub(super) fn row(label: &str, control: impl IntoElement) -> Div {
-    div()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .gap_x_4()
-        .gap_y_1()
-        .min_h(theme::TOUCH)
-        .child(
-            div()
-                .w(px(180.))
-                .text_color(theme::text_2())
-                .child(label.to_owned()),
-        )
-        .child(div().flex_1().min_w(px(200.)).child(control))
-}
-
-/// A row of mutually exclusive choices.
-pub(super) fn segmented<T: Copy + PartialEq + 'static>(
-    id: impl Into<ElementId>,
-    options: &[(T, &'static str)],
-    selected: T,
-    cx: &mut Context<ThroccApp>,
-    on_pick: impl Fn(&mut ThroccApp, T, &mut Context<ThroccApp>) + Clone + 'static,
-) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .gap_1()
-        .p_1()
-        .rounded(theme::RADIUS_BUTTON)
-        .bg(theme::surface())
-        .children(options.iter().enumerate().map(|(i, (value, label))| {
-            let value = *value;
-            let on_pick = on_pick.clone();
-            div()
-                .id(i)
-                .px_3()
-                .py_1()
-                .rounded(theme::RADIUS_ROW)
-                .cursor_pointer()
-                .when(value == selected, |s| s.bg(theme::raised()))
-                .text_color(if value == selected {
-                    theme::text()
-                } else {
-                    theme::text_3()
-                })
-                .child(*label)
-                .on_click(cx.listener(move |app, _, _, cx| {
-                    on_pick(app, value, cx);
-                    cx.notify();
-                }))
-        }))
 }
 
 /// The voice-activity gate in `transmit`, or the default one for push to talk.
@@ -285,46 +68,16 @@ fn set_voice(app: &mut ThroccApp, change: impl FnOnce(&mut VoiceSettings)) {
 fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let seed = app.state.me.map_or(0, |me| me.0);
     let name = app.state.profile_name.clone().unwrap_or_default();
-    let picture = match &app.profile_picture_edit {
-        Some(edit) => edit.image.clone(),
-        None => app.picture(app.state.profile_picture, cx),
-    };
-    let has_picture = picture.is_some();
-    let saving = app.profile_status == Some(ProfileStatus::Saving);
-    let picture_buttons = div()
-        .flex()
-        .gap_2()
-        .child(
-            secondary("choose-picture", "Choose Picture…")
-                .disabled(saving)
-                .on_click(cx.listener(|app, _, _, cx| {
-                    app.profile_status = None;
-                    app.choose_picture(PictureFor::Profile, cx);
-                })),
-        )
-        .children(has_picture.then(|| {
-            secondary("remove-picture", "Remove")
-                .disabled(saving)
-                .on_click(cx.listener(|app, _, _, cx| {
-                    app.profile_status = None;
-                    app.profile_picture_edit = Some(PictureEdit::removed());
-                    cx.notify();
-                }))
-        }));
-    let status = app.profile_status.clone().map(|status| match status {
-        ProfileStatus::Saving => caption("Saving…"),
-        ProfileStatus::Saved => caption("Saved").text_color(theme::ok_text()),
-        ProfileStatus::UntilJoined => {
-            caption("Saved here. Others see your picture once you join a room.")
-        }
-        ProfileStatus::Failed(reason) => caption(format!(
-            "Kept on this computer, but this server refused it: {reason}"
-        ))
-        .text_color(theme::danger_text()),
-    });
+    let saved = app.state.profile_picture;
+    let picture = picture_editor(app, PictureFor::Profile, &name, seed, saved, true, cx);
     let save = primary("save-profile", "Save")
-        .disabled(saving || !app.profile_changed(cx))
+        .disabled(app.profile_form.saving() || !app.profile_changed(cx))
         .on_click(cx.listener(|app, _, _, cx| app.save_profile(cx)));
+    let save = save_line(
+        app.profile_form.status.as_ref(),
+        |reason| format!("Kept on this computer, but this server refused it: {reason}"),
+        save,
+    );
     div()
         .flex()
         .flex_col()
@@ -334,16 +87,9 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .flex()
                 .flex_col()
                 .gap_4()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_4()
-                        .child(avatar(&name, seed, picture, px(64.), false))
-                        .child(picture_buttons),
-                )
+                .child(picture)
                 .child(field("Name", Input::new(&app.name)))
-                .child(save_line(status, save)),
+                .child(save),
         )
         .into_any_element()
 }
@@ -383,19 +129,16 @@ impl AudioControls {
         };
         let input = device_select(inputs);
         let output = device_select(outputs);
-        let mut slider = |min: f32, max: f32, value: f32| {
-            cx.new(|_| {
-                SliderState::new()
-                    .min(min)
-                    .max(max)
-                    .step(1.)
-                    .default_value(value)
-            })
-        };
-        let input_volume = slider(0., 200., gain_to_loudness(voice.input_volume) * 100.);
-        let output_volume = slider(0., 200., gain_to_loudness(voice.output_volume) * 100.);
-        let cue_volume = slider(0., 200., gain_to_loudness(voice.cue_volume) * 100.);
-        let threshold = slider(METER_FLOOR_DBFS, 0., gate_dbfs(voice.transmit));
+        let input_volume = cx.new(|_| volume_slider(voice.input_volume));
+        let output_volume = cx.new(|_| volume_slider(voice.output_volume));
+        let cue_volume = cx.new(|_| volume_slider(voice.cue_volume));
+        let threshold = cx.new(|_| {
+            SliderState::new()
+                .min(METER_FLOOR_DBFS)
+                .max(0.)
+                .step(1.)
+                .default_value(gate_dbfs(voice.transmit))
+        });
         let on_device = |is_input: bool| {
             move |app: &mut ThroccApp,
                   _,
@@ -418,10 +161,9 @@ impl AudioControls {
                 cx.notify();
             }
         };
-        let on_slide = |change: fn(&mut VoiceSettings, f32)| {
+        let on_slide = |change: fn(&mut VoiceSettings, &SliderEvent)| {
             move |app: &mut ThroccApp, _, event: &SliderEvent, cx: &mut Context<ThroccApp>| {
-                let (SliderEvent::Change(value) | SliderEvent::Release(value)) = event;
-                set_voice(app, |voice| change(voice, value.start()));
+                set_voice(app, |voice| change(voice, event));
                 cx.notify();
             }
         };
@@ -430,17 +172,14 @@ impl AudioControls {
             cx.subscribe(&output, on_device(false)),
             cx.subscribe(
                 &input_volume,
-                on_slide(|voice, percent| voice.input_volume = loudness_to_gain(percent / 100.)),
+                on_slide(|voice, event| voice.input_volume = slider_gain(event)),
             ),
             cx.subscribe(
                 &output_volume,
-                on_slide(|voice, percent| voice.output_volume = loudness_to_gain(percent / 100.)),
+                on_slide(|voice, event| voice.output_volume = slider_gain(event)),
             ),
             cx.subscribe(&cue_volume, |app, _, event: &SliderEvent, cx| {
-                let (SliderEvent::Change(value) | SliderEvent::Release(value)) = event;
-                set_voice(app, |voice| {
-                    voice.cue_volume = loudness_to_gain(value.start() / 100.)
-                });
+                set_voice(app, |voice| voice.cue_volume = slider_gain(event));
                 if matches!(event, SliderEvent::Release(_)) {
                     app.save_cue_volume();
                 }
@@ -448,9 +187,9 @@ impl AudioControls {
             }),
             cx.subscribe(
                 &threshold,
-                on_slide(|voice, dbfs| {
+                on_slide(|voice, event| {
                     if let Transmit::VoiceActivity { threshold_dbfs } = &mut voice.transmit {
-                        *threshold_dbfs = dbfs;
+                        *threshold_dbfs = slider_value(event);
                     }
                 }),
             ),
@@ -468,7 +207,8 @@ impl AudioControls {
     }
 }
 
-/// Redraws the page every 100 ms while it shows the audio settings, for the level meter.
+/// Redraws the page every 100 ms while it shows the audio settings with a level meter that
+/// can move, and stops the mic test once the page is left.
 fn keep_metering(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) {
     if app.audio.metering {
         return;
@@ -480,10 +220,11 @@ fn keep_metering(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) {
             let shown = this.update(cx, |app, cx| {
                 let shown = app.screen == Screen::Settings(SettingsPage::Audio);
                 app.audio.metering = shown;
-                if shown {
-                    cx.notify();
-                } else {
+                let meter_shown = matches!(app.voice.transmit, Transmit::VoiceActivity { .. });
+                if !shown {
                     app.stop_mic_test();
+                } else if meter_shown && app.client.is_some() {
+                    cx.notify();
                 }
                 shown
             });
@@ -590,7 +331,7 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                     "Mode",
                     segmented(
                         "mode",
-                        &[(true, "Voice Activity"), (false, "Push to Talk")],
+                        [(true, "Voice Activity"), (false, "Push to Talk")],
                         vad,
                         cx,
                         |app, voice_activity, cx| {
@@ -631,14 +372,9 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                     )
                 }))
                 .children((!vad).then(|| {
-                    let global = app.has_global_push_to_talk().then(|| {
-                        let key = if cfg!(target_os = "macos") {
-                            "⌥ Space"
-                        } else {
-                            "Alt+Space"
-                        };
-                        [key_cap(key), caption("anywhere, or")]
-                    });
+                    let global = app
+                        .has_global_push_to_talk()
+                        .then(|| [key_cap(DEFAULT_KEY_LABEL), caption("anywhere, or")]);
                     row(
                         "Push-to-talk key",
                         div()
@@ -671,7 +407,7 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                     "Noise suppression",
                     segmented(
                         "ns",
-                        &[
+                        [
                             (None, "Off"),
                             (Some(NoiseSuppressionLevel::Low), "Low"),
                             (Some(NoiseSuppressionLevel::Moderate), "Moderate"),
@@ -712,8 +448,8 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .into_any_element()
 }
 
-fn servers(app: &mut ThroccApp) -> AnyElement {
-    let current = app.state.server.as_ref().map(|s| s.address.clone());
+fn servers(app: &ThroccApp) -> AnyElement {
+    let current = app.connected_server().map(|s| s.address.as_str());
     div()
         .flex()
         .flex_col()
@@ -744,7 +480,7 @@ fn servers(app: &mut ThroccApp) -> AnyElement {
                                     ),
                             )
                             .children(
-                                (current.as_deref() == Some(address.as_str()))
+                                (current == Some(address.as_str()))
                                     .then(|| chip("Connected", theme::ok_bg(), theme::ok_text())),
                             )
                     },

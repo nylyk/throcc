@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
@@ -15,13 +16,16 @@ use throcc_client_core::state::{Person, State, share_label};
 use throcc_proto::ids::{RoomId, UserId};
 
 use super::common::{
-    Typeset, avatar, caption, description, ghost_icon, icon, moves_window, player, player_button,
-    player_title, primary, rate, section, sharing_icon,
+    Typeset, avatar, bottom_bar, caption, danger_menu_item, description, ghost_icon, icon, player,
+    player_button, player_title, primary, rate, section, sharing_icon, toggle_icon, top_bar,
 };
 use super::mascot;
-use super::settings::{resize_handle, sidebar_column};
+use super::page::{resize_handle, sidebar_column};
 use crate::app::{Dialog, Screen, ServerPage, ThroccApp, ToggleDeafen, ToggleMic};
 use crate::theme;
+
+/// Decoded profile pictures by person.
+type Pictures = HashMap<UserId, Arc<RenderImage>>;
 
 pub fn render(
     app: &mut ThroccApp,
@@ -31,14 +35,15 @@ pub fn render(
     if let Some(user) = app.fullscreen_stream() {
         return fullscreen(app, user, window, cx).into_any_element();
     }
-    let content = match app.state.current.clone() {
-        Some(current) => room(app, current.room, window, cx).into_any_element(),
+    let pictures = app.pictures_of_people(cx);
+    let content = match app.state.current.as_ref().map(|c| c.room) {
+        Some(current) => room(app, current, &pictures, window, cx).into_any_element(),
         None => lobby(app, cx).into_any_element(),
     };
     div()
         .size_full()
         .flex()
-        .child(sidebar(app, cx))
+        .child(sidebar(app, &pictures, cx))
         .child(
             div()
                 .flex_1()
@@ -57,25 +62,22 @@ fn fullscreen(
     window: &mut Window,
     cx: &mut Context<ThroccApp>,
 ) -> impl IntoElement {
-    let person = app.state.person(user).cloned();
-    let picture = app.picture(person.as_ref().and_then(|p| p.avatar), cx);
-    let name = person.as_ref().map_or("Someone".into(), |p| p.name.clone());
+    let state = app.state.clone();
+    let person = state.person(user);
+    let picture = app.picture(person.and_then(|p| p.avatar), cx);
+    let name = person.map_or("Someone", |p| &p.name);
     let config = person
-        .as_ref()
         .and_then(|p| p.sharing)
         .map(|c| share_label(&c))
         .unwrap_or_default();
-    let title = player_title(&name, user.0, picture, config);
+    let title = player_title(name, user.0, picture, config);
     let buttons = div()
         .flex()
         .gap_2()
         .child(
-            player_button("fullscreen-stop-watching", "eye-off").on_click(cx.listener(
-                move |app, _, window, cx| {
-                    app.stop_watching(user);
-                    app.exit_fullscreen(window, cx);
-                },
-            )),
+            player_button("fullscreen-stop-watching", "eye-off").on_click(
+                cx.listener(move |app, _, window, cx| app.stop_watching(user, window, cx)),
+            ),
         )
         .child(
             player_button("exit-fullscreen", "minimize-2")
@@ -96,29 +98,22 @@ fn fullscreen(
                 app.open_person_menu(user, event.position, window, cx)
             }),
         )
-        .on_key_down(cx.listener(|app, event: &gpui::KeyDownEvent, window, cx| {
-            if event.keystroke.key == "escape" {
-                app.exit_fullscreen(window, cx);
-            }
-        }))
         .child(player(stream, title, buttons, controls))
 }
 
-fn people_in(state: &State, room: RoomId) -> Vec<(UserId, Person)> {
-    state
-        .occupants(room)
-        .map(|(u, p)| (*u, p.clone()))
-        .collect()
+fn people_in(state: &State, room: RoomId) -> Vec<(UserId, &Person)> {
+    state.occupants(room).map(|(u, p)| (*u, p)).collect()
 }
 
-fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
-    let pictures = app.pictures_of_people(cx);
+fn sidebar(
+    app: &mut ThroccApp,
+    pictures: &Pictures,
+    cx: &mut Context<ThroccApp>,
+) -> impl IntoElement {
     let state = app.state.clone();
-    let server_address = state
-        .server
-        .as_ref()
-        .map_or_else(String::new, |s| s.address.clone());
-    let server_name = state.server.as_ref().and_then(|s| s.name.clone());
+    let server_address = state.server.as_ref().map_or("", |s| s.address.as_str());
+    let server_title = state.server.as_ref().map_or("", |s| s.title());
+    let named = state.server.as_ref().is_some_and(|s| s.name.is_some());
     let own_picture = app.picture(state.profile_picture, cx);
     let current_room = state.current.as_ref().map(|c| c.room);
     let manages = app.manages_rooms();
@@ -156,15 +151,16 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
             .child(with_room_menu(row, id, manages, cx))
             .children(people.into_iter().map(|(user, person)| {
                 let changed = state.key_warnings.iter().any(|w| w.user == user);
-                occupant(user, &person, pictures.get(&user).cloned(), changed, cx)
+                occupant(user, person, pictures.get(&user).cloned(), changed, cx)
             }))
     });
 
     let me = state.me;
-    let my_name = me
-        .and_then(|m| state.person(m).map(|p| p.name.clone()))
-        .or_else(|| state.profile_name.clone())
-        .unwrap_or_else(|| "You".into());
+    let my_person = me.and_then(|m| state.person(m));
+    let my_name = my_person
+        .map(|p| p.name.as_str())
+        .or(state.profile_name.as_deref())
+        .unwrap_or("You");
     let my_picture = me.and_then(|m| pictures.get(&m).cloned()).or(own_picture);
     let (mic, deafened) = (state.mic, state.deafened);
     let in_room = state.current.is_some();
@@ -191,9 +187,9 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                         .flex_none()
                         .max_w(server_name_width)
                         .truncate()
-                        .child(server_name.clone().unwrap_or(server_address.clone())),
+                        .child(server_title.to_owned()),
                 )
-                .children(server_name.is_some().then(|| {
+                .children(named.then(|| {
                     div()
                         .min_w_0()
                         .truncate()
@@ -212,31 +208,23 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                         .on_click(move |_, window, cx| {
                             settings
                                 .update(cx, |app, cx| {
-                                    app.fill_server(window, cx);
-                                    app.screen = Screen::Server(ServerPage::Overview);
-                                    cx.notify();
+                                    let overview = Screen::Server(ServerPage::Overview);
+                                    app.show_screen(overview, window, cx);
                                 })
                                 .ok();
                         }),
                 )
                 .separator()
                 .item(
-                    PopupMenuItem::element(|_, _| {
-                        div().text_color(theme::danger_text()).child("Leave Server")
-                    })
-                    .icon(icon("log-out").text_color(theme::danger_text()))
-                    .on_click(move |_, _, cx| {
+                    danger_menu_item("Leave Server", "log-out").on_click(move |_, _, cx| {
                         leave
-                            .update(cx, |app, cx| {
-                                app.dialog = Some(Dialog::LeaveServer);
-                                cx.notify();
-                            })
+                            .update(cx, |app, cx| app.set_dialog(Some(Dialog::LeaveServer), cx))
                             .ok();
                     }),
                 )
         });
 
-    let speaking = me.is_some_and(|m| state.person(m).is_some_and(|p| p.speaking));
+    let speaking = my_person.is_some_and(|p| p.speaking);
     let profile = div()
         .flex_1()
         .min_w_0()
@@ -245,7 +233,7 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
         .gap_2()
         .px_2()
         .child(avatar(
-            &my_name,
+            my_name,
             me.map_or(0, |m| m.0),
             my_picture,
             px(36.),
@@ -260,23 +248,13 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                     div()
                         .truncate()
                         .font_weight(FontWeight::MEDIUM)
-                        .child(my_name),
+                        .child(my_name.to_owned()),
                 )
                 .child(caption(if in_room { "Connected" } else { "In the lobby" }).truncate()),
         );
 
     sidebar_column(app.sidebar_width)
-        .child(
-            moves_window(div())
-                .flex()
-                .items_center()
-                .px_2()
-                .h(theme::HEADER_HEIGHT)
-                .flex_none()
-                .border_b_1()
-                .border_color(theme::control())
-                .child(server_menu),
-        )
+        .child(top_bar().px_2().child(server_menu))
         .child(
             div()
                 .id("rooms")
@@ -308,41 +286,31 @@ fn sidebar(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement
                 ),
         )
         .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .px_3()
-                .h(theme::FOOTER_HEIGHT)
-                .flex_none()
-                .border_t_1()
-                .border_color(theme::control())
-                .child(profile)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .child(
-                            toggle_icon("profile-mic", "mic", "mic-off", !mic, "Mute")
-                                .tooltip_with_action("Mute", &ToggleMic, None)
-                                .on_click(cx.listener(move |app, _, _, _| {
-                                    app.command(Command::SetMic(!mic))
-                                })),
+            bottom_bar().child(profile).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .child(
+                        toggle_icon("profile-mic", "mic", "mic-off", !mic, "Mute")
+                            .tooltip_with_action("Mute", &ToggleMic, None)
+                            .on_click(
+                                cx.listener(move |app, _, _, _| app.command(Command::SetMic(!mic))),
+                            ),
+                    )
+                    .child(
+                        toggle_icon(
+                            "profile-deafen",
+                            "headphones",
+                            "headphone-off",
+                            deafened,
+                            "Deafen",
                         )
-                        .child(
-                            toggle_icon(
-                                "profile-deafen",
-                                "headphones",
-                                "headphone-off",
-                                deafened,
-                                "Deafen",
-                            )
-                            .tooltip_with_action("Deafen", &ToggleDeafen, None)
-                            .on_click(cx.listener(
-                                move |app, _, _, _| app.command(Command::SetDeafened(!deafened)),
-                            )),
-                        ),
-                ),
+                        .tooltip_with_action("Deafen", &ToggleDeafen, None)
+                        .on_click(cx.listener(move |app, _, _, _| {
+                            app.command(Command::SetDeafened(!deafened))
+                        })),
+                    ),
+            ),
         )
         .child(resize_handle(cx))
 }
@@ -372,44 +340,16 @@ fn with_room_menu(
             )
             .separator()
             .item(
-                PopupMenuItem::element(|_, _| {
-                    div().text_color(theme::danger_text()).child("Delete Room")
-                })
-                .icon(icon("trash").text_color(theme::danger_text()))
-                .on_click(move |_, _, cx| {
+                danger_menu_item("Delete Room", "trash").on_click(move |_, _, cx| {
                     delete
                         .update(cx, |app, cx| {
-                            app.dialog = Some(Dialog::DeleteRoom(room));
-                            cx.notify();
+                            app.set_dialog(Some(Dialog::DeleteRoom(room)), cx)
                         })
                         .ok();
                 }),
             )
         })
         .into_any_element()
-}
-
-/// A ghost icon that turns red, showing `active_icon`, while `active`.
-pub(super) fn toggle_icon(
-    id: &'static str,
-    icon_name: &'static str,
-    active_icon: &'static str,
-    active: bool,
-    tooltip: &'static str,
-) -> Button {
-    let shown = if active { active_icon } else { icon_name };
-    let shown = icon(shown).size(px(16.));
-    Button::new(id)
-        .child(if active {
-            shown.text_color(theme::danger_text())
-        } else {
-            shown
-        })
-        .ghost()
-        .size_8()
-        .px_0()
-        .rounded(theme::RADIUS_ROW)
-        .tooltip(tooltip)
 }
 
 fn occupant(
@@ -465,10 +405,7 @@ fn key_changed_marker(user: UserId, cx: &Context<ThroccApp>) -> Stateful<Div> {
                 .text_color(theme::danger_text()),
         )
         .tooltip(|window, cx| Tooltip::new("Key changed").build(window, cx))
-        .on_click(cx.listener(move |app, _, _, cx| {
-            app.dialog = Some(Dialog::Verify(user));
-            cx.notify();
-        }))
+        .on_click(cx.listener(move |app, _, _, cx| app.open_verify(user, cx)))
 }
 
 /// The headphones-off icon while `person` is deafened, which mutes too, or else the
@@ -486,14 +423,8 @@ fn muted_icon(person: &Person, size: Pixels) -> Option<Icon> {
 
 fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
     let no_rooms = app.state.rooms.is_empty();
-    let header = moves_window(div())
-        .flex()
-        .items_center()
+    let header = top_bar()
         .px_6()
-        .h(theme::HEADER_HEIGHT)
-        .flex_none()
-        .border_b_1()
-        .border_color(theme::control())
         .child(div().typeset(theme::TITLE_3).child("Lobby"));
     let body = div()
         .flex_1()
@@ -525,36 +456,28 @@ fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
 fn room(
     app: &mut ThroccApp,
     room: RoomId,
+    pictures: &Pictures,
     window: &mut Window,
     cx: &mut Context<ThroccApp>,
 ) -> impl IntoElement {
-    let pictures = app.pictures_of_people(cx);
     let state = app.state.clone();
     let name = state.room(room).map_or("Room".into(), |r| r.name.clone());
-    let people = people_in(&state, room);
-    let current = state.current.clone();
-    let tiles: Vec<Tile> = people
-        .iter()
+    let tiles: Vec<Tile> = people_in(&state, room)
+        .into_iter()
         .map(|(user, person)| Tile {
-            user: *user,
-            person: person.clone(),
-            picture: pictures.get(user).cloned(),
-            mine: Some(*user) == state.me,
-            shows_stream: app.shows_stream(*user),
-            popped: app.popouts.contains_key(user),
+            user,
+            person,
+            picture: pictures.get(&user).cloned(),
+            mine: Some(user) == state.me,
+            shows_stream: app.shows_stream(user),
+            popped: app.popouts.contains_key(&user),
         })
         .collect();
     let rtt = state.health.rtt_ms;
 
-    let header = moves_window(div())
-        .flex()
-        .items_center()
+    let header = top_bar()
         .gap_3()
         .px_6()
-        .h(theme::HEADER_HEIGHT)
-        .flex_none()
-        .border_b_1()
-        .border_color(theme::control())
         .child(
             div()
                 .flex_1()
@@ -575,23 +498,14 @@ fn room(
                 .font_features(FontFeatures(Arc::new(vec![("tnum".into(), 1)])))
                 .ghost()
                 .tooltip("Connection")
-                .on_click(cx.listener(|app, _, _, cx| {
-                    app.dialog = Some(Dialog::Connection);
-                    cx.notify();
-                })),
+                .on_click(
+                    cx.listener(|app, _, _, cx| app.set_dialog(Some(Dialog::Connection), cx)),
+                ),
         );
 
-    let sharing = current.as_ref().is_some_and(|c| c.sharing.is_some());
-    let controls = div()
-        .flex()
-        .items_center()
+    let sharing = state.current.as_ref().is_some_and(|c| c.sharing.is_some());
+    let controls = bottom_bar()
         .justify_center()
-        .gap_2()
-        .px_3()
-        .h(theme::FOOTER_HEIGHT)
-        .flex_none()
-        .border_t_1()
-        .border_color(theme::control())
         .child(
             Button::new("share")
                 .child(
@@ -619,10 +533,10 @@ fn room(
                 .on_click(cx.listener(move |app, _, _, cx| {
                     if sharing {
                         app.command(Command::StopShare);
+                        cx.notify();
                     } else {
-                        app.dialog = Some(Dialog::Share);
+                        app.set_dialog(Some(Dialog::Share), cx);
                     }
-                    cx.notify();
                 })),
         )
         .child(
@@ -723,9 +637,9 @@ fn room_marker(locked: bool, selected: bool) -> AnyElement {
 }
 
 /// One person in the room, and what their tile shows.
-struct Tile {
+struct Tile<'a> {
     user: UserId,
-    person: Person,
+    person: &'a Person,
     picture: Option<Arc<RenderImage>>,
     mine: bool,
     shows_stream: bool,
@@ -986,10 +900,9 @@ fn tile(
                     "eye-off",
                     "Stop Watching",
                 )
-                .on_click(cx.listener(move |app, _, _, cx| {
+                .on_click(cx.listener(move |app, _, window, cx| {
                     cx.stop_propagation();
-                    app.stop_watching(user);
-                    cx.notify();
+                    app.stop_watching(user, window, cx);
                 })),
             )
             .child(
@@ -1039,7 +952,7 @@ fn card_fit(height: Pixels, sharing: bool, compact: bool) -> (bool, Pixels) {
 /// watch it when they share.
 fn person_card(t: &Tile, height: Pixels, compact: bool, cx: &mut Context<ThroccApp>) -> Div {
     let user = t.user;
-    let person = &t.person;
+    let person = t.person;
     let (compact, picture_size) = card_fit(height, person.sharing.is_some(), compact);
     let action = person.sharing.map(|_| {
         let (label, icon_name) = if t.popped {
@@ -1051,24 +964,13 @@ fn person_card(t: &Tile, height: Pixels, compact: bool, cx: &mut Context<ThroccA
         } else {
             ("Watch Stream", "eye")
         };
-        let popped = t.popped;
-        let mine = t.mine;
         Button::new(("watch", user.0 as usize))
             .label(label)
             .icon(icon(icon_name))
             .primary()
             .rounded(theme::RADIUS_BUTTON)
             .with_size(if compact { Size::Small } else { Size::Medium })
-            .on_click(cx.listener(move |app, _, _, cx| {
-                if popped {
-                    app.close_popout(user, cx);
-                } else if mine {
-                    app.preview_self = true;
-                } else {
-                    app.command(Command::Watch(user));
-                }
-                cx.notify();
-            }))
+            .on_click(cx.listener(move |app, _, _, cx| app.watch(user, cx)))
     });
     let status = person.sharing.map(|config| {
         div()
@@ -1076,7 +978,7 @@ fn person_card(t: &Tile, height: Pixels, compact: bool, cx: &mut Context<ThroccA
             .items_center()
             .gap_2()
             .child(sharing_icon(px(14.)))
-            .children((!compact).then(|| caption(share_label(&config))))
+            .child(caption(share_label(&config)))
     });
     div()
         .size_full()
@@ -1112,7 +1014,7 @@ fn person_card(t: &Tile, height: Pixels, compact: bool, cx: &mut Context<ThroccA
                 )
                 .children(muted_icon(person, px(13.))),
         )
-        .children((!compact).then_some(status).flatten())
+        .children(status.filter(|_| !compact))
         .children(action)
 }
 

@@ -2,6 +2,12 @@ use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
 pub const DEFAULT_KEY: &str = "alt+Space";
+/// [`DEFAULT_KEY`] as the keyboard labels it.
+pub const DEFAULT_KEY_LABEL: &str = if cfg!(target_os = "macos") {
+    "⌥ Space"
+} else {
+    "Alt+Space"
+};
 
 /// A push-to-talk key that works while another app has focus. Unregistered on drop.
 pub struct PushToTalkKey {

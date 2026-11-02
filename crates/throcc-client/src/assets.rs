@@ -6,52 +6,19 @@ use gpui_kit_assets::AllAssets;
 /// The Lucide icons plus the mascot drawings in `assets/mascot`.
 pub struct Assets;
 
-const MASCOTS: &[(&str, &[u8])] = &[
-    (
-        "mascot/sobbing.svg",
-        include_bytes!("../assets/mascot/sobbing.svg"),
-    ),
-    (
-        "mascot/side-eye.svg",
-        include_bytes!("../assets/mascot/side-eye.svg"),
-    ),
-    ("mascot/sad.svg", include_bytes!("../assets/mascot/sad.svg")),
-    (
-        "mascot/asleep.svg",
-        include_bytes!("../assets/mascot/asleep.svg"),
-    ),
-    (
-        "mascot/angry.svg",
-        include_bytes!("../assets/mascot/angry.svg"),
-    ),
-    (
-        "mascot/cool.svg",
-        include_bytes!("../assets/mascot/cool.svg"),
-    ),
-    (
-        "mascot/dizzy.svg",
-        include_bytes!("../assets/mascot/dizzy.svg"),
-    ),
-    (
-        "mascot/glitch.svg",
-        include_bytes!("../assets/mascot/glitch.svg"),
-    ),
-    (
-        "mascot/happy.svg",
-        include_bytes!("../assets/mascot/happy.svg"),
-    ),
-    (
-        "mascot/love.svg",
-        include_bytes!("../assets/mascot/love.svg"),
-    ),
-    (
-        "mascot/sing.svg",
-        include_bytes!("../assets/mascot/sing.svg"),
-    ),
-    (
-        "mascot/thinking.svg",
-        include_bytes!("../assets/mascot/thinking.svg"),
-    ),
+/// The `mascot/<name>.svg` drawings, each embedded from `assets/mascot`.
+macro_rules! mascots {
+    ($($name:literal),* $(,)?) => {
+        &[$((
+            concat!("mascot/", $name, ".svg"),
+            include_bytes!(concat!("../assets/mascot/", $name, ".svg")),
+        )),*]
+    };
+}
+
+const MASCOTS: &[(&str, &[u8])] = mascots![
+    "sobbing", "side-eye", "sad", "asleep", "angry", "cool", "dizzy", "glitch", "happy", "love",
+    "sing", "thinking",
 ];
 
 impl AssetSource for Assets {
@@ -71,5 +38,25 @@ impl AssetSource for Assets {
                 .map(|(name, _)| SharedString::from(*name)),
         );
         Ok(names)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::views::mascot;
+
+    #[test]
+    fn every_mascot_shown_is_embedded() {
+        let shown = [
+            mascot::WELCOMERS,
+            mascot::GREETERS,
+            mascot::IDLE,
+            mascot::LONELY,
+            mascot::UPSET,
+        ];
+        for path in shown.concat() {
+            assert!(MASCOTS.iter().any(|(name, _)| *name == path), "{path}");
+        }
     }
 }

@@ -39,7 +39,7 @@ pub fn prepare(file: &[u8]) -> Result<Vec<u8>, String> {
     }
     let mut jpeg = Vec::new();
     JpegEncoder::new_with_quality(&mut jpeg, JPEG_QUALITY)
-        .encode_image(&DynamicImage::ImageRgb8(small.to_rgb8()))
+        .encode_image(&DynamicImage::ImageRgb8(small.into_rgb8()))
         .map_err(|e| e.to_string())?;
     Ok(jpeg)
 }
@@ -61,7 +61,7 @@ pub fn sample() -> Vec<u8> {
 pub fn decode(bytes: &[u8]) -> Option<Arc<RenderImage>> {
     let mut pixels = decode_within(bytes, MAX_SHOWN_SIDE, MAX_SHOWN_BYTES)
         .ok()?
-        .to_rgba8();
+        .into_rgba8();
     for pixel in pixels.pixels_mut() {
         pixel.0.swap(0, 2);
     }

@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use gpui::{
     App, AppContext, Context, Entity, InteractiveElement, IntoElement, KeyBinding, ParentElement,
-    PathPromptOptions, Render, RenderImage, Styled, Subscription, Task, Window, WindowHandle,
-    actions, div,
+    PathPromptOptions, Render, RenderImage, SharedString, Styled, Subscription, Task, Window,
+    WindowHandle, actions, div,
 };
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::notification::Notification;
@@ -22,14 +23,14 @@ use throcc_client_core::settings::Settings;
 use throcc_client_core::state::{
     ConnectionStatus, MAX_VOLUME, Playback, ServerView, ShareChoice, Sound, State,
 };
-use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
 use throcc_proto::invite::{self, InviteCode};
-use throcc_proto::messages::User;
+use throcc_proto::messages::{User, valid_name, valid_password};
+use throcc_proto::{Fingerprint, permissions};
 
 use crate::theme;
 use crate::views;
-use crate::views::common::{Typeset, gain_to_loudness, loudness_to_gain};
+use crate::views::common::{Typeset, slider_gain, slider_value, volume_slider};
 
 actions!(throcc, [ToggleMic, ToggleDeafen, CloseDialog]);
 
@@ -60,12 +61,39 @@ pub enum SettingsPage {
     Servers,
 }
 
+impl SettingsPage {
+    pub const ALL: [Self; 4] = [Self::Profile, Self::Audio, Self::Appearance, Self::Servers];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Profile => "Profile",
+            Self::Audio => "Audio",
+            Self::Appearance => "Appearance",
+            Self::Servers => "Servers",
+        }
+    }
+}
+
 /// Pages about the server we are connected to, apart from this machine's settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServerPage {
     Overview,
     Keys,
     Members,
+}
+
+impl ServerPage {
+    pub const ALL: [Self; 3] = [Self::Overview, Self::Keys, Self::Members];
+
+    /// The page's title for someone of `role`: Members lists everyone only for those who may.
+    pub fn title(self, role: Option<Role>) -> &'static str {
+        match self {
+            Self::Overview => "Server",
+            Self::Keys => "Privacy and Keys",
+            Self::Members if role.is_some_and(permissions::can_list_users) => "Members",
+            Self::Members => "Invites",
+        }
+    }
 }
 
 /// Whose picture a chosen file becomes.
@@ -83,9 +111,9 @@ pub enum Screen {
     Server(ServerPage),
 }
 
-/// How the last change on the profile page went.
+/// How the last change on the profile or server page went.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ProfileStatus {
+pub enum SaveStatus {
     Saving,
     Saved,
     /// The picture is kept and goes on our profile when we next join a room.
@@ -99,19 +127,25 @@ pub struct PictureEdit {
     pub image: Option<Arc<RenderImage>>,
 }
 
-impl PictureEdit {
-    pub fn removed() -> Self {
-        Self {
-            bytes: None,
-            image: None,
-        }
+/// The unsaved picture of the profile or server page, and how its last save went.
+#[derive(Default)]
+pub struct PictureForm {
+    pub edit: Option<PictureEdit>,
+    pub status: Option<SaveStatus>,
+}
+
+impl PictureForm {
+    pub fn saving(&self) -> bool {
+        self.status == Some(SaveStatus::Saving)
     }
 
-    fn chosen(bytes: Vec<u8>) -> Self {
-        Self {
-            image: crate::avatar::decode(&bytes),
-            bytes: Some(bytes),
-        }
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// The picture Save would set: `Some(None)` removes it.
+    fn change(&self) -> Option<Option<Vec<u8>>> {
+        self.edit.as_ref().map(|edit| edit.bytes.clone())
     }
 }
 
@@ -141,19 +175,15 @@ pub struct PlaybackControl {
     _changes: Subscription,
 }
 
-/// How the last save on the server page went.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ServerStatus {
-    Saving,
-    Saved,
-    Failed(String),
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum Dialog {
     Share,
     Connection,
-    Verify(UserId),
+    /// `number` is our safety number with `user`, once we have pinned their key.
+    Verify {
+        user: UserId,
+        number: Option<String>,
+    },
     Remove {
         user: UserId,
         name: String,
@@ -189,6 +219,25 @@ pub struct CachedLook {
     pub picture: Option<Arc<RenderImage>>,
 }
 
+/// Runs `f` on the app a moment from now, once the mock client has applied a sample's
+/// commands.
+fn after_a_moment(
+    cx: &mut Context<ThroccApp>,
+    f: impl FnOnce(&mut ThroccApp, &mut Context<ThroccApp>) + 'static,
+) {
+    cx.spawn(async move |this, cx| {
+        cx.background_executor()
+            .timer(Duration::from_millis(300))
+            .await;
+        this.update(cx, |app, cx| {
+            f(app, cx);
+            cx.notify();
+        })
+        .ok();
+    })
+    .detach();
+}
+
 /// The kept looks of `known` servers, by address.
 fn cached_looks(known: &[(String, Fingerprint)]) -> HashMap<String, CachedLook> {
     let (Ok(dir), Ok(cache)) = (keystore::config_dir(), keystore::cache_dir()) else {
@@ -220,13 +269,48 @@ fn known_servers() -> Vec<(String, Fingerprint)> {
         .unwrap_or_default()
 }
 
-fn saved_cue_volume() -> f32 {
+/// A name field's text: `Some(None)` when empty, `None` when the server would refuse it.
+fn typed_name(field: &Entity<InputState>, cx: &App) -> Option<Option<String>> {
+    let typed = field.read(cx).value();
+    if typed.trim().is_empty() {
+        return Some(None);
+    }
+    valid_name(&typed).map(|name| Some(name.to_owned()))
+}
+
+/// A password field's text: `Some(None)` when empty, `None` when the server would refuse it.
+fn typed_password(field: &Entity<InputState>, cx: &App) -> Option<Option<String>> {
+    let typed = field.read(cx).value().to_string();
+    if typed.is_empty() {
+        return Some(None);
+    }
+    valid_password(&typed).then_some(Some(typed))
+}
+
+/// Puts `value` in `field`, and focuses it when `focus`.
+fn set_field(
+    field: &Entity<InputState>,
+    value: impl Into<SharedString>,
+    focus: bool,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let value: SharedString = value.into();
+    field.update(cx, |field, cx| {
+        field.set_value(value, window, cx);
+        if focus {
+            field.focus(window, cx);
+        }
+    });
+}
+
+/// This computer's settings, or the defaults if they can't be read.
+pub fn saved_settings() -> Settings {
     keystore::config_dir()
         .and_then(|dir| Settings::load(&dir))
-        .map(|s| s.cue_volume.clamp(0.0, MAX_VOLUME))
         .unwrap_or_else(|e| {
-            tracing::warn!("no saved cue volume: {e:#}");
-            1.0
+            tracing::warn!("no saved settings: {e:#}");
+            Settings::default()
         })
 }
 
@@ -241,8 +325,7 @@ pub struct ThroccApp {
     pub room_name: Entity<InputState>,
     pub room_password: Entity<InputState>,
     pub server_name: Entity<InputState>,
-    pub server_status: Option<ServerStatus>,
-    pub server_picture_edit: Option<PictureEdit>,
+    pub server_form: PictureForm,
     /// One hex field per palette colour, in [`theme::Palette::LABELS`] order.
     pub palette_fields: Vec<Entity<InputState>>,
     /// The picked theme's name: a preset's, or [`theme::CUSTOM`], which unlocks the colour fields.
@@ -250,18 +333,17 @@ pub struct ThroccApp {
     /// The Custom theme's colours, kept while a preset is picked.
     pub custom_colors: theme::Palette,
     /// Pictures by hash, `None` while one decodes in the background or if it can't be shown.
-    pub pictures: std::collections::HashMap<Hash, Option<Arc<RenderImage>>>,
+    pub pictures: HashMap<Hash, Option<Arc<RenderImage>>>,
     pub joining: bool,
     pub mascot: views::mascot::Shown,
     /// Counts joins started, so a join that was overtaken by a newer one is ignored.
     join_attempt: u64,
     pub join_error: Option<String>,
-    pub profile_status: Option<ProfileStatus>,
-    pub profile_picture_edit: Option<PictureEdit>,
+    pub profile_form: PictureForm,
     pub known_servers: Vec<(String, Fingerprint)>,
     pub server_looks: HashMap<String, CachedLook>,
     pub users: Vec<User>,
-    pub invite: Option<(String, u64)>,
+    pub invite: Option<String>,
     pub voice: VoiceSettings,
     pub input_device: Option<String>,
     pub output_device: Option<String>,
@@ -279,11 +361,11 @@ pub struct ThroccApp {
     pub focus: Option<UserId>,
     /// Whether our own share's self-view shows in our tile.
     pub preview_self: bool,
-    pub popouts: std::collections::HashMap<UserId, WindowHandle<Root>>,
+    pub popouts: HashMap<UserId, WindowHandle<Root>>,
     /// The share filling the whole window, with the rest of the UI hidden.
     pub fullscreen: Option<UserId>,
     /// Until when the controls over the fullscreen share show.
-    pub controls_until: std::time::Instant,
+    pub controls_until: Instant,
     pub fullscreen_focus: gpui::FocusHandle,
     /// Whether [`Self::enter_fullscreen`] made the window fullscreen, so leaving undoes only that.
     made_window_fullscreen: bool,
@@ -295,7 +377,7 @@ pub struct ThroccApp {
     pub room_chrome: gpui::Size<gpui::Pixels>,
     pub person_menu: Option<PersonMenu>,
     /// The tile whose overlay shows, and until when once the pointer has left it.
-    overlay: Option<(UserId, Option<std::time::Instant>)>,
+    overlay: Option<(UserId, Option<Instant>)>,
     pub resizing_sidebar: bool,
     events: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -305,6 +387,7 @@ impl ThroccApp {
     pub fn new(
         mock: bool,
         picked_theme: &'static str,
+        settings: &Settings,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -318,8 +401,7 @@ impl ThroccApp {
                 .placeholder("Password")
         });
         let server_name = cx.new(|cx| InputState::new(window, cx).placeholder("Server name"));
-        let custom_colors =
-            if mock { None } else { theme::saved_custom() }.unwrap_or_else(theme::palette);
+        let custom_colors = theme::custom(settings).unwrap_or_else(theme::palette);
         let palette_fields: Vec<Entity<InputState>> = custom_colors
             .colors()
             .iter()
@@ -379,7 +461,7 @@ impl ThroccApp {
         let (bitrate, bitrate_changes) = Self::bitrate_slider(share_choice, cx);
         let (inputs, outputs) = devices::list();
         let voice = VoiceSettings {
-            cue_volume: saved_cue_volume(),
+            cue_volume: settings.cue_volume.clamp(0.0, MAX_VOLUME),
             ..VoiceSettings::default()
         };
         let audio = views::settings::AudioControls::new(&voice, &inputs, &outputs, window, cx);
@@ -394,18 +476,16 @@ impl ThroccApp {
             room_name,
             room_password,
             server_name,
-            server_status: None,
-            server_picture_edit: None,
+            server_form: PictureForm::default(),
             palette_fields,
             picked_theme,
             custom_colors,
-            pictures: std::collections::HashMap::new(),
+            pictures: HashMap::new(),
             joining: false,
             mascot: views::mascot::Shown::default(),
             join_attempt: 0,
             join_error: None,
-            profile_status: None,
-            profile_picture_edit: None,
+            profile_form: PictureForm::default(),
             known_servers,
             server_looks,
             users: Vec::new(),
@@ -423,9 +503,9 @@ impl ThroccApp {
             _bitrate_changes: bitrate_changes,
             focus: None,
             preview_self: false,
-            popouts: std::collections::HashMap::new(),
+            popouts: HashMap::new(),
             fullscreen: None,
-            controls_until: std::time::Instant::now(),
+            controls_until: Instant::now(),
             fullscreen_focus: cx.focus_handle(),
             made_window_fullscreen: false,
             root_focus: cx.focus_handle(),
@@ -520,8 +600,13 @@ impl ThroccApp {
                 if self.fullscreen.is_some_and(|user| !self.shows_stream(user)) {
                     self.exit_fullscreen(window, cx);
                 }
+                if let Some(Dialog::Verify { user, number }) = &mut self.dialog
+                    && number.is_none()
+                {
+                    *number = self.client.as_ref().and_then(|c| c.safety_number(*user));
+                }
             }
-            Event::Invite { code, expires } => self.invite = Some((code, expires)),
+            Event::Invite { code, .. } => self.invite = Some(code),
             Event::Users(users) => self.users = users,
             Event::Notice(text) => window.push_notification(Notification::new().message(text), cx),
             Event::Kicked(reason) => {
@@ -530,30 +615,26 @@ impl ThroccApp {
             }
             Event::AvatarReady(_) => {}
             Event::ProfileSaved => {
-                self.profile_picture_edit = None;
-                self.profile_status = Some(ProfileStatus::Saved);
+                self.profile_form.edit = None;
+                self.profile_form.status = Some(SaveStatus::Saved);
             }
             Event::ProfileRefused(reason) => {
-                self.profile_picture_edit = None;
-                self.profile_status = Some(ProfileStatus::Failed(reason));
+                self.profile_form.edit = None;
+                self.profile_form.status = Some(SaveStatus::Failed(reason));
             }
             Event::ServerProfileSaved => {
-                self.server_picture_edit = None;
-                self.server_status = Some(ServerStatus::Saved);
+                self.server_form.edit = None;
+                self.server_form.status = Some(SaveStatus::Saved);
             }
             Event::ServerProfileRefused(reason) => {
-                self.server_status = Some(ServerStatus::Failed(reason))
+                self.server_form.status = Some(SaveStatus::Failed(reason))
             }
             Event::PasswordRefused(reason) => {
                 if let Some(Dialog::RoomPassword { error, .. }) = &mut self.dialog {
                     *error = Some(reason);
                 }
             }
-            Event::LeftServer => {
-                self.end_session(window, cx);
-                self.events = None;
-                self.reload_known_servers();
-            }
+            Event::LeftServer => self.end_session(window, cx),
         }
         cx.notify();
     }
@@ -562,7 +643,7 @@ impl ThroccApp {
     pub fn pictures_of_people(
         &mut self,
         cx: &mut Context<Self>,
-    ) -> std::collections::HashMap<UserId, Arc<RenderImage>> {
+    ) -> HashMap<UserId, Arc<RenderImage>> {
         let state = self.state.clone();
         state
             .people
@@ -702,16 +783,9 @@ impl ThroccApp {
         playback: Playback,
         cx: &mut Context<Self>,
     ) -> PlaybackControl {
-        let slider = cx.new(|_| {
-            SliderState::new()
-                .min(0.)
-                .max(200.)
-                .step(1.)
-                .default_value(gain_to_loudness(playback.volume) * 100.)
-        });
+        let slider = cx.new(|_| volume_slider(playback.volume));
         let changes = cx.subscribe(&slider, move |app, _, event: &SliderEvent, cx| {
-            let (SliderEvent::Change(value) | SliderEvent::Release(value)) = event;
-            let volume = loudness_to_gain(value.start() / 100.);
+            let volume = slider_gain(event);
             app.change_playback(sound, |p| p.volume = volume, cx);
         });
         PlaybackControl {
@@ -758,7 +832,7 @@ impl ThroccApp {
 
     pub fn shows_overlay(&self, user: UserId) -> bool {
         self.overlay.is_some_and(|(shown, until)| {
-            shown == user && until.is_none_or(|until| std::time::Instant::now() < until)
+            shown == user && until.is_none_or(|until| Instant::now() < until)
         })
     }
 
@@ -768,7 +842,7 @@ impl ThroccApp {
         if hovered {
             self.overlay = Some((user, None));
         } else if self.overlay.is_some_and(|(shown, _)| shown == user) {
-            self.overlay = Some((user, Some(std::time::Instant::now() + linger)));
+            self.overlay = Some((user, Some(Instant::now() + linger)));
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(linger).await;
                 this.update(cx, |_, cx| cx.notify()).ok();
@@ -779,7 +853,7 @@ impl ThroccApp {
     }
 
     pub fn show_controls(&mut self, cx: &mut Context<Self>) {
-        self.controls_until = std::time::Instant::now() + crate::views::common::CONTROLS_LINGER;
+        self.controls_until = Instant::now() + crate::views::common::CONTROLS_LINGER;
         cx.notify();
     }
 
@@ -807,8 +881,7 @@ impl ThroccApp {
                 .default_value(at as f32)
         });
         let changes = cx.subscribe(&slider, move |app, _, event: &SliderEvent, cx| {
-            let (SliderEvent::Change(value) | SliderEvent::Release(value)) = event;
-            let at = value.start().round().max(0.) as usize;
+            let at = slider_value(event).round().max(0.) as usize;
             if let Some(kbps) = offered.get(at) {
                 app.share_choice.kbps = *kbps;
                 cx.notify();
@@ -878,18 +951,46 @@ impl ThroccApp {
         }
     }
 
-    /// Stops showing `user`'s share: our own self-view, or someone else's stream.
-    pub fn stop_watching(&mut self, user: UserId) {
+    /// Shows `user`'s share here: back from its pop-out, our own self-view, or someone
+    /// else's stream.
+    pub fn watch(&mut self, user: UserId, cx: &mut Context<Self>) {
+        if self.popouts.contains_key(&user) {
+            self.close_popout(user, cx);
+        } else if Some(user) == self.state.me {
+            self.preview_self = true;
+        } else {
+            self.command(Command::Watch(user));
+        }
+        cx.notify();
+    }
+
+    /// Stops showing `user`'s share, leaving fullscreen if it fills the window.
+    pub fn stop_watching(&mut self, user: UserId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.fullscreen_stream() == Some(user) {
+            self.exit_fullscreen(window, cx);
+        }
         if Some(user) == self.state.me {
             self.preview_self = false;
         } else {
             self.command(Command::Unwatch(user));
         }
+        cx.notify();
     }
 
     /// Whether we may create, rename and delete rooms.
     pub fn manages_rooms(&self) -> bool {
-        matches!(self.state.role, Some(Role::Admin | Role::Manager))
+        self.state.role.is_some_and(permissions::can_manage_rooms)
+    }
+
+    pub fn set_dialog(&mut self, dialog: Option<Dialog>, cx: &mut Context<Self>) {
+        self.dialog = dialog;
+        cx.notify();
+    }
+
+    /// Opens the dialog comparing our safety number with `user`'s.
+    pub fn open_verify(&mut self, user: UserId, cx: &mut Context<Self>) {
+        let number = self.client.as_ref().and_then(|c| c.safety_number(user));
+        self.set_dialog(Some(Dialog::Verify { user, number }), cx);
     }
 
     fn on_room_field(
@@ -916,9 +1017,8 @@ impl ThroccApp {
             return;
         }
         if self.state.room(room).is_some_and(|r| r.locked) && !self.manages_rooms() {
-            self.clear_room_password(window, cx);
-            self.dialog = Some(Dialog::RoomPassword { room, error: None });
-            cx.notify();
+            set_field(&self.room_password, "", true, window, cx);
+            self.set_dialog(Some(Dialog::RoomPassword { room, error: None }), cx);
             return;
         }
         self.command(Command::Join(Some(room)));
@@ -928,39 +1028,13 @@ impl ThroccApp {
         let Some(Dialog::RoomPassword { room, .. }) = self.dialog else {
             return;
         };
-        let password = self.room_password.read(cx).value().to_string();
-        if !password.is_empty() {
+        if let Some(Some(password)) = typed_password(&self.room_password, cx) {
             self.command(Command::JoinWithPassword(room, password));
         }
     }
 
-    fn clear_room_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.room_password.update(cx, |s, cx| {
-            s.set_value("", window, cx);
-            s.focus(window, cx);
-        });
-    }
-
     pub fn open_new_room(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.clear_room_password(window, cx);
-        self.room_name.update(cx, |s, cx| {
-            s.set_value("", window, cx);
-            s.focus(window, cx);
-        });
-        self.dialog = Some(Dialog::NewRoom);
-        cx.notify();
-    }
-
-    pub fn create_room(&mut self, cx: &mut Context<Self>) {
-        let name = self.room_name.read(cx).value().trim().to_owned();
-        if name.is_empty() {
-            return;
-        }
-        let password = self.room_password.read(cx).value().to_string();
-        let password = (!password.is_empty()).then_some(password);
-        self.command(Command::CreateRoom(name, password));
-        self.dialog = None;
-        cx.notify();
+        self.open_room_dialog(Dialog::NewRoom, String::new(), window, cx);
     }
 
     pub fn open_edit_room(&mut self, room: RoomId, window: &mut Window, cx: &mut Context<Self>) {
@@ -969,13 +1043,31 @@ impl ThroccApp {
             .room(room)
             .map(|r| r.name.clone())
             .unwrap_or_default();
-        self.clear_room_password(window, cx);
-        self.room_name.update(cx, |s, cx| {
-            s.set_value(name, window, cx);
-            s.focus(window, cx);
-        });
-        self.dialog = Some(Dialog::EditRoom(room));
-        cx.notify();
+        self.open_room_dialog(Dialog::EditRoom(room), name, window, cx);
+    }
+
+    /// Opens a room dialog with `name` in its name field and its password field empty.
+    fn open_room_dialog(
+        &mut self,
+        dialog: Dialog,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        set_field(&self.room_password, "", true, window, cx);
+        set_field(&self.room_name, name, true, window, cx);
+        self.set_dialog(Some(dialog), cx);
+    }
+
+    pub fn create_room(&mut self, cx: &mut Context<Self>) {
+        let (Some(Some(name)), Some(password)) = (
+            typed_name(&self.room_name, cx),
+            typed_password(&self.room_password, cx),
+        ) else {
+            return;
+        };
+        self.command(Command::CreateRoom(name, password));
+        self.set_dialog(None, cx);
     }
 
     /// Renames the edited room, and locks it with the typed password if there is one.
@@ -983,83 +1075,80 @@ impl ThroccApp {
         let Some(Dialog::EditRoom(room)) = self.dialog else {
             return;
         };
-        let name = self.room_name.read(cx).value().trim().to_owned();
-        let unchanged = self.state.room(room).is_some_and(|r| r.name == name);
-        if !name.is_empty() && !unchanged {
+        let (Some(name), Some(password)) = (
+            typed_name(&self.room_name, cx),
+            typed_password(&self.room_password, cx),
+        ) else {
+            return;
+        };
+        if let Some(name) =
+            name.filter(|name| self.state.room(room).is_none_or(|r| r.name != *name))
+        {
             self.command(Command::RenameRoom(room, name));
         }
-        let password = self.room_password.read(cx).value().to_string();
-        if !password.is_empty() {
-            self.command(Command::SetRoomPassword(room, Some(password)));
+        if password.is_some() {
+            self.command(Command::SetRoomPassword(room, password));
         }
-        self.dialog = None;
-        cx.notify();
+        self.set_dialog(None, cx);
     }
 
     /// What a picture change waits on: the server, or, without a name kept here, the name
     /// the server tells us when we next join a room.
-    pub fn saving_status(&self) -> ProfileStatus {
+    fn saving_status(&self) -> SaveStatus {
         if self.state.profile_name.is_some() || self.state.current.is_some() {
-            ProfileStatus::Saving
+            SaveStatus::Saving
         } else {
-            ProfileStatus::UntilJoined
+            SaveStatus::UntilJoined
         }
     }
 
     /// The name Save on the profile page would give us, if it differs from the kept one.
     fn profile_name_change(&self, cx: &App) -> Option<String> {
-        let typed = self.name.read(cx).value().trim().to_owned();
-        (!typed.is_empty() && self.state.profile_name.as_deref() != Some(typed.as_str()))
-            .then_some(typed)
+        let typed = typed_name(&self.name, cx).flatten()?;
+        (self.state.profile_name.as_deref() != Some(typed.as_str())).then_some(typed)
     }
 
     pub fn profile_changed(&self, cx: &App) -> bool {
-        self.profile_picture_edit.is_some() || self.profile_name_change(cx).is_some()
+        self.profile_form.edit.is_some() || self.profile_name_change(cx).is_some()
     }
 
     pub fn save_profile(&mut self, cx: &mut Context<Self>) {
         let name = self.profile_name_change(cx);
-        let picture = self
-            .profile_picture_edit
-            .as_ref()
-            .map(|edit| edit.bytes.clone());
+        let picture = self.profile_form.change();
         if name.is_none() && picture.is_none() {
             return;
         }
-        self.profile_status = Some(if name.is_some() {
-            ProfileStatus::Saving
+        let status = if name.is_some() {
+            SaveStatus::Saving
         } else {
             self.saving_status()
-        });
-        if self.profile_status == Some(ProfileStatus::UntilJoined) {
-            self.profile_picture_edit = None;
+        };
+        if status == SaveStatus::UntilJoined {
+            self.profile_form.edit = None;
         }
+        self.profile_form.status = Some(status);
         self.command(Command::SetProfile { name, picture });
         cx.notify();
     }
 
     /// The name Save on the server page would give the server, if it differs.
     fn server_name_change(&self, cx: &App) -> Option<Option<String>> {
-        let typed = self.server_name.read(cx).value().trim().to_owned();
-        let typed = (!typed.is_empty()).then_some(typed);
+        let typed = typed_name(&self.server_name, cx)?;
         let current = self.state.server.as_ref().and_then(|s| s.name.clone());
         (typed != current).then_some(typed)
     }
 
     pub fn server_changed(&self, cx: &App) -> bool {
-        self.server_picture_edit.is_some() || self.server_name_change(cx).is_some()
+        self.server_form.edit.is_some() || self.server_name_change(cx).is_some()
     }
 
     pub fn save_server(&mut self, cx: &mut Context<Self>) {
         let name = self.server_name_change(cx);
-        let picture = self
-            .server_picture_edit
-            .as_ref()
-            .map(|edit| edit.bytes.clone());
+        let picture = self.server_form.change();
         if name.is_none() && picture.is_none() {
             return;
         }
-        self.server_status = Some(ServerStatus::Saving);
+        self.server_form.status = Some(SaveStatus::Saving);
         self.command(Command::SetServerProfile { name, picture });
         cx.notify();
     }
@@ -1070,30 +1159,65 @@ impl ThroccApp {
         }
     }
 
-    /// Puts our kept name in the profile page's name field.
-    pub fn fill_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.profile_status = None;
-        self.profile_picture_edit = None;
-        let name = self.state.profile_name.clone().unwrap_or_default();
-        self.name.update(cx, |s, cx| s.set_value(name, window, cx));
+    /// Shows `screen`, first filling in what its page needs.
+    pub fn show_screen(&mut self, screen: Screen, window: &mut Window, cx: &mut Context<Self>) {
+        match screen {
+            Screen::Settings(SettingsPage::Profile) => {
+                self.profile_form.reset();
+                let name = self.state.profile_name.clone().unwrap_or_default();
+                set_field(&self.name, name, false, window, cx);
+            }
+            Screen::Server(ServerPage::Overview) => {
+                self.server_form.reset();
+                let name = self.state.server.as_ref().and_then(|s| s.name.clone());
+                set_field(
+                    &self.server_name,
+                    name.unwrap_or_default(),
+                    false,
+                    window,
+                    cx,
+                );
+            }
+            Screen::Server(ServerPage::Members)
+                if self.state.role.is_some_and(permissions::can_list_users) =>
+            {
+                self.command(Command::ListUsers);
+            }
+            _ => {}
+        }
+        self.screen = screen;
+        cx.notify();
     }
 
-    /// Puts the server's name in the server page's name field.
-    pub fn fill_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.server_status = None;
-        self.server_picture_edit = None;
-        let name = self
-            .state
-            .server
-            .as_ref()
-            .and_then(|s| s.name.clone())
-            .unwrap_or_default();
-        self.server_name
-            .update(cx, |s, cx| s.set_value(name, window, cx));
+    pub fn form(&self, target: PictureFor) -> &PictureForm {
+        match target {
+            PictureFor::Profile => &self.profile_form,
+            PictureFor::Server => &self.server_form,
+        }
+    }
+
+    fn form_mut(&mut self, target: PictureFor) -> &mut PictureForm {
+        match target {
+            PictureFor::Profile => &mut self.profile_form,
+            PictureFor::Server => &mut self.server_form,
+        }
+    }
+
+    /// Marks our or the server's picture for removal on the next save.
+    pub fn remove_picture(&mut self, target: PictureFor, cx: &mut Context<Self>) {
+        *self.form_mut(target) = PictureForm {
+            edit: Some(PictureEdit {
+                bytes: None,
+                image: None,
+            }),
+            status: None,
+        };
+        cx.notify();
     }
 
     /// Asks for a picture file, shrinks it and sets it as our or the server's picture.
     pub fn choose_picture(&mut self, target: PictureFor, cx: &mut Context<Self>) {
+        self.form_mut(target).status = None;
         let chosen = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -1111,23 +1235,18 @@ impl ThroccApp {
                 .background_executor()
                 .spawn(async move {
                     let file = std::fs::read(&path).map_err(|e| e.to_string())?;
-                    crate::avatar::prepare(&file)
+                    let bytes = crate::avatar::prepare(&file)?;
+                    Ok(PictureEdit {
+                        image: crate::avatar::decode(&bytes),
+                        bytes: Some(bytes),
+                    })
                 })
                 .await;
             this.update(cx, |app, cx| {
-                match (target, prepared) {
-                    (PictureFor::Profile, Ok(bytes)) => {
-                        app.profile_picture_edit = Some(PictureEdit::chosen(bytes));
-                    }
-                    (PictureFor::Profile, Err(message)) => {
-                        app.profile_status = Some(ProfileStatus::Failed(message))
-                    }
-                    (PictureFor::Server, Ok(bytes)) => {
-                        app.server_picture_edit = Some(PictureEdit::chosen(bytes));
-                    }
-                    (PictureFor::Server, Err(message)) => {
-                        app.server_status = Some(ServerStatus::Failed(message))
-                    }
+                let form = app.form_mut(target);
+                match prepared {
+                    Ok(edit) => form.edit = Some(edit),
+                    Err(message) => form.status = Some(SaveStatus::Failed(message)),
                 }
                 cx.notify();
             })
@@ -1159,22 +1278,17 @@ impl ThroccApp {
         if self.joining && self.address.read(cx).value() == address {
             return;
         }
-        self.address
-            .update(cx, |s, cx| s.set_value(address, window, cx));
-        self.code.update(cx, |s, cx| s.set_value("", window, cx));
+        set_field(&self.address, address, false, window, cx);
+        set_field(&self.code, "", false, window, cx);
         self.join(window, cx);
         cx.notify();
     }
 
     pub fn open_add_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.join_error = None;
-        self.address.update(cx, |s, cx| {
-            s.set_value("", window, cx);
-            s.focus(window, cx);
-        });
-        self.code.update(cx, |s, cx| s.set_value("", window, cx));
-        self.dialog = Some(Dialog::AddServer);
-        cx.notify();
+        set_field(&self.address, "", true, window, cx);
+        set_field(&self.code, "", false, window, cx);
+        self.set_dialog(Some(Dialog::AddServer), cx);
     }
 
     /// Connects to the server in the address field, leaving the one we are on first and
@@ -1224,17 +1338,14 @@ impl ThroccApp {
             let result = connecting.await;
             cx.update_window(window_handle, |_, window, cx| {
                 this.update(cx, |app, cx| {
+                    if result.is_ok() {
+                        app.reload_known_servers();
+                    }
                     if app.join_attempt != attempt {
-                        if result.is_ok() {
-                            app.reload_known_servers();
-                        }
                         return;
                     }
                     match result {
-                        Ok(client) => {
-                            app.reload_known_servers();
-                            app.attach(Arc::new(client), window, cx);
-                        }
+                        Ok(client) => app.attach(Arc::new(client), window, cx),
                         Err(e) => {
                             app.joining = false;
                             match e.pin_mismatch() {
@@ -1269,7 +1380,7 @@ impl ThroccApp {
         if let Ok(mut known) = Keystore::default_known_servers()
             && known.trust(address, actual).is_ok()
         {
-            self.dialog = None;
+            self.set_dialog(None, cx);
             self.join(window, cx);
         }
     }
@@ -1278,15 +1389,16 @@ impl ThroccApp {
     fn disconnect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.command(Command::Disconnect);
         self.end_session(window, cx);
-        self.events = None;
     }
 
-    /// Returns to the screen for no server without anything that belonged to the server's session.
+    /// Returns to the screen for no server without anything that belonged to the server's
+    /// session, and reloads the known servers, whose looks it may have changed.
     fn end_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_all_popouts(cx);
         self.exit_fullscreen(window, cx);
         self.stop_mic_test();
         self.client = None;
+        self.events = None;
         self.invite = None;
         self.users.clear();
         self.dialog = None;
@@ -1295,7 +1407,7 @@ impl ThroccApp {
         self.preview_self = false;
         self.push_to_talk = None;
         self.screen = Screen::Join;
-        self.server_looks = cached_looks(&self.known_servers);
+        self.reload_known_servers();
     }
 
     /// Takes the server at `address` off our list without leaving it, abandoning a join to it.
@@ -1308,8 +1420,7 @@ impl ThroccApp {
             tracing::warn!("forgetting {address}: {e:#}");
         }
         self.reload_known_servers();
-        self.dialog = None;
-        cx.notify();
+        self.set_dialog(None, cx);
     }
 
     fn reload_known_servers(&mut self) {
@@ -1327,9 +1438,10 @@ impl ThroccApp {
     }
 
     /// Opens a screen of the mock client by name, for screenshots: welcome, join, joinfailed,
-    /// lost, lobby, emptylobby, room, alone, focus, fullscreen, popout, share, settings, sounds,
-    /// appearance, profile, connection, verify, members, keychange, pinmismatch, addserver,
-    /// removeserver or personmenu.
+    /// lost, personmenu, addserver, removeserver, room, alone, emptylobby, focus, fullscreen,
+    /// popout, share, connection, verify, keychange, pinmismatch, settings, appearance,
+    /// newroom, editroom, roompassword, deleteroom, profile, server or members. Any other
+    /// name leaves the lobby.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         let room = RoomId(1);
         let joined = |app: &mut Self| {
@@ -1337,40 +1449,28 @@ impl ThroccApp {
             app.command(Command::SetMic(true));
             app.command(Command::Watch(UserId(4)));
         };
+        let offline = |app: &mut Self| {
+            app.client = None;
+            app.screen = Screen::Join;
+        };
         match screen {
             "welcome" => {
-                self.client = None;
-                self.screen = Screen::Join;
+                offline(self);
                 self.known_servers.clear();
             }
-            "join" => {
-                self.client = None;
-                self.screen = Screen::Join;
-            }
+            "join" => offline(self),
             "joinfailed" => {
-                self.client = None;
-                self.screen = Screen::Join;
-                self.join_error = Some(
-                    "Couldn’t reach the server. Check the address, and that UDP port 8476 is open."
-                        .into(),
-                );
+                offline(self);
+                self.join_error = Some(views::join::unreachable_hint());
             }
             "lost" => {
                 joined(self);
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(300))
-                        .await;
-                    this.update(cx, |app, cx| {
-                        Arc::make_mut(&mut app.state).connection = ConnectionStatus::Reconnecting {
-                            attempt: 3,
-                            reason: "timed out".into(),
-                        };
-                        cx.notify();
-                    })
-                    .ok();
-                })
-                .detach();
+                after_a_moment(cx, |app, _| {
+                    Arc::make_mut(&mut app.state).connection = ConnectionStatus::Reconnecting {
+                        attempt: 3,
+                        reason: "timed out".into(),
+                    };
+                });
             }
             "personmenu" => {
                 joined(self);
@@ -1382,13 +1482,11 @@ impl ThroccApp {
                 );
             }
             "addserver" => {
-                self.client = None;
-                self.screen = Screen::Join;
+                offline(self);
                 self.dialog = Some(Dialog::AddServer);
             }
             "removeserver" => {
-                self.client = None;
-                self.screen = Screen::Join;
+                offline(self);
                 self.dialog = Some(Dialog::RemoveServer("lan.example.org".into()));
             }
             "room" => joined(self),
@@ -1406,29 +1504,14 @@ impl ThroccApp {
             }
             "fullscreen" => {
                 joined(self);
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(300))
-                        .await;
-                    this.update(cx, |app, cx| {
-                        app.fullscreen = Some(UserId(4));
-                        app.controls_until =
-                            std::time::Instant::now() + std::time::Duration::from_secs(60);
-                        cx.notify();
-                    })
-                    .ok();
-                })
-                .detach();
+                after_a_moment(cx, |app, _| {
+                    app.fullscreen = Some(UserId(4));
+                    app.controls_until = Instant::now() + Duration::from_secs(60);
+                });
             }
             "popout" => {
                 joined(self);
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(300))
-                        .await;
-                    this.update(cx, |app, cx| app.pop_out(UserId(4), cx)).ok();
-                })
-                .detach();
+                after_a_moment(cx, |app, cx| app.pop_out(UserId(4), cx));
             }
             "share" => {
                 joined(self);
@@ -1438,11 +1521,10 @@ impl ThroccApp {
                 joined(self);
                 self.dialog = Some(Dialog::Connection);
             }
-            "verify" => self.dialog = Some(Dialog::Verify(UserId(2))),
-            "keychange" => self.dialog = Some(Dialog::Verify(UserId(3))),
+            "verify" => self.open_verify(UserId(2), cx),
+            "keychange" => self.open_verify(UserId(3), cx),
             "pinmismatch" => {
-                self.client = None;
-                self.screen = Screen::Join;
+                offline(self);
                 self.dialog = Some(Dialog::PinMismatch {
                     address: "voice.example.net".into(),
                     expected: Fingerprint([0x2c; 32]),
@@ -1468,13 +1550,9 @@ impl ThroccApp {
                     picture: Some(Some(crate::avatar::sample())),
                 });
             }
-            "server" => {
-                self.screen = Screen::Server(ServerPage::Overview);
-                self.fill_server(window, cx);
-            }
+            "server" => self.screen = Screen::Server(ServerPage::Overview),
             "members" => {
                 self.screen = Screen::Server(ServerPage::Members);
-                self.command(Command::ListUsers);
                 self.command(Command::CreateInvite);
             }
             _ => {}
@@ -1482,9 +1560,7 @@ impl ThroccApp {
         if let Some(client) = &self.client {
             self.state = client.state();
         }
-        if self.screen == Screen::Settings(SettingsPage::Profile) {
-            self.fill_profile(window, cx);
-        }
+        self.show_screen(self.screen, window, cx);
     }
 
     /// Registers or drops the global push-to-talk key to match the transmit mode.
@@ -1501,7 +1577,7 @@ impl ThroccApp {
                 let poller = cx.spawn(async move |this, cx| {
                     loop {
                         cx.background_executor()
-                            .timer(std::time::Duration::from_millis(10))
+                            .timer(Duration::from_millis(10))
                             .await;
                         let alive = this.update(cx, |app, _| {
                             if let Some(down) =
@@ -1559,10 +1635,6 @@ impl ThroccApp {
         self.push_to_talk.is_some()
     }
 
-    pub fn safety_number(&self, user: UserId) -> Option<String> {
-        self.client.as_ref()?.safety_number(user)
-    }
-
     fn toggle_mic(&mut self, _: &ToggleMic, _: &mut Window, _: &mut Context<Self>) {
         self.command(Command::SetMic(!self.state.mic));
     }
@@ -1578,13 +1650,13 @@ impl ThroccApp {
         if self.dialog.is_none() && self.fullscreen.is_some() {
             self.exit_fullscreen(window, cx);
         }
-        self.dialog = None;
-        cx.notify();
+        self.set_dialog(None, cx);
     }
 }
 
 impl Render for ThroccApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.feeds.sweep(window, cx);
         self.sidebar_width = self.sidebar_width.min(widest_sidebar(window));
         self.mascot.start_render();
         let lost = match self.screen {

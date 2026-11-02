@@ -6,10 +6,10 @@ use gpui_component::Icon;
 use gpui_component::slider::Slider;
 use throcc_client_core::client::Command;
 use throcc_client_core::state::{Person, Sound};
-use throcc_proto::ids::{Role, UserId};
+use throcc_proto::ids::UserId;
+use throcc_proto::permissions;
 
-use super::common::{Typeset, gain_to_loudness, icon, mono, section};
-use super::main::toggle_icon;
+use super::common::{Typeset, gain_to_loudness, icon, mono, section, toggle_icon};
 use crate::app::{Dialog, PlaybackControl, ThroccApp};
 use crate::theme;
 
@@ -141,37 +141,21 @@ fn playback(
 
 /// What can be done with `user`'s stream here, as menu rows.
 fn stream_actions(app: &ThroccApp, user: UserId, mine: bool, cx: &mut Context<ThroccApp>) -> Div {
-    let rows = div()
-        .flex()
-        .flex_col()
-        .pt_1()
-        .mt_1()
-        .border_t_1()
-        .border_color(theme::control());
-    if app.popouts.contains_key(&user) {
-        return rows.child(
-            action("person-menu-bring-back", "panel-top-open", "Bring Back").on_click(cx.listener(
-                move |app, _, _, cx| {
-                    app.close_person_menu(cx);
-                    app.close_popout(user, cx);
-                },
-            )),
-        );
-    }
+    let rows = group();
     if !app.shows_stream(user) {
-        let label = if mine { "Preview" } else { "Watch Stream" };
-        return rows.child(
-            action("person-menu-watch", "eye", label).on_click(cx.listener(
-                move |app, _, _, cx| {
-                    app.close_person_menu(cx);
-                    if mine {
-                        app.preview_self = true;
-                    } else {
-                        app.command(Command::Watch(user));
-                    }
-                },
-            )),
-        );
+        let (id, icon_name, label) = if app.popouts.contains_key(&user) {
+            ("person-menu-bring-back", "panel-top-open", "Bring Back")
+        } else if mine {
+            ("person-menu-watch", "eye", "Preview")
+        } else {
+            ("person-menu-watch", "eye", "Watch Stream")
+        };
+        return rows.child(action(id, icon_name, label).on_click(cx.listener(
+            move |app, _, _, cx| {
+                app.close_person_menu(cx);
+                app.watch(user, cx);
+            },
+        )));
     }
     rows.children((!mine).then(|| {
         action("person-menu-pop-out", "picture-in-picture-2", "Pop Out").on_click(cx.listener(
@@ -204,10 +188,7 @@ fn stream_actions(app: &ThroccApp, user: UserId, mine: bool, cx: &mut Context<Th
         )
         .on_click(cx.listener(move |app, _, window, cx| {
             app.close_person_menu(cx);
-            if app.fullscreen_stream() == Some(user) {
-                app.exit_fullscreen(window, cx);
-            }
-            app.stop_watching(user);
+            app.stop_watching(user, window, cx);
         })),
     )
 }
@@ -221,27 +202,23 @@ fn moderation(
     cx: &mut Context<ThroccApp>,
 ) -> Option<Div> {
     let me = app.state.role?;
-    let outranked = Some(user) != app.state.me && person.role < me;
-    let kick_room = person.room.filter(|_| outranked && me >= Role::Manager);
+    let other = Some(user) != app.state.me;
+    let kick_room = person
+        .room
+        .filter(|_| other && permissions::can_kick_from_room(me, person.role));
     let kick = kick_room.is_some();
     let in_popout = app.person_menu.as_ref().is_some_and(|menu| {
         app.popouts
             .values()
             .any(|popout| AnyWindowHandle::from(*popout) == menu.window)
     });
-    let remove = outranked && me == Role::Admin && !in_popout;
+    let remove = other && permissions::can_remove(me, person.role) && !in_popout;
     if !kick && !remove {
         return None;
     }
     let name = person.name.clone();
     Some(
-        div()
-            .flex()
-            .flex_col()
-            .pt_1()
-            .mt_1()
-            .border_t_1()
-            .border_color(theme::control())
+        group()
             .children(kick.then(|| {
                 danger_action("person-menu-kick", "door-open", "Kick from Room").on_click(
                     cx.listener(move |app, _, _, cx| {
@@ -256,15 +233,27 @@ fn moderation(
                 danger_action("person-menu-remove", "user-x", "Remove from Server").on_click(
                     cx.listener(move |app, _, _, cx| {
                         app.close_person_menu(cx);
-                        app.dialog = Some(Dialog::Remove {
+                        let dialog = Dialog::Remove {
                             user,
                             name: name.clone(),
                             cascade: false,
-                        });
+                        };
+                        app.set_dialog(Some(dialog), cx);
                     }),
                 )
             })),
     )
+}
+
+/// Menu rows set apart from those above by a rule.
+fn group() -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .pt_1()
+        .mt_1()
+        .border_t_1()
+        .border_color(theme::control())
 }
 
 fn action(id: &'static str, icon_name: &'static str, label: &'static str) -> Stateful<Div> {

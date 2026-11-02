@@ -56,7 +56,7 @@ impl Palette {
         }
     }
 
-    /// One line of eight `#rrggbb` colours, in [`Self::LABELS`] order.
+    /// The eight colours as `#rrggbb`, in [`Self::LABELS`] order.
     pub fn to_hex(self) -> Vec<String> {
         self.colors().iter().map(|c| format_hex(*c)).collect()
     }
@@ -168,6 +168,9 @@ pub const PRESETS: [(&str, Palette); 7] = [
 /// `#rrggbb`, `rrggbb` or `#rgb` as a colour.
 pub fn parse_hex(text: &str) -> Option<u32> {
     let digits = text.trim().trim_start_matches('#');
+    if !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
     let digits: String = match digits.len() {
         3 => digits.chars().flat_map(|c| [c, c]).collect(),
         6 => digits.to_owned(),
@@ -190,12 +193,8 @@ pub fn palette() -> Palette {
 
 pub const CUSTOM: &str = "Custom";
 
-/// The name and palette of the theme picked last time, if one was saved.
-pub fn saved() -> Option<(&'static str, Palette)> {
-    picked(&saved_settings()?)
-}
-
-fn picked(settings: &Settings) -> Option<(&'static str, Palette)> {
+/// The name and palette of the theme kept in `settings`, if one was.
+pub fn picked(settings: &Settings) -> Option<(&'static str, Palette)> {
     match settings.theme.as_deref()? {
         CUSTOM => Some((CUSTOM, Palette::from_hex(settings.palette.as_ref()?)?)),
         name => preset(name),
@@ -210,13 +209,9 @@ pub fn preset(name: &str) -> Option<(&'static str, Palette)> {
         .copied()
 }
 
-/// The Custom theme's colours, if they were ever saved.
-pub fn saved_custom() -> Option<Palette> {
-    Palette::from_hex(&saved_settings()?.palette?)
-}
-
-fn saved_settings() -> Option<Settings> {
-    Settings::load(&throcc_client_core::keystore::config_dir().ok()?).ok()
+/// The Custom theme's colours in `settings`, if they were ever saved.
+pub fn custom(settings: &Settings) -> Option<Palette> {
+    Palette::from_hex(settings.palette.as_ref()?)
 }
 
 /// Keeps the preset called `name` as the picked theme.
@@ -303,15 +298,12 @@ fn mixed(top: u32, share: f32, base: u32) -> Hsla {
 pub fn bg() -> Hsla {
     hex(palette().bg)
 }
-pub fn sidebar() -> Hsla {
-    hex(palette().panel)
-}
 /// The sidebar over the blurred desktop on macOS, solid elsewhere.
 pub fn sidebar_glass() -> Hsla {
     if cfg!(target_os = "macos") {
-        sidebar().opacity(0.91)
+        surface().opacity(0.91)
     } else {
-        sidebar()
+        surface()
     }
 }
 /// What shows behind every view: nothing on macOS, where the window blurs the desktop.
@@ -404,7 +396,6 @@ fn danger_hover() -> Hsla {
     let p = palette();
     mixed(p.bad, 0.28, p.panel)
 }
-/// Behind a stream, where its letterbox bars show.
 /// Behind a fullscreen stream, as in any video player, whatever the theme.
 pub fn player_bg() -> Hsla {
     gpui::black()
@@ -555,7 +546,7 @@ pub fn set(palette: Palette, cx: &mut App) {
 }
 
 /// Points gpui-component's own widgets (buttons, inputs, switches, focus rings) at these tokens.
-pub fn install(cx: &mut App) {
+fn install(cx: &mut App) {
     let families = FAMILIES.get_or_init(|| pick_families(cx)).clone();
     let mode = if palette().is_light() {
         ThemeMode::Light
@@ -662,6 +653,7 @@ mod tests {
         assert_eq!(parse_hex("#fa0"), Some(0xFFAA00));
         assert_eq!(parse_hex("#12345"), None);
         assert_eq!(parse_hex("#GGGGGG"), None);
+        assert_eq!(parse_hex("#+FFFFF"), None);
     }
 
     #[test]

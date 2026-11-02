@@ -7,6 +7,8 @@ use gpui::{
     relative,
 };
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::menu::PopupMenuItem;
+use gpui_component::slider::{SliderEvent, SliderState};
 use gpui_component::{Icon, Sizable, Size};
 use throcc_client_core::state::MAX_VOLUME;
 
@@ -52,6 +54,26 @@ pub fn gain_to_loudness(gain: f32) -> f32 {
     } else {
         1.0 + gain.ln() / MAX_VOLUME.ln()
     }
+}
+
+/// A 0 to 200 % volume slider, set to `gain`.
+pub fn volume_slider(gain: f32) -> SliderState {
+    SliderState::new()
+        .min(0.)
+        .max(200.)
+        .step(1.)
+        .default_value(gain_to_loudness(gain) * 100.)
+}
+
+/// Where a slider was moved to.
+pub fn slider_value(event: &SliderEvent) -> f32 {
+    let (SliderEvent::Change(value) | SliderEvent::Release(value)) = event;
+    value.start()
+}
+
+/// The gain a [`volume_slider`] was moved to.
+pub fn slider_gain(event: &SliderEvent) -> f32 {
+    loudness_to_gain(slider_value(event) / 100.)
 }
 
 /// A server as "name (address)", or its address alone when it has no name.
@@ -215,6 +237,48 @@ pub fn danger(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Butto
         .with_size(Size::Medium)
 }
 
+/// A ghost icon that turns red, showing `active_icon`, while `active`.
+pub fn toggle_icon(
+    id: &'static str,
+    icon_name: &'static str,
+    active_icon: &'static str,
+    active: bool,
+    tooltip: &'static str,
+) -> Button {
+    let shown = if active { active_icon } else { icon_name };
+    let shown = icon(shown).size(px(16.));
+    Button::new(id)
+        .child(if active {
+            shown.text_color(theme::danger_text())
+        } else {
+            shown
+        })
+        .ghost()
+        .size_8()
+        .px_0()
+        .rounded(theme::RADIUS_ROW)
+        .tooltip(tooltip)
+}
+
+/// A menu item in the danger colours, for leaving or removing something.
+pub fn danger_menu_item(label: &'static str, icon_name: &'static str) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, _| div().text_color(theme::danger_text()).child(label))
+        .icon(icon(icon_name).text_color(theme::danger_text()))
+}
+
+/// What went wrong, in the warning colours.
+pub fn error_box(error: String) -> Div {
+    div()
+        .p_3()
+        .rounded(theme::RADIUS_ROW)
+        .bg(theme::warn_bg())
+        .border_1()
+        .border_color(theme::warn_border())
+        .text_color(theme::warn_text())
+        .typeset(theme::CALLOUT)
+        .child(error)
+}
+
 pub fn ghost_icon(
     id: impl Into<ElementId>,
     icon_name: &'static str,
@@ -250,6 +314,30 @@ pub fn app_titlebar(options: WindowOptions, lights: Point<Pixels>, blurred: bool
         },
         ..options
     }
+}
+
+/// A bar across the top of a column at the header height, which moves the window.
+pub fn top_bar() -> Div {
+    moves_window(div())
+        .flex()
+        .items_center()
+        .h(theme::HEADER_HEIGHT)
+        .flex_none()
+        .border_b_1()
+        .border_color(theme::control())
+}
+
+/// A bar across the bottom of a column at the footer height.
+pub fn bottom_bar() -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .h(theme::FOOTER_HEIGHT)
+        .flex_none()
+        .border_t_1()
+        .border_color(theme::control())
 }
 
 /// Lets a top bar move the window, and zoom it on double-click, on macOS where the app

@@ -3,9 +3,10 @@ use throcc_client_core::account::SignInError;
 use throcc_client_core::connection::ConnectError;
 use throcc_client_core::control::LoginError;
 use throcc_client_core::state::ConnectionStatus;
+use throcc_proto::DEFAULT_PORT;
 use throcc_proto::messages::AuthError;
 
-use super::common::{Typeset, description, moves_window, primary};
+use super::common::{Typeset, description, error_box, moves_window, primary};
 use super::mascot;
 use crate::app::{Dialog, ThroccApp};
 use crate::theme;
@@ -26,24 +27,16 @@ pub fn explain(error: &SignInError) -> String {
             "This server doesn’t know you anymore. Join again with a fresh invite code.".into()
         }
         SignInError::Connect(ConnectError::Resolve(address)) => format!("Couldn’t find {address}. Check the address."),
-        SignInError::Connect(ConnectError::Connection(_)) => {
-            "Couldn’t reach the server. Check the address, and that UDP port 8476 is open.".into()
-        }
+        SignInError::Connect(ConnectError::Connection(_)) => unreachable_hint(),
         other => other.to_string(),
     }
 }
 
-/// A failed join, in the warning colours.
-pub(super) fn error_box(error: String) -> Div {
-    div()
-        .p_3()
-        .rounded(theme::RADIUS_ROW)
-        .bg(theme::warn_bg())
-        .border_1()
-        .border_color(theme::warn_border())
-        .text_color(theme::warn_text())
-        .typeset(theme::CALLOUT)
-        .child(error)
+/// Why a server didn't answer, and what to check.
+pub fn unreachable_hint() -> String {
+    format!(
+        "Couldn’t reach the server. Check the address, and that UDP port {DEFAULT_PORT} is open."
+    )
 }
 
 /// The window with no server connected: how a join is going, or what to do next.

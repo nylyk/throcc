@@ -76,9 +76,7 @@ impl PopOut {
             .inspect_err(|e| tracing::warn!("could not open a window for the share: {e:#}"))
             .ok()
     }
-}
 
-impl PopOut {
     fn set_fullscreen(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         if window.is_fullscreen() != on {
@@ -95,6 +93,7 @@ impl PopOut {
 
 impl Render for PopOut {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.feeds.sweep(window, cx);
         let user = self.user;
         let Some(app) = self.app.upgrade() else {
             return div().id("popout").size_full().bg(theme::bg());
@@ -103,16 +102,16 @@ impl Render for PopOut {
             let app = app.read(cx);
             (app.client.clone(), app.state.clone())
         };
-        let person = state.person(user).cloned();
-        let sharer_picture = app.update(cx, |app, cx| app.picture(person.as_ref()?.avatar, cx));
-        let name = person.as_ref().map_or("Someone".into(), |p| p.name.clone());
+        let person = state.person(user);
+        let sharer_picture = app.update(cx, |app, cx| app.picture(person?.avatar, cx));
+        let name = person.map_or("Someone", |p| &p.name);
         let room = state
             .current
             .as_ref()
             .and_then(|c| state.room(c.room))
             .map(|r| r.name.clone())
             .unwrap_or_default();
-        let config = person.as_ref().and_then(|p| p.sharing);
+        let config = person.and_then(|p| p.sharing);
         let details = match config {
             Some(config) => format!("{room} · {}", share_label(&config)),
             None => room,
@@ -130,7 +129,7 @@ impl Render for PopOut {
                 .child(caption(format!("{name} stopped sharing.")))
                 .into_any_element()
         };
-        let title = player_title(&name, user.0, sharer_picture, details).pl(if fullscreen {
+        let title = player_title(name, user.0, sharer_picture, details).pl(if fullscreen {
             px(0.)
         } else {
             TRAFFIC_LIGHTS
