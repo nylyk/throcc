@@ -4,23 +4,28 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use throcc_client_core::account;
-use throcc_client_core::call::Call;
+use throcc_client_core::call::{Call, CallEvent};
 use throcc_client_core::client::{Client, ClientApi, ClientOptions, Command, Event};
 use throcc_client_core::keystore::Keystore;
-use throcc_client_core::state::{ConnectionStatus, KeyWarning, State, WarningCause};
-use throcc_proto::ids::RoomId;
+use throcc_client_core::state::{ConnectionStatus, KeyWarning, State};
+use throcc_proto::Fingerprint;
+use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::invite::InviteCode;
-use throcc_proto::messages::{Codec, MediaState, Request, Response};
+use throcc_proto::messages::{
+    Codec, Event as ServerEvent, MediaState, PublicKey, Request, Response,
+};
+use throcc_server::identity::KEY_FILE;
+use tokio::runtime::Runtime;
 
 use common::{ProcessLikeServer, share_1080p60, sharing};
 
 /// The server takes one profile change per 10 s.
 const PROFILE_INTERVAL: Duration = Duration::from_millis(10_500);
 
-/// A server's address and bootstrap invite. It runs until the returned handle drops.
+/// A server's address and an admin invite. It runs until the returned handle drops.
 fn server() -> (String, InviteCode, ProcessLikeServer) {
     let server = ProcessLikeServer::start_temp();
-    let bootstrap = server.bootstrap.clone().unwrap();
+    let bootstrap = server.admin_invite();
     (server.addr.to_string(), bootstrap, server)
 }
 
@@ -58,6 +63,68 @@ fn wait_for_within(
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// Waits until `ready` holds, for checks on a bare call.
+fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn identity_in(dir: &Path) -> PublicKey {
+    Keystore::open_in(dir).unwrap().identity().public()
+}
+
+/// A bare call keeping its keys in `dir`, enrolled with `invite`, placed in `room`.
+fn call_in(
+    runtime: &Runtime,
+    dir: &Path,
+    address: &str,
+    invite: &InviteCode,
+    room: RoomId,
+) -> Call {
+    runtime.block_on(async {
+        let mut keystore = Keystore::open_in(dir).unwrap();
+        let link = account::enroll(&mut keystore, address, invite)
+            .await
+            .unwrap();
+        let call = Call::start(link, &keystore).unwrap();
+        call.join(Some(room), None).await.unwrap();
+        call
+    })
+}
+
+/// Whether `viewer` holds the key `sender` sends their mic with in the current epoch.
+fn holds_key_of(viewer: &Call, sender: UserId) -> bool {
+    let mut keys = viewer.engine.keys();
+    let Some(mic) = keys.peer_tracks(sender).map(|t| t.mic) else {
+        return false;
+    };
+    let epoch = keys.epoch();
+    keys.recv_key(mic, epoch).is_some()
+}
+
+/// Puts `alice` and `bob`, enrolled in `alice_dir` and `bob_dir`, in a room at `address`,
+/// and has alice verify bob. Returns bob's user id.
+fn verify_in_a_room(alice_dir: &Path, bob_dir: &Path, address: &str, admin: &InviteCode) -> UserId {
+    let alice = client_in(alice_dir, address, Some(admin));
+    wait_connected(&alice, "alice connected");
+    let room = create_room(&alice);
+    let bob = client_in(bob_dir, address, Some(&invite(&alice)));
+    let bob_id = bob.state().me.unwrap();
+    alice.command(Command::Join(Some(room)));
+    bob.command(Command::Join(Some(room)));
+    wait_for(&alice, "bob's key", |s| {
+        s.person(bob_id).is_some_and(|p| p.identity_key.is_some())
+    });
+    alice.command(Command::SetVerified(bob_id, true));
+    wait_for(&alice, "bob verified", |s| {
+        s.person(bob_id).is_some_and(|p| p.verified)
+    });
+    bob_id
 }
 
 fn wait_connected(client: &Client, what: &str) {
@@ -159,8 +226,11 @@ fn two_clients_see_each_other_join_and_unmute() {
     });
 
     let alice_id = alice.state().me.unwrap();
-    wait_for(&bob, "a pinned key for alice", |_| {
+    wait_for(&bob, "alice's key", |_| {
         bob.safety_number(alice_id).is_some()
+    });
+    wait_for(&alice, "bob's key", |_| {
+        alice.safety_number(bob_id).is_some()
     });
     assert_eq!(bob.safety_number(alice_id), alice.safety_number(bob_id));
 
@@ -440,7 +510,7 @@ fn a_verified_contact_stays_verified_in_the_next_session() {
     alice.command(Command::Join(Some(room)));
     bob.command(Command::Join(Some(room)));
     let alice_id = alice.state().me.unwrap();
-    wait_for(&bob, "a pinned key for alice", |_| {
+    wait_for(&bob, "alice's key", |_| {
         bob.safety_number(alice_id).is_some()
     });
     bob.command(Command::SetVerified(alice_id, true));
@@ -456,60 +526,180 @@ fn a_verified_contact_stays_verified_in_the_next_session() {
 }
 
 #[test]
-fn someone_new_using_a_known_persons_name_is_warned_of_until_verified() {
+fn a_verified_key_is_verified_on_every_server_it_shows_up_on() {
+    let (alice_dir, bob_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (first, first_admin, _first) = server();
+    verify_in_a_room(alice_dir.path(), bob_dir.path(), &first, &first_admin);
+
+    let (second, second_admin, _second) = server();
+    let alice = client_in(alice_dir.path(), &second, Some(&second_admin));
+    wait_connected(&alice, "alice on the second server");
+    let room = create_room(&alice);
+    let bob = client_in(bob_dir.path(), &second, Some(&invite(&alice)));
+    let bob_id = bob.state().me.unwrap();
+    alice.command(Command::Join(Some(room)));
+    bob.command(Command::Join(Some(room)));
+    wait_for(&alice, "bob verified on the second server", |s| {
+        s.person(bob_id).is_some_and(|p| p.verified) && s.key_warnings.is_empty()
+    });
+    let verified = alice.state().verified.clone();
+    assert_eq!(verified.len(), 1);
+    assert_eq!(verified[0].key, Fingerprint(identity_in(bob_dir.path())));
+    assert_eq!(verified[0].servers.len(), 2);
+}
+
+#[test]
+fn a_new_key_for_a_verified_persons_user_id_is_warned_of_and_still_hears_us() {
+    let first_dir = tempfile::tempdir().unwrap();
+    let first = ProcessLikeServer::start(first_dir.path(), "127.0.0.1:0".parse().unwrap());
+    let (addr, address) = (first.addr, first.addr.to_string());
+    let (alice_dir, bob_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let admin = first.admin_invite();
+    let bob_id = verify_in_a_room(alice_dir.path(), bob_dir.path(), &address, &admin);
+    first.stop();
+
+    // The same key with a fresh database, as a rebuilt server: its user ids start over.
+    let rebuilt_dir = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        first_dir.path().join(KEY_FILE),
+        rebuilt_dir.path().join(KEY_FILE),
+    )
+    .unwrap();
+    let rebuilt = ProcessLikeServer::start(rebuilt_dir.path(), addr);
+    let alice = client_in(alice_dir.path(), &address, Some(&rebuilt.admin_invite()));
+    wait_connected(&alice, "alice on the rebuilt server");
+    let room = create_room(&alice);
+    alice.command(Command::Join(Some(room)));
+    wait_for(&alice, "alice in the room", |s| s.current.is_some());
+    let alice_id = alice.state().me.unwrap();
+    let code = invite(&alice);
+    let runtime = Runtime::new().unwrap();
+    let carol_dir = tempfile::tempdir().unwrap();
+    let carol = call_in(&runtime, carol_dir.path(), &address, &code, room);
+    assert_eq!(carol.me(), bob_id, "carol didn't get bob's old user id");
+
+    let warning = KeyWarning {
+        user: bob_id,
+        verified: Fingerprint(identity_in(bob_dir.path())),
+        now: Fingerprint(identity_in(carol_dir.path())),
+    };
+    wait_for(&alice, "a warning that bob's key changed", |s| {
+        s.key_warnings == [warning.clone()] && s.person(bob_id).is_some_and(|p| !p.verified)
+    });
+    wait_until("carol to hold alice's key", || {
+        holds_key_of(&carol, alice_id)
+    });
+
+    alice.command(Command::DismissKeyChange(bob_id));
+    wait_for(&alice, "the warning dismissed", |s| {
+        s.key_warnings.is_empty()
+    });
+    assert!(!alice.state().person(bob_id).unwrap().verified);
+    assert_eq!(
+        alice.state().verified.len(),
+        1,
+        "bob's key is still verified"
+    );
+}
+
+#[test]
+fn people_not_verified_are_shown_so_and_still_hear_us() {
     let (address, bootstrap, _server) = server();
     let (alice, _a) = client(&address, &bootstrap);
     wait_connected(&alice, "connected");
     let room = create_room(&alice);
     alice.command(Command::Join(Some(room)));
-    let joined_as = |name: &str, rename_after_joining: bool| {
-        let (member, dir) = client(&address, &invite(&alice));
-        let id = member.state().me.unwrap();
-        let rename = Command::SetProfile {
-            name: Some(name.into()),
-            picture: None,
-        };
-        if rename_after_joining {
-            member.command(Command::Join(Some(room)));
-            wait_for(&alice, "a pinned key for them", |_| {
-                alice.safety_number(id).is_some()
-            });
-            member.command(rename);
-        } else {
-            member.command(rename);
-            member.command(Command::Join(Some(room)));
-        }
-        wait_for(&alice, "their name", |s| {
-            s.person(id).is_some_and(|p| p.name == name)
+    wait_for(&alice, "alice in the room", |s| s.current.is_some());
+    let alice_id = alice.state().me.unwrap();
+    let code = invite(&alice);
+    let runtime = Runtime::new().unwrap();
+    let bob_dir = tempfile::tempdir().unwrap();
+    let bob = call_in(&runtime, bob_dir.path(), &address, &code, room);
+
+    wait_for(&alice, "bob's key, not verified", |s| {
+        s.person(bob.me())
+            .is_some_and(|p| p.identity_key.is_some() && !p.verified)
+            && s.key_warnings.is_empty()
+    });
+    wait_until("bob to hold alice's key", || holds_key_of(&bob, alice_id));
+    wait_for_within(Duration::from_secs(10), &alice, "bob's mic followed", |s| {
+        s.health
+            .receiving
+            .iter()
+            .any(|t| t.label.ends_with(", mic"))
+    });
+}
+
+#[test]
+fn an_epoch_floor_outlives_a_restart_and_refuses_a_replayed_sender_key() {
+    let (address, bootstrap, _server) = server();
+    let (alice, _a) = client(&address, &bootstrap);
+    wait_connected(&alice, "connected");
+    let room = create_room(&alice);
+    alice.command(Command::Join(Some(room)));
+    wait_for(&alice, "alice in the room", |s| s.current.is_some());
+    let alice_id = alice.state().me.unwrap();
+    let code = invite(&alice);
+    let runtime = Runtime::new().unwrap();
+    let bob_dir = tempfile::tempdir().unwrap();
+    let (mut bob, placed) = runtime.block_on(async {
+        let mut keystore = Keystore::open_in(bob_dir.path()).unwrap();
+        let link = account::enroll(&mut keystore, &address, &code)
+            .await
+            .unwrap();
+        let bob = Call::start(link, &keystore).unwrap();
+        let (placed, _) = bob.join(Some(room), None).await.unwrap();
+        (bob, placed)
+    });
+    // Alice's sender key for bob, as a server could record it to replay later.
+    let (epoch, wrapped) = runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(CallEvent::Server(ServerEvent::SenderKey {
+                    from,
+                    epoch,
+                    wrapped,
+                })) = bob.events.recv().await
+                    && from == alice_id
+                {
+                    return (epoch, wrapped);
+                }
+            }
+        })
+        .await
+        .expect("no sender key from alice")
+    });
+    assert_eq!(epoch, placed.epoch);
+    // The same install before its floors were written, to show the replay works without them.
+    let unsaved_dir = tempfile::tempdir().unwrap();
+    for file in std::fs::read_dir(bob_dir.path()).unwrap() {
+        let file = file.unwrap();
+        std::fs::copy(file.path(), unsaved_dir.path().join(file.file_name())).unwrap();
+    }
+    runtime.block_on(bob.close());
+    drop(bob);
+
+    // Starting again, then shown the old placement and key, as a replaying server would.
+    let replayed = |dir: &Path| {
+        let bob = runtime.block_on(async {
+            let keystore = Keystore::open_in(dir).unwrap();
+            let link = account::sign_in(&keystore, &address, None).await.unwrap();
+            Call::start(link, &keystore).unwrap()
         });
-        (member, id, dir)
+        let notices = format!("{:?}", bob.engine.placed(&placed));
+        let taken = bob
+            .engine
+            .keys()
+            .sender_key(alice_id, epoch, &wrapped, Instant::now());
+        runtime.block_on(bob.close());
+        (notices, taken)
     };
-
-    let (bob, bob_id, _b) = joined_as("Bob", true);
-    bob.command(Command::Disconnect);
-    wait_for(&alice, "bob gone", |s| s.person(bob_id).is_none());
-
-    let (_other, other_id, _o) = joined_as("BOB", false);
-    let warning = KeyWarning {
-        user: other_id,
-        cause: WarningCause::SameName { known: bob_id },
-    };
-    wait_for(&alice, "a warning naming both", |s| {
-        s.key_warnings.contains(&warning)
-    });
-    alice.command(Command::SetVerified(other_id, true));
-    wait_for(&alice, "the warning gone once verified", |s| {
-        s.key_warnings.is_empty()
-    });
-
-    let (_renamed, renamed_id, _r) = joined_as("Bob", true);
-    let warning = KeyWarning {
-        user: renamed_id,
-        cause: WarningCause::SameName { known: bob_id },
-    };
-    wait_for(&alice, "a warning for a rename after joining", |s| {
-        s.key_warnings.contains(&warning)
-    });
+    let (notices, taken) = replayed(bob_dir.path());
+    assert!(notices.contains("OldEpoch"), "{notices}");
+    assert!(taken.is_err(), "the replayed sender key was taken");
+    let (notices, taken) = replayed(unsaved_dir.path());
+    assert!(!notices.contains("OldEpoch"), "{notices}");
+    assert!(taken.is_ok(), "{taken:?}");
 }
 
 #[test]

@@ -5,6 +5,7 @@ use throcc_proto::messages::Request;
 
 use crate::connection::{self, ConnectError};
 use crate::control::{self, Link, LinkError, LoginError, Requester};
+use crate::floors::EpochFloors;
 use crate::keystore::Keystore;
 
 #[derive(Debug, thiserror::Error)]
@@ -47,13 +48,14 @@ pub async fn sign_in(
         .ok_or_else(|| SignInError::NotEnrolled(address.to_owned()))?;
     let connected = connection::connect(address, Some(pin)).await?;
     let link = control::login(connected, keystore.identity(), want_room).await?;
-    keystore.known_servers.signed_in(address)?;
     let server = &link.connected.fingerprint;
     publish_enc_key(keystore, &link.requester, server, link.welcome.me).await?;
     Ok(link)
 }
 
-/// Enrolls with an invite code and pins the server the PAKE proved.
+/// Enrolls with an invite code and pins the server the PAKE proved. Epoch floors kept for
+/// that server go: they were for an earlier account, as on a server rebuilt with the same
+/// key, whose user ids and rooms now stand for others.
 pub async fn enroll(
     keystore: &mut Keystore,
     address: &str,
@@ -61,10 +63,9 @@ pub async fn enroll(
 ) -> Result<Link, SignInError> {
     let connected = connection::connect(address, None).await?;
     let link = control::enroll(connected, keystore.identity(), code).await?;
-    keystore
-        .known_servers
-        .trust(address, link.connected.fingerprint)?;
     let server = &link.connected.fingerprint;
+    keystore.known_servers.trust(address, *server)?;
+    EpochFloors::forget(keystore.dir(), server)?;
     publish_enc_key(keystore, &link.requester, server, link.welcome.me).await?;
     Ok(link)
 }

@@ -86,6 +86,35 @@ async fn first_enrollment_becomes_admin() {
 }
 
 #[tokio::test]
+async fn an_admin_invite_minted_while_the_server_runs_enrolls_another_admin() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    invited(&server, &alice).await;
+
+    let minted = throcc_server::admin_invite(server.dir.path()).unwrap();
+    assert_eq!(minted.fingerprint, server.shared.fingerprint);
+    let lifetime = minted.expires_at - throcc_server::unix_now();
+    assert!((86_390..=86_400).contains(&lifetime), "{lifetime}");
+    let carol = enroll(&server, &minted.code).await;
+    assert_eq!(carol.link.welcome.role, Role::Admin);
+    let carol_id = carol.link.welcome.me;
+    alice
+        .event(|e| matches!(e, Event::UserAdded(u) if u.id == carol_id).then_some(()))
+        .await;
+    assert!(try_enroll(&server.addr, &minted.code).await.is_err());
+}
+
+#[test]
+fn an_admin_invite_needs_a_server_that_has_started_in_its_data_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("typo");
+    assert!(throcc_server::admin_invite(&missing).is_err());
+    assert!(!missing.exists());
+    assert!(throcc_server::admin_invite(dir.path()).is_err());
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
 async fn relaying_mitm_fails_at_key_confirmation_and_uses_one_try() {
     let server = start_server();
     let alice = admin(&server).await;
@@ -178,7 +207,7 @@ async fn an_invite_spent_when_the_server_stopped_frees_its_slot_on_restart() {
     let dir = tempfile::tempdir().unwrap();
     let first = ProcessLikeServer::start(dir.path(), "127.0.0.1:0".parse().unwrap());
     let addr = first.addr;
-    let alice = enroll_at(&addr.to_string(), first.bootstrap.as_ref().unwrap()).await;
+    let alice = enroll_at(&addr.to_string(), &first.admin_invite()).await;
     let mut bob = invited_at(&addr.to_string(), &alice).await;
     let spent = invite(&bob).await;
     for _ in 0..2 {
@@ -352,7 +381,7 @@ async fn one_source_signs_in_a_few_connections_at_a_time() {
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
     let enrolling = tokio::spawn({
-        let (addr, code) = (server.addr.clone(), server.bootstrap.clone());
+        let (addr, code) = (server.addr.clone(), server.admin_invite.clone());
         async move { enroll_at(&addr, &code).await }
     });
     tokio::time::sleep(Duration::from_millis(500)).await;

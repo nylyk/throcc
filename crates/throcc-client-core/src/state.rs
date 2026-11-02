@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashSet};
 use serde::{Deserialize, Serialize};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
-use throcc_proto::messages::{Codec, Room, ShareConfig, valid_name};
+use throcc_proto::messages::{Codec, PublicKey, Room, ShareConfig, valid_name};
 
 pub(crate) const MIC_KBPS: u32 = 64;
 pub(crate) const SHARE_AUDIO_KBPS: u32 = crate::media::share_audio::KBPS;
@@ -28,6 +28,8 @@ pub struct State {
     pub mic: bool,
     pub deafened: bool,
     pub key_warnings: Vec<KeyWarning>,
+    /// Everyone verified on this install, on any server.
+    pub verified: Vec<VerifiedIdentity>,
     pub health: Health,
     /// Our name as kept on this computer, once we have chosen one.
     pub profile_name: Option<String>,
@@ -152,7 +154,11 @@ pub struct Person {
     pub sharing: Option<ShareConfig>,
     pub speaking: bool,
     pub playback: PersonPlayback,
+    /// Whether the user verified the identity key the server shows for them.
     pub verified: bool,
+    /// Their identity key: the one the server showed this session, or else the verified one
+    /// last seen as them. None until either is known.
+    pub identity_key: Option<PublicKey>,
     pub role: Role,
 }
 
@@ -225,23 +231,24 @@ pub struct CurrentRoom {
     pub watching: Vec<UserId>,
 }
 
+/// The server shows `user`, whose identity key `verified` was verified, with another key
+/// that isn't. The new key still gets our media: it is only unverified, like anyone new.
+/// Shown until the new key is verified or the user dismisses it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyWarning {
     pub user: UserId,
-    pub cause: WarningCause,
+    pub verified: Fingerprint,
+    pub now: Fingerprint,
 }
 
+/// An identity key verified on this install.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum WarningCause {
-    /// Their identity key differs from the one pinned for them. They are left out until it
-    /// matches again.
-    KeyChanged {
-        pinned: Fingerprint,
-        now: Fingerprint,
-    },
-    /// They are new to us but go by the name of `known`, someone pinned here before, as
-    /// the server posing as `known` would. Shown until they are marked verified.
-    SameName { known: UserId },
+pub struct VerifiedIdentity {
+    pub key: Fingerprint,
+    /// The name they had when verified.
+    pub name: String,
+    /// The servers it was seen on.
+    pub servers: Vec<Fingerprint>,
 }
 
 /// The connection panel's numbers, refreshed every 2 s.
@@ -429,6 +436,7 @@ mod tests {
             speaking: false,
             playback: PersonPlayback::default(),
             verified: false,
+            identity_key: None,
             role: Role::User,
         }
     }

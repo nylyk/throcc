@@ -261,7 +261,7 @@ async fn a_join_that_cannot_bump_the_new_rooms_epoch_leaves_the_old_room_alone()
     let dir = tempfile::tempdir().unwrap();
     let first = ProcessLikeServer::start(dir.path(), "127.0.0.1:0".parse().unwrap());
     let addr = first.addr;
-    let mut alice = enroll_at(&addr.to_string(), first.bootstrap.as_ref().unwrap()).await;
+    let mut alice = enroll_at(&addr.to_string(), &first.admin_invite()).await;
     let general = create_room(&mut alice, "General").await;
     let full = create_room(&mut alice, "Full").await;
     first.stop();
@@ -331,13 +331,12 @@ async fn media_ids_never_repeat_across_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     let first = ProcessLikeServer::start(dir.path(), "127.0.0.1:0".parse().unwrap());
     let addr = first.addr;
-    let mut alice = enroll_at(&addr.to_string(), first.bootstrap.as_ref().unwrap()).await;
+    let mut alice = enroll_at(&addr.to_string(), &first.admin_invite()).await;
     let general = create_room(&mut alice, "General").await;
     let before = alice.join(Some(general)).await.tracks.unwrap();
     first.stop();
 
     let second = ProcessLikeServer::start(dir.path(), addr);
-    assert!(second.bootstrap.is_none());
     alice.reconnect(&addr.to_string(), Some(general)).await;
     let placed = &alice.link.welcome.placed;
     let after = placed.tracks.as_ref().unwrap();
@@ -556,7 +555,7 @@ async fn a_leave_that_cannot_bump_the_epoch_still_ends_presence() {
     let dir = tempfile::tempdir().unwrap();
     let first = ProcessLikeServer::start(dir.path(), "127.0.0.1:0".parse().unwrap());
     let addr = first.addr;
-    let mut alice = enroll_at(&addr.to_string(), first.bootstrap.as_ref().unwrap()).await;
+    let mut alice = enroll_at(&addr.to_string(), &first.admin_invite()).await;
     let general = create_room(&mut alice, "General").await;
     let mut bob = invited_at(&addr.to_string(), &alice).await;
     first.stop();
@@ -584,7 +583,7 @@ async fn a_server_holds_a_bounded_number_of_rooms() {
     let dir = tempfile::tempdir().unwrap();
     let first = ProcessLikeServer::start(dir.path(), "127.0.0.1:0".parse().unwrap());
     let addr = first.addr;
-    let mut alice = enroll_at(&addr.to_string(), first.bootstrap.as_ref().unwrap()).await;
+    let mut alice = enroll_at(&addr.to_string(), &first.admin_invite()).await;
     first.stop();
     let db = Database::open(&dir.path().join(DATABASE_FILE)).unwrap();
     for i in 0..MAX_ROOMS {

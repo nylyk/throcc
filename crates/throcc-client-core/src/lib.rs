@@ -3,9 +3,9 @@ pub mod avatars;
 pub mod call;
 pub mod client;
 pub mod connection;
-mod contacts;
 pub mod control;
 mod files;
+mod floors;
 mod json_file;
 mod keys;
 pub mod keystore;
@@ -18,6 +18,7 @@ mod servers;
 mod session;
 pub mod settings;
 pub mod state;
+mod verified;
 
 use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
 

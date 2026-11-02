@@ -8,9 +8,9 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::connection::Connected;
-use crate::contacts::Contacts;
 use crate::control::{self, Link, LinkError, Requester};
-use crate::keys::{EpochFloors, KeyNotice};
+use crate::floors::EpochFloors;
+use crate::keys::KeyNotice;
 use crate::keystore::Keystore;
 use crate::media::engine::MediaEngine;
 
@@ -31,6 +31,8 @@ pub struct Call {
     /// Our tracks whose encoder must recover after a local drop.
     pub recovery: mpsc::Receiver<MediaId>,
     pub connection: quinn::Connection,
+    /// The newest epochs we took part in, which the session saves now and then.
+    pub floors: EpochFloors,
     connected: Connected,
 }
 
@@ -39,8 +41,8 @@ impl Call {
         Self::start_after(link, keystore, None)
     }
 
-    /// Starts the call that replaces `previous` after a reconnect, keeping the pins it made
-    /// even where they never reached the file, before any key is wrapped.
+    /// Starts the call that replaces `previous` after a reconnect, keeping the epoch floors
+    /// it raised even where they never reached the file.
     pub fn restart(link: Link, keystore: &Keystore, previous: &Call) -> Result<Self> {
         Self::start_after(link, keystore, Some(previous))
     }
@@ -54,17 +56,16 @@ impl Call {
         } = link;
         let connection = connected.connection.clone();
         let enc = keystore.enc_key_pair()?;
-        let mut contacts = Contacts::load(keystore.dir(), &connected.fingerprint)?;
-        if let Some(previous) = previous {
-            contacts.carry_from(&previous.engine.keys().contacts);
-        }
+        let floors = match previous {
+            Some(previous) => previous.floors.clone(),
+            None => EpochFloors::load(keystore.dir(), &connected.fingerprint)?,
+        };
         let (engine, mut engine_requests, recovery) = MediaEngine::start(
             connection.clone(),
             welcome.me,
             enc,
             connected.fingerprint,
-            contacts,
-            EpochFloors::process(),
+            floors.clone(),
         );
         let engine = Arc::new(engine);
 
@@ -111,12 +112,16 @@ impl Call {
             events,
             recovery,
             connection,
+            floors,
             connected,
         })
     }
 
-    /// Leaves the server cleanly.
+    /// Saves the epoch floors and leaves the server cleanly.
     pub async fn close(&self) {
+        if let Err(e) = self.floors.save() {
+            warn!("saving epoch floors: {e:#}");
+        }
         self.connected.close().await;
     }
 

@@ -21,7 +21,7 @@ Every push to `main` publishes `ghcr.io/nylyk/throcc:latest` for amd64 and arm64
 
 ```sh
 docker run -d --name throcc --restart unless-stopped -p 8476:8476/udp -v throcc-data:/data ghcr.io/nylyk/throcc:latest
-docker logs throcc | grep 'becomes admin'
+docker exec throcc /throcc-server admin-invite --data /data
 ```
 
 ### With Nix
@@ -31,7 +31,7 @@ docker logs throcc | grep 'becomes admin'
 ### Then
 
 1. Allow UDP 8476 in the firewall, and forward it if the server is behind NAT. Clients only need outbound UDP.
-2. On first start the server logs an invite code and its fingerprint. Whoever joins with that code becomes the admin.
+2. Once the server is running, `throcc-server admin-invite --data <data directory>` prints an invite code, its expiry and the server's fingerprint. Whoever joins with that code becomes an admin. Run it again whenever you need one, for instance after losing your identity. In Docker: `docker exec throcc /throcc-server admin-invite --data /data`.
 3. Anyone can make more invites from Server Settings: admins without limit, everyone else 3 a day. Each code works once and expires after a day.
 
 **Back up** the data directory: `server_key` and the SQLite database. Stop the server and copy it, or run `sqlite3 throcc.sqlite '.backup copy.sqlite'` and copy `server_key`. Losing `server_key` gives the server a new identity, and every client has to rejoin.
@@ -47,7 +47,7 @@ docker logs throcc | grep 'becomes admin'
 - **Nix:** `nix run github:nylyk/throcc`. On macOS this needs the Xcode Command Line Tools.
 - **macOS and Windows:** the `packaging` workflow builds a `.dmg` and a zip on tags and weekly, and keeps them for a week. The `.dmg` is not signed with a Developer ID, so open it the first time with right-click, Open.
 
-Start the client, enter the server's address and an invite code, and check that the fingerprint it shows matches the server's log.
+Start the client, enter the server's address and an invite code, and check that the fingerprint it shows matches the one `admin-invite` printed or the server logged.
 
 ## Build from source
 
@@ -71,7 +71,7 @@ The packages ship an LGPL ffmpeg built by `packaging/ffmpeg/build.sh <prefix>`.
 
 ## Security
 
-Every member of a room wraps a fresh key to each other member whenever someone joins or leaves, so a newcomer can't decrypt what came before and a leaver can't decrypt what comes after. The client pins the server's key and each member's key, warns when one changes or when someone new takes the name of a person it knows, and shows a safety number to compare out of band.
+Every member of a room wraps a fresh key to each other member whenever someone joins or leaves, so a newcomer can't decrypt what came before and a leaver can't decrypt what comes after. The client pins the server's key. Each install has one identity key, used on every server, and the safety number between two people depends only on their two identity keys. Compare it out of band and mark the person verified once: they then show as verified on every server where that key appears. Everyone not verified is marked so but still hears you: until you compare safety numbers, their key could be one the server made up. If a server later shows a different key for someone you verified, the client warns that their key changed. It also remembers, across restarts, the newest key epoch it took part in per room, so a server can't replay an older call's keys.
 
 The server still sees metadata: who is in which room, when, and at what bitrate. Profiles, avatars and room names are not end-to-end encrypted.
 

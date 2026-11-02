@@ -4,9 +4,8 @@ use std::path::Path;
 use anyhow::Result;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use throcc_proto::Fingerprint;
-use throcc_proto::ids::{Hash, UserId};
+use throcc_proto::ids::{Epoch, Hash, RoomId, UserId};
 
-use crate::contacts::Contact;
 use crate::json_file;
 use crate::state::PersonPlayback;
 
@@ -18,10 +17,6 @@ const FILE: &str = "servers.json";
 pub(crate) struct Servers {
     /// Pinned server fingerprints, by the address they were pinned at.
     pub known: BTreeMap<String, Hex>,
-    /// The fingerprint an address had before the user trusted its new one, until our
-    /// account signs in under the new one.
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub replaced: BTreeMap<String, Hex>,
     pub servers: BTreeMap<Hex, Server>,
 }
 
@@ -30,8 +25,10 @@ pub(crate) struct Servers {
 pub(crate) struct Server {
     pub name: Option<String>,
     pub avatar: Option<Hex>,
-    pub contacts: BTreeMap<UserId, Contact>,
     pub playback: BTreeMap<UserId, PersonPlayback>,
+    /// The newest epoch each of our users took part in, per room.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub epochs: BTreeMap<UserId, BTreeMap<RoomId, Epoch>>,
 }
 
 impl Servers {
@@ -50,18 +47,6 @@ impl Servers {
 
     pub fn server_mut(&mut self, server: &Fingerprint) -> &mut Server {
         self.servers.entry(Hex(server.0)).or_default()
-    }
-
-    /// Copies the people pinned under the server key `from` to `to`, keeping any pinned
-    /// under `to` already.
-    pub fn carry_contacts(&mut self, from: Hex, to: Hex) {
-        let Some(carried) = self.servers.get(&from).map(|s| s.contacts.clone()) else {
-            return;
-        };
-        let contacts = &mut self.servers.entry(to).or_default().contacts;
-        for (user, contact) in carried {
-            contacts.entry(user).or_insert(contact);
-        }
     }
 }
 

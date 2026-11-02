@@ -26,7 +26,7 @@ const ENC_KEY_RENEW_BEFORE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// made under a clock running ahead would otherwise stay valid far too long.
 const ENC_KEY_CLOCK_SKEW: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// The install's identity key plus everything pinned per server.
+/// The install's identity key and encryption key, plus the pinned servers.
 pub struct Keystore {
     dir: PathBuf,
     cache: PathBuf,

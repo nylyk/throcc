@@ -4,7 +4,7 @@
 pub mod unit;
 
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -33,7 +33,8 @@ use tokio::sync::mpsc;
 
 pub struct TestServer {
     pub addr: String,
-    pub bootstrap: InviteCode,
+    /// An admin invite minted at start, as `throcc-server admin-invite` would.
+    pub admin_invite: InviteCode,
     pub shared: Arc<Shared>,
     pub dir: TempDir,
 }
@@ -51,16 +52,21 @@ pub fn bind_server_at(data_dir: &Path, listen: SocketAddr) -> Server {
     .unwrap()
 }
 
+/// Mints an admin invite into `data_dir` the way `throcc-server admin-invite` does.
+pub fn mint_admin_invite(data_dir: &Path) -> InviteCode {
+    throcc_server::admin_invite(data_dir).unwrap().code
+}
+
 pub fn start_server() -> TestServer {
     let dir = tempfile::tempdir().unwrap();
     let server = bind_server(dir.path());
     let addr = server.local_addr().unwrap().to_string();
-    let bootstrap = server.bootstrap_invite().unwrap().clone();
+    let admin_invite = mint_admin_invite(dir.path());
     let shared = server.shared();
     tokio::spawn(server.run());
     TestServer {
         addr,
-        bootstrap,
+        admin_invite,
         shared,
         dir,
     }
@@ -70,7 +76,7 @@ pub fn start_server() -> TestServer {
 /// process exit, and blocking clients can reach it from a plain test thread.
 pub struct ProcessLikeServer {
     pub addr: SocketAddr,
-    pub bootstrap: Option<InviteCode>,
+    data_dir: PathBuf,
     stop: std::sync::mpsc::Sender<()>,
     thread: Option<std::thread::JoinHandle<()>>,
     dir: Option<TempDir>,
@@ -80,27 +86,23 @@ impl ProcessLikeServer {
     pub fn start(dir: &Path, listen: SocketAddr) -> Self {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (stop, stop_rx) = std::sync::mpsc::channel::<()>();
-        let dir = dir.to_owned();
+        let data_dir = dir.to_owned();
+        let dir = data_dir.clone();
         let thread = std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
                 let server = bind_server_at(&dir, listen);
-                ready_tx
-                    .send((
-                        server.local_addr().unwrap(),
-                        server.bootstrap_invite().cloned(),
-                    ))
-                    .unwrap();
+                ready_tx.send(server.local_addr().unwrap()).unwrap();
                 tokio::spawn(server.run());
                 tokio::task::spawn_blocking(move || stop_rx.recv().ok())
                     .await
                     .ok();
             });
         });
-        let (addr, bootstrap) = ready_rx.recv().unwrap();
+        let addr = ready_rx.recv().unwrap();
         Self {
             addr,
-            bootstrap,
+            data_dir,
             stop,
             thread: Some(thread),
             dir: None,
@@ -113,6 +115,11 @@ impl ProcessLikeServer {
         let mut server = Self::start(dir.path(), "127.0.0.1:0".parse().unwrap());
         server.dir = Some(dir);
         server
+    }
+
+    /// Mints an admin invite into the running server's data directory.
+    pub fn admin_invite(&self) -> InviteCode {
+        mint_admin_invite(&self.data_dir)
     }
 
     pub fn stop(self) {
@@ -205,7 +212,7 @@ pub async fn try_enroll_at(addr: &str, code: &InviteCode) -> Result<TestClient, 
 }
 
 pub async fn admin(server: &TestServer) -> TestClient {
-    enroll(server, &server.bootstrap).await
+    enroll(server, &server.admin_invite).await
 }
 
 pub async fn invite(by: &TestClient) -> InviteCode {
@@ -278,16 +285,10 @@ pub async fn room_with_two_at(server: &TestServer, bob_addr: &str) -> (Call, Cal
 /// Waits until `viewer` knows `peer`'s tracks, then returns them.
 pub async fn peer_tracks(viewer: &Call, peer: &Call) -> Tracks {
     wait_for("the viewer to learn the peer's tracks", || {
-        viewer.engine.keys().keys.peer_tracks(peer.me()).is_some()
+        viewer.engine.keys().peer_tracks(peer.me()).is_some()
     })
     .await;
-    viewer
-        .engine
-        .keys()
-        .keys
-        .peer_tracks(peer.me())
-        .unwrap()
-        .clone()
+    viewer.engine.keys().peer_tracks(peer.me()).unwrap().clone()
 }
 
 pub async fn first_share(viewer: &Call, peer: &Call) -> Share {

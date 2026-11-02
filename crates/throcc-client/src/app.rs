@@ -202,7 +202,7 @@ pub struct PlaybackControl {
 pub enum Dialog {
     Share,
     Connection,
-    /// `number` is our safety number with `user`, once we have pinned their key.
+    /// `number` is our safety number with `user`, once we know their identity key.
     Verify {
         user: UserId,
         number: Option<String>,
@@ -682,7 +682,7 @@ impl ThroccApp {
             }
             Event::LeftServer => self.end_session(window, cx),
         }
-        // A key is pinned with only a notice, so any event may be the first with the number.
+        // Their key arrives with a room state, so any event may be the first with the number.
         if let Some(Dialog::Verify { user, number }) = &mut self.dialog
             && number.is_none()
         {
@@ -1472,7 +1472,7 @@ impl ThroccApp {
     ) {
         if self.mock
             || Keystore::default_known_servers()
-                .and_then(|mut known| known.trust_new_key(address, actual))
+                .and_then(|mut known| known.trust(address, actual))
                 .is_ok()
         {
             self.set_dialog(None, cx);
@@ -1628,9 +1628,8 @@ impl ThroccApp {
                 joined(self);
                 self.dialog = Some(Dialog::Connection);
             }
-            "verify" => self.open_verify(UserId(2), cx),
+            "verify" => self.open_verify(UserId(4), cx),
             "keychange" => self.open_verify(UserId(3), cx),
-            "samename" => self.open_verify(UserId(8), cx),
             "pinmismatch" => {
                 offline(self);
                 self.dialog = Some(Dialog::PinMismatch {

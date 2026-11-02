@@ -32,15 +32,15 @@ async fn ten_seconds_of_frames_at_15_mbps_arrive_intact() {
         alice.request(Request::SetMedia(share)).await.unwrap(),
         Response::Ok
     );
-    let epoch = alice.engine.keys().keys.epoch();
+    let epoch = alice.engine.keys().epoch();
     let video_id = first_share(&bob, &alice).await.video;
     let mut units = watch(&bob, video_id, UNITS as usize).await;
     wait_for("bob's key for alice's video", || {
-        bob.engine.keys().keys.recv_key(video_id, epoch).is_some()
+        bob.engine.keys().recv_key(video_id, epoch).is_some()
     })
     .await;
     wait_for("both at one epoch", || {
-        alice.engine.keys().keys.epoch() == bob.engine.keys().keys.epoch()
+        alice.engine.keys().epoch() == bob.engine.keys().epoch()
     })
     .await;
 
@@ -124,10 +124,10 @@ async fn mic_audio_reaches_peers_but_not_the_deafened() {
     let server = start_server();
     let (alice, bob, _) = room_with_two(&server).await;
     let mic = peer_tracks(&bob, &alice).await.mic;
-    let epoch = alice.engine.keys().keys.epoch();
+    let epoch = alice.engine.keys().epoch();
     let mut heard = bob.engine.subscribe(mic, Kind::Audio, 64);
     wait_for("bob's key for alice's mic", || {
-        bob.engine.keys().keys.recv_key(mic, epoch).is_some()
+        bob.engine.keys().recv_key(mic, epoch).is_some()
     })
     .await;
 
@@ -171,9 +171,8 @@ async fn keyframes_arrive_whole_through_two_percent_loss() {
     let video_id = first_share(&bob, &alice).await.video;
     let mut units = watch(&bob, video_id, KEYFRAMES as usize).await;
     wait_for("both at one epoch with keys", || {
-        let epoch = alice.engine.keys().keys.epoch();
-        epoch == bob.engine.keys().keys.epoch()
-            && bob.engine.keys().keys.recv_key(video_id, epoch).is_some()
+        let epoch = alice.engine.keys().epoch();
+        epoch == bob.engine.keys().epoch() && bob.engine.keys().recv_key(video_id, epoch).is_some()
     })
     .await;
 

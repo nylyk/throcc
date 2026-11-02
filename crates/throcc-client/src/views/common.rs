@@ -10,7 +10,7 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::PopupMenuItem;
 use gpui_component::slider::{SliderEvent, SliderState};
 use gpui_component::{Icon, Sizable, Size};
-use throcc_client_core::state::{MAX_VOLUME, State, WarningCause};
+use throcc_client_core::state::{MAX_VOLUME, State};
 use throcc_proto::ids::UserId;
 
 use crate::theme;
@@ -26,20 +26,28 @@ pub trait Typeset: Styled + Sized {
 
 impl<E: Styled> Typeset for E {}
 
-/// What the marker beside `user` says while a key warning stands for them, a changed key
-/// before anything else.
-pub fn key_warning_label(state: &State, user: UserId) -> Option<&'static str> {
-    let causes = || {
-        state
-            .key_warnings
-            .iter()
-            .filter(move |w| w.user == user)
-            .map(|w| &w.cause)
-    };
-    if causes().any(|c| matches!(c, WarningCause::KeyChanged { .. })) {
-        Some("Key changed")
+/// Whether the identity key the server shows for `user` replaced one the user verified.
+pub fn key_changed(state: &State, user: UserId) -> bool {
+    state.key_warnings.iter().any(|w| w.user == user)
+}
+
+/// What we know of the identity key the server shows for someone.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Trust {
+    /// It replaced a key the user verified.
+    KeyChanged,
+    Unverified,
+    /// Verified, or our own.
+    Verified,
+}
+
+pub fn trust(state: &State, user: UserId) -> Trust {
+    if key_changed(state, user) {
+        Trust::KeyChanged
+    } else if state.me == Some(user) || state.person(user).is_some_and(|p| p.verified) {
+        Trust::Verified
     } else {
-        causes().next().map(|_| "Same name")
+        Trust::Unverified
     }
 }
 

@@ -16,9 +16,9 @@ use throcc_client_core::state::{Person, State, share_label};
 use throcc_proto::ids::{RoomId, UserId};
 
 use super::common::{
-    Typeset, avatar, bottom_bar, caption, danger_menu_item, description, ghost_icon, icon,
-    key_warning_label, player, player_button, player_title, primary, rate, section, sharing_icon,
-    toggle_icon, top_bar,
+    Trust, Typeset, avatar, bottom_bar, caption, danger_menu_item, description, ghost_icon, icon,
+    player, player_button, player_title, primary, rate, section, sharing_icon, toggle_icon,
+    top_bar, trust,
 };
 use super::mascot;
 use super::page::{resize_handle, sidebar_column};
@@ -150,8 +150,8 @@ fn sidebar(
             .flex_col()
             .child(with_room_menu(row, id, manages, cx))
             .children(people.into_iter().map(|(user, person)| {
-                let warning = key_warning_label(&state, user);
-                occupant(user, person, pictures.get(&user).cloned(), warning, cx)
+                let trust = trust(&state, user);
+                occupant(user, person, pictures.get(&user).cloned(), trust, cx)
             }))
     });
 
@@ -357,7 +357,7 @@ fn occupant(
     user: UserId,
     person: &Person,
     picture: Option<std::sync::Arc<gpui::RenderImage>>,
-    key_warning: Option<&'static str>,
+    trust: Trust,
     cx: &Context<ThroccApp>,
 ) -> Div {
     div()
@@ -387,26 +387,29 @@ fn occupant(
                 .text_color(theme::text_2_muted())
                 .child(person.name.clone()),
         )
-        .children(key_warning.map(|label| key_warning_marker(user, label, cx)))
+        .children(trust_marker(user, trust, cx))
         .child(div().flex_1())
         .children(person.sharing.is_some().then(|| sharing_icon(px(16.))))
         .children(muted_icon(person, px(16.)))
 }
 
-/// The danger sign beside the name of someone with a key warning, opening their key dialog.
-fn key_warning_marker(user: UserId, label: &'static str, cx: &Context<ThroccApp>) -> Stateful<Div> {
-    div()
-        .id(("key-changed", user.0 as usize))
+/// The sign beside the name of someone not verified, or whose verified key changed, which
+/// opens their key dialog: a danger sign for a changed key, a quiet one otherwise.
+fn trust_marker(user: UserId, trust: Trust, cx: &Context<ThroccApp>) -> Option<Stateful<Div>> {
+    let (name, size, color, label) = match trust {
+        Trust::KeyChanged => ("triangle-alert", 16., theme::danger_text(), "Key changed"),
+        Trust::Unverified => ("shield-question-mark", 14., theme::text_3(), "Not verified"),
+        Trust::Verified => return None,
+    };
+    let marker = div()
+        .id(("trust", user.0 as usize))
         .flex()
         .flex_none()
         .cursor_pointer()
-        .child(
-            icon("triangle-alert")
-                .size(px(16.))
-                .text_color(theme::danger_text()),
-        )
+        .child(icon(name).size(px(size)).text_color(color))
         .tooltip(move |window, cx| Tooltip::new(label).build(window, cx))
-        .on_click(cx.listener(move |app, _, _, cx| app.open_verify(user, cx)))
+        .on_click(cx.listener(move |app, _, _, cx| app.open_verify(user, cx)));
+    Some(marker)
 }
 
 /// The headphones-off icon while `person` is deafened, which mutes too, or else the

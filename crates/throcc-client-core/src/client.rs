@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -13,7 +12,6 @@ use tracing::warn;
 use crate::account::{self, SignInError};
 use crate::avatars;
 use crate::call::Call;
-use crate::contacts::Contacts;
 use crate::keystore::Keystore;
 use crate::lock;
 use crate::media::audio::VoiceSettings;
@@ -24,7 +22,7 @@ use crate::session::{AvatarSlot, Session, Shared};
 use crate::state::{
     ConnectionStatus, CurrentRoom, Health, KeyWarning, MIC_KBPS, Person, PersonPlayback, Playback,
     RoomView, SHARE_AUDIO_DETAIL, SHARE_AUDIO_KBPS, SentTrack, ServerView, Sound, State,
-    TrackHealth, VOICE_DETAIL, WarningCause, share_detail,
+    TrackHealth, VOICE_DETAIL, VerifiedIdentity, share_detail,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -78,7 +76,13 @@ pub enum Command {
         user: UserId,
         cascade: bool,
     },
+    /// Verifies the identity key the server shows for this user, on every server, or takes
+    /// it off the verified ones.
     SetVerified(UserId, bool),
+    /// Stops warning that this user's verified key changed, leaving the new key unverified.
+    DismissKeyChange(UserId),
+    /// Takes a verified identity key off the verified ones, on every server.
+    Unverify(Fingerprint),
     Voice(VoiceSettings),
     Devices {
         input: Option<String>,
@@ -126,7 +130,7 @@ pub trait ClientApi: Send + Sync {
     fn command(&self, command: Command);
     fn events(&self) -> broadcast::Receiver<Event>;
     fn state(&self) -> Arc<State>;
-    /// The 60-digit safety number with `user`, if both identity keys are known.
+    /// The 60-digit safety number with `user`, once their identity key is known.
     fn safety_number(&self, user: UserId) -> Option<String>;
     /// The newest picture of `user`'s share while watched, or of ours while sharing.
     fn picture(&self, user: UserId) -> Option<Picture>;
@@ -149,8 +153,6 @@ pub struct Client {
     commands: mpsc::Sender<Command>,
     shared: Arc<Shared>,
     identity: PublicKey,
-    dir: PathBuf,
-    server: Fingerprint,
     runtime: Option<tokio::runtime::Runtime>,
     session: Option<tokio::task::JoinHandle<()>>,
 }
@@ -176,9 +178,7 @@ impl Client {
                 None => account::sign_in(&keystore, address, None).await,
             }
         })?;
-        let server = link.connected.fingerprint;
         let identity = keystore.identity().public();
-        let dir = keystore.dir().to_owned();
         let cache = keystore.cache_dir().to_owned();
         runtime.spawn_blocking(move || {
             if let Err(e) = avatars::prune(&cache, SystemTime::now()) {
@@ -197,8 +197,6 @@ impl Client {
             commands,
             shared,
             identity,
-            dir,
-            server,
             runtime: Some(runtime),
             session: Some(session),
         })
@@ -236,11 +234,8 @@ impl ClientApi for Client {
     }
 
     fn safety_number(&self, user: UserId) -> Option<String> {
-        let contacts = Contacts::load(&self.dir, &self.server).ok()?;
-        Some(safety::safety_number(
-            &self.identity,
-            &contacts.get(user)?.key,
-        ))
+        let key = self.state().person(user)?.identity_key?;
+        Some(safety::safety_number(&self.identity, &key))
     }
 
     fn picture(&self, user: UserId) -> Option<Picture> {
@@ -450,8 +445,32 @@ impl ClientApi for MockClient {
                 self.shared.emit(Event::Users(sample_users()));
             }
             Command::SetVerified(user, verified) => self.update(|s| {
-                if let Some(p) = s.people.get_mut(&user) {
-                    p.verified = verified;
+                let Some(p) = s.people.get_mut(&user) else {
+                    return;
+                };
+                p.verified = verified;
+                let key = p.identity_key.map(Fingerprint);
+                let name = p.name.clone();
+                s.verified.retain(|v| Some(v.key) != key);
+                if let Some(key) = key.filter(|_| verified) {
+                    let server = s.server.as_ref().map(|s| s.fingerprint);
+                    s.verified.push(VerifiedIdentity {
+                        key,
+                        name,
+                        servers: server.into_iter().collect(),
+                    });
+                    s.key_warnings.retain(|w| w.user != user);
+                }
+            }),
+            Command::DismissKeyChange(user) => {
+                self.update(|s| s.key_warnings.retain(|w| w.user != user))
+            }
+            Command::Unverify(key) => self.update(|s| {
+                s.verified.retain(|v| v.key != key);
+                for p in s.people.values_mut() {
+                    if p.identity_key.map(Fingerprint) == Some(key) {
+                        p.verified = false;
+                    }
                 }
             }),
             Command::PushToTalk(down) => self.update(|s| set_mine(s, me, |_, p| p.speaking = down)),
@@ -510,6 +529,7 @@ fn person(name: &str, room: Option<u64>) -> Person {
         speaking: false,
         playback: PersonPlayback::default(),
         verified: false,
+        identity_key: None,
         role: Role::User,
     }
 }
@@ -532,9 +552,12 @@ fn sample_state() -> State {
         (5, "Teo", Some(2)),
         (6, "Ren", Some(2)),
         (7, "Kaya", Some(4)),
-        (8, "Mara", Some(4)),
+        (8, "Noor", Some(4)),
     ] {
-        people.insert(UserId(id), person(name, room));
+        let mut person = person(name, room);
+        person.identity_key = Some(sample_key(id));
+        person.verified = [2, 5, 6].contains(&id);
+        people.insert(UserId(id), person);
     }
     if let Some(p) = people.get_mut(&UserId(1)) {
         p.role = Role::Admin;
@@ -575,17 +598,31 @@ fn sample_state() -> State {
         current: None,
         mic: true,
         deafened: false,
-        key_warnings: vec![
-            KeyWarning {
-                user: UserId(3),
-                cause: WarningCause::KeyChanged {
-                    pinned: Fingerprint([0x7c; 32]),
-                    now: Fingerprint([0xb8; 32]),
-                },
+        key_warnings: vec![KeyWarning {
+            user: UserId(3),
+            verified: Fingerprint([0x7c; 32]),
+            now: Fingerprint(sample_key(3)),
+        }],
+        verified: vec![
+            VerifiedIdentity {
+                key: Fingerprint(sample_key(2)),
+                name: "Mara".into(),
+                servers: vec![Fingerprint([0x2c; 32]), Fingerprint([0x91; 32])],
             },
-            KeyWarning {
-                user: UserId(8),
-                cause: WarningCause::SameName { known: UserId(2) },
+            VerifiedIdentity {
+                key: Fingerprint([0x7c; 32]),
+                name: "Jonas".into(),
+                servers: vec![Fingerprint([0x2c; 32])],
+            },
+            VerifiedIdentity {
+                key: Fingerprint(sample_key(5)),
+                name: "Teo".into(),
+                servers: vec![Fingerprint([0x2c; 32])],
+            },
+            VerifiedIdentity {
+                key: Fingerprint(sample_key(6)),
+                name: "Ren".into(),
+                servers: vec![Fingerprint([0x2c; 32])],
             },
         ],
         health: Health {
@@ -638,6 +675,11 @@ fn sample_state() -> State {
     }
 }
 
+/// A sample person's identity key, as in [`sample_users`].
+fn sample_key(id: u64) -> PublicKey {
+    [(id as u8).wrapping_mul(37); 32]
+}
+
 fn sample_users() -> Vec<User> {
     [
         (1, "Felix", Role::Admin, None),
@@ -653,7 +695,7 @@ fn sample_users() -> Vec<User> {
         name: name.into(),
         role,
         invited_by: by.map(UserId),
-        identity_key: [id as u8 * 37; 32],
+        identity_key: sample_key(id),
         created_at: 0,
     })
     .collect()

@@ -295,7 +295,7 @@ fn find_user(presence: &[Presence], query: &str) -> Option<UserId> {
 /// The mic and first video track of `user`, once this call trusts them.
 fn peer_tracks(call: &Call, user: UserId) -> Option<(MediaId, MediaId)> {
     let keys = call.engine.keys();
-    let tracks = keys.keys.peer_tracks(user)?;
+    let tracks = keys.peer_tracks(user)?;
     Some((tracks.mic, tracks.shares.first()?.video))
 }
 

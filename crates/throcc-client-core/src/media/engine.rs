@@ -18,8 +18,8 @@ use super::fragment::{
     fragment,
 };
 use super::reorder::{Output, Reorder};
-use crate::contacts::{Contacts, UnsavedPins};
-use crate::keys::{EpochFloors, KeyManager, KeyNotice};
+use crate::floors::EpochFloors;
+use crate::keys::{KeyManager, KeyNotice};
 use crate::lock;
 
 /// How long ciphertext waits for a sender key that opens it before it counts as a
@@ -107,11 +107,6 @@ pub struct Arrived {
     pub bytes: u64,
 }
 
-pub struct KeyState {
-    pub keys: KeyManager,
-    pub contacts: Contacts,
-}
-
 /// One remote track's replay window, which outlives subscriptions until the room changes,
 /// and its track task's inbox while subscribed.
 #[derive(Default)]
@@ -137,8 +132,7 @@ type Sinks = Arc<Mutex<HashMap<MediaId, Sink>>>;
 
 /// Moves media between this client's tracks and the connection, end-to-end encrypted.
 pub struct MediaEngine {
-    keys: Arc<Mutex<KeyState>>,
-    pins: Arc<UnsavedPins>,
+    keys: Arc<Mutex<KeyManager>>,
     sinks: Sinks,
     audio: mpsc::Sender<Outgoing>,
     video: mpsc::Sender<Outgoing>,
@@ -155,18 +149,13 @@ impl MediaEngine {
         me: UserId,
         enc: EncKeyPair,
         server: Fingerprint,
-        contacts: Contacts,
         floors: EpochFloors,
     ) -> (
         Self,
         mpsc::UnboundedReceiver<Request>,
         mpsc::Receiver<MediaId>,
     ) {
-        let pins = contacts.unsaved();
-        let keys = Arc::new(Mutex::new(KeyState {
-            keys: KeyManager::new(me, enc, server, floors),
-            contacts,
-        }));
+        let keys = Arc::new(Mutex::new(KeyManager::new(me, enc, server, floors)));
         let sinks: Sinks = Arc::default();
         let stats = Arc::new(Stats::default());
         let (requests, requests_rx) = mpsc::unbounded_channel();
@@ -190,7 +179,7 @@ impl MediaEngine {
         let ticker = Arc::downgrade(&keys);
         tokio::spawn(async move {
             while let Some(keys) = ticker.upgrade() {
-                lock(&keys).keys.tick(Instant::now());
+                lock(&keys).tick(Instant::now());
                 drop(keys);
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
@@ -199,7 +188,6 @@ impl MediaEngine {
         (
             Self {
                 keys,
-                pins,
                 sinks,
                 audio,
                 video,
@@ -211,24 +199,24 @@ impl MediaEngine {
         )
     }
 
-    pub fn keys(&self) -> MutexGuard<'_, KeyState> {
+    pub fn keys(&self) -> MutexGuard<'_, KeyManager> {
         lock(&self.keys)
     }
 
     /// Applies our placement after `SetRoom`.
     pub fn placed(&self, placed: &Placed) -> Vec<KeyNotice> {
-        let (room_changed, (requests, notices)) = self.with_keys(|keys, contacts, now| {
+        let (room_changed, (requests, notices)) = {
+            let mut keys = self.keys();
             let room_changed = keys.room() != placed.room;
             let applied = keys.placed(
                 placed.room,
                 placed.epoch,
                 placed.tracks.clone(),
                 &placed.peers,
-                contacts,
-                now,
+                Instant::now(),
             );
             (room_changed, applied)
-        });
+        };
         if room_changed {
             lock(&self.sinks).clear();
         }
@@ -239,8 +227,9 @@ impl MediaEngine {
     /// Applies a control event that concerns media. Returns key warnings for the user.
     pub fn event(&self, event: &Event) -> Vec<KeyNotice> {
         match event {
-            Event::RoomState { room, epoch, peers } => self
-                .rekey(|keys, contacts, now| keys.room_state(*room, *epoch, peers, contacts, now)),
+            Event::RoomState { room, epoch, peers } => {
+                self.rekey(|keys, now| keys.room_state(*room, *epoch, peers, now))
+            }
             Event::SenderKey {
                 from,
                 epoch,
@@ -248,7 +237,6 @@ impl MediaEngine {
             } => {
                 if let Err(e) = self
                     .keys()
-                    .keys
                     .sender_key(*from, *epoch, wrapped, Instant::now())
                 {
                     warn!(from = from.0, "rejected a sender key: {e}");
@@ -264,9 +252,9 @@ impl MediaEngine {
     /// Notes where `user` is, and applies the room state again when that changes who is
     /// in our room.
     pub fn set_presence(&self, user: UserId, room: Option<RoomId>) -> Vec<KeyNotice> {
-        self.rekey(|keys, contacts, now| {
+        self.rekey(|keys, now| {
             if keys.set_presence(user, room) {
-                keys.reapply_room_state(contacts, now)
+                keys.reapply_room_state(now)
             } else {
                 (None, Vec::new())
             }
@@ -276,70 +264,11 @@ impl MediaEngine {
     /// Applies `f` to the keys, then sends the request it makes.
     fn rekey(
         &self,
-        f: impl FnOnce(&mut KeyManager, &mut Contacts, Instant) -> (Option<Request>, Vec<KeyNotice>),
+        f: impl FnOnce(&mut KeyManager, Instant) -> (Option<Request>, Vec<KeyNotice>),
     ) -> Vec<KeyNotice> {
-        let (request, notices) = self.with_keys(f);
+        let (request, notices) = f(&mut self.keys(), Instant::now());
         self.send_requests(request);
         notices
-    }
-
-    /// Marks `user`'s pinned key as checked by us, or not.
-    pub fn set_verified(&self, user: UserId, verified: bool) {
-        self.with_keys(|_, contacts, _| contacts.set_verified(user, verified));
-    }
-
-    /// Notes the names pinned people are shown with. Returns the unverified ones shown
-    /// with a name not noted for them before.
-    pub fn remember_names<'a>(
-        &self,
-        shown: impl IntoIterator<Item = (UserId, &'a str)>,
-    ) -> Vec<UserId> {
-        self.with_keys(|_, contacts, _| {
-            let mut renamed = Vec::new();
-            for (user, name) in shown {
-                if contacts.remember_name(user, name)
-                    && contacts.get(user).is_some_and(|c| !c.verified)
-                {
-                    renamed.push(user);
-                }
-            }
-            renamed
-        })
-    }
-
-    /// Writes the pins not yet saved, and none after, waiting for any write under way.
-    pub fn save_last_pins(&self) -> anyhow::Result<()> {
-        self.pins.save_last()
-    }
-
-    /// Why pins stopped reaching the file, once per run of failed writes.
-    pub fn pin_save_failure(&self) -> Option<String> {
-        self.pins.take_failure()
-    }
-
-    /// Runs `f` on the key manager and contacts, holding the key lock only for it. Pins it
-    /// changes are written afterwards, beside the async workers, so media never waits on
-    /// the file.
-    fn with_keys<R>(&self, f: impl FnOnce(&mut KeyManager, &mut Contacts, Instant) -> R) -> R {
-        let result = {
-            let mut state = self.keys();
-            let KeyState { keys, contacts } = &mut *state;
-            f(keys, contacts, Instant::now())
-        };
-        self.save_pins();
-        result
-    }
-
-    /// Writes the pins not yet saved, if any, beside the async workers.
-    pub fn save_pins(&self) {
-        if !self.pins.is_empty() {
-            let pins = self.pins.clone();
-            tokio::task::spawn_blocking(move || {
-                if let Err(e) = pins.save() {
-                    warn!("could not save a contact: {e:#}");
-                }
-            });
-        }
     }
 
     fn send_requests(&self, requests: impl IntoIterator<Item = Request>) {
@@ -469,7 +398,7 @@ impl Stats {
 struct Track {
     media_id: MediaId,
     kind: Kind,
-    keys: Arc<Mutex<KeyState>>,
+    keys: Arc<Mutex<KeyManager>>,
     sinks: Sinks,
     stats: Arc<Stats>,
     requests: mpsc::UnboundedSender<Request>,
@@ -490,7 +419,7 @@ impl Track {
     fn new(
         media_id: MediaId,
         kind: Kind,
-        keys: Arc<Mutex<KeyState>>,
+        keys: Arc<Mutex<KeyManager>>,
         sinks: Sinks,
         stats: Arc<Stats>,
         requests: mpsc::UnboundedSender<Request>,
@@ -576,7 +505,7 @@ impl Track {
         if self.pending.is_empty() {
             return;
         }
-        let generation = lock(&self.keys).keys.generation();
+        let generation = lock(&self.keys).generation();
         if generation == self.tried_generation {
             return;
         }
@@ -587,7 +516,7 @@ impl Track {
     }
 
     fn handle(&mut self, epoch: Epoch, datagram: Bytes, arrived: Instant, now: Instant) {
-        let key = lock(&self.keys).keys.recv_key(self.media_id, epoch);
+        let key = lock(&self.keys).recv_key(self.media_id, epoch);
         self.scratch.clear();
         self.scratch.extend_from_slice(&datagram);
         let (header, plaintext) = match key.map(|key| key.open(&mut self.scratch)) {
@@ -728,7 +657,7 @@ const KEYFRAME_COPIES: usize = 2;
 
 async fn send_loop(
     connection: quinn::Connection,
-    keys: Arc<Mutex<KeyState>>,
+    keys: Arc<Mutex<KeyManager>>,
     mut audio: mpsc::Receiver<Outgoing>,
     mut video: mpsc::Receiver<Outgoing>,
     recovery: mpsc::Sender<MediaId>,
@@ -785,12 +714,12 @@ fn copy_would_delay(unit: &Outgoing, video: &mpsc::Receiver<Outgoing>) -> bool {
 }
 
 fn seal(
-    keys: &Mutex<KeyState>,
+    keys: &Mutex<KeyManager>,
     sealer: &mut Sealer,
     unit: &Outgoing,
     stats: &Stats,
 ) -> Option<Vec<Bytes>> {
-    let (epoch, key) = lock(keys).keys.send_key(unit.media_id)?;
+    let (epoch, key) = lock(keys).send_key(unit.media_id)?;
     let datagrams = sealer.seal(unit, epoch, &key);
     let bytes: usize = datagrams.iter().map(Bytes::len).sum();
     *lock(&stats.sent_bytes).entry(unit.media_id).or_default() += bytes as u64;
@@ -800,7 +729,7 @@ fn seal(
 /// Seals and sends one unit. False once the connection is gone.
 async fn send_unit(
     connection: &quinn::Connection,
-    keys: &Mutex<KeyState>,
+    keys: &Mutex<KeyManager>,
     sealer: &mut Sealer,
     unit: &Outgoing,
     stats: &Stats,
@@ -838,10 +767,7 @@ mod tests {
 
     /// A track task for `media_id` on `receiver`'s keys, and what it delivers.
     fn track(receiver: Member, media_id: MediaId, kind: Kind) -> (Track, mpsc::Receiver<Received>) {
-        let keys = Arc::new(Mutex::new(KeyState {
-            keys: receiver.keys,
-            contacts: receiver.contacts,
-        }));
+        let keys = Arc::new(Mutex::new(receiver.keys));
         let sinks = Arc::new(Mutex::new(HashMap::from([(media_id, Sink::default())])));
         let (requests, _) = mpsc::unbounded_channel();
         let (out, out_rx) = mpsc::channel(16);
@@ -898,7 +824,6 @@ mod tests {
         assert!(timestamps(&mut out).is_empty());
 
         lock(&track.keys)
-            .keys
             .sender_key(a.id, second.0, &second.1, now)
             .unwrap();
         for datagram in later {
@@ -929,7 +854,6 @@ mod tests {
             track.receive(datagram, now);
         }
         lock(&track.keys)
-            .keys
             .sender_key(a.id, key.0, &key.1, now)
             .unwrap();
         for datagram in delta {

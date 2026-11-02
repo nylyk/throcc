@@ -9,7 +9,7 @@ use gpui_component::input::Input;
 use gpui_component::slider::Slider;
 use gpui_component::switch::Switch;
 use throcc_client_core::client::Command;
-use throcc_client_core::state::{FRAME_RATES, Resolution, WarningCause};
+use throcc_client_core::state::{FRAME_RATES, Resolution};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::messages::Codec;
@@ -489,26 +489,14 @@ fn verify(
         .person(user)
         .map_or(format!("User {}", user.0), |p| p.name.clone());
     let verified = app.state.person(user).is_some_and(|p| p.verified);
-    let causes = || {
-        app.state
-            .key_warnings
-            .iter()
-            .filter(|w| w.user == user)
-            .map(|w| &w.cause)
-    };
-    let key_change = causes().find_map(|c| match c {
-        WarningCause::KeyChanged { pinned, now } => Some((*pinned, *now)),
-        WarningCause::SameName { .. } => None,
-    });
-    let namesake = causes().find_map(|c| match c {
-        WarningCause::SameName { known } => Some(*known),
-        WarningCause::KeyChanged { .. } => None,
-    });
-    let changed = key_change.is_some();
-    let mut content = body(name.clone()).child(div().flex().gap_2().child(if changed {
+    let change = app
+        .state
+        .key_warnings
+        .iter()
+        .find(|w| w.user == user)
+        .map(|w| (w.verified, w.now));
+    let mut content = body(name.clone()).child(div().flex().gap_2().child(if change.is_some() {
         chip("Key changed", theme::danger_bg(), theme::danger_text())
-    } else if namesake.is_some() {
-        chip("Same name", theme::danger_bg(), theme::danger_text())
     } else if verified {
         chip("Verified", theme::ok_bg(), theme::ok_text())
     } else {
@@ -522,31 +510,28 @@ fn verify(
             .child(caption(label).w(px(48.)))
             .child(mono(key))
     };
-    if let Some((pinned, now)) = key_change {
+    if let Some((before, now)) = change {
         content = content.child(
             danger_box()
                 .child(div().typeset(theme::HEADLINE).child(format!("{name}’s key changed")))
                 .child(format!(
-                    "The server is showing a different key for {name} than the one you know. An honest server never does this, so someone may be trying to listen in."
+                    "You verified {name} with another key. An honest server only shows a new one after it was rebuilt and gave their account to someone else, so someone may be trying to listen in."
                 ))
-                .child(key("Before", pinned.short()))
+                .child(key("Before", before.short()))
                 .child(key("Now", now.short()))
-                .child(caption("Nothing you say or share is encrypted to the new key, so it can’t hear or see you.")),
-        );
-    }
-    if let Some(known) = namesake {
-        content = content.child(
-            danger_box()
-                .child(div().typeset(theme::HEADLINE).child(format!("Someone you know is also called {name}")))
-                .child(
-                    "This is a new account using the name of a person you met here before. A server trying to listen in would pose as them just like this.",
-                )
-                .child(key("Known", format!("User {}", known.0)))
-                .child(key("New", format!("User {}", user.0)))
-                .child(caption("Compare safety numbers with the real person before you trust this one. Marking them verified clears this warning.")),
+                .child(caption("The new key still hears what you say and sees what you share, like anyone not verified.")),
         );
     }
     let groups: Vec<String> = number.as_deref().map(safety_groups).unwrap_or_default();
+    let mut buttons = actions("Done", cx);
+    if change.is_some() {
+        buttons = buttons.child(secondary("dismiss-key-change", "Dismiss Warning").on_click(
+            cx.listener(move |app, _, _, cx| {
+                app.command(Command::DismissKeyChange(user));
+                cx.notify();
+            }),
+        ));
+    }
     content
         .child(section("Safety number"))
         .child(if groups.is_empty() {
@@ -562,17 +547,17 @@ fn verify(
                 .children(groups.into_iter().map(|g| div().child(g)))
                 .into_any_element()
         })
-        .child(description(if changed {
+        .child(description(if change.is_some() {
             format!(
-                "This number belongs to the key you knew. If it matches {name}’s, you know the real {name}, but the server is still showing a different key."
+                "This number belongs to the new key. Only if it matches {name}’s is the new key really theirs."
             )
         } else {
             format!(
-                "Compare this with {name} in person or through another app. If both match, nobody between you is swapping keys."
+                "Compare this with {name} in person or through another app. If both match, nobody between you is swapping keys. Verifying them here counts on every server."
             )
         }))
         .child(
-            actions("Done", cx).child(
+            buttons.child(
                 primary("mark-verified", if verified { "Mark as Not Verified" } else { "Mark as Verified" })
                     .disabled(!verified && number.is_none())
                     .on_click(cx.listener(move |app, _, _, cx| {
