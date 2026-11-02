@@ -17,11 +17,11 @@ use throcc_client_core::media::audio::{
 };
 
 use super::common::{
-    Typeset, avatar, caption, card, chip, key_cap, mono, primary, section, slider_gain,
-    slider_value, volume_slider,
+    Typeset, avatar, caption, card, chip, field_error, key_cap, mono, primary, section,
+    server_seed, slider_gain, slider_value, volume_slider,
 };
 use super::page::{field, frame, nav, picture_editor, row, save_line, segmented};
-use crate::app::{PictureFor, Screen, SettingsPage, ThroccApp};
+use crate::app::{PictureFor, Screen, SettingsPage, ThroccApp, typed_name};
 use crate::hotkey::DEFAULT_KEY_LABEL;
 use crate::theme;
 
@@ -70,6 +70,7 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let name = app.state.profile_name.clone().unwrap_or_default();
     let saved = app.state.profile_picture;
     let picture = picture_editor(app, PictureFor::Profile, &name, seed, saved, true, cx);
+    let name_error = typed_name(&app.name, cx).err();
     let save = primary("save-profile", "Save")
         .disabled(app.profile_form.saving() || !app.profile_changed(cx))
         .on_click(cx.listener(|app, _, _, cx| app.save_profile(cx)));
@@ -88,7 +89,7 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .flex_col()
                 .gap_4()
                 .child(picture)
-                .child(field("Name", Input::new(&app.name)))
+                .child(field("Name", Input::new(&app.name)).children(name_error.map(field_error)))
                 .child(save),
         )
         .into_any_element()
@@ -459,32 +460,30 @@ fn servers(app: &ThroccApp) -> AnyElement {
                 .flex()
                 .flex_col()
                 .gap_2()
-                .children(app.known_servers.iter().enumerate().map(
-                    |(i, (address, fingerprint))| {
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .min_h(theme::TOUCH)
-                            .child(avatar(address, i as u64, None, px(28.), false))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .flex()
-                                    .flex_col()
-                                    .child(div().child(address.clone()))
-                                    .child(
-                                        mono(fingerprint.short())
-                                            .typeset(theme::CAPTION)
-                                            .text_color(theme::text_3()),
-                                    ),
-                            )
-                            .children(
-                                (current == Some(address.as_str()))
-                                    .then(|| chip("Connected", theme::ok_bg(), theme::ok_text())),
-                            )
-                    },
-                )),
+                .children(app.known_servers.iter().map(|(address, fingerprint)| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .min_h(theme::TOUCH)
+                        .child(avatar(address, server_seed(address), None, px(28.), false))
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .child(mono(address.clone()))
+                                .child(
+                                    mono(fingerprint.short())
+                                        .typeset(theme::CAPTION)
+                                        .text_color(theme::text_3()),
+                                ),
+                        )
+                        .children(
+                            (current == Some(address.as_str()))
+                                .then(|| chip("Connected", theme::ok_bg(), theme::ok_text())),
+                        )
+                })),
         )
         .into_any_element()
 }

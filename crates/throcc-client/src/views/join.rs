@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use gpui::{Context, Div, IntoElement, ParentElement, Styled, div, px};
 use throcc_client_core::account::SignInError;
 use throcc_client_core::connection::ConnectError;
@@ -11,8 +13,8 @@ use super::mascot;
 use crate::app::{Dialog, ThroccApp};
 use crate::theme;
 
-/// Turns a failed sign-in into a sentence for the join screen.
-pub fn explain(error: &SignInError) -> String {
+/// Turns a failed sign-in to `address` into a sentence for the join screen.
+pub fn explain(error: &SignInError, address: &str) -> String {
     match error {
         SignInError::NotEnrolled(address) => {
             format!("You haven’t joined {address} yet. Ask someone there for an invite code.")
@@ -27,16 +29,26 @@ pub fn explain(error: &SignInError) -> String {
             "This server doesn’t know you anymore. Join again with a fresh invite code.".into()
         }
         SignInError::Connect(ConnectError::Resolve(address)) => format!("Couldn’t find {address}. Check the address."),
-        SignInError::Connect(ConnectError::Connection(_)) => unreachable_hint(),
+        SignInError::Connect(ConnectError::Connection(_)) => unreachable_hint(address),
         other => other.to_string(),
     }
 }
 
-/// Why a server didn't answer, and what to check.
-pub fn unreachable_hint() -> String {
-    format!(
-        "Couldn’t reach the server. Check the address, and that UDP port {DEFAULT_PORT} is open."
-    )
+/// Why the server at `address` didn't answer, and what to check.
+pub fn unreachable_hint(address: &str) -> String {
+    let port = port_of(address);
+    format!("Couldn’t reach the server. Check the address, and that UDP port {port} is open.")
+}
+
+/// The port a connection to `address` uses: the one it names, else the default.
+fn port_of(address: &str) -> u16 {
+    if let Ok(socket) = address.parse::<SocketAddr>() {
+        return socket.port();
+    }
+    match address.rsplit_once(':') {
+        Some((host, port)) if !host.contains(':') => port.parse().unwrap_or(DEFAULT_PORT),
+        _ => DEFAULT_PORT,
+    }
 }
 
 /// The window with no server connected: how a join is going, or what to do next.
@@ -113,4 +125,20 @@ fn frame(mascot: &'static str) -> Div {
                 .h(theme::HEADER_HEIGHT),
         )
         .child(mascot::drawing(mascot))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn port_is_the_addresses_own_or_the_default() {
+        assert_eq!(port_of("voice.example.net"), DEFAULT_PORT);
+        assert_eq!(port_of("voice.example.net:9000"), 9000);
+        assert_eq!(port_of("192.0.2.40:9001"), 9001);
+        assert_eq!(port_of("[2001:db8::1]:9002"), 9002);
+        assert_eq!(port_of("2001:db8::1"), DEFAULT_PORT);
+        assert_eq!(port_of("192.0.2.40"), DEFAULT_PORT);
+        assert!(unreachable_hint("host:9000").contains("UDP port 9000"));
+    }
 }

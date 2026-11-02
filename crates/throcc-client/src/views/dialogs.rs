@@ -15,10 +15,10 @@ use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::messages::Codec;
 
 use super::common::{
-    Typeset, caption, card, chip, danger, description, error_box, mono, primary, rate, secondary,
-    section, title,
+    Typeset, caption, card, chip, danger, description, error_box, field_error, mono, primary, rate,
+    secondary, section, title,
 };
-use crate::app::{Dialog, ThroccApp};
+use crate::app::{Dialog, ThroccApp, typed_name, typed_password};
 use crate::theme;
 
 /// The modal for `dialog`, over a dimmed window.
@@ -100,9 +100,27 @@ fn sends(
     }))
 }
 
+/// The room dialogs' name field, with why the server would refuse the typed name.
+fn room_name(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> Div {
+    let error = typed_name(&app.room_name, cx).err();
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(Input::new(&app.room_name))
+        .children(error.map(field_error))
+}
+
+/// Why the server would refuse the password typed in the room dialogs.
+fn room_password_error(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> Option<Div> {
+    typed_password(&app.room_password, cx)
+        .err()
+        .map(field_error)
+}
+
 fn new_room(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     body("New Room")
-        .child(Input::new(&app.room_name))
+        .child(room_name(app, cx))
         .child(
             div()
                 .flex()
@@ -110,11 +128,13 @@ fn new_room(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .gap_2()
                 .child(section("Password"))
                 .child(Input::new(&app.room_password))
+                .children(room_password_error(app, cx))
                 .child(caption("Leave it empty to let anyone join.")),
         )
         .child(
             actions("Cancel", cx).child(
                 primary("create-room", "Create")
+                    .disabled(!app.can_create_room(cx))
                     .on_click(cx.listener(|app, _, _, cx| app.create_room(cx))),
             ),
         )
@@ -144,7 +164,7 @@ fn delete_room(app: &mut ThroccApp, room: RoomId, cx: &mut Context<ThroccApp>) -
 fn edit_room(app: &mut ThroccApp, room: RoomId, cx: &mut Context<ThroccApp>) -> AnyElement {
     let locked = app.state.room(room).is_some_and(|r| r.locked);
     body("Edit Room")
-        .child(Input::new(&app.room_name))
+        .child(room_name(app, cx))
         .child(
             div()
                 .flex()
@@ -165,15 +185,20 @@ fn edit_room(app: &mut ThroccApp, room: RoomId, cx: &mut Context<ThroccApp>) -> 
                             )
                         })),
                 )
+                .children(room_password_error(app, cx))
                 .child(caption(if locked {
                     "Members need the password to join. Type a new one to change it."
                 } else {
                     "Anyone can join. Type a password to lock the room."
                 })),
         )
-        .child(actions("Cancel", cx).child(
-            primary("save-room", "Save").on_click(cx.listener(|app, _, _, cx| app.save_room(cx))),
-        ))
+        .child(
+            actions("Cancel", cx).child(
+                primary("save-room", "Save")
+                    .disabled(!app.can_save_room(cx))
+                    .on_click(cx.listener(|app, _, _, cx| app.save_room(cx))),
+            ),
+        )
         .into_any_element()
 }
 
@@ -192,15 +217,11 @@ fn room_password(
             "This room is locked. Enter its password to join.",
         ))
         .child(Input::new(&app.room_password))
-        .children(error.map(|error| {
-            div()
-                .typeset(theme::CALLOUT)
-                .text_color(theme::danger_text())
-                .child(error)
-        }))
+        .children(room_password_error(app, cx).or(error.map(field_error)))
         .child(
             actions("Cancel", cx).child(
                 primary("join-locked-room", "Join")
+                    .disabled(!app.can_join_with_password(cx))
                     .on_click(cx.listener(|app, _, _, cx| app.join_with_password(cx))),
             ),
         )

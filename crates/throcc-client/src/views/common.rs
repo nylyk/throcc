@@ -99,6 +99,13 @@ pub fn initials(name: &str) -> String {
         .map_or("?".into(), |c| c.to_uppercase().to_string())
 }
 
+/// An avatar colour seed for the server at `address`, the same wherever it is drawn.
+pub fn server_seed(address: &str) -> u64 {
+    address.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
 /// The person's picture, or their initials on a muted hue, with the speaking ring when
 /// they talk.
 pub fn avatar(
@@ -267,6 +274,14 @@ pub fn danger_menu_item(label: &'static str, icon_name: &'static str) -> PopupMe
 }
 
 /// What went wrong, in the warning colours.
+/// Why what was typed in the field above can't be used.
+pub fn field_error(error: impl Into<SharedString>) -> Div {
+    div()
+        .typeset(theme::CALLOUT)
+        .text_color(theme::danger_text())
+        .child(error.into())
+}
+
 pub fn error_box(error: String) -> Div {
     div()
         .p_3()

@@ -25,7 +25,7 @@ use throcc_client_core::state::{
 };
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
 use throcc_proto::invite::{self, InviteCode};
-use throcc_proto::messages::{User, valid_name, valid_password};
+use throcc_proto::messages::{MAX_NAME_CHARS, User, valid_name, valid_password};
 use throcc_proto::{Fingerprint, permissions};
 
 use crate::theme;
@@ -132,6 +132,9 @@ pub struct PictureEdit {
 pub struct PictureForm {
     pub edit: Option<PictureEdit>,
     pub status: Option<SaveStatus>,
+    /// Counts picks, resets and saves, so a picture still decoding when one of them
+    /// overtakes it is dropped.
+    pick: u64,
 }
 
 impl PictureForm {
@@ -140,7 +143,15 @@ impl PictureForm {
     }
 
     fn reset(&mut self) {
-        *self = Self::default();
+        *self = Self {
+            pick: self.pick + 1,
+            ..Self::default()
+        };
+    }
+
+    /// Drops the picture still decoding, if one is.
+    fn outdate_pick(&mut self) {
+        self.pick += 1;
     }
 
     /// The picture Save would set: `Some(None)` removes it.
@@ -269,22 +280,44 @@ fn known_servers() -> Vec<(String, Fingerprint)> {
         .unwrap_or_default()
 }
 
-/// A name field's text: `Some(None)` when empty, `None` when the server would refuse it.
-fn typed_name(field: &Entity<InputState>, cx: &App) -> Option<Option<String>> {
-    let typed = field.read(cx).value();
+const NAME_TOO_LONG: &str = "Names can be at most 32 characters.";
+const NAME_HIDES_TEXT: &str = "Names can’t contain control or invisible characters.";
+const PASSWORD_TOO_LONG: &str = "Passwords can be at most 128 characters.";
+
+/// A typed name: `Ok(None)` when empty, and why the server would refuse it if it would.
+fn checked_name(typed: &str) -> Result<Option<String>, &'static str> {
     if typed.trim().is_empty() {
-        return Some(None);
+        return Ok(None);
     }
-    valid_name(&typed).map(|name| Some(name.to_owned()))
+    match valid_name(typed) {
+        Some(name) => Ok(Some(name.to_owned())),
+        None if typed.trim().chars().count() > MAX_NAME_CHARS => Err(NAME_TOO_LONG),
+        None => Err(NAME_HIDES_TEXT),
+    }
 }
 
-/// A password field's text: `Some(None)` when empty, `None` when the server would refuse it.
-fn typed_password(field: &Entity<InputState>, cx: &App) -> Option<Option<String>> {
-    let typed = field.read(cx).value().to_string();
+/// A typed password: `Ok(None)` when empty, and why the server would refuse it if it would.
+fn checked_password(typed: &str) -> Result<Option<String>, &'static str> {
     if typed.is_empty() {
-        return Some(None);
+        Ok(None)
+    } else if valid_password(typed) {
+        Ok(Some(typed.to_owned()))
+    } else {
+        Err(PASSWORD_TOO_LONG)
     }
-    valid_password(&typed).then_some(Some(typed))
+}
+
+/// A name field's text, checked as [`checked_name`] does.
+pub fn typed_name(field: &Entity<InputState>, cx: &App) -> Result<Option<String>, &'static str> {
+    checked_name(&field.read(cx).value())
+}
+
+/// A password field's text, checked as [`checked_password`] does.
+pub fn typed_password(
+    field: &Entity<InputState>,
+    cx: &App,
+) -> Result<Option<String>, &'static str> {
+    checked_password(&field.read(cx).value())
 }
 
 /// Puts `value` in `field`, and focuses it when `focus`.
@@ -315,6 +348,8 @@ pub fn saved_settings() -> Settings {
 }
 
 pub struct ThroccApp {
+    /// Running on sample data, which must leave this computer's settings and servers alone.
+    mock: bool,
     pub client: Option<Arc<dyn ClientApi>>,
     pub state: Arc<State>,
     pub screen: Screen,
@@ -366,7 +401,6 @@ pub struct ThroccApp {
     pub fullscreen: Option<UserId>,
     /// Until when the controls over the fullscreen share show.
     pub controls_until: Instant,
-    pub fullscreen_focus: gpui::FocusHandle,
     /// Whether [`Self::enter_fullscreen`] made the window fullscreen, so leaving undoes only that.
     made_window_fullscreen: bool,
     /// The whole window's focus, so its key bindings work when no field has focus.
@@ -466,6 +500,7 @@ impl ThroccApp {
         };
         let audio = views::settings::AudioControls::new(&voice, &inputs, &outputs, window, cx);
         let mut app = Self {
+            mock,
             client: None,
             state: Arc::new(State::default()),
             screen: Screen::Join,
@@ -506,7 +541,6 @@ impl ThroccApp {
             popouts: HashMap::new(),
             fullscreen: None,
             controls_until: Instant::now(),
-            fullscreen_focus: cx.focus_handle(),
             made_window_fullscreen: false,
             root_focus: cx.focus_handle(),
             sidebar_width: theme::SIDEBAR_WIDTH,
@@ -600,11 +634,6 @@ impl ThroccApp {
                 if self.fullscreen.is_some_and(|user| !self.shows_stream(user)) {
                     self.exit_fullscreen(window, cx);
                 }
-                if let Some(Dialog::Verify { user, number }) = &mut self.dialog
-                    && number.is_none()
-                {
-                    *number = self.client.as_ref().and_then(|c| c.safety_number(*user));
-                }
             }
             Event::Invite { code, .. } => self.invite = Some(code),
             Event::Users(users) => self.users = users,
@@ -635,6 +664,12 @@ impl ThroccApp {
                 }
             }
             Event::LeftServer => self.end_session(window, cx),
+        }
+        // A key is pinned with only a notice, so any event may be the first with the number.
+        if let Some(Dialog::Verify { user, number }) = &mut self.dialog
+            && number.is_none()
+        {
+            *number = self.client.as_ref().and_then(|c| c.safety_number(*user));
         }
         cx.notify();
     }
@@ -690,14 +725,18 @@ impl ThroccApp {
     ) {
         self.picked_theme = name;
         theme::set(palette, cx);
-        theme::save_preset(name);
+        if !self.mock {
+            theme::save_preset(name);
+        }
     }
 
     /// Switches every window to the Custom theme and keeps it for next time.
     pub fn use_custom(&mut self, cx: &mut Context<Self>) {
         self.picked_theme = theme::CUSTOM;
         theme::set(self.custom_colors, cx);
-        theme::save_custom(self.custom_colors);
+        if !self.mock {
+            theme::save_custom(self.custom_colors);
+        }
     }
 
     /// Takes a typed hex colour into the Custom theme once it parses.
@@ -739,7 +778,6 @@ impl ThroccApp {
     pub fn enter_fullscreen(&mut self, user: UserId, window: &mut Window, cx: &mut Context<Self>) {
         self.fullscreen = Some(user);
         self.show_controls(cx);
-        window.focus(&self.fullscreen_focus, cx);
         if !window.is_fullscreen() {
             window.toggle_fullscreen();
             self.made_window_fullscreen = true;
@@ -1000,6 +1038,9 @@ impl ThroccApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if matches!(event, InputEvent::Change) {
+            cx.notify();
+        }
         if matches!(event, InputEvent::PressEnter { .. }) {
             match self.dialog {
                 Some(Dialog::NewRoom) => self.create_room(cx),
@@ -1028,9 +1069,13 @@ impl ThroccApp {
         let Some(Dialog::RoomPassword { room, .. }) = self.dialog else {
             return;
         };
-        if let Some(Some(password)) = typed_password(&self.room_password, cx) {
+        if let Ok(Some(password)) = typed_password(&self.room_password, cx) {
             self.command(Command::JoinWithPassword(room, password));
         }
+    }
+
+    pub fn can_join_with_password(&self, cx: &App) -> bool {
+        typed_password(&self.room_password, cx).is_ok_and(|password| password.is_some())
     }
 
     pub fn open_new_room(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1059,11 +1104,24 @@ impl ThroccApp {
         self.set_dialog(Some(dialog), cx);
     }
 
+    /// The room dialog's typed name and password, unless the server would refuse either.
+    fn room_fields(&self, cx: &App) -> Option<(Option<String>, Option<String>)> {
+        Some((
+            typed_name(&self.room_name, cx).ok()?,
+            typed_password(&self.room_password, cx).ok()?,
+        ))
+    }
+
+    pub fn can_create_room(&self, cx: &App) -> bool {
+        self.room_fields(cx).is_some_and(|(name, _)| name.is_some())
+    }
+
+    pub fn can_save_room(&self, cx: &App) -> bool {
+        self.room_fields(cx).is_some()
+    }
+
     pub fn create_room(&mut self, cx: &mut Context<Self>) {
-        let (Some(Some(name)), Some(password)) = (
-            typed_name(&self.room_name, cx),
-            typed_password(&self.room_password, cx),
-        ) else {
+        let Some((Some(name), password)) = self.room_fields(cx) else {
             return;
         };
         self.command(Command::CreateRoom(name, password));
@@ -1075,10 +1133,7 @@ impl ThroccApp {
         let Some(Dialog::EditRoom(room)) = self.dialog else {
             return;
         };
-        let (Some(name), Some(password)) = (
-            typed_name(&self.room_name, cx),
-            typed_password(&self.room_password, cx),
-        ) else {
+        let Some((name, password)) = self.room_fields(cx) else {
             return;
         };
         if let Some(name) =
@@ -1102,18 +1157,23 @@ impl ThroccApp {
         }
     }
 
-    /// The name Save on the profile page would give us, if it differs from the kept one.
-    fn profile_name_change(&self, cx: &App) -> Option<String> {
-        let typed = typed_name(&self.name, cx).flatten()?;
-        (self.state.profile_name.as_deref() != Some(typed.as_str())).then_some(typed)
+    /// The name Save on the profile page would give us, if it differs from the kept one,
+    /// and why the server would refuse it if it would.
+    fn profile_name_change(&self, cx: &App) -> Result<Option<String>, &'static str> {
+        let typed = typed_name(&self.name, cx)?;
+        Ok(typed.filter(|typed| self.state.profile_name.as_deref() != Some(typed.as_str())))
     }
 
+    /// Whether Save on the profile page has something to save that the server would take.
     pub fn profile_changed(&self, cx: &App) -> bool {
-        self.profile_form.edit.is_some() || self.profile_name_change(cx).is_some()
+        self.profile_name_change(cx)
+            .is_ok_and(|name| name.is_some() || self.profile_form.edit.is_some())
     }
 
     pub fn save_profile(&mut self, cx: &mut Context<Self>) {
-        let name = self.profile_name_change(cx);
+        let Ok(name) = self.profile_name_change(cx) else {
+            return;
+        };
         let picture = self.profile_form.change();
         if name.is_none() && picture.is_none() {
             return;
@@ -1126,28 +1186,35 @@ impl ThroccApp {
         if status == SaveStatus::UntilJoined {
             self.profile_form.edit = None;
         }
+        self.profile_form.outdate_pick();
         self.profile_form.status = Some(status);
         self.command(Command::SetProfile { name, picture });
         cx.notify();
     }
 
-    /// The name Save on the server page would give the server, if it differs.
-    fn server_name_change(&self, cx: &App) -> Option<Option<String>> {
+    /// The name Save on the server page would give the server, if it differs, and why the
+    /// server would refuse it if it would.
+    fn server_name_change(&self, cx: &App) -> Result<Option<Option<String>>, &'static str> {
         let typed = typed_name(&self.server_name, cx)?;
         let current = self.state.server.as_ref().and_then(|s| s.name.clone());
-        (typed != current).then_some(typed)
+        Ok((typed != current).then_some(typed))
     }
 
+    /// Whether Save on the server page has something to save that the server would take.
     pub fn server_changed(&self, cx: &App) -> bool {
-        self.server_form.edit.is_some() || self.server_name_change(cx).is_some()
+        self.server_name_change(cx)
+            .is_ok_and(|name| name.is_some() || self.server_form.edit.is_some())
     }
 
     pub fn save_server(&mut self, cx: &mut Context<Self>) {
-        let name = self.server_name_change(cx);
+        let Ok(name) = self.server_name_change(cx) else {
+            return;
+        };
         let picture = self.server_form.change();
         if name.is_none() && picture.is_none() {
             return;
         }
+        self.server_form.outdate_pick();
         self.server_form.status = Some(SaveStatus::Saving);
         self.command(Command::SetServerProfile { name, picture });
         cx.notify();
@@ -1205,19 +1272,22 @@ impl ThroccApp {
 
     /// Marks our or the server's picture for removal on the next save.
     pub fn remove_picture(&mut self, target: PictureFor, cx: &mut Context<Self>) {
-        *self.form_mut(target) = PictureForm {
-            edit: Some(PictureEdit {
-                bytes: None,
-                image: None,
-            }),
-            status: None,
-        };
+        let form = self.form_mut(target);
+        form.outdate_pick();
+        form.edit = Some(PictureEdit {
+            bytes: None,
+            image: None,
+        });
+        form.status = None;
         cx.notify();
     }
 
     /// Asks for a picture file, shrinks it and sets it as our or the server's picture.
     pub fn choose_picture(&mut self, target: PictureFor, cx: &mut Context<Self>) {
-        self.form_mut(target).status = None;
+        let form = self.form_mut(target);
+        form.status = None;
+        form.outdate_pick();
+        let pick = form.pick;
         let chosen = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -1244,6 +1314,9 @@ impl ThroccApp {
                 .await;
             this.update(cx, |app, cx| {
                 let form = app.form_mut(target);
+                if form.pick != pick {
+                    return;
+                }
                 match prepared {
                     Ok(edit) => form.edit = Some(edit),
                     Err(message) => form.status = Some(SaveStatus::Failed(message)),
@@ -1255,19 +1328,20 @@ impl ThroccApp {
         .detach();
     }
 
-    /// The server we are connected to.
+    /// The server we are connected to, or still reconnecting to.
     pub fn connected_server(&self) -> Option<&ServerView> {
-        self.client.as_ref().and(self.state.server.as_ref())
+        let gave_up = matches!(self.state.connection, ConnectionStatus::Failed(_));
+        self.client
+            .as_ref()
+            .filter(|_| !gave_up)
+            .and(self.state.server.as_ref())
     }
 
-    /// Shows the server at `address`, connecting to it first unless we already are and haven't
-    /// given up reconnecting.
+    /// Shows the server at `address`, connecting to it first unless we already are.
     pub fn open_server(&mut self, address: String, window: &mut Window, cx: &mut Context<Self>) {
-        let gave_up = matches!(self.state.connection, ConnectionStatus::Failed(_));
-        if !gave_up
-            && self
-                .connected_server()
-                .is_some_and(|s| s.address == address)
+        if self
+            .connected_server()
+            .is_some_and(|s| s.address == address)
         {
             if matches!(self.screen, Screen::Settings(_) | Screen::Server(_)) {
                 self.screen = Screen::Main;
@@ -1316,6 +1390,10 @@ impl ThroccApp {
             self.disconnect(window, cx);
             self.dialog = dialog;
         }
+        if self.mock {
+            self.attach(Arc::new(MockClient::new()), window, cx);
+            return;
+        }
         self.joining = true;
         self.join_attempt += 1;
         let attempt = self.join_attempt;
@@ -1356,7 +1434,7 @@ impl ThroccApp {
                                         actual,
                                     });
                                 }
-                                None => app.join_error = Some(views::join::explain(&e)),
+                                None => app.join_error = Some(views::join::explain(&e, &address)),
                             }
                         }
                     }
@@ -1377,8 +1455,10 @@ impl ThroccApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Ok(mut known) = Keystore::default_known_servers()
-            && known.trust(address, actual).is_ok()
+        if self.mock
+            || Keystore::default_known_servers()
+                .and_then(|mut known| known.trust(address, actual))
+                .is_ok()
         {
             self.set_dialog(None, cx);
             self.join(window, cx);
@@ -1406,6 +1486,7 @@ impl ThroccApp {
         self.focus = None;
         self.preview_self = false;
         self.push_to_talk = None;
+        self.server_form.reset();
         self.screen = Screen::Join;
         self.reload_known_servers();
     }
@@ -1416,7 +1497,10 @@ impl ThroccApp {
             self.joining = false;
             self.join_attempt += 1;
         }
-        if let Err(e) = Keystore::default_known_servers().and_then(|mut k| k.forget(address)) {
+        if self.mock {
+            self.known_servers.retain(|(known, _)| known != address);
+        } else if let Err(e) = Keystore::default_known_servers().and_then(|mut k| k.forget(address))
+        {
             tracing::warn!("forgetting {address}: {e:#}");
         }
         self.reload_known_servers();
@@ -1424,6 +1508,9 @@ impl ThroccApp {
     }
 
     fn reload_known_servers(&mut self) {
+        if self.mock {
+            return;
+        }
         self.known_servers = known_servers();
         self.server_looks = cached_looks(&self.known_servers);
     }
@@ -1440,8 +1527,8 @@ impl ThroccApp {
     /// Opens a screen of the mock client by name, for screenshots: welcome, join, joinfailed,
     /// lost, personmenu, addserver, removeserver, room, alone, emptylobby, focus, fullscreen,
     /// popout, share, connection, verify, keychange, pinmismatch, settings, appearance,
-    /// newroom, editroom, roompassword, deleteroom, profile, server or members. Any other
-    /// name leaves the lobby.
+    /// servers, newroom, editroom, roompassword, deleteroom, profile, server, keys, members,
+    /// invites, removeuser or leaveserver. Any other name leaves the lobby.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         let room = RoomId(1);
         let joined = |app: &mut Self| {
@@ -1461,7 +1548,7 @@ impl ThroccApp {
             "join" => offline(self),
             "joinfailed" => {
                 offline(self);
-                self.join_error = Some(views::join::unreachable_hint());
+                self.join_error = Some(views::join::unreachable_hint("voice.example.net"));
             }
             "lost" => {
                 joined(self);
@@ -1533,6 +1620,7 @@ impl ThroccApp {
             }
             "settings" => self.screen = Screen::Settings(SettingsPage::Audio),
             "appearance" => self.screen = Screen::Settings(SettingsPage::Appearance),
+            "servers" => self.screen = Screen::Settings(SettingsPage::Servers),
             "newroom" => self.dialog = Some(Dialog::NewRoom),
             "editroom" => self.dialog = Some(Dialog::EditRoom(room)),
             "roompassword" => {
@@ -1551,10 +1639,30 @@ impl ThroccApp {
                 });
             }
             "server" => self.screen = Screen::Server(ServerPage::Overview),
+            "keys" => {
+                joined(self);
+                self.screen = Screen::Server(ServerPage::Keys);
+            }
             "members" => {
                 self.screen = Screen::Server(ServerPage::Members);
                 self.command(Command::CreateInvite);
             }
+            "invites" => {
+                self.screen = Screen::Server(ServerPage::Members);
+                self.command(Command::CreateInvite);
+                after_a_moment(cx, |app, _| {
+                    Arc::make_mut(&mut app.state).role = Some(Role::User)
+                });
+            }
+            "removeuser" => {
+                self.screen = Screen::Server(ServerPage::Members);
+                self.dialog = Some(Dialog::Remove {
+                    user: UserId(4),
+                    name: "Ilse".into(),
+                    cascade: false,
+                });
+            }
+            "leaveserver" => self.dialog = Some(Dialog::LeaveServer),
             _ => {}
         }
         if let Some(client) = &self.client {
@@ -1615,9 +1723,10 @@ impl ThroccApp {
     /// Keeps the cue volume on this computer and plays a cue at it.
     pub fn save_cue_volume(&mut self) {
         let volume = self.voice.cue_volume;
-        let saved = keystore::config_dir()
-            .and_then(|dir| Settings::update(&dir, |s| s.cue_volume = volume));
-        if let Err(e) = saved {
+        if !self.mock
+            && let Err(e) = keystore::config_dir()
+                .and_then(|dir| Settings::update(&dir, |s| s.cue_volume = volume))
+        {
             tracing::warn!("could not save the cue volume: {e:#}");
         }
         self.command(Command::PlayCue(Cue::Join));
@@ -1735,5 +1844,47 @@ impl Render for ThroccApp {
                     .map(|dialog| views::dialogs::render(self, dialog, cx)),
             )
             .children(views::person_menu::render(self, window, cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use throcc_proto::messages::MAX_PASSWORD_CHARS;
+
+    use super::*;
+
+    #[test]
+    fn names_are_checked_with_a_reason() {
+        assert_eq!(checked_name(""), Ok(None));
+        assert_eq!(checked_name("   "), Ok(None));
+        assert_eq!(checked_name("  Lobby "), Ok(Some("Lobby".into())));
+        let longest = "é".repeat(MAX_NAME_CHARS);
+        assert_eq!(checked_name(&longest), Ok(Some(longest.clone())));
+        assert_eq!(checked_name(&format!("{longest}x")), Err(NAME_TOO_LONG));
+        assert_eq!(checked_name("a\tb"), Err(NAME_HIDES_TEXT));
+        assert_eq!(checked_name("adm\u{202E}nimda"), Err(NAME_HIDES_TEXT));
+        assert!(NAME_TOO_LONG.contains(&MAX_NAME_CHARS.to_string()));
+    }
+
+    #[test]
+    fn passwords_are_checked_with_a_reason() {
+        assert_eq!(checked_password(""), Ok(None));
+        assert_eq!(checked_password(" "), Ok(Some(" ".into())));
+        let longest = "p".repeat(MAX_PASSWORD_CHARS);
+        assert_eq!(checked_password(&longest), Ok(Some(longest.clone())));
+        assert_eq!(
+            checked_password(&format!("{longest}p")),
+            Err(PASSWORD_TOO_LONG)
+        );
+        assert!(PASSWORD_TOO_LONG.contains(&MAX_PASSWORD_CHARS.to_string()));
+    }
+
+    #[test]
+    fn a_reset_outdates_a_pick_still_decoding() {
+        let mut form = PictureForm::default();
+        form.outdate_pick();
+        let pick = form.pick;
+        form.reset();
+        assert_ne!(form.pick, pick);
     }
 }

@@ -6,7 +6,7 @@ use gpui::{
 use gpui_component::menu::ContextMenuExt;
 use gpui_component::tooltip::Tooltip;
 
-use super::common::{avatar, danger_menu_item, icon, moves_window, server_label};
+use super::common::{avatar, danger_menu_item, icon, moves_window, server_label, server_seed};
 use crate::app::{Dialog, Screen, SettingsPage, ThroccApp};
 use crate::theme;
 
@@ -34,7 +34,13 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
                 let address = address.clone();
                 let open = address.clone();
                 let server = item(("server", i), tooltip, here)
-                    .child(avatar(&initials_from, i as u64, picture, px(36.), false))
+                    .child(avatar(
+                        &initials_from,
+                        server_seed(&address),
+                        picture,
+                        px(36.),
+                        false,
+                    ))
                     .on_click(cx.listener(move |app, _, window, cx| {
                         app.open_server(open.clone(), window, cx)
                     }));

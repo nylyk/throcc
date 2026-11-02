@@ -9,10 +9,11 @@ use throcc_proto::ids::Role;
 use throcc_proto::{Fingerprint, permissions};
 
 use super::common::{
-    Typeset, avatar, caption, card, chip, ghost_icon, mono, primary, secondary, section,
+    Typeset, avatar, caption, card, chip, field_error, ghost_icon, mono, primary, secondary,
+    section, server_seed,
 };
 use super::page::{field, frame, nav, picture_editor, save_line, segmented};
-use crate::app::{Dialog, PictureFor, Screen, ServerPage, ThroccApp};
+use crate::app::{Dialog, PictureFor, Screen, ServerPage, ThroccApp, typed_name};
 use crate::theme;
 
 pub fn render(
@@ -51,13 +52,20 @@ fn overview(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         app,
         PictureFor::Server,
         server.title(),
-        0,
+        server_seed(&server.address),
         server.avatar,
         editable,
         cx,
     );
     let name = if editable {
-        Input::new(&app.server_name).into_any_element()
+        let error = typed_name(&app.server_name, cx).err();
+        div()
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            .child(Input::new(&app.server_name))
+            .children(error.map(field_error))
+            .into_any_element()
     } else {
         div().child(server.title().to_owned()).into_any_element()
     };
@@ -95,7 +103,7 @@ fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .flex_col()
                 .gap_2()
                 .child(section("This Server"))
-                .child(div().child(address))
+                .child(mono(address))
                 .child(
                     mono(fingerprint.to_string())
                         .typeset(theme::CAPTION)

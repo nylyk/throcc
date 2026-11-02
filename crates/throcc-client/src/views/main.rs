@@ -89,7 +89,6 @@ fn fullscreen(
         .surface(app.client.as_ref(), user, px(0.), window, cx);
     div()
         .id("fullscreen")
-        .track_focus(&app.fullscreen_focus)
         .size_full()
         .on_mouse_move(cx.listener(|app, _, _, cx| app.show_controls(cx)))
         .on_mouse_down(
@@ -194,6 +193,7 @@ fn sidebar(
                         .min_w_0()
                         .truncate()
                         .font_weight(FontWeight::NORMAL)
+                        .font_family(theme::mono_font())
                         .text_color(theme::text_3())
                         .child(format!("({server_address})"))
                 })),

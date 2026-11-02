@@ -32,7 +32,7 @@ docker logs throcc | grep 'becomes admin'
 
 1. Allow UDP 8476 in the firewall, and forward it if the server is behind NAT. Clients only need outbound UDP.
 2. On first start the server logs an invite code and its fingerprint. Whoever joins with that code becomes the admin.
-3. Admins and managers make more invites from the Members page. Each code works once and expires after a day.
+3. Anyone can make more invites from Server Settings: admins without limit, everyone else 3 a day. Each code works once and expires after a day.
 
 **Back up** the data directory: `server_key` and the SQLite database. Stop the server and copy it, or run `sqlite3 throcc.sqlite '.backup copy.sqlite'` and copy `server_key`. Losing `server_key` gives the server a new identity, and every client has to rejoin.
 
