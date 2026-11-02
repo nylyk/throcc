@@ -23,7 +23,7 @@ pub fn render(
 ) -> impl IntoElement {
     let role = app.state.role;
     let links = nav(
-        ServerPage::ALL.map(|p| (p, p.title(role))),
+        ServerPage::ALL.map(|p| (p, p.title(role), p.icon())),
         page,
         Screen::Server,
         cx,

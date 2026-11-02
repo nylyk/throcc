@@ -7,7 +7,7 @@ use gpui_component::Disableable;
 use gpui_component::button::Button;
 use throcc_proto::ids::Hash;
 
-use super::common::{Typeset, avatar, caption, ghost_icon, secondary, top_bar};
+use super::common::{Typeset, avatar, caption, ghost_icon, icon, secondary, top_bar};
 use crate::app::{PictureFor, SaveStatus, Screen, ThroccApp};
 use crate::theme;
 
@@ -100,7 +100,7 @@ pub fn resize_handle(cx: &mut Context<ThroccApp>) -> Stateful<Div> {
 
 /// The column of links to `pages` in a settings-style sidebar, each showing its `screen`.
 pub fn nav<P: Copy + PartialEq + 'static>(
-    pages: impl IntoIterator<Item = (P, &'static str)>,
+    pages: impl IntoIterator<Item = (P, &'static str, &'static str)>,
     current: P,
     screen: fn(P) -> Screen,
     cx: &mut Context<ThroccApp>,
@@ -111,24 +111,29 @@ pub fn nav<P: Copy + PartialEq + 'static>(
         .flex()
         .flex_col()
         .gap_1()
-        .children(pages.into_iter().enumerate().map(|(i, (page, label))| {
-            div()
-                .id(("nav", i))
-                .px_3()
-                .min_h(px(36.))
-                .flex()
-                .items_center()
-                .rounded(theme::RADIUS_ROW)
-                .cursor_pointer()
-                .when(page == current, |s| s.bg(theme::raised()))
-                .hover(|s| s.bg(theme::raised()))
-                .child(label)
-                .on_click(
-                    cx.listener(move |app, _, window, cx| {
-                        app.show_screen(screen(page), window, cx)
-                    }),
-                )
-        }))
+        .children(
+            pages
+                .into_iter()
+                .enumerate()
+                .map(|(i, (page, label, icon_name))| {
+                    div()
+                        .id(("nav", i))
+                        .px_3()
+                        .min_h(px(36.))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .rounded(theme::RADIUS_ROW)
+                        .cursor_pointer()
+                        .when(page == current, |s| s.bg(theme::raised()))
+                        .hover(|s| s.bg(theme::raised()))
+                        .child(icon(icon_name).size(px(16.)).text_color(theme::text_2()))
+                        .child(label)
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            app.show_screen(screen(page), window, cx)
+                        }))
+                }),
+        )
 }
 
 /// The page's picture of `target`, its unsaved one first, with buttons to choose another or

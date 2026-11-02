@@ -72,6 +72,15 @@ impl SettingsPage {
             Self::Servers => "Servers",
         }
     }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::Profile => "circle-user",
+            Self::Audio => "audio-lines",
+            Self::Appearance => "palette",
+            Self::Servers => "server",
+        }
+    }
 }
 
 /// Pages about the server we are connected to, apart from this machine's settings.
@@ -92,6 +101,14 @@ impl ServerPage {
             Self::Keys => "Privacy and Keys",
             Self::Members if role.is_some_and(permissions::can_list_users) => "Members",
             Self::Members => "Invites",
+        }
+    }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::Overview => "server",
+            Self::Keys => "key-round",
+            Self::Members => "users",
         }
     }
 }

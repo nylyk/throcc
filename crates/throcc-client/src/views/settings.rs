@@ -31,7 +31,7 @@ pub fn render(
     cx: &mut Context<ThroccApp>,
 ) -> impl IntoElement {
     let links = nav(
-        SettingsPage::ALL.map(|p| (p, p.title())),
+        SettingsPage::ALL.map(|p| (p, p.title(), p.icon())),
         page,
         Screen::Settings,
         cx,
