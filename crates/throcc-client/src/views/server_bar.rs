@@ -94,7 +94,7 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
                         .text_color(theme::text_2())
                         .child(icon("settings").size(px(20.)))
                         .on_click(cx.listener(|app, _, window, cx| {
-                            app.show_screen(Screen::Settings(SettingsPage::Audio), window, cx)
+                            app.show_screen(Screen::Settings(SettingsPage::Profile), window, cx)
                         })),
                 ),
         )
