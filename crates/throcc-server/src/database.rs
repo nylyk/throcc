@@ -128,7 +128,9 @@ impl Database {
     }
 
     /// Reserves `count` consecutive media ids, or returns `None` once they are exhausted.
-    /// Ids are never handed out twice, even across restarts.
+    /// Ids are never handed out twice across process restarts. With `synchronous=NORMAL`
+    /// an OS crash or power loss can roll back the last allocations; clients draw a fresh
+    /// sender secret on every placement, so a repeated id never repeats a track key.
     pub fn allocate_media_ids(&mut self, count: u32) -> Result<Option<MediaId>> {
         let tx = self.conn.transaction()?;
         let first = next_media_id(&tx)?;
@@ -338,11 +340,20 @@ impl Database {
         Ok(())
     }
 
-    pub fn set_epoch(&self, room: RoomId, epoch: Epoch) -> Result<()> {
-        self.conn.execute(
-            "UPDATE rooms SET epoch = ?1 WHERE id = ?2",
-            params![i64::from(epoch.0), room.0 as i64],
-        )?;
+    pub fn set_epoch(&mut self, room: RoomId, epoch: Epoch) -> Result<()> {
+        self.set_epochs(&[(room, epoch)])
+    }
+
+    /// Sets the epochs of several rooms, all or none.
+    pub fn set_epochs(&mut self, epochs: &[(RoomId, Epoch)]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        for (room, epoch) in epochs {
+            tx.execute(
+                "UPDATE rooms SET epoch = ?1 WHERE id = ?2",
+                params![i64::from(epoch.0), room.0 as i64],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -396,6 +407,14 @@ impl Database {
     pub fn delete_bootstrap_invites(&self) -> Result<()> {
         self.conn
             .execute("DELETE FROM invites WHERE minted_by IS NULL", [])?;
+        Ok(())
+    }
+
+    /// Deletes invites that have used up their `tries`. Only safe while no run is in flight,
+    /// since the last run of an invite is what burns it.
+    pub fn delete_spent_invites(&self, tries: u32) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM invites WHERE failures >= ?1", [tries])?;
         Ok(())
     }
 
@@ -716,6 +735,36 @@ mod tests {
         let mut db = Database::open_in_memory().unwrap();
         enroll(&mut db, 1, None);
         assert_eq!(db.enroll(&[9; 32], "C01", 100).unwrap(), None);
+    }
+
+    #[test]
+    fn spent_invites_are_deleted() {
+        let db = Database::open_in_memory().unwrap();
+        for (code_id, failures) in [("ONE", 2), ("TWO", 3)] {
+            db.insert_invite(&InviteRow {
+                code_id: code_id.into(),
+                secret: "S".into(),
+                minted_by: None,
+                expires_at: 1000,
+                failures,
+            })
+            .unwrap();
+        }
+        db.delete_spent_invites(3).unwrap();
+        assert!(db.invite("ONE").unwrap().is_some());
+        assert!(db.invite("TWO").unwrap().is_none());
+    }
+
+    #[test]
+    fn epochs_are_set_together() {
+        let mut db = Database::open_in_memory().unwrap();
+        let (a, b) = (
+            db.create_room("a", None).unwrap(),
+            db.create_room("b", None).unwrap(),
+        );
+        db.set_epochs(&[(a, Epoch(4)), (b, Epoch(9))]).unwrap();
+        let epochs: Vec<_> = db.rooms().unwrap().iter().map(|r| r.epoch).collect();
+        assert_eq!(epochs, vec![Epoch(4), Epoch(9)]);
     }
 
     #[test]

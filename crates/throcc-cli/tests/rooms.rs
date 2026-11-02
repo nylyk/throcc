@@ -6,13 +6,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use throcc_proto::framing;
-use throcc_proto::ids::{Epoch, Role, RoomId, UserId};
+use throcc_proto::ids::{Epoch, Hash, Role, RoomId, UserId};
 use throcc_proto::messages::{
     ClientMessage, ErrorCode, Event, MAX_AVATAR_BYTES, Presence, Request, Response, ServerMessage,
     SignedEncKey, Welcome,
 };
 use throcc_server::database::Database;
-use throcc_server::rooms::MAX_ROOMS;
+use throcc_server::rooms::{Handled, MAX_ROOMS, PasswordWork};
 use throcc_server::{DATABASE_FILE, unix_now};
 
 use common::*;
@@ -195,6 +195,89 @@ async fn a_room_created_with_a_password_is_locked_from_the_start() {
 }
 
 #[tokio::test]
+async fn a_password_checked_outside_the_hub_is_checked_again_before_it_counts() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let general = create_room(&mut alice, "General").await;
+    let mut bob = invited(&server, &alice).await;
+    let bob_id = bob.link.welcome.me;
+    let lock = |password: Option<&str>| Request::SetRoomPassword {
+        room: general,
+        password: password.map(str::to_owned),
+    };
+    let join = |password: &str| Request::SetRoom {
+        room: Some(general),
+        password: Some(password.to_owned()),
+    };
+    // Bob's request up to its password work, then the rest, as his session would run them.
+    let start = |request: Request| {
+        let mut hub = server.shared.hub();
+        let conn_id = hub.conn_id(bob_id).unwrap();
+        match hub.handle(bob_id, conn_id, request) {
+            Handled::Pending(work) => (conn_id, work),
+            Handled::Done(res) => panic!("expected password work, got {res:?}"),
+        }
+    };
+    let finish = |(conn_id, work): (u64, PasswordWork)| {
+        let done = work.run();
+        server.shared.hub().resume(bob_id, conn_id, done)
+    };
+
+    assert_eq!(alice.request(lock(Some("hunter2"))).await, Response::Ok);
+    let joining = start(join("hunter2"));
+    assert_eq!(alice.request(lock(Some("hunter3"))).await, Response::Ok);
+    assert_error(&finish(joining), ErrorCode::WrongPassword);
+
+    let joining = start(join("hunter3"));
+    assert_eq!(alice.request(lock(None)).await, Response::Ok);
+    assert!(matches!(finish(joining), Response::Placed(p) if p.room == Some(general)));
+    bob.join(None).await;
+
+    assert_eq!(alice.request(lock(Some("hunter4"))).await, Response::Ok);
+    let joining = start(join("hunter4"));
+    bob.reconnect(&server.addr, None).await;
+    assert_error(&finish(joining), ErrorCode::Forbidden);
+
+    let joining = start(join("hunter4"));
+    assert_eq!(
+        alice.request(Request::DeleteRoom(general)).await,
+        Response::Ok
+    );
+    assert_error(&finish(joining), ErrorCode::NotFound);
+
+    let promote = |role| Request::SetRole { user: bob_id, role };
+    assert_eq!(alice.request(promote(Role::Manager)).await, Response::Ok);
+    let creating = start(Request::CreateRoom {
+        name: "Private".into(),
+        password: Some("hunter5".into()),
+    });
+    assert_eq!(alice.request(promote(Role::User)).await, Response::Ok);
+    assert_error(&finish(creating), ErrorCode::Forbidden);
+}
+
+#[tokio::test]
+async fn a_join_that_cannot_bump_the_new_rooms_epoch_leaves_the_old_room_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = ProcessLikeServer::start(dir.path(), "127.0.0.1:0".parse().unwrap());
+    let addr = first.addr;
+    let mut alice = enroll_at(&addr.to_string(), first.bootstrap.as_ref().unwrap()).await;
+    let general = create_room(&mut alice, "General").await;
+    let full = create_room(&mut alice, "Full").await;
+    first.stop();
+    Database::open(&dir.path().join(DATABASE_FILE))
+        .unwrap()
+        .set_epoch(full, Epoch(u32::MAX))
+        .unwrap();
+
+    let second = ProcessLikeServer::start(dir.path(), addr);
+    alice.reconnect(&addr.to_string(), None).await;
+    let epoch = alice.join(Some(general)).await.epoch;
+    assert_error(&alice.set_room(Some(full), None).await, ErrorCode::Internal);
+    assert_eq!(alice.join(Some(general)).await.epoch, epoch);
+    second.stop();
+}
+
+#[tokio::test]
 async fn failed_set_room_leaves_the_client_in_place() {
     let server = start_server();
     let mut alice = admin(&server).await;
@@ -323,6 +406,96 @@ async fn requests_are_rate_limited_per_user() {
         alice.request(Request::ListUsers).await,
         Response::Users(_)
     ));
+}
+
+#[tokio::test]
+async fn picture_fetches_have_their_own_rate_limit() {
+    let server = start_server();
+    let alice = admin(&server).await;
+    let fetches: Vec<_> = (0..4000)
+        .map(|_| {
+            let requester = alice.link.requester.clone();
+            tokio::spawn(async move { requester.request(Request::GetAvatar(Hash([0; 32]))).await })
+        })
+        .collect();
+    let mut limited = 0;
+    for fetch in fetches {
+        let res = fetch.await.unwrap().unwrap();
+        if matches!(&res, Response::Err { code, .. } if *code == ErrorCode::RateLimited) {
+            limited += 1;
+        }
+    }
+    assert!(limited > 0);
+    assert!(matches!(
+        alice.request(Request::ListUsers).await,
+        Response::Users(_)
+    ));
+}
+
+#[tokio::test]
+async fn only_admins_hear_about_new_users_and_role_changes() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let mut manager = invited(&server, &alice).await;
+    let manager_id = manager.link.welcome.me;
+    let set_role = |user, role| Request::SetRole { user, role };
+    assert_eq!(
+        alice.request(set_role(manager_id, Role::Manager)).await,
+        Response::Ok
+    );
+    manager
+        .event(|e| {
+            matches!(e, Event::RoleChanged { user, .. } if *user == manager_id).then_some(())
+        })
+        .await;
+
+    let mut carol = invited(&server, &alice).await;
+    let carol_id = carol.link.welcome.me;
+    alice
+        .event(|e| matches!(e, Event::UserAdded(u) if u.id == carol_id).then_some(()))
+        .await;
+    assert_eq!(
+        alice.request(set_role(carol_id, Role::Manager)).await,
+        Response::Ok
+    );
+    for client in [&mut alice, &mut carol] {
+        client
+            .event(|e| {
+                matches!(e, Event::RoleChanged { user, .. } if *user == carol_id).then_some(())
+            })
+            .await;
+    }
+    create_room(&mut alice, "Marker").await;
+    manager
+        .event(|e| match e {
+            Event::UserAdded(_) => panic!("a manager heard about a new user"),
+            Event::RoleChanged { user, .. } if *user == carol_id => {
+                panic!("a manager heard about someone else's role")
+            }
+            Event::RoomCreated(room) if room.name == "Marker" => Some(()),
+            _ => None,
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_member_who_disconnects_leaves_no_routes_behind() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let general = create_room(&mut alice, "General").await;
+    let bob = invited(&server, &alice).await;
+    let alice_mic = alice.join(Some(general)).await.tracks.unwrap().mic;
+    let bob_mic = bob.join(Some(general)).await.tracks.unwrap().mic;
+    let routes = || server.shared.sfu.table.load();
+    assert_eq!(routes().routes[&alice_mic].subscribers.len(), 1);
+    assert!(routes().routes.contains_key(&bob_mic));
+
+    bob.disconnect();
+    wait_for("the departed member's routes to go", || {
+        let table = routes();
+        !table.routes.contains_key(&bob_mic) && table.routes[&alice_mic].subscribers.is_empty()
+    })
+    .await;
 }
 
 #[tokio::test]

@@ -6,8 +6,8 @@ use serde::de::DeserializeOwned;
 use throcc_crypto::identity::random;
 use throcc_proto::framing::{self, FrameError, LEN_BYTES};
 use throcc_proto::messages::{
-    AuthError, AuthResult, ClientMessage, Event, Hello, PROTOCOL, PakeStep, Response, ServerHello,
-    ServerMessage,
+    AuthError, AuthResult, ClientMessage, ErrorCode, Event, Hello, PROTOCOL, PakeStep, Request,
+    Response, ServerHello, ServerMessage,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{Semaphore, mpsc};
@@ -17,7 +17,7 @@ use crate::Shared;
 use crate::auth::{self, Refused};
 use crate::egress;
 use crate::limits::{Pass, SourceKey};
-use crate::rooms::{Link, Outgoing};
+use crate::rooms::{Handled, Link, Outgoing, PasswordDone, PasswordWork};
 
 /// How long a connection may wait for a handshake slot, and then how long it has to send
 /// its `Hello`.
@@ -207,8 +207,18 @@ async fn read_loop(
     let pictures = Arc::new(Semaphore::new(QUEUED_PICTURE_BYTES));
     loop {
         let ClientMessage::Request { id, req } = read_frame(recv).await?;
-        debug!(user = user.0, id, ?req, "request");
-        let res = shared.hub().handle(user, conn_id, req);
+        debug!(user = user.0, id, kind = request_kind(&req), "request");
+        let handled = shared.hub().handle(user, conn_id, req);
+        let res = match handled {
+            Handled::Done(res) => res,
+            Handled::Pending(work) => match run_password_work(shared, work).await {
+                Some(done) => shared.hub().resume(user, conn_id, done),
+                None => Response::Err {
+                    code: ErrorCode::Internal,
+                    message: "internal server error".into(),
+                },
+            },
+        };
         let response = match &res {
             Response::Avatar(bytes) => {
                 let cost = bytes.len().min(QUEUED_PICTURE_BYTES) as u32;
@@ -222,6 +232,46 @@ async fn read_loop(
         if outgoing.send(response).await.is_err() {
             return Err(ReadError::Closed);
         }
+    }
+}
+
+/// Runs Argon2 on the blocking pool, so neither the hub lock nor an async worker waits
+/// on it, and only a few at a time, since each run takes 19 MiB.
+async fn run_password_work(shared: &Shared, work: PasswordWork) -> Option<PasswordDone> {
+    let _turn = shared.password_work.acquire().await.ok()?;
+    match tokio::task::spawn_blocking(move || work.run()).await {
+        Ok(done) => Some(done),
+        Err(e) => {
+            warn!("room password work failed: {e}");
+            None
+        }
+    }
+}
+
+/// A request's name for the log. Requests carry passwords and pictures, so the log never
+/// gets the request itself.
+fn request_kind(req: &Request) -> &'static str {
+    match req {
+        Request::SetRoom { .. } => "SetRoom",
+        Request::SetProfile { .. } => "SetProfile",
+        Request::SetAvatar(_) => "SetAvatar",
+        Request::GetAvatar(_) => "GetAvatar",
+        Request::SetEncKey(_) => "SetEncKey",
+        Request::SetMedia(_) => "SetMedia",
+        Request::CreateRoom { .. } => "CreateRoom",
+        Request::RenameRoom { .. } => "RenameRoom",
+        Request::DeleteRoom(_) => "DeleteRoom",
+        Request::SetRoomPassword { .. } => "SetRoomPassword",
+        Request::CreateInvite => "CreateInvite",
+        Request::ListUsers => "ListUsers",
+        Request::SetRole { .. } => "SetRole",
+        Request::RemoveUser { .. } => "RemoveUser",
+        Request::SetWatching(_) => "SetWatching",
+        Request::RequestKeyframe { .. } => "RequestKeyframe",
+        Request::PublishKey { .. } => "PublishKey",
+        Request::SetServerName(_) => "SetServerName",
+        Request::SetServerAvatar(_) => "SetServerAvatar",
+        Request::KickFromRoom { .. } => "KickFromRoom",
     }
 }
 

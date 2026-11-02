@@ -15,7 +15,7 @@ The server: sign-in, rooms and presence, the key relay, and an SFU that forwards
 | `session.rs` | One connection: handshake, control-stream read and write loops |
 | `auth.rs` | Sign-in for known keys, and enrollment with an invite through the PAKE |
 | `rooms.rs` | The `Hub`: rooms, membership, presence, invites, profiles, key relay, request handling |
-| `room_password.rs` | Argon2id hashes of room passwords |
+| `room_password.rs` | Argon2id hashes of room passwords. They run on the blocking pool, a few at a time, never under the hub lock |
 | `limits.rs` | Token buckets, per-source connection caps and the per-source enrollment limiter |
 | `sfu.rs` | Ingress: the per-connection rate limit, the ownership check, the forwarding table and keyframe-request merging |
 | `egress.rs` | One task per receiver: audio first, video in whole units within a 150 ms budget, link stats |

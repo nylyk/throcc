@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use throcc_crypto::identity::{self, random};
 use throcc_crypto::pake::{ServerPake, Transcript};
@@ -96,7 +96,7 @@ struct Enrollment<'a> {
 impl Enrollment<'_> {
     async fn run(&self, stream: &mut FrameStream, pake_a: &[u8]) -> Result<UserRow, Refused> {
         // A run counts against its source from the start, so parallel runs can't outpace the limit.
-        if !self.shared.limiter().begin(self.source) {
+        if !self.shared.limiter().begin(self.source, Instant::now()) {
             warn!(source = ?self.source, "enrollment rate-limited");
             return Err(Refused::Enroll(AuthError::RateLimited));
         }

@@ -18,6 +18,7 @@ use anyhow::{Context, Result};
 use throcc_proto::Fingerprint;
 use throcc_proto::invite::InviteCode;
 use throcc_proto::transport::{check_datagrams, close};
+use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
 use crate::database::Database;
@@ -46,6 +47,8 @@ pub const HANDSHAKES: Caps = Caps {
     total: 128,
 };
 pub const TLS_TIMEOUT: Duration = Duration::from_secs(10);
+/// Room-password Argon2 runs allowed at once; each takes 19 MiB.
+const PASSWORD_WORKERS: usize = 2;
 const KEYFRAME_TICK: Duration = Duration::from_millis(100);
 
 pub struct Config {
@@ -63,6 +66,7 @@ pub struct Shared {
     unauthenticated: Arc<Gate>,
     connections: Arc<Gate>,
     handshakes: Arc<Gate>,
+    password_work: Semaphore,
 }
 
 impl Shared {
@@ -93,6 +97,8 @@ impl Server {
             sfu.clone(),
             identity.fingerprint,
         )?;
+        // No enrollment run is in flight yet, so invites a stop left spent can go now.
+        hub.db.delete_spent_invites(auth::INVITE_TRIES)?;
         let bootstrap = if hub.db.user_count()? == 0 {
             hub.db.delete_bootstrap_invites()?;
             Some(hub.mint_invite(None, unix_now())?.0)
@@ -111,6 +117,7 @@ impl Server {
             unauthenticated: Gate::new(UNAUTHENTICATED),
             connections: Gate::new(CONNECTIONS),
             handshakes: Gate::new(HANDSHAKES),
+            password_work: Semaphore::new(PASSWORD_WORKERS),
         });
         Ok(Self {
             endpoint,

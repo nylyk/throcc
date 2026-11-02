@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -145,6 +145,8 @@ pub struct Queues {
     /// In the order units arrived, which is also the order of their ids.
     video: VecDeque<VideoUnit>,
     history: HashMap<MediaId, BTreeMap<u32, Fate>>,
+    /// Video tracks seen since the last [`Queues::forget_quiet_tracks`].
+    active_tracks: HashSet<MediaId>,
     next_id: u64,
     stats: BTreeMap<MediaId, Counters>,
     video_bytes: usize,
@@ -175,6 +177,7 @@ impl Queues {
             flags,
             ..
         } = packet.header;
+        self.active_tracks.insert(media_id);
         if flags.contains(Flags::FIRST) {
             let id = self.new_id();
             let history = self.history.entry(media_id).or_default();
@@ -203,15 +206,20 @@ impl Queues {
             .map(|(_, fate)| *fate);
         match fate {
             Some(Fate::Queued(id)) => {
-                if let Some(unit) = self.position(id).map(|i| &mut self.video[i])
-                    && unit.received < MAX_UNIT_FRAGMENTS
-                {
-                    self.video_bytes += packet.bytes.len();
-                    unit.packets.push_back(packet.bytes);
-                    unit.received += 1;
-                    unit.last_fragment = now;
-                    unit.complete |= flags.contains(Flags::LAST);
+                let Some(i) = self.position(id) else {
+                    return;
+                };
+                let unit = &mut self.video[i];
+                if unit.received >= MAX_UNIT_FRAGMENTS {
+                    // Forwarding only part of it would break whole-unit delivery.
+                    self.drop_unit(id);
+                    return;
                 }
+                self.video_bytes += packet.bytes.len();
+                unit.packets.push_back(packet.bytes);
+                unit.received += 1;
+                unit.last_fragment = now;
+                unit.complete |= flags.contains(Flags::LAST);
             }
             Some(Fate::Sent) => {
                 let id = self.new_id();
@@ -240,6 +248,7 @@ impl Queues {
             self.count_drop(media_id);
             return;
         }
+        self.active_tracks.insert(media_id);
         let history = self.history.entry(media_id).or_default();
         if first {
             if !history.contains_key(&seq) {
@@ -347,6 +356,15 @@ impl Queues {
         }
     }
 
+    /// Forgets the history of tracks that were quiet since the last call and have nothing
+    /// queued, so a long-lived receiver keeps none for tracks that have ended.
+    fn forget_quiet_tracks(&mut self) {
+        let queued: HashSet<MediaId> = self.video.iter().map(|u| u.media_id).collect();
+        self.history
+            .retain(|id, _| self.active_tracks.contains(id) || queued.contains(id));
+        self.active_tracks.clear();
+    }
+
     fn position(&self, id: u64) -> Option<usize> {
         self.video.binary_search_by_key(&id, |u| u.id).ok()
     }
@@ -440,6 +458,7 @@ pub fn spawn(connection: quinn::Connection, control: mpsc::Sender<Outgoing>) -> 
             queues.enforce_budget(now);
             if now >= next_stats {
                 next_stats = now + LINK_STATS_INTERVAL;
+                queues.forget_quiet_tracks();
                 if let Ok(permit) = control.try_reserve() {
                     let tracks = queues.take_stats();
                     if !tracks.is_empty() {
@@ -646,14 +665,43 @@ mod tests {
     }
 
     #[test]
-    fn a_unit_cannot_grow_without_bound() {
+    fn a_unit_over_the_fragment_limit_is_dropped_whole() {
         let now = Instant::now();
         let mut queues = Queues::default();
         queues.push(packet(TrackKind::Video, 1, 0, Flags::FIRST, 10), now);
-        for seq in 1..MAX_UNIT_FRAGMENTS as u32 * 2 {
+        assert_eq!(queues.pop().unwrap()[0], 0);
+        let past_limit = MAX_UNIT_FRAGMENTS as u32 + 5;
+        for seq in 1..past_limit {
             queues.push(packet(TrackKind::Video, 1, seq, Flags::default(), 10), now);
         }
-        assert_eq!(queues.video[0].packets.len(), MAX_UNIT_FRAGMENTS);
+        queues.push(
+            packet(TrackKind::Video, 1, past_limit, Flags::LAST, 10),
+            now,
+        );
+        assert!(queues.video.is_empty());
+        assert_eq!(queues.video_bytes, 0);
+        assert!(queues.pop().is_none());
+        queues.enforce_budget(now + UNIT_IDLE * 2);
+        assert_eq!(queues.stats[&MediaId(1)].dropped_units, 1);
+    }
+
+    #[test]
+    fn the_history_of_a_quiet_track_is_forgotten() {
+        let now = Instant::now();
+        let mut queues = Queues::default();
+        unit(&mut queues, 1, 0, 2, false, now);
+        drain(&mut queues);
+        queues.push(packet(TrackKind::Video, 2, 0, Flags::FIRST, 10), now);
+        queues.forget_quiet_tracks();
+        assert_eq!(queues.history.len(), 2);
+        unit(&mut queues, 3, 0, 1, false, now);
+        queues.forget_quiet_tracks();
+        let mut kept: Vec<_> = queues.history.keys().copied().collect();
+        kept.sort();
+        assert_eq!(kept, vec![MediaId(2), MediaId(3)]);
+        drain(&mut queues);
+        queues.forget_quiet_tracks();
+        assert_eq!(queues.history.len(), 1);
     }
 
     #[test]

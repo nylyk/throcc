@@ -36,6 +36,10 @@ const MAX_WRAPPED_BYTES: usize = 256;
 pub const MAX_ROOMS: usize = 500;
 const REQUEST_BURST: f64 = 100.0;
 const REQUESTS_PER_SECOND: f64 = 20.0;
+/// Keyframe requests and picture fetches come in bursts, so they get their own larger
+/// allowance, which still keeps one client from monopolising the hub.
+const CHEAP_REQUEST_BURST: f64 = 1000.0;
+const CHEAP_REQUESTS_PER_SECOND: f64 = 500.0;
 const UPLOAD_BURST_BYTES: f64 = 1024.0 * 1024.0;
 /// One full-size avatar every 10 seconds.
 const UPLOAD_BYTES_PER_SECOND: f64 = MAX_AVATAR_BYTES as f64 / 10.0;
@@ -60,7 +64,80 @@ impl Refusal {
     }
 }
 
+impl From<Refusal> for Response {
+    fn from(Refusal(code, message): Refusal) -> Self {
+        Response::Err { code, message }
+    }
+}
+
 type Outcome = Result<Response, Refusal>;
+
+/// What [`Hub::handle`] makes of a request.
+pub enum Handled {
+    Done(Response),
+    /// The request waits on Argon2, which must run without the hub lock: run the work,
+    /// then pass its result to [`Hub::resume`].
+    Pending(PasswordWork),
+}
+
+/// Argon2 work a request waits on. Takes tens of milliseconds.
+pub enum PasswordWork {
+    Join {
+        room: RoomId,
+        password: String,
+        hash: String,
+    },
+    CreateRoom {
+        name: String,
+        password: String,
+    },
+    SetRoomPassword {
+        room: RoomId,
+        password: String,
+    },
+}
+
+impl PasswordWork {
+    pub fn run(self) -> PasswordDone {
+        match self {
+            Self::Join {
+                room,
+                password,
+                hash,
+            } => PasswordDone::Join {
+                matched: room_password::matches(&password, &hash),
+                room,
+                hash,
+            },
+            Self::CreateRoom { name, password } => PasswordDone::CreateRoom {
+                name,
+                hash: room_password::hash(&password),
+            },
+            Self::SetRoomPassword { room, password } => PasswordDone::SetRoomPassword {
+                room,
+                hash: room_password::hash(&password),
+            },
+        }
+    }
+}
+
+/// The result of [`PasswordWork`], for [`Hub::resume`].
+pub enum PasswordDone {
+    Join {
+        room: RoomId,
+        /// The hash the password was checked against.
+        hash: String,
+        matched: bool,
+    },
+    CreateRoom {
+        name: String,
+        hash: anyhow::Result<String>,
+    },
+    SetRoomPassword {
+        room: RoomId,
+        hash: anyhow::Result<String>,
+    },
+}
 
 /// What the session writer sends next.
 pub enum Outgoing {
@@ -128,6 +205,7 @@ pub struct Hub {
     rooms: BTreeMap<RoomId, RoomEntry>,
     next_conn: u64,
     requests: Buckets<UserId>,
+    cheap_requests: Buckets<UserId>,
     uploads: Buckets<UserId>,
     password_tries: Buckets<UserId>,
     /// The room each user last moved into themselves, which a reconnect may return them to
@@ -163,6 +241,7 @@ impl Hub {
             rooms,
             next_conn: 0,
             requests: Buckets::new(REQUEST_BURST, REQUESTS_PER_SECOND),
+            cheap_requests: Buckets::new(CHEAP_REQUEST_BURST, CHEAP_REQUESTS_PER_SECOND),
             uploads: Buckets::new(UPLOAD_BURST_BYTES, UPLOAD_BYTES_PER_SECOND),
             password_tries: Buckets::new(PASSWORD_BURST, PASSWORDS_PER_SECOND),
             last_joined: HashMap::new(),
@@ -233,9 +312,21 @@ impl Hub {
 
     /// Handles a request from connection `conn_id`. A connection that has been replaced
     /// by a newer one of the same user is refused.
-    pub fn handle(&mut self, user: UserId, conn_id: u64, request: Request) -> Response {
+    pub fn handle(&mut self, user: UserId, conn_id: u64, request: Request) -> Handled {
         self.dispatch(user, conn_id, request)
-            .unwrap_or_else(|Refusal(code, message)| Response::Err { code, message })
+            .unwrap_or_else(|refusal| Handled::Done(refusal.into()))
+    }
+
+    /// Finishes a request after its [`PasswordWork`]. The hub may have changed while the
+    /// work ran, so everything the request relies on is checked again.
+    pub fn resume(&mut self, user: UserId, conn_id: u64, done: PasswordDone) -> Response {
+        self.finish(user, conn_id, done)
+            .unwrap_or_else(Response::from)
+    }
+
+    /// The id of `user`'s current connection.
+    pub fn conn_id(&self, user: UserId) -> Option<u64> {
+        self.sessions.get(&user).map(|s| s.conn_id)
     }
 
     fn is_current(&self, user: UserId, conn_id: u64) -> bool {
@@ -244,36 +335,54 @@ impl Hub {
             .is_some_and(|s| s.conn_id == conn_id)
     }
 
-    fn dispatch(&mut self, user: UserId, conn_id: u64, request: Request) -> Outcome {
-        if !self.is_current(user, conn_id) {
-            return Err(Refusal::new(
+    fn require_current(&self, user: UserId, conn_id: u64) -> Result<(), Refusal> {
+        if self.is_current(user, conn_id) {
+            Ok(())
+        } else {
+            Err(Refusal::new(
                 ErrorCode::Forbidden,
                 "this connection was replaced",
-            ));
+            ))
         }
-        let metered = !matches!(
+    }
+
+    fn dispatch(
+        &mut self,
+        user: UserId,
+        conn_id: u64,
+        request: Request,
+    ) -> Result<Handled, Refusal> {
+        self.require_current(user, conn_id)?;
+        let cheap = matches!(
             request,
             Request::RequestKeyframe { .. } | Request::GetAvatar(_)
         );
-        if metered && !self.requests.take(user, 1.0, Instant::now()) {
+        let bucket = if cheap {
+            &mut self.cheap_requests
+        } else {
+            &mut self.requests
+        };
+        if !bucket.take(user, 1.0, Instant::now()) {
             return Err(Refusal::new(
                 ErrorCode::RateLimited,
                 "too many requests; slow down",
             ));
         }
-        match request {
-            Request::SetRoom { room, password } => self.join(user, room, password.as_deref()),
+        let outcome = match request {
+            Request::SetRoom { room, password } => return self.join(user, room, password),
+            Request::CreateRoom { name, password } => {
+                return self.create_room(user, name, password);
+            }
+            Request::SetRoomPassword { room, password } => {
+                return self.set_room_password(user, room, password);
+            }
             Request::SetProfile { name, avatar } => self.set_profile(user, name, avatar),
             Request::SetAvatar(bytes) => self.set_avatar(user, bytes),
             Request::GetAvatar(hash) => self.get_avatar(hash),
             Request::SetEncKey(enc_key) => self.set_enc_key(user, enc_key),
             Request::SetMedia(media) => self.set_media(user, media),
-            Request::CreateRoom { name, password } => self.create_room(user, name, password),
             Request::RenameRoom { room, name } => self.rename_room(user, room, name),
             Request::DeleteRoom(room) => self.delete_room(user, room),
-            Request::SetRoomPassword { room, password } => {
-                self.set_room_password(user, room, password)
-            }
             Request::CreateInvite => self.create_invite(user),
             Request::ListUsers => self.list_users(user),
             Request::SetRole { user: target, role } => self.set_role(user, target, role),
@@ -289,6 +398,28 @@ impl Hub {
             Request::SetServerName(name) => self.set_server_name(user, name),
             Request::SetServerAvatar(avatar) => self.set_server_avatar(user, avatar),
             Request::KickFromRoom { user: target, room } => self.kick_from_room(user, target, room),
+        };
+        outcome.map(Handled::Done)
+    }
+
+    fn finish(&mut self, user: UserId, conn_id: u64, done: PasswordDone) -> Outcome {
+        self.require_current(user, conn_id)?;
+        match done {
+            PasswordDone::Join {
+                room,
+                hash,
+                matched,
+            } => self.finish_join(user, room, &hash, matched),
+            PasswordDone::CreateRoom { name, hash } => {
+                let hash = hash.map_err(Refusal::internal)?;
+                let name = self.room_to_create(user, &name)?;
+                self.add_room(name, Some(hash))
+            }
+            PasswordDone::SetRoomPassword { room, hash } => {
+                let hash = hash.map_err(Refusal::internal)?;
+                self.may_manage_room(user, room)?;
+                self.store_room_password(room, Some(hash))
+            }
         }
     }
 
@@ -400,19 +531,24 @@ impl Hub {
             .collect()
     }
 
-    fn bump_epoch(&mut self, room: RoomId) -> Result<Epoch, Refusal> {
-        let epoch = Epoch(
-            self.room_entry(room)?
-                .epoch
-                .0
-                .checked_add(1)
-                .ok_or_else(|| Refusal::new(ErrorCode::Internal, "room epoch exhausted"))?,
-        );
-        self.db.set_epoch(room, epoch).map_err(Refusal::internal)?;
-        if let Some(entry) = self.rooms.get_mut(&room) {
-            entry.epoch = epoch;
+    /// Moves each of `rooms` to its next epoch, all or none.
+    fn bump_epochs(&mut self, rooms: &[RoomId]) -> Result<(), Refusal> {
+        let epochs = rooms
+            .iter()
+            .map(|room| {
+                let next = self.room_entry(*room)?.epoch.0.checked_add(1);
+                let next =
+                    next.ok_or_else(|| Refusal::new(ErrorCode::Internal, "room epoch exhausted"))?;
+                Ok((*room, Epoch(next)))
+            })
+            .collect::<Result<Vec<_>, Refusal>>()?;
+        self.db.set_epochs(&epochs).map_err(Refusal::internal)?;
+        for (room, epoch) in epochs {
+            if let Some(entry) = self.rooms.get_mut(&room) {
+                entry.epoch = epoch;
+            }
         }
-        Ok(epoch)
+        Ok(())
     }
 
     fn broadcast_room_state(&self, room: RoomId, except: Option<UserId>) {
@@ -427,10 +563,58 @@ impl Hub {
         self.emit_room(room, event, except);
     }
 
-    fn join(&mut self, user: UserId, target: Option<RoomId>, password: Option<&str>) -> Outcome {
-        if let Some(room) = target {
-            self.check_password(user, room, password)?;
+    fn join(
+        &mut self,
+        user: UserId,
+        target: Option<RoomId>,
+        password: Option<String>,
+    ) -> Result<Handled, Refusal> {
+        let needed = match target {
+            Some(room) => self.password_to_enter(user, room)?.map(|hash| (room, hash)),
+            None => None,
+        };
+        let Some((room, hash)) = needed else {
+            return self.enter(user, target).map(Handled::Done);
+        };
+        let Some(password) = password else {
+            return Err(Refusal::new(
+                ErrorCode::WrongPassword,
+                "this room needs a password",
+            ));
+        };
+        // Taken before the work is handed out, so guesses can't make Argon2 run faster.
+        if !self.password_tries.take(user, 1.0, Instant::now()) {
+            return Err(Refusal::new(
+                ErrorCode::RateLimited,
+                "too many password attempts; wait a few seconds",
+            ));
         }
+        Ok(Handled::Pending(PasswordWork::Join {
+            room,
+            password,
+            hash,
+        }))
+    }
+
+    /// Enters `room` once a password checked against `hash` matched, if the room still
+    /// asks for that same password.
+    fn finish_join(&mut self, user: UserId, room: RoomId, hash: &str, matched: bool) -> Outcome {
+        if !matched {
+            return Err(Refusal::new(ErrorCode::WrongPassword, "wrong password"));
+        }
+        if self
+            .password_to_enter(user, room)?
+            .is_some_and(|current| current != hash)
+        {
+            return Err(Refusal::new(
+                ErrorCode::WrongPassword,
+                "the room's password has just changed",
+            ));
+        }
+        self.enter(user, Some(room))
+    }
+
+    fn enter(&mut self, user: UserId, target: Option<RoomId>) -> Outcome {
         let placed = self.place(user, target)?;
         match target {
             Some(room) => self.last_joined.insert(user, room),
@@ -439,37 +623,17 @@ impl Hub {
         Ok(Response::Placed(placed))
     }
 
-    /// Refuses `user` entry to a locked `room` without its password. Members already in it
-    /// and those who manage rooms pass without one.
-    fn check_password(
-        &mut self,
-        user: UserId,
-        room: RoomId,
-        password: Option<&str>,
-    ) -> Result<(), Refusal> {
-        let Some(hash) = self.room_entry(room)?.password_hash.clone() else {
-            return Ok(());
+    /// The hash of the password `user` needs to enter `room`, if they need one. Members
+    /// already in it and those who manage rooms enter without one.
+    fn password_to_enter(&self, user: UserId, room: RoomId) -> Result<Option<String>, Refusal> {
+        let Some(hash) = &self.room_entry(room)?.password_hash else {
+            return Ok(None);
         };
         if self.session(user)?.room == Some(room) || permissions::can_manage_rooms(self.role(user)?)
         {
-            return Ok(());
+            return Ok(None);
         }
-        let Some(password) = password else {
-            return Err(Refusal::new(
-                ErrorCode::WrongPassword,
-                "this room needs a password",
-            ));
-        };
-        if !self.password_tries.take(user, 1.0, Instant::now()) {
-            return Err(Refusal::new(
-                ErrorCode::RateLimited,
-                "too many password attempts; wait a few seconds",
-            ));
-        }
-        if !room_password::matches(password, &hash) {
-            return Err(Refusal::new(ErrorCode::WrongPassword, "wrong password"));
-        }
-        Ok(())
+        Ok(Some(hash.clone()))
     }
 
     /// Whether a reconnect may put `user` back into `room` without its password.
@@ -503,23 +667,15 @@ impl Hub {
         }
 
         let tracks = target.map(|_| self.allocate_tracks()).transpose()?;
-        for room in current.iter().chain(&target) {
-            self.bump_epoch(*room)?;
-        }
+        let changed: Vec<RoomId> = current.into_iter().chain(target).collect();
+        self.bump_epochs(&changed)?;
         if let Some(entry) = current.and_then(|old| self.rooms.get_mut(&old)) {
             entry.members.remove(&user);
         }
         if let Some(entry) = target.and_then(|new| self.rooms.get_mut(&new)) {
             entry.members.insert(user);
         }
-        let session = self.session_mut(user)?;
-        session.room = target;
-        session.media.share = None;
-        session.watching.clear();
-        let old_tracks = std::mem::replace(&mut session.tracks, tracks);
-        for share in old_tracks.iter().flat_map(|t| &t.shares) {
-            self.keyframes.forget(share.video);
-        }
+        self.set_membership(user, target, tracks);
 
         if let Some(old) = current {
             self.broadcast_room_state(old, None);
@@ -544,15 +700,30 @@ impl Hub {
             return;
         };
         warn!(user = user.0, "leaving the room cleanly failed: {message}");
-        let Some(room) = self.sessions.get_mut(&user).and_then(|s| s.room.take()) else {
+        let Some(room) = self.sessions.get(&user).and_then(|s| s.room) else {
             return;
         };
         if let Some(entry) = self.rooms.get_mut(&room) {
             entry.members.remove(&user);
         }
+        self.set_membership(user, None, None);
         self.broadcast_room_state(room, None);
         self.emit_all(Event::PresenceEnded(user));
         self.rebuild_routes();
+    }
+
+    /// Puts `user`'s session in `room` with `tracks`, ending what it sent and watched.
+    fn set_membership(&mut self, user: UserId, room: Option<RoomId>, tracks: Option<Tracks>) {
+        let Some(session) = self.sessions.get_mut(&user) else {
+            return;
+        };
+        session.room = room;
+        session.media.share = None;
+        session.watching.clear();
+        let old_tracks = std::mem::replace(&mut session.tracks, tracks);
+        for share in old_tracks.iter().flat_map(|t| &t.shares) {
+            self.keyframes.forget(share.video);
+        }
     }
 
     fn placed(&self, user: UserId) -> Placed {
@@ -696,7 +867,7 @@ impl Hub {
         let session = self.session_mut(user)?;
         session.row.enc_key = Some(enc_key);
         if let Some(room) = session.room {
-            self.bump_epoch(room)?;
+            self.bump_epochs(&[room])?;
             self.broadcast_room_state(room, None);
         }
         Ok(Response::Ok)
@@ -718,16 +889,39 @@ impl Hub {
         Ok(Response::Ok)
     }
 
-    fn create_room(&mut self, user: UserId, name: String, password: Option<String>) -> Outcome {
+    fn create_room(
+        &mut self,
+        user: UserId,
+        name: String,
+        password: Option<String>,
+    ) -> Result<Handled, Refusal> {
+        let name = self.room_to_create(user, &name)?;
+        match password {
+            Some(password) => {
+                check_password_length(&password)?;
+                Ok(Handled::Pending(PasswordWork::CreateRoom {
+                    name,
+                    password,
+                }))
+            }
+            None => self.add_room(name, None).map(Handled::Done),
+        }
+    }
+
+    /// Checks that `user` may create a room called `name`, and returns the name to use.
+    fn room_to_create(&self, user: UserId, name: &str) -> Result<String, Refusal> {
         require(permissions::can_manage_rooms(self.role(user)?))?;
-        let name = checked_name(&name)?;
+        let name = checked_name(name)?;
         if self.rooms.len() >= MAX_ROOMS {
             return Err(Refusal::new(
                 ErrorCode::TooLarge,
                 format!("a server holds at most {MAX_ROOMS} rooms"),
             ));
         }
-        let password_hash = password.as_deref().map(hash_password).transpose()?;
+        Ok(name)
+    }
+
+    fn add_room(&mut self, name: String, password_hash: Option<String>) -> Outcome {
         let id = self
             .db
             .create_room(&name, password_hash.as_deref())
@@ -763,10 +957,27 @@ impl Hub {
         user: UserId,
         room: RoomId,
         password: Option<String>,
-    ) -> Outcome {
+    ) -> Result<Handled, Refusal> {
+        self.may_manage_room(user, room)?;
+        match password {
+            Some(password) => {
+                check_password_length(&password)?;
+                Ok(Handled::Pending(PasswordWork::SetRoomPassword {
+                    room,
+                    password,
+                }))
+            }
+            None => self.store_room_password(room, None).map(Handled::Done),
+        }
+    }
+
+    fn may_manage_room(&self, user: UserId, room: RoomId) -> Result<(), Refusal> {
         require(permissions::can_manage_rooms(self.role(user)?))?;
+        self.room_entry(room).map(|_| ())
+    }
+
+    fn store_room_password(&mut self, room: RoomId, hash: Option<String>) -> Outcome {
         let entry = self.rooms.get_mut(&room).ok_or_else(no_such_room)?;
-        let hash = password.as_deref().map(hash_password).transpose()?;
         self.db
             .set_room_password_hash(room, hash.as_deref())
             .map_err(Refusal::internal)?;
@@ -1140,12 +1351,13 @@ fn checked_name(name: &str) -> Result<String, Refusal> {
     })
 }
 
-fn hash_password(password: &str) -> Result<String, Refusal> {
-    if !valid_password(password) {
-        return Err(Refusal::new(
+fn check_password_length(password: &str) -> Result<(), Refusal> {
+    if valid_password(password) {
+        Ok(())
+    } else {
+        Err(Refusal::new(
             ErrorCode::Invalid,
             format!("passwords are 1 to {MAX_PASSWORD_CHARS} characters"),
-        ));
+        ))
     }
-    room_password::hash(password).map_err(Refusal::internal)
 }

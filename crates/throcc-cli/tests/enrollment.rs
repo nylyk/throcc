@@ -13,7 +13,8 @@ use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
     AuthError, ErrorCode, Event, Hello, PROTOCOL, Request, Response, ServerHello,
 };
-use throcc_server::{Congestion, HANDSHAKES, tls};
+use throcc_server::database::Database;
+use throcc_server::{Congestion, DATABASE_FILE, HANDSHAKES, tls};
 
 use common::*;
 
@@ -173,6 +174,30 @@ async fn users_get_three_invites_a_day() {
 }
 
 #[tokio::test]
+async fn an_invite_spent_when_the_server_stopped_frees_its_slot_on_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = ProcessLikeServer::start(dir.path(), "127.0.0.1:0".parse().unwrap());
+    let addr = first.addr;
+    let alice = enroll_at(&addr.to_string(), first.bootstrap.as_ref().unwrap()).await;
+    let mut bob = invited_at(&addr.to_string(), &alice).await;
+    let spent = invite(&bob).await;
+    for _ in 0..2 {
+        invite(&bob).await;
+    }
+    first.stop();
+    let db = Database::open(&dir.path().join(DATABASE_FILE)).unwrap();
+    for _ in 0..3 {
+        db.consume_invite_try(&spent.id).unwrap();
+    }
+    drop(db);
+
+    let second = ProcessLikeServer::start(dir.path(), addr);
+    bob.reconnect(&addr.to_string(), None).await;
+    invite(&bob).await;
+    second.stop();
+}
+
+#[tokio::test]
 async fn enrolled_users_count_against_the_daily_cap() {
     let server = start_server();
     let alice = admin(&server).await;
@@ -307,7 +332,7 @@ async fn a_failed_run_does_not_burn_an_invite_while_another_run_is_in_flight() {
     let alice = admin(&server).await;
     let code = invite(&alice).await;
 
-    let pending = raw_enroll_start(&server.addr, &code, connection::transport_config(0)).await;
+    let pending = raw_enroll_start(&server.addr, &code, connection::transport_config()).await;
 
     for _ in 0..2 {
         try_enroll(&server.addr, &wrong_secret(&code))

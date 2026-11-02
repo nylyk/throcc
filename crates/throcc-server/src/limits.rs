@@ -13,6 +13,9 @@ const NETWORK_RUNS: usize = 30;
 const SOURCE_WINDOW: Duration = Duration::from_secs(10 * 60);
 /// How often [`Buckets`] forgets its full buckets.
 const BUCKET_SWEEP: Duration = Duration::from_secs(1);
+/// How often [`SourceLimiter`] forgets sources whose runs have all left the window. The
+/// sources it counts expire their own runs on every check.
+const RUN_SWEEP: Duration = Duration::from_secs(60);
 
 /// Holds up to `capacity` tokens and refills `per_second` of them.
 pub struct TokenBucket {
@@ -211,21 +214,26 @@ impl SourceKey {
 pub struct SourceLimiter {
     sources: RunWindow,
     networks: RunWindow,
+    next_sweep: Option<Instant>,
 }
 
 impl SourceLimiter {
     /// Records the start of a run, or returns false if the source or its network is over
     /// its limit.
-    pub fn begin(&mut self, source: SourceKey) -> bool {
+    pub fn begin(&mut self, source: SourceKey, now: Instant) -> bool {
+        if self.next_sweep.is_none_or(|t| now >= t) {
+            self.sources.expire_all(now);
+            self.networks.expire_all(now);
+            self.next_sweep = Some(now + RUN_SWEEP);
+        }
         let network = source.network();
-        self.sources.expire();
-        self.networks.expire();
-        if self.sources.count(source) >= SOURCE_RUNS || self.networks.count(network) >= NETWORK_RUNS
+        if self.sources.count(source, now) >= SOURCE_RUNS
+            || self.networks.count(network, now) >= NETWORK_RUNS
         {
             return false;
         }
-        self.sources.record(source);
-        self.networks.record(network);
+        self.sources.record(source, now);
+        self.networks.record(network, now);
         true
     }
 
@@ -239,27 +247,38 @@ impl SourceLimiter {
 struct RunWindow(HashMap<SourceKey, VecDeque<Instant>>);
 
 impl RunWindow {
-    fn expire(&mut self) {
+    fn expire_all(&mut self, now: Instant) {
         self.0.retain(|_, times| {
-            while times.front().is_some_and(|t| t.elapsed() > SOURCE_WINDOW) {
-                times.pop_front();
-            }
+            expire(times, now);
             !times.is_empty()
         });
     }
 
-    fn count(&self, key: SourceKey) -> usize {
-        self.0.get(&key).map_or(0, VecDeque::len)
+    /// Runs of `key` still in the window.
+    fn count(&mut self, key: SourceKey, now: Instant) -> usize {
+        self.0.get_mut(&key).map_or(0, |times| {
+            expire(times, now);
+            times.len()
+        })
     }
 
-    fn record(&mut self, key: SourceKey) {
-        self.0.entry(key).or_default().push_back(Instant::now());
+    fn record(&mut self, key: SourceKey, now: Instant) {
+        self.0.entry(key).or_default().push_back(now);
     }
 
     fn forgive(&mut self, key: SourceKey) {
         if let Some(times) = self.0.get_mut(&key) {
             times.pop_back();
         }
+    }
+}
+
+fn expire(times: &mut VecDeque<Instant>, now: Instant) {
+    while times
+        .front()
+        .is_some_and(|t| now.saturating_duration_since(*t) > SOURCE_WINDOW)
+    {
+        times.pop_front();
     }
 }
 
@@ -361,30 +380,48 @@ mod tests {
 
     #[test]
     fn limiter_blocks_after_repeated_failures() {
+        let now = Instant::now();
         let mut limiter = SourceLimiter::default();
-        let source = SourceKey::of("192.0.2.1".parse().unwrap());
+        let failing = source("192.0.2.1");
         for _ in 0..SOURCE_RUNS {
-            assert!(limiter.begin(source));
+            assert!(limiter.begin(failing, now));
         }
-        assert!(!limiter.begin(source));
-        limiter.forgive(source);
-        assert!(limiter.begin(source));
-        assert!(limiter.begin(SourceKey::of("192.0.2.2".parse().unwrap())));
+        assert!(!limiter.begin(failing, now));
+        limiter.forgive(failing);
+        assert!(limiter.begin(failing, now));
+        assert!(limiter.begin(source("192.0.2.2"), now));
     }
 
     #[test]
     fn limiter_caps_a_network_of_many_sources() {
+        let now = Instant::now();
         let mut limiter = SourceLimiter::default();
-        let sources = (0..NETWORK_RUNS as u16)
-            .map(|i| SourceKey::of(format!("2001:db8:1:{i:x}::1").parse().unwrap()));
+        let sources = (0..NETWORK_RUNS as u16).map(|i| source(&format!("2001:db8:1:{i:x}::1")));
         for source in sources {
-            assert!(limiter.begin(source));
+            assert!(limiter.begin(source, now));
         }
-        assert!(!limiter.begin(SourceKey::of("2001:db8:1:ffff::1".parse().unwrap())));
-        assert!(limiter.begin(SourceKey::of("2001:db8:2::1".parse().unwrap())));
+        assert!(!limiter.begin(source("2001:db8:1:ffff::1"), now));
+        assert!(limiter.begin(source("2001:db8:2::1"), now));
         for last in 0..NETWORK_RUNS as u8 {
-            limiter.begin(SourceKey::of(format!("198.51.100.{last}").parse().unwrap()));
+            limiter.begin(source(&format!("198.51.100.{last}")), now);
         }
-        assert!(!limiter.begin(SourceKey::of("198.51.100.200".parse().unwrap())));
+        assert!(!limiter.begin(source("198.51.100.200"), now));
+    }
+
+    #[test]
+    fn runs_leave_the_window_and_idle_sources_are_forgotten() {
+        let start = Instant::now();
+        let mut limiter = SourceLimiter::default();
+        let busy = source("192.0.2.1");
+        for _ in 0..SOURCE_RUNS {
+            assert!(limiter.begin(busy, start));
+        }
+        for last in 0..100u8 {
+            limiter.begin(source(&format!("203.0.113.{last}")), start);
+        }
+        let later = start + SOURCE_WINDOW + Duration::from_secs(1);
+        assert!(limiter.begin(busy, later));
+        assert_eq!(limiter.sources.0.len(), 1);
+        assert_eq!(limiter.networks.0.len(), 1);
     }
 }
