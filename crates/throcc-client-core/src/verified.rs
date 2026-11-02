@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -7,6 +8,7 @@ use throcc_proto::Fingerprint;
 use throcc_proto::ids::UserId;
 use throcc_proto::messages::PublicKey;
 
+use crate::lock;
 use crate::people::People;
 use crate::servers::Hex;
 use crate::state::VerifiedIdentity;
@@ -22,7 +24,8 @@ const MAX_SEEN: usize = 256;
 /// that change is kept until the user verifies the new key or dismisses it. Every change is
 /// written at once, except which key a recorded change now shows.
 pub(crate) struct VerifiedKeys {
-    dir: PathBuf,
+    /// Where the file is kept. None keeps the keys in memory only.
+    dir: Option<PathBuf>,
     records: VerifiedRecords,
     /// The key shown last where a change is recorded with an earlier one, written with the
     /// next change: a server flipping between keys can't make each room state rewrite the
@@ -96,7 +99,7 @@ impl VerifiedKeys {
     /// re-reads it first, so a file that can't be read is never overwritten.
     pub fn empty(dir: &Path) -> Self {
         Self {
-            dir: dir.to_owned(),
+            dir: Some(dir.to_owned()),
             records: VerifiedRecords::default(),
             shown_since: BTreeMap::new(),
         }
@@ -104,7 +107,7 @@ impl VerifiedKeys {
 
     pub fn load(dir: &Path) -> Result<Self> {
         Ok(Self {
-            dir: dir.to_owned(),
+            dir: Some(dir.to_owned()),
             records: People::load(dir)?.verified,
             shown_since: BTreeMap::new(),
         })
@@ -232,21 +235,93 @@ impl VerifiedKeys {
     /// Applies `change` to the file as it is on disk, then takes what it now holds, which
     /// includes changes other processes made.
     fn change(&mut self, change: impl FnOnce(&mut VerifiedRecords)) -> Result<()> {
-        let mut written = None;
         let shown_since = &self.shown_since;
-        People::update(&self.dir, |people| {
-            let records = &mut people.verified;
+        let apply = |records: &mut VerifiedRecords| {
             for changed in &mut records.changed {
                 if let Some(key) = shown_since.get(&changed.at) {
                     changed.now = Hex(*key);
                 }
             }
             change(records);
-            written = Some(records.clone());
-        })?;
+        };
+        let written = match &self.dir {
+            Some(dir) => {
+                let mut written = None;
+                People::update(dir, |people| {
+                    apply(&mut people.verified);
+                    written = Some(people.verified.clone());
+                })?;
+                written.unwrap_or_default()
+            }
+            None => {
+                let mut records = self.records.clone();
+                apply(&mut records);
+                records
+            }
+        };
         self.shown_since.clear();
-        self.records = written.unwrap_or_default();
+        self.records = written;
         Ok(())
+    }
+}
+
+/// The verified keys of this install, shared by the app and every session it starts.
+#[derive(Clone)]
+pub struct VerifiedStore(Arc<Mutex<VerifiedKeys>>);
+
+impl VerifiedStore {
+    pub fn load(dir: &Path) -> Result<Self> {
+        Ok(Self::of(VerifiedKeys::load(dir)?))
+    }
+
+    /// None verified, kept in `dir`, for when the file there can't be read.
+    pub fn empty(dir: &Path) -> Self {
+        Self::of(VerifiedKeys::empty(dir))
+    }
+
+    /// None verified, kept in memory only.
+    pub fn in_memory() -> Self {
+        Self::of(VerifiedKeys {
+            dir: None,
+            records: VerifiedRecords::default(),
+            shown_since: BTreeMap::new(),
+        })
+    }
+
+    /// Reads the file again, taking in changes other processes made. When it can't be
+    /// read, none count as verified.
+    pub fn reload(&self) -> Result<()> {
+        let mut keys = self.lock();
+        let Some(dir) = keys.dir.clone() else {
+            return Ok(());
+        };
+        match VerifiedKeys::load(&dir) {
+            Ok(loaded) => {
+                *keys = loaded;
+                Ok(())
+            }
+            Err(e) => {
+                *keys = VerifiedKeys::empty(&dir);
+                Err(e)
+            }
+        }
+    }
+
+    pub fn list(&self) -> Vec<VerifiedIdentity> {
+        self.lock().list()
+    }
+
+    /// Takes `key` off the verified ones, on every server.
+    pub fn unverify(&self, key: &Fingerprint) -> Result<()> {
+        self.lock().unverify(&key.0)
+    }
+
+    pub(crate) fn lock(&self) -> MutexGuard<'_, VerifiedKeys> {
+        lock(&self.0)
+    }
+
+    fn of(keys: VerifiedKeys) -> Self {
+        Self(Arc::new(Mutex::new(keys)))
     }
 }
 
@@ -389,6 +464,27 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn a_store_takes_in_what_another_process_wrote_once_reloaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let here = VerifiedStore::load(dir.path()).unwrap();
+        let elsewhere = VerifiedStore::load(dir.path()).unwrap();
+        elsewhere
+            .lock()
+            .verify(&HERE, UserId(4), &[4; 32], "Mara")
+            .unwrap();
+        assert!(here.list().is_empty());
+        here.reload().unwrap();
+        assert_eq!(here.list().len(), 1);
+
+        std::fs::write(dir.path().join(crate::people::FILE), "not json").unwrap();
+        assert!(here.reload().is_err());
+        assert!(
+            here.list().is_empty(),
+            "nobody counts once the file is unreadable"
+        );
+    }
+
     #[test]
     fn the_file_is_private() {
         use std::os::unix::fs::PermissionsExt;

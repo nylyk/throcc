@@ -92,6 +92,7 @@ fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .as_ref()
         .map(|s| (s.address.clone(), s.fingerprint));
     let me = state.me;
+    let verified = app.verified.list();
     div()
         .flex()
         .flex_col()
@@ -118,7 +119,7 @@ fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .children(state.people.iter().filter(|(u, _)| Some(**u) != me).map(
                     |(user, person)| {
                         let user = *user;
-                        let verified_as = verified_as(&state, person);
+                        let verified_as = verified_as(&verified, person);
                         div()
                             .id(("contact", user.0 as usize))
                             .flex()

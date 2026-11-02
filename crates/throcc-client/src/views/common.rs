@@ -9,7 +9,7 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::PopupMenuItem;
 use gpui_component::slider::{SliderEvent, SliderState};
 use gpui_component::{Icon, Sizable, Size};
-use throcc_client_core::state::{MAX_VOLUME, Person, State};
+use throcc_client_core::state::{MAX_VOLUME, Person, State, VerifiedIdentity};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::UserId;
 
@@ -33,9 +33,9 @@ pub fn key_changed(state: &State, user: UserId) -> bool {
 
 /// The name `person` was verified under, where the server now shows another: the server
 /// picks the name, so it alone doesn't say who is verified.
-pub fn verified_as(state: &State, person: &Person) -> Option<String> {
+pub fn verified_as(verified: &[VerifiedIdentity], person: &Person) -> Option<String> {
     let key = Fingerprint(person.identity_key.filter(|_| person.verified)?);
-    let stored = &state.verified.iter().find(|v| v.key == key)?.name;
+    let stored = &verified.iter().find(|v| v.key == key)?.name;
     (*stored != person.name).then(|| stored.clone())
 }
 

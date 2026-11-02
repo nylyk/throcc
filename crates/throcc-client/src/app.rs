@@ -23,6 +23,7 @@ use throcc_client_core::settings::Settings;
 use throcc_client_core::state::{
     ConnectionStatus, MAX_VOLUME, Playback, ServerView, ShareChoice, Sound, State,
 };
+use throcc_client_core::verified::VerifiedStore;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
 use throcc_proto::invite::{self, InviteCode};
 use throcc_proto::messages::{MAX_NAME_CHARS, User, shows_something, valid_name, valid_password};
@@ -319,6 +320,28 @@ fn cached_looks(known: &[(String, Fingerprint)]) -> HashMap<String, CachedLook> 
         .collect()
 }
 
+/// The verified people kept on this computer, with why they couldn't be read if they
+/// couldn't, in which case nobody counts as verified.
+fn load_verified() -> (VerifiedStore, Option<String>) {
+    match keystore::config_dir() {
+        Ok(dir) => {
+            let verified = VerifiedStore::empty(&dir);
+            let problem = read_verified(&verified);
+            (verified, problem)
+        }
+        Err(e) => (VerifiedStore::in_memory(), Some(e.to_string())),
+    }
+}
+
+/// Reads `verified` from its file again, returning why it couldn't be read if it couldn't.
+fn read_verified(verified: &VerifiedStore) -> Option<String> {
+    let e = verified.reload().err()?;
+    tracing::warn!("no verified keys: {e:#}");
+    Some(format!(
+        "Couldn't read who you verified ({e}), so everyone shows as not verified."
+    ))
+}
+
 fn known_servers() -> Vec<(String, Fingerprint)> {
     Keystore::default_known_servers()
         .map(|k| k.iter().map(|(a, f)| (a.to_owned(), f)).collect())
@@ -427,6 +450,9 @@ pub struct ThroccApp {
     pub start_over: StartOver,
     pub profile_form: PictureForm,
     pub known_servers: Vec<(String, Fingerprint)>,
+    pub verified: VerifiedStore,
+    /// Why the verified people couldn't be read or saved, the last time that failed.
+    pub verified_problem: Option<String>,
     pub server_looks: HashMap<String, CachedLook>,
     pub users: Vec<User>,
     pub invite: Option<String>,
@@ -522,6 +548,11 @@ impl ThroccApp {
             cx.subscribe_in(&room_name, window, Self::on_room_field),
             cx.subscribe_in(&room_password, window, Self::on_room_field),
         ]);
+        let (verified, verified_problem) = if mock {
+            (VerifiedStore::in_memory(), None)
+        } else {
+            load_verified()
+        };
         let known_servers = if mock {
             vec![
                 ("voice.example.net".into(), Fingerprint([0x2c; 32])),
@@ -574,6 +605,8 @@ impl ThroccApp {
             start_over: StartOver::NotStarted,
             profile_form: PictureForm::default(),
             known_servers,
+            verified,
+            verified_problem,
             server_looks,
             users: Vec::new(),
             invite: None,
@@ -608,7 +641,7 @@ impl ThroccApp {
         };
         window.focus(&app.root_focus, cx);
         if mock {
-            app.attach(Arc::new(MockClient::new()), window, cx);
+            app.attach(Arc::new(MockClient::new(app.verified.clone())), window, cx);
         }
         app
     }
@@ -806,6 +839,15 @@ impl ThroccApp {
         }
     }
 
+    /// Takes `key` off the verified people, on every server.
+    pub fn unverify(&mut self, key: Fingerprint) {
+        if let Err(e) = self.verified.unverify(&key) {
+            tracing::warn!("could not save who is verified: {e:#}");
+            self.verified_problem = Some(format!("Couldn't save who you verified: {e}"));
+        }
+        self.command(Command::VerifiedChanged);
+    }
+
     /// Makes the sidebar see-through or solid and keeps the choice for next time.
     pub fn use_translucent_sidebar(&mut self, translucent: bool) {
         theme::set_translucent_sidebar(translucent);
@@ -867,7 +909,7 @@ impl ThroccApp {
         cx.notify();
     }
 
-    /// Opens the person menu for `user` at `position` in `window`, unless it would be empty.
+    /// Opens the person menu for `user` at `position` in `window`.
     pub fn open_person_menu(
         &mut self,
         user: UserId,
@@ -1514,9 +1556,11 @@ impl ThroccApp {
             self.dialog = dialog;
         }
         if self.mock {
-            self.attach(Arc::new(MockClient::at(&address)), window, cx);
+            let client = MockClient::at(&address, self.verified.clone());
+            self.attach(Arc::new(client), window, cx);
             return;
         }
+        self.verified_problem = read_verified(&self.verified);
         self.joining = true;
         self.join_attempt += 1;
         let attempt = self.join_attempt;
@@ -1530,9 +1574,10 @@ impl ThroccApp {
         let window_handle = window.window_handle();
         let connecting = cx.background_executor().spawn({
             let address = address.clone();
+            let verified = self.verified.clone();
             async move {
                 let keystore = Keystore::open_default().map_err(SignInError::Store)?;
-                Client::connect(&address, keystore, invite.as_ref(), options)
+                Client::connect(&address, keystore, invite.as_ref(), options, verified)
             }
         });
         cx.spawn(async move |this, cx| {

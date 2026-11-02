@@ -83,6 +83,9 @@ pub fn render(
                     )
                     .on_click(cx.listener(|app, _, window, cx| {
                         app.close_person_menu(cx);
+                        if app.fullscreen_stream().is_some() {
+                            app.exit_fullscreen(window, cx);
+                        }
                         app.show_screen(Screen::Settings(SettingsPage::Audio), window, cx);
                     }))
                 }))

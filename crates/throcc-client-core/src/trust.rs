@@ -6,8 +6,8 @@ use throcc_proto::ids::UserId;
 use throcc_proto::messages::PublicKey;
 use tracing::warn;
 
-use crate::state::{KeyWarning, MAX_PEOPLE, VerifiedIdentity};
-use crate::verified::VerifiedKeys;
+use crate::state::{KeyWarning, MAX_PEOPLE};
+use crate::verified::VerifiedStore;
 
 /// Who is verified on one server. Only a key presented this session counts: someone
 /// verified before shows as verified only once they present that key again, since nothing
@@ -17,11 +17,11 @@ pub(crate) struct Trust {
     /// The identity key each user last presented this session, with an encryption key it
     /// validly signed for them here.
     presented: HashMap<UserId, PublicKey>,
-    verified: VerifiedKeys,
+    verified: VerifiedStore,
 }
 
 impl Trust {
-    pub fn new(server: Fingerprint, verified: VerifiedKeys) -> Self {
+    pub fn new(server: Fingerprint, verified: VerifiedStore) -> Self {
         Self {
             server,
             presented: HashMap::new(),
@@ -45,16 +45,17 @@ impl Trust {
         if new.is_empty() {
             return false;
         }
+        let mut verified = self.verified.lock();
         if self.presented.len() + new.len() > MAX_PEOPLE {
             let here: HashSet<UserId> = peers.iter().map(|(user, _)| *user).collect();
-            let (verified, server) = (&self.verified, &self.server);
+            let server = &self.server;
             self.presented.retain(|user, _| {
                 here.contains(user) || verified.changed_at(server, *user).is_some()
             });
         }
         for (user, key) in new {
             self.presented.insert(user, key);
-            if let Err(e) = self.verified.presented(&self.server, user, &key) {
+            if let Err(e) = verified.presented(&self.server, user, &key) {
                 warn!("noting where a verified key was seen: {e:#}");
             }
         }
@@ -64,25 +65,21 @@ impl Trust {
     /// Whether `user` is verified, and the identity key they presented this session.
     pub fn of(&self, user: UserId) -> (bool, Option<PublicKey>) {
         match self.presented.get(&user) {
-            Some(key) => (self.verified.is_verified(key), Some(*key)),
+            Some(key) => (self.verified.lock().is_verified(key), Some(*key)),
             None => (false, None),
         }
     }
 
     /// The warning that the key shown as `user` replaced one the user verified.
     pub fn warning(&self, user: UserId) -> Option<KeyWarning> {
-        let now = self.verified.changed_at(&self.server, user)?;
-        let before = self.verified.verified_at(&self.server, user)?;
+        let verified = self.verified.lock();
+        let now = verified.changed_at(&self.server, user)?;
+        let before = verified.verified_at(&self.server, user)?;
         Some(KeyWarning {
             user,
             verified: Fingerprint(before),
             now: Fingerprint(now),
         })
-    }
-
-    /// Everyone verified on this install.
-    pub fn list(&self) -> Vec<VerifiedIdentity> {
-        self.verified.list()
     }
 
     /// Verifies `key` as `name`, or takes it off the verified ones, if `user` still presents
@@ -99,9 +96,9 @@ impl Trust {
             return Ok(false);
         }
         if verified {
-            self.verified.verify(&self.server, user, key, name)?;
+            self.verified.lock().verify(&self.server, user, key, name)?;
         } else {
-            self.verified.unverify(key)?;
+            self.verified.lock().unverify(key)?;
         }
         Ok(true)
     }
@@ -116,12 +113,9 @@ impl Trust {
             return Ok(false);
         }
         self.verified
+            .lock()
             .dismiss_change(&self.server, user, presented.as_ref())?;
         Ok(true)
-    }
-
-    pub fn unverify(&mut self, key: &PublicKey) -> Result<()> {
-        self.verified.unverify(key)
     }
 }
 
@@ -135,7 +129,7 @@ mod tests {
     const IMPOSTOR: PublicKey = [9; 32];
 
     fn trust_in(dir: &std::path::Path) -> Trust {
-        Trust::new(SERVER, VerifiedKeys::load(dir).unwrap())
+        Trust::new(SERVER, VerifiedStore::load(dir).unwrap())
     }
 
     /// Mara verified with her real key, then shown with the impostor's.
@@ -156,7 +150,7 @@ mod tests {
         trust.note(&[(MARA, IMPOSTOR)]);
         assert!(!trust.set_verified(MARA, &compared, true, "Mara").unwrap());
         assert_eq!(trust.of(MARA), (false, Some(IMPOSTOR)));
-        assert!(trust.list().is_empty());
+        assert!(trust.verified.list().is_empty());
 
         trust.note(&[(MARA, REAL)]);
         assert!(trust.set_verified(MARA, &compared, true, "Mara").unwrap());
@@ -171,14 +165,14 @@ mod tests {
 
         assert!(!trust.set_verified(MARA, &REAL, false, "").unwrap());
         assert_eq!(
-            trust.list().len(),
+            trust.verified.list().len(),
             1,
             "unverified while another key was shown"
         );
         assert!(!trust.set_verified(MARA, &REAL, true, "Mara").unwrap());
         trust.note(&[(MARA, REAL)]);
         assert!(trust.set_verified(MARA, &REAL, false, "").unwrap());
-        assert!(trust.list().is_empty());
+        assert!(trust.verified.list().is_empty());
         assert!(trust.warning(MARA).is_none());
     }
 

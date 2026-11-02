@@ -8,6 +8,7 @@ use throcc_client_core::call::{Call, CallEvent};
 use throcc_client_core::client::{Client, ClientApi, ClientOptions, Command, Event};
 use throcc_client_core::keystore::Keystore;
 use throcc_client_core::state::{ConnectionStatus, KeyWarning, Playback, Sound, State};
+use throcc_client_core::verified::VerifiedStore;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::invite::InviteCode;
@@ -38,7 +39,8 @@ fn client_in(dir: &Path, address: &str, invite: Option<&InviteCode>) -> Client {
         audio: false,
         ..Default::default()
     };
-    Client::connect(address, keystore, invite, options).unwrap()
+    let verified = VerifiedStore::load(dir).unwrap();
+    Client::connect(address, keystore, invite, options, verified).unwrap()
 }
 
 fn wait_for(client: &Client, what: &str, ready: impl FnMut(&State) -> bool) {
@@ -484,7 +486,12 @@ fn only_the_compared_key_is_verified_and_it_stays_verified_in_the_next_session()
 
     let compared = [9; 32];
     command_then(&bob, verify(alice_id, compared), "no notice", refused);
-    assert!(bob.state().verified.is_empty());
+    assert!(
+        VerifiedStore::load(bob_dir.path())
+            .unwrap()
+            .list()
+            .is_empty()
+    );
     assert!(!bob.state().person(alice_id).unwrap().verified);
     bob.command(verify(alice_id, presented));
     wait_for(&bob, "alice verified", |s| {
@@ -534,7 +541,7 @@ fn a_verified_key_is_verified_on_every_server_it_shows_up_on() {
     wait_for(&alice, "bob verified on the second server", |s| {
         s.person(bob_id).is_some_and(|p| p.verified) && s.key_warnings.is_empty()
     });
-    let verified = alice.state().verified.clone();
+    let verified = VerifiedStore::load(alice_dir.path()).unwrap().list();
     assert_eq!(verified.len(), 1);
     assert_eq!(verified[0].key, Fingerprint(identity_in(bob_dir.path())));
     assert_eq!(verified[0].servers.len(), 2);
@@ -692,7 +699,7 @@ fn a_new_key_for_a_verified_persons_user_id_is_warned_of_and_still_hears_us() {
     });
     assert!(!alice.state().person(bob_id).unwrap().verified);
     assert_eq!(
-        alice.state().verified.len(),
+        VerifiedStore::load(alice_dir.path()).unwrap().list().len(),
         1,
         "bob's key is still verified"
     );

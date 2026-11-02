@@ -261,13 +261,18 @@ fn voice_call(
     use throcc_client_core::client::{
         Client, ClientApi, ClientOptions, Command as ClientCommand, Event as ClientEvent,
     };
+    use throcc_client_core::verified::VerifiedStore;
     let options = ClientOptions {
         audio,
         input_device: input,
         output_device: output,
         ..Default::default()
     };
-    let client = Client::connect(address, keystore, None, options)?;
+    let verified = VerifiedStore::load(keystore.dir()).unwrap_or_else(|e| {
+        eprintln!("Couldn't read who you verified ({e:#}), so everyone shows as not verified.");
+        VerifiedStore::empty(keystore.dir())
+    });
+    let client = Client::connect(address, keystore, None, options, verified)?;
     let state = client.state();
     let rooms = state.rooms.iter().map(|r| (r.id, r.name.as_str()));
     let room = find_room(rooms, room)?;

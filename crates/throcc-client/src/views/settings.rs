@@ -459,7 +459,8 @@ fn verified(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             .find(|(_, known)| known == server)
             .map_or_else(|| server.short(), |(address, _)| address.clone())
     };
-    let rows = app.state.verified.iter().enumerate().map(|(i, person)| {
+    let people = app.verified.list();
+    let rows = people.iter().enumerate().map(|(i, person)| {
         let key = person.key;
         let servers: Vec<String> = person.servers.iter().map(address_of).collect();
         div()
@@ -490,7 +491,7 @@ fn verified(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             .child(
                 ghost_icon(("unverify", i), "x", "Mark as Not Verified").on_click(cx.listener(
                     move |app, _, _, cx| {
-                        app.command(Command::Unverify(key));
+                        app.unverify(key);
                         cx.notify();
                     },
                 )),
@@ -503,10 +504,11 @@ fn verified(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .child(section("People that you have verified"))
         .children(rows)
         .children(
-            app.state.verified.is_empty().then(|| {
+            people.is_empty().then(|| {
                 caption("Nobody yet. Compare safety numbers with someone to verify them.")
             }),
         )
+        .children(app.verified_problem.clone().map(field_error))
         .into_any_element()
 }
 

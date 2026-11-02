@@ -28,8 +28,6 @@ pub struct State {
     pub mic: bool,
     pub deafened: bool,
     pub key_warnings: Vec<KeyWarning>,
-    /// Everyone verified on this install, on any server.
-    pub verified: Vec<VerifiedIdentity>,
     pub health: Health,
     /// Our name as kept on this computer, once we have chosen one.
     pub profile_name: Option<String>,

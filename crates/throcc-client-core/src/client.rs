@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -22,8 +23,9 @@ use crate::session::{AvatarSlot, Session, Shared};
 use crate::state::{
     ConnectionStatus, CurrentRoom, Health, KeyWarning, MIC_KBPS, Person, PersonPlayback, Playback,
     RoomView, SHARE_AUDIO_DETAIL, SHARE_AUDIO_KBPS, SentTrack, ServerView, Sound, State,
-    TrackHealth, VOICE_DETAIL, VerifiedIdentity, share_detail,
+    TrackHealth, VOICE_DETAIL, share_detail,
 };
+use crate::verified::VerifiedStore;
 
 #[derive(Clone, Debug, Default)]
 pub struct ClientOptions {
@@ -91,8 +93,9 @@ pub enum Command {
         user: UserId,
         shown: Option<Fingerprint>,
     },
-    /// Takes a verified identity key off the verified ones, on every server.
-    Unverify(Fingerprint),
+    /// Shows who is verified again, after a change to the [`VerifiedStore`] made outside
+    /// the client.
+    VerifiedChanged,
     Voice(VoiceSettings),
     Devices {
         input: Option<String>,
@@ -174,6 +177,7 @@ impl Client {
         mut keystore: Keystore,
         invite: Option<&InviteCode>,
         options: ClientOptions,
+        verified: VerifiedStore,
     ) -> Result<Self, SignInError> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -200,7 +204,14 @@ impl Client {
         let session = {
             let _guard = runtime.enter();
             let call = Call::start(link, &keystore).map_err(SignInError::Store)?;
-            Session::new(shared.clone(), keystore, address.to_owned(), options, call)
+            Session::new(
+                shared.clone(),
+                keystore,
+                address.to_owned(),
+                options,
+                call,
+                verified,
+            )
         };
         let session = runtime.spawn(session.run(commands_rx));
         Ok(Self {
@@ -271,6 +282,7 @@ impl ClientApi for Client {
 /// A client with canned people and rooms that reacts to commands locally.
 pub struct MockClient {
     shared: Shared,
+    verified: VerifiedStore,
     /// A test pattern every share shows.
     picture: watch::Sender<Option<Arc<VideoFrame>>>,
     started: Instant,
@@ -278,7 +290,7 @@ pub struct MockClient {
 
 impl Default for MockClient {
     fn default() -> Self {
-        Self::new()
+        Self::new(VerifiedStore::in_memory())
     }
 }
 
@@ -291,18 +303,21 @@ impl MockClient {
         hash
     }
 
-    pub fn new() -> Self {
+    /// The sample client, with its sample verified people added to `verified`.
+    pub fn new(verified: VerifiedStore) -> Self {
         let frame = VideoFrame::test_pattern(1280, 720, 1, 0);
+        add_sample_verified(&verified);
         Self {
             shared: Shared::new(sample_state()),
+            verified,
             picture: watch::Sender::new(Some(Arc::new(frame))),
             started: Instant::now(),
         }
     }
 
     /// The sample client, as if connected at `address`.
-    pub fn at(address: &str) -> Self {
-        let client = Self::new();
+    pub fn at(address: &str, verified: VerifiedStore) -> Self {
+        let client = Self::new(verified);
         client.update(|s| {
             if let Some(server) = s.server.as_mut() {
                 server.address = address.to_owned();
@@ -466,16 +481,14 @@ impl ClientApi for MockClient {
                 }
                 p.verified = verified;
                 let name = p.name.clone();
-                s.verified.retain(|v| v.key != key);
+                let mut keys = self.verified.lock();
                 if verified {
-                    let server = s.server.as_ref().map(|s| s.fingerprint);
-                    s.verified.push(VerifiedIdentity {
-                        key,
-                        name,
-                        servers: server.into_iter().collect(),
-                    });
+                    if let Some(server) = s.server.as_ref().map(|s| s.fingerprint) {
+                        let _ = keys.verify(&server, user, &key.0, &name);
+                    }
                     s.key_warnings.retain(|w| w.user != user);
                 } else {
+                    let _ = keys.unverify(&key.0);
                     s.key_warnings.retain(|w| w.verified != key);
                 }
             }),
@@ -484,15 +497,24 @@ impl ClientApi for MockClient {
                     s.key_warnings.retain(|w| w.user != user);
                 }
             }),
-            Command::Unverify(key) => self.update(|s| {
-                s.verified.retain(|v| v.key != key);
-                s.key_warnings.retain(|w| w.verified != key);
-                for p in s.people.values_mut() {
-                    if p.identity_key.map(Fingerprint) == Some(key) {
-                        p.verified = false;
+            Command::VerifiedChanged => {
+                let state = self.state();
+                let keys = self.verified.lock();
+                let verified: HashSet<PublicKey> = state
+                    .key_warnings
+                    .iter()
+                    .map(|w| w.verified.0)
+                    .chain(state.people.values().filter_map(|p| p.identity_key))
+                    .filter(|key| keys.is_verified(key))
+                    .collect();
+                drop(keys);
+                self.update(|s| {
+                    s.key_warnings.retain(|w| verified.contains(&w.verified.0));
+                    for p in s.people.values_mut() {
+                        p.verified = p.identity_key.is_some_and(|k| verified.contains(&k));
                     }
-                }
-            }),
+                });
+            }
             Command::PushToTalk(down) => self.update(|s| set_mine(s, me, |_, p| p.speaking = down)),
             Command::Voice(_)
             | Command::Devices { .. }
@@ -623,28 +645,6 @@ fn sample_state() -> State {
             verified: Fingerprint([0x7c; 32]),
             now: Fingerprint(sample_key(3)),
         }],
-        verified: vec![
-            VerifiedIdentity {
-                key: Fingerprint(sample_key(2)),
-                name: "Mara".into(),
-                servers: vec![Fingerprint([0x2c; 32]), Fingerprint([0x91; 32])],
-            },
-            VerifiedIdentity {
-                key: Fingerprint([0x7c; 32]),
-                name: "Jonas".into(),
-                servers: vec![Fingerprint([0x2c; 32])],
-            },
-            VerifiedIdentity {
-                key: Fingerprint(sample_key(5)),
-                name: "Teo".into(),
-                servers: vec![Fingerprint([0x2c; 32])],
-            },
-            VerifiedIdentity {
-                key: Fingerprint(sample_key(6)),
-                name: "Ren".into(),
-                servers: vec![Fingerprint([0x2c; 32])],
-            },
-        ],
         health: Health {
             rtt_ms: 18.0,
             download_kbps: 10_480,
@@ -696,6 +696,20 @@ fn sample_state() -> State {
     }
 }
 
+fn add_sample_verified(verified: &VerifiedStore) {
+    let (here, elsewhere) = (Fingerprint([0x2c; 32]), Fingerprint([0x91; 32]));
+    let mut keys = verified.lock();
+    for (server, user, key, name) in [
+        (here, 2, sample_key(2), "Mara"),
+        (elsewhere, 2, sample_key(2), "Mara"),
+        (here, 3, [0x7c; 32], "Jonas"),
+        (here, 5, sample_key(5), "Teo"),
+        (here, 6, sample_key(6), "Ren"),
+    ] {
+        let _ = keys.verify(&server, UserId(user), &key, name);
+    }
+}
+
 /// A sample person's identity key, as in [`sample_users`].
 fn sample_key(id: u64) -> PublicKey {
     [(id as u8).wrapping_mul(37); 32]
@@ -728,7 +742,7 @@ mod tests {
 
     #[test]
     fn mock_reacts_to_commands() {
-        let client = MockClient::new();
+        let client = MockClient::default();
         let mut events = client.events();
         client.command(Command::Join(Some(RoomId(1))));
         let Ok(Event::State(state)) = events.try_recv() else {

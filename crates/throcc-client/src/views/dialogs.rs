@@ -461,7 +461,7 @@ fn profile(
     let presented = person.and_then(|p| p.identity_key).map(Fingerprint);
     let shown_key = shown.as_ref().map(|(key, _)| *key);
     let verified_as = person
-        .and_then(|p| verified_as(&app.state, p))
+        .and_then(|p| verified_as(&app.verified.list(), p))
         .map(|name| caption(format!("Verified as {name}")));
     let change = app
         .state

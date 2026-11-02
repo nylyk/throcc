@@ -36,7 +36,7 @@ use crate::state::{
     VOICE_DETAIL, person_name, room_name, share_detail, shown_name,
 };
 use crate::trust::Trust;
-use crate::verified::VerifiedKeys;
+use crate::verified::VerifiedStore;
 
 const LEVELS_EVERY: Duration = Duration::from_millis(100);
 const HEALTH_EVERY: Duration = Duration::from_secs(2);
@@ -355,6 +355,7 @@ impl Session {
         address: String,
         options: ClientOptions,
         call: Call,
+        verified: VerifiedStore,
     ) -> Self {
         let server = call.server();
         let profile = Profile::load(keystore.dir()).unwrap_or_else(|e| {
@@ -368,13 +369,6 @@ impl Session {
         let server_look = ServerLook::load(keystore.dir(), &server).unwrap_or_else(|e| {
             warn!("no kept server look: {e:#}");
             ServerLook::default()
-        });
-        let verified = VerifiedKeys::load(keystore.dir()).unwrap_or_else(|e| {
-            warn!("no verified keys: {e:#}");
-            shared.notice(format!(
-                "Couldn't read who you verified ({e}), so everyone shows as not verified."
-            ));
-            VerifiedKeys::empty(keystore.dir())
         });
         let mut session = Self {
             shared,
@@ -947,7 +941,7 @@ impl Session {
         }
     }
 
-    /// Shows who is verified, whose verified key changed, and everyone verified anywhere.
+    /// Shows who is verified and whose verified key changed.
     fn refresh_trust(&self) {
         let state = self.shared.state();
         let trust: BTreeMap<UserId, (bool, Option<PublicKey>)> = state
@@ -962,7 +956,6 @@ impl Session {
             .filter(|user| **user != me)
             .filter_map(|user| self.trust.warning(*user))
             .collect();
-        let everyone = self.trust.list();
         self.shared.update(|s| {
             for (user, person) in &mut s.people {
                 if let Some(&(verified, key)) = trust.get(user) {
@@ -970,7 +963,6 @@ impl Session {
                 }
             }
             s.key_warnings = warnings;
-            s.verified = everyone;
         });
     }
 
@@ -1151,10 +1143,7 @@ impl Session {
                     dismissed => self.after_trust_change(dismissed.map(drop)),
                 }
             }
-            Command::Unverify(key) => {
-                let unverified = self.trust.unverify(&key.0);
-                self.after_trust_change(unverified);
-            }
+            Command::VerifiedChanged => self.refresh_trust(),
             Command::Voice(settings) => {
                 self.options.voice = settings;
                 self.voice(VoiceCommand::Settings(settings));
