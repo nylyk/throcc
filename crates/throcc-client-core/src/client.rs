@@ -652,6 +652,7 @@ fn sample_state() -> State {
             upload_loss: 0.0,
             download_loss: 0.3,
             dropped_for_you: 0,
+            slow_shares: Default::default(),
             receiving: vec![
                 TrackHealth {
                     label: "Ilse, screen".into(),

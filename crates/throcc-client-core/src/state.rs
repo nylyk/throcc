@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde::{Deserialize, Serialize};
 use throcc_proto::Fingerprint;
@@ -262,6 +262,9 @@ pub struct Health {
     pub upload_loss: f32,
     pub download_loss: f32,
     pub dropped_for_you: u32,
+    /// Sharers whose share reaches us with frames dropped or lost: our connection can't keep
+    /// up with it.
+    pub slow_shares: BTreeSet<UserId>,
     pub receiving: Vec<TrackHealth>,
     pub sending: Vec<SentTrack>,
 }

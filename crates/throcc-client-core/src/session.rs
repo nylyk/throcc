@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::ControlFlow;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -40,6 +40,11 @@ use crate::verified::VerifiedKeys;
 
 const LEVELS_EVERY: Duration = Duration::from_millis(100);
 const HEALTH_EVERY: Duration = Duration::from_secs(2);
+/// Frames dropped by the server plus datagrams lost on the way, on one watched share within
+/// one health refresh, that mark the share too slow for our connection.
+const SLOW_SHARE_LOSSES: u64 = 2;
+/// Health refreshes a share stays marked too slow after its last lossy one.
+const SLOW_SHARE_HOLD: u8 = 3;
 const MAX_BACKOFF: Duration = Duration::from_secs(15);
 /// Each reconnect wait is spread over this fraction either side of the backoff, so clients
 /// that lost the same server don't all come back in the same instant.
@@ -169,6 +174,24 @@ struct Watched {
     last_bytes: u64,
     last_received: u64,
     last_lost: u64,
+    /// Units the server dropped for us since the last health refresh.
+    dropped: u64,
+    /// Health refreshes left showing this track as too slow.
+    slow_for: u8,
+}
+
+impl Watched {
+    /// Counts one health refresh's losses, `lost` datagrams plus the units the server
+    /// dropped, and says whether the track is still too slow for our connection.
+    fn too_slow_after(&mut self, lost: u64) -> bool {
+        let losses = lost + std::mem::take(&mut self.dropped);
+        self.slow_for = if losses >= SLOW_SHARE_LOSSES {
+            SLOW_SHARE_HOLD
+        } else {
+            self.slow_for.saturating_sub(1)
+        };
+        self.slow_for > 0
+    }
 }
 
 /// What a watched track carries.
@@ -1440,6 +1463,8 @@ impl Session {
             last_bytes: arrived.bytes,
             last_received: arrived.datagrams,
             last_lost: arrived.lost,
+            dropped: 0,
+            slow_for: 0,
         }
     }
 
@@ -1720,6 +1745,11 @@ impl Session {
                 self.dropped_for_you = tracks.iter().fold(self.dropped_for_you, |sum, t| {
                     sum.saturating_add(t.dropped_units)
                 });
+                for t in &tracks {
+                    if let Some(watched) = self.tracks.get_mut(&t.media_id) {
+                        watched.dropped += u64::from(t.dropped_units);
+                    }
+                }
             }
             ServerEvent::RoleChanged { user, role } => {
                 if user == self.call.me() {
@@ -1793,6 +1823,7 @@ impl Session {
 
         let state = self.shared.state();
         let mut rows = Vec::new();
+        let mut slow_shares = BTreeSet::new();
         let (mut received_total, mut lost_total) = (0, 0);
         for (media_id, track) in self.tracks.iter_mut() {
             let arrived = self.call.engine.arrived(*media_id);
@@ -1801,6 +1832,10 @@ impl Session {
             let new_lost = advance(&mut track.last_lost, arrived.lost);
             received_total += new_received;
             lost_total += new_lost;
+            if matches!(track.carries, Carries::ShareVideo { .. }) && track.too_slow_after(new_lost)
+            {
+                slow_shares.insert(track.user);
+            }
             let name = state
                 .person(track.user)
                 .map_or("someone".to_owned(), |p| p.name.clone());
@@ -1823,6 +1858,7 @@ impl Session {
             upload_loss,
             download_loss,
             dropped_for_you: dropped,
+            slow_shares,
             sending: self.sent_tracks(new_local_drops),
             receiving: rows,
         };
@@ -2016,6 +2052,24 @@ fn jittered(backoff: Duration, random: u64) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_share_stays_too_slow_for_a_few_refreshes_after_its_last_losses() {
+        let mut track = Watched {
+            user: UserId(4),
+            carries: Carries::ShareAudio,
+            last_bytes: 0,
+            last_received: 0,
+            last_lost: 0,
+            dropped: 0,
+            slow_for: 0,
+        };
+        assert!(!track.too_slow_after(1));
+        track.dropped = 1;
+        assert!(track.too_slow_after(1));
+        let held: Vec<bool> = (0..4).map(|_| track.too_slow_after(0)).collect();
+        assert_eq!(held, [true, true, false, false]);
+    }
 
     #[test]
     fn only_a_rate_limited_share_start_is_undone() {
