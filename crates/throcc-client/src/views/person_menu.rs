@@ -10,7 +10,7 @@ use throcc_proto::ids::UserId;
 use throcc_proto::permissions;
 
 use super::common::{CONTROLS_LINGER, Typeset, gain_to_loudness, icon, mono, section, toggle_icon};
-use crate::app::{Dialog, PlaybackControl, ThroccApp};
+use crate::app::{Dialog, PlaybackControl, Screen, SettingsPage, ThroccApp};
 use crate::theme;
 
 /// The person menu at the pointer, over a backdrop that closes it, if it is open in `window`.
@@ -66,14 +66,23 @@ pub fn render(
             )
         }))
         .children((!in_popout).then(|| {
-            group().child(
-                action("person-menu-profile", "circle-user", "Profile").on_click(cx.listener(
-                    move |app, _, _, cx| {
-                        app.close_person_menu(cx);
-                        app.open_profile(user, cx);
-                    },
-                )),
-            )
+            group()
+                .child(
+                    action("person-menu-profile", "circle-user", "Profile").on_click(cx.listener(
+                        move |app, _, _, cx| {
+                            app.close_person_menu(cx);
+                            app.open_profile(user, cx);
+                        },
+                    )),
+                )
+                .children(mine.then(|| {
+                    action("person-menu-audio", "audio-lines", "Audio Settings").on_click(
+                        cx.listener(|app, _, window, cx| {
+                            app.close_person_menu(cx);
+                            app.show_screen(Screen::Settings(SettingsPage::Audio), window, cx);
+                        }),
+                    )
+                }))
         }))
         .children(
             person

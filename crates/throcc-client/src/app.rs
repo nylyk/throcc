@@ -855,9 +855,6 @@ impl ThroccApp {
         let Some(person) = self.state.person(user).cloned() else {
             return;
         };
-        if Some(user) == self.state.me && person.sharing.is_none() {
-            return;
-        }
         self.person_menu = Some(PersonMenu {
             user,
             window: window.window_handle(),

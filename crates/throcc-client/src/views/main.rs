@@ -159,7 +159,7 @@ fn sidebar(
         div()
             .flex()
             .flex_col()
-            .child(with_room_menu(row, id, manages, cx))
+            .child(with_room_menu(row, id, selected, manages, cx))
             .children(people.into_iter().map(|(user, person)| {
                 let trust = trust(&state, user);
                 occupant(user, person, pictures.get(&user).cloned(), trust, cx)
@@ -319,39 +319,57 @@ fn sidebar(
         .child(resize_handle(cx))
 }
 
-/// `element` with a right-click menu to edit `room`, for those who manage rooms.
+/// `element` with a right-click menu to leave `room` while `joined`, and to edit it for
+/// those who manage rooms.
 fn with_room_menu(
     element: Stateful<Div>,
     room: RoomId,
+    joined: bool,
     manages: bool,
     cx: &Context<ThroccApp>,
 ) -> AnyElement {
-    if !manages {
+    if !joined && !manages {
         return element.into_any_element();
     }
     let this = cx.entity().downgrade();
     element
         .context_menu(move |menu, _, _| {
+            let leave = this.clone();
+            let menu = menu.when(joined, |menu| {
+                menu.item(
+                    PopupMenuItem::new("Leave Room")
+                        .icon(icon("phone-off"))
+                        .on_click(move |_, _, cx| {
+                            leave
+                                .update(cx, |app, _| app.command(Command::Join(None)))
+                                .ok();
+                        }),
+                )
+            });
+            if !manages {
+                return menu;
+            }
             let edit = this.clone();
             let delete = this.clone();
-            menu.item(
-                PopupMenuItem::new("Edit Room…")
-                    .icon(icon("pencil"))
-                    .on_click(move |_, window, cx| {
-                        edit.update(cx, |app, cx| app.open_edit_room(room, window, cx))
+            menu.when(joined, |menu| menu.separator())
+                .item(
+                    PopupMenuItem::new("Edit Room…")
+                        .icon(icon("pencil"))
+                        .on_click(move |_, window, cx| {
+                            edit.update(cx, |app, cx| app.open_edit_room(room, window, cx))
+                                .ok();
+                        }),
+                )
+                .separator()
+                .item(
+                    danger_menu_item("Delete Room", "trash").on_click(move |_, _, cx| {
+                        delete
+                            .update(cx, |app, cx| {
+                                app.set_dialog(Some(Dialog::DeleteRoom(room)), cx)
+                            })
                             .ok();
                     }),
-            )
-            .separator()
-            .item(
-                danger_menu_item("Delete Room", "trash").on_click(move |_, _, cx| {
-                    delete
-                        .update(cx, |app, cx| {
-                            app.set_dialog(Some(Dialog::DeleteRoom(room)), cx)
-                        })
-                        .ok();
-                }),
-            )
+                )
         })
         .into_any_element()
 }
