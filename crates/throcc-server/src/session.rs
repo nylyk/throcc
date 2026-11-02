@@ -14,9 +14,9 @@ use tokio::sync::{Semaphore, mpsc};
 use tracing::{debug, info, warn};
 
 use crate::Shared;
-use crate::auth::{self, Refused, SourceKey};
+use crate::auth::{self, Refused};
 use crate::egress;
-use crate::limits::Pass;
+use crate::limits::{Pass, SourceKey};
 use crate::rooms::{Link, Outgoing};
 
 /// How long a connection may wait for a handshake slot, and then how long it has to send
@@ -255,22 +255,23 @@ async fn write_loop(
 /// Sends a refusal and lets the client close first, so the refusal isn't lost to our close.
 async fn refuse(connection: &quinn::Connection, mut stream: FrameStream, refused: Refused) {
     let written = match refused {
-        Refused::Hello(e) => {
-            let result = AuthResult::Err(e);
-            tokio::time::timeout(HELLO_TIMEOUT, write_frame(&mut stream.send, &result)).await
-        }
-        Refused::Enroll(e) => {
-            let step = PakeStep::Err(e);
-            tokio::time::timeout(HELLO_TIMEOUT, write_frame(&mut stream.send, &step)).await
-        }
+        Refused::Hello(e) => send_within(&mut stream.send, &AuthResult::Err(e)).await,
+        Refused::Enroll(e) => send_within(&mut stream.send, &PakeStep::Err(e)).await,
         Refused::Internal => {
             connection.close(close::SERVER_BUSY.into(), b"internal server error");
             return;
         }
     };
-    if matches!(written, Ok(Ok(_))) {
+    if written {
         stream.send.finish().ok();
         tokio::time::timeout(LINGER, connection.closed()).await.ok();
     }
     connection.close(close::AUTH_FAILED.into(), b"authentication failed");
+}
+
+async fn send_within<T: Serialize>(send: &mut quinn::SendStream, message: &T) -> bool {
+    matches!(
+        tokio::time::timeout(HELLO_TIMEOUT, write_frame(send, message)).await,
+        Ok(Ok(()))
+    )
 }

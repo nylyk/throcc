@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use throcc_crypto::identity::{self, random};
 use throcc_proto::Fingerprint;
@@ -22,8 +22,9 @@ use crate::egress::{EgressHandle, TrackKind};
 use crate::limits::Buckets;
 use crate::room_password;
 use crate::sfu::{ForwardingTable, KeyframeAggregator, Route, Sfu};
+use crate::unix_now;
 
-pub const INVITE_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
+const INVITE_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 const PROFILE_INTERVAL: Duration = Duration::from_secs(10);
 const TRACKS_PER_MEMBERSHIP: u32 = 3;
 const MINT_ATTEMPTS: usize = 64;
@@ -152,7 +153,7 @@ impl Hub {
                 )
             })
             .collect();
-        db.delete_unused_blobs(unix_now().saturating_sub(UNUSED_BLOB_GRACE.as_secs()))?;
+        delete_unused_blobs(&db, unix_now())?;
         Ok(Self {
             db,
             fingerprint,
@@ -222,42 +223,45 @@ impl Hub {
         Ok(Some((conn_id, welcome)))
     }
 
+    /// Leaving the room already rebuilds the routes, and a session outside a room has none.
     pub fn disconnect(&mut self, user: UserId, conn_id: u64) {
-        if self
-            .sessions
-            .get(&user)
-            .is_some_and(|s| s.conn_id == conn_id)
-        {
+        if self.is_current(user, conn_id) {
             self.leave_room(user);
             self.sessions.remove(&user);
-            self.rebuild_routes();
         }
     }
 
     /// Handles a request from connection `conn_id`. A connection that has been replaced
     /// by a newer one of the same user is refused.
     pub fn handle(&mut self, user: UserId, conn_id: u64, request: Request) -> Response {
-        if self
-            .sessions
+        self.dispatch(user, conn_id, request)
+            .unwrap_or_else(|Refusal(code, message)| Response::Err { code, message })
+    }
+
+    fn is_current(&self, user: UserId, conn_id: u64) -> bool {
+        self.sessions
             .get(&user)
-            .is_none_or(|s| s.conn_id != conn_id)
-        {
-            return Response::Err {
-                code: ErrorCode::Forbidden,
-                message: "this connection was replaced".into(),
-            };
+            .is_some_and(|s| s.conn_id == conn_id)
+    }
+
+    fn dispatch(&mut self, user: UserId, conn_id: u64, request: Request) -> Outcome {
+        if !self.is_current(user, conn_id) {
+            return Err(Refusal::new(
+                ErrorCode::Forbidden,
+                "this connection was replaced",
+            ));
         }
         let metered = !matches!(
             request,
             Request::RequestKeyframe { .. } | Request::GetAvatar(_)
         );
         if metered && !self.requests.take(user, 1.0, Instant::now()) {
-            return Response::Err {
-                code: ErrorCode::RateLimited,
-                message: "too many requests; slow down".into(),
-            };
+            return Err(Refusal::new(
+                ErrorCode::RateLimited,
+                "too many requests; slow down",
+            ));
         }
-        let outcome = match request {
+        match request {
             Request::SetRoom { room, password } => self.join(user, room, password.as_deref()),
             Request::SetProfile { name, avatar } => self.set_profile(user, name, avatar),
             Request::SetAvatar(bytes) => self.set_avatar(user, bytes),
@@ -285,8 +289,7 @@ impl Hub {
             Request::SetServerName(name) => self.set_server_name(user, name),
             Request::SetServerAvatar(avatar) => self.set_server_avatar(user, avatar),
             Request::KickFromRoom { user: target, room } => self.kick_from_room(user, target, room),
-        };
-        outcome.unwrap_or_else(|Refusal(code, message)| Response::Err { code, message })
+        }
     }
 
     fn evict(&mut self, user: UserId, reason: &str) {
@@ -302,8 +305,10 @@ impl Hub {
         }
     }
 
-    pub fn emit_admins(&self, event: Event) {
-        for session in self.sessions.values().filter(|s| s.row.role == Role::Admin) {
+    /// Sends a change of the user list to everyone who may list users.
+    pub fn emit_user_list_change(&self, event: Event) {
+        let listers = self.sessions.values();
+        for session in listers.filter(|s| permissions::can_list_users(s.row.role)) {
             send(session, event.clone());
         }
     }
@@ -346,9 +351,24 @@ impl Hub {
     }
 
     fn room_entry(&self, room: RoomId) -> Result<&RoomEntry, Refusal> {
-        self.rooms
-            .get(&room)
-            .ok_or_else(|| Refusal::new(ErrorCode::NotFound, "no such room"))
+        self.rooms.get(&room).ok_or_else(no_such_room)
+    }
+
+    fn stored_user(&self, user: UserId) -> Result<UserRow, Refusal> {
+        self.db
+            .user(user)
+            .map_err(Refusal::internal)?
+            .ok_or_else(|| Refusal::new(ErrorCode::NotFound, "no such user"))
+    }
+
+    /// Refuses a picture that hasn't been uploaded.
+    fn require_picture(&self, avatar: Option<Hash>) -> Result<(), Refusal> {
+        match avatar {
+            Some(hash) if !self.db.has_blob(&hash).map_err(Refusal::internal)? => {
+                Err(Refusal::new(ErrorCode::NotFound, "no such picture"))
+            }
+            _ => Ok(()),
+        }
     }
 
     fn announce_presence(&self, user: UserId) {
@@ -395,13 +415,16 @@ impl Hub {
         Ok(epoch)
     }
 
-    fn room_state(&self, room: RoomId) -> Option<Event> {
-        let entry = self.rooms.get(&room)?;
-        Some(Event::RoomState {
+    fn broadcast_room_state(&self, room: RoomId, except: Option<UserId>) {
+        let Some(entry) = self.rooms.get(&room) else {
+            return;
+        };
+        let event = Event::RoomState {
             room,
             epoch: entry.epoch,
             peers: self.peers(room),
-        })
+        };
+        self.emit_room(room, event, except);
     }
 
     fn join(&mut self, user: UserId, target: Option<RoomId>, password: Option<&str>) -> Outcome {
@@ -479,10 +502,7 @@ impl Hub {
             }
         }
 
-        let tracks = match target {
-            Some(_) => Some(self.allocate_tracks()?),
-            None => None,
-        };
+        let tracks = target.map(|_| self.allocate_tracks()).transpose()?;
         for room in current.iter().chain(&target) {
             self.bump_epoch(*room)?;
         }
@@ -501,15 +521,11 @@ impl Hub {
             self.keyframes.forget(share.video);
         }
 
-        if let Some(old) = current
-            && let Some(event) = self.room_state(old)
-        {
-            self.emit_room(old, event, None);
+        if let Some(old) = current {
+            self.broadcast_room_state(old, None);
         }
-        if let Some(new) = target
-            && let Some(event) = self.room_state(new)
-        {
-            self.emit_room(new, event, Some(user));
+        if let Some(new) = target {
+            self.broadcast_room_state(new, Some(user));
         }
         match self.sessions.get(&user).and_then(presence) {
             Some(p) => self.emit_all(Event::PresenceChanged(p)),
@@ -534,9 +550,7 @@ impl Hub {
         if let Some(entry) = self.rooms.get_mut(&room) {
             entry.members.remove(&user);
         }
-        if let Some(event) = self.room_state(room) {
-            self.emit_room(room, event, None);
-        }
+        self.broadcast_room_state(room, None);
         self.emit_all(Event::PresenceEnded(user));
         self.rebuild_routes();
     }
@@ -577,11 +591,7 @@ impl Hub {
 
     fn set_profile(&mut self, user: UserId, name: String, avatar: Option<Hash>) -> Outcome {
         let name = checked_name(&name)?;
-        if let Some(hash) = &avatar
-            && self.db.blob(hash).map_err(Refusal::internal)?.is_none()
-        {
-            return Err(Refusal::new(ErrorCode::NotFound, "no such picture"));
-        }
+        self.require_picture(avatar)?;
         let session = self.session(user)?;
         if session
             .last_profile
@@ -589,7 +599,10 @@ impl Hub {
         {
             return Err(Refusal::new(
                 ErrorCode::RateLimited,
-                "one profile change per 10 seconds",
+                format!(
+                    "one profile change per {} seconds",
+                    PROFILE_INTERVAL.as_secs()
+                ),
             ));
         }
         self.db
@@ -604,7 +617,7 @@ impl Hub {
     }
 
     fn set_server_name(&mut self, user: UserId, name: Option<String>) -> Outcome {
-        self.require(permissions::can_edit_server(self.role(user)?))?;
+        require(permissions::can_edit_server(self.role(user)?))?;
         let name = match name.as_deref().map(str::trim) {
             None | Some("") => None,
             Some(name) => Some(checked_name(name)?),
@@ -616,12 +629,8 @@ impl Hub {
     }
 
     fn set_server_avatar(&mut self, user: UserId, avatar: Option<Hash>) -> Outcome {
-        self.require(permissions::can_edit_server(self.role(user)?))?;
-        if let Some(hash) = &avatar
-            && self.db.blob(hash).map_err(Refusal::internal)?.is_none()
-        {
-            return Err(Refusal::new(ErrorCode::NotFound, "no such picture"));
-        }
+        require(permissions::can_edit_server(self.role(user)?))?;
+        self.require_picture(avatar)?;
         self.db
             .set_server_avatar(avatar)
             .map_err(Refusal::internal)?;
@@ -638,7 +647,7 @@ impl Hub {
         if bytes.len() > MAX_AVATAR_BYTES {
             return Err(Refusal::new(
                 ErrorCode::TooLarge,
-                "avatars are at most 64 KiB",
+                format!("avatars are at most {} KiB", MAX_AVATAR_BYTES / 1024),
             ));
         }
         let cost = bytes.len().max(MIN_UPLOAD_COST) as f64;
@@ -649,9 +658,7 @@ impl Hub {
             ));
         }
         let now = unix_now();
-        self.db
-            .delete_unused_blobs(now.saturating_sub(UNUSED_BLOB_GRACE.as_secs()))
-            .map_err(Refusal::internal)?;
+        delete_unused_blobs(&self.db, now).map_err(Refusal::internal)?;
         let hash = Hash::of(&bytes);
         self.db
             .put_blob(&hash, &bytes, now)
@@ -690,9 +697,7 @@ impl Hub {
         session.row.enc_key = Some(enc_key);
         if let Some(room) = session.room {
             self.bump_epoch(room)?;
-            if let Some(event) = self.room_state(room) {
-                self.emit_room(room, event, None);
-            }
+            self.broadcast_room_state(room, None);
         }
         Ok(Response::Ok)
     }
@@ -703,8 +708,8 @@ impl Hub {
         let share_changed = session.media.share != media.share;
         let deafened_changed = session.media.deafened != media.deafened;
         session.media = media;
-        if share_changed && let Some(event) = self.room_state(room) {
-            self.emit_room(room, event, None);
+        if share_changed {
+            self.broadcast_room_state(room, None);
         }
         if deafened_changed {
             self.rebuild_routes();
@@ -714,7 +719,7 @@ impl Hub {
     }
 
     fn create_room(&mut self, user: UserId, name: String, password: Option<String>) -> Outcome {
-        self.require(permissions::can_manage_rooms(self.role(user)?))?;
+        require(permissions::can_manage_rooms(self.role(user)?))?;
         let name = checked_name(&name)?;
         if self.rooms.len() >= MAX_ROOMS {
             return Err(Refusal::new(
@@ -742,12 +747,9 @@ impl Hub {
     }
 
     fn rename_room(&mut self, user: UserId, room: RoomId, name: String) -> Outcome {
-        self.require(permissions::can_manage_rooms(self.role(user)?))?;
+        require(permissions::can_manage_rooms(self.role(user)?))?;
         let name = checked_name(&name)?;
-        let entry = self
-            .rooms
-            .get_mut(&room)
-            .ok_or_else(|| Refusal::new(ErrorCode::NotFound, "no such room"))?;
+        let entry = self.rooms.get_mut(&room).ok_or_else(no_such_room)?;
         self.db
             .rename_room(room, &name)
             .map_err(Refusal::internal)?;
@@ -762,17 +764,13 @@ impl Hub {
         room: RoomId,
         password: Option<String>,
     ) -> Outcome {
-        self.require(permissions::can_manage_rooms(self.role(user)?))?;
-        self.room_entry(room)?;
+        require(permissions::can_manage_rooms(self.role(user)?))?;
+        let entry = self.rooms.get_mut(&room).ok_or_else(no_such_room)?;
         let hash = password.as_deref().map(hash_password).transpose()?;
         self.db
             .set_room_password_hash(room, hash.as_deref())
             .map_err(Refusal::internal)?;
         let locked = hash.is_some();
-        let entry = self
-            .rooms
-            .get_mut(&room)
-            .ok_or_else(|| Refusal::new(ErrorCode::NotFound, "no such room"))?;
         entry.password_hash = hash;
         let members = &entry.members;
         self.last_joined
@@ -782,7 +780,7 @@ impl Hub {
     }
 
     fn delete_room(&mut self, user: UserId, room: RoomId) -> Outcome {
-        self.require(permissions::can_manage_rooms(self.role(user)?))?;
+        require(permissions::can_manage_rooms(self.role(user)?))?;
         for member in self.room_entry(room)?.members.clone() {
             self.place(member, None)?;
         }
@@ -842,7 +840,7 @@ impl Hub {
     }
 
     fn list_users(&mut self, user: UserId) -> Outcome {
-        self.require(permissions::can_list_users(self.role(user)?))?;
+        require(permissions::can_list_users(self.role(user)?))?;
         let users = self.db.users().map_err(Refusal::internal)?;
         Ok(Response::Users(
             users.iter().map(UserRow::to_user).collect(),
@@ -851,22 +849,16 @@ impl Hub {
 
     fn set_role(&mut self, user: UserId, target: UserId, role: Role) -> Outcome {
         let actor = self.role(user)?;
-        let row = self
-            .db
-            .user(target)
-            .map_err(Refusal::internal)?
-            .ok_or_else(|| Refusal::new(ErrorCode::NotFound, "no such user"))?;
-        self.require(permissions::can_set_role(actor, row.role, role))?;
+        let row = self.stored_user(target)?;
+        require(permissions::can_set_role(actor, row.role, role))?;
         self.db.set_role(target, role).map_err(Refusal::internal)?;
         if let Some(session) = self.sessions.get_mut(&target) {
             session.row.role = role;
         }
-        if let Some(p) = self.sessions.get(&target).and_then(presence) {
-            self.emit_all(Event::PresenceChanged(p));
-        }
+        self.announce_presence(target);
         let event = Event::RoleChanged { user: target, role };
-        self.emit_admins(event.clone());
-        if role != Role::Admin {
+        self.emit_user_list_change(event.clone());
+        if !permissions::can_list_users(role) {
             self.emit_to(target, event);
         }
         Ok(Response::Ok)
@@ -879,7 +871,7 @@ impl Hub {
             .get(&target)
             .filter(|s| s.room == Some(room))
             .ok_or_else(|| Refusal::new(ErrorCode::NotFound, "they aren't in that room"))?;
-        self.require(permissions::can_kick_from_room(actor, session.row.role))?;
+        require(permissions::can_kick_from_room(actor, session.row.role))?;
         self.last_joined.remove(&target);
         self.leave_room(target);
         self.emit_to(target, Event::KickedFromRoom { by: user, room });
@@ -890,7 +882,8 @@ impl Hub {
     fn remove_user(&mut self, user: UserId, target: UserId, cascade: bool) -> Outcome {
         let actor = self.role(user)?;
         let leaving = target == user && !cascade;
-        if leaving && actor == Role::Admin && self.admins()? == 1 {
+        if leaving && actor == Role::Admin && self.db.admin_count().map_err(Refusal::internal)? == 1
+        {
             return Err(Refusal::new(
                 ErrorCode::Forbidden,
                 "you are the server's only admin, so you can't leave it",
@@ -902,25 +895,16 @@ impl Hub {
             vec![target]
         };
         for id in &removed {
-            let row = self
-                .db
-                .user(*id)
-                .map_err(Refusal::internal)?
-                .ok_or_else(|| Refusal::new(ErrorCode::NotFound, "no such user"))?;
-            self.require(leaving || permissions::can_remove(actor, row.role))?;
+            let row = self.stored_user(*id)?;
+            require(leaving || permissions::can_remove(actor, row.role))?;
         }
         self.db.remove_users(&removed).map_err(Refusal::internal)?;
         for id in &removed {
             self.evict(*id, "you were removed from this server");
-            self.emit_admins(Event::UserRemoved(*id));
+            self.emit_user_list_change(Event::UserRemoved(*id));
         }
         info!(?removed, "removed users");
         Ok(Response::Ok)
-    }
-
-    fn admins(&self) -> Result<usize, Refusal> {
-        let users = self.db.users().map_err(Refusal::internal)?;
-        Ok(users.iter().filter(|u| u.role == Role::Admin).count())
     }
 
     fn set_watching(&mut self, user: UserId, ids: Vec<MediaId>) -> Outcome {
@@ -1074,14 +1058,22 @@ impl Hub {
         }
         self.sfu.table.store(Arc::new(table));
     }
+}
 
-    fn require(&self, allowed: bool) -> Result<(), Refusal> {
-        if allowed {
-            Ok(())
-        } else {
-            Err(Refusal::new(ErrorCode::Forbidden, "you can't do that"))
-        }
+fn require(allowed: bool) -> Result<(), Refusal> {
+    if allowed {
+        Ok(())
+    } else {
+        Err(Refusal::new(ErrorCode::Forbidden, "you can't do that"))
     }
+}
+
+fn no_such_room() -> Refusal {
+    Refusal::new(ErrorCode::NotFound, "no such room")
+}
+
+fn delete_unused_blobs(db: &Database, now: u64) -> anyhow::Result<usize> {
+    db.delete_unused_blobs(now.saturating_sub(UNUSED_BLOB_GRACE.as_secs()))
 }
 
 fn send(session: &Session, event: Event) {
@@ -1156,10 +1148,4 @@ fn hash_password(password: &str) -> Result<String, Refusal> {
         ));
     }
     room_password::hash(password).map_err(Refusal::internal)
-}
-
-pub fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }

@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -8,6 +8,7 @@ use throcc_proto::ids::MediaId;
 use throcc_proto::messages::{Event, ServerMessage, TrackStats};
 use tokio::sync::mpsc;
 
+use crate::lock;
 use crate::rooms::Outgoing;
 
 /// Queued video beyond this is dropped, in whole units that haven't started sending.
@@ -48,17 +49,14 @@ pub struct EgressHandle {
 
 impl EgressHandle {
     pub fn offer(&self, packet: Packet) {
-        let lost = Lost {
-            kind: packet.kind,
-            media_id: packet.header.media_id,
-            seq: packet.header.seq,
-            first: packet.header.flags.contains(Flags::FIRST),
-        };
-        if self.inbox.try_send(packet).is_err() {
-            self.inbox_drops
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .record(lost);
+        if let Err(e) = self.inbox.try_send(packet) {
+            let packet = e.into_inner();
+            lock(&self.inbox_drops).record(Lost {
+                kind: packet.kind,
+                media_id: packet.header.media_id,
+                seq: packet.header.seq,
+                first: packet.header.flags.contains(Flags::FIRST),
+            });
         }
     }
 }
@@ -101,8 +99,6 @@ struct VideoUnit {
     id: u64,
     media_id: MediaId,
     packets: VecDeque<Bytes>,
-    /// Bytes of `packets`.
-    bytes: usize,
     received: usize,
     arrived: Instant,
     last_fragment: Instant,
@@ -117,6 +113,25 @@ struct VideoUnit {
     copy: bool,
 }
 
+impl VideoUnit {
+    fn new(id: u64, media_id: MediaId, first_seq: u32, bytes: Bytes, now: Instant) -> Self {
+        Self {
+            id,
+            media_id,
+            packets: VecDeque::from([bytes]),
+            received: 1,
+            arrived: now,
+            last_fragment: now,
+            started: false,
+            complete: false,
+            discardable: false,
+            stray: false,
+            first_seq,
+            copy: false,
+        }
+    }
+}
+
 #[derive(Default)]
 struct Counters {
     forwarded: u32,
@@ -127,6 +142,7 @@ struct Counters {
 #[derive(Default)]
 pub struct Queues {
     audio: VecDeque<(MediaId, Bytes)>,
+    /// In the order units arrived, which is also the order of their ids.
     video: VecDeque<VideoUnit>,
     history: HashMap<MediaId, BTreeMap<u32, Fate>>,
     next_id: u64,
@@ -142,7 +158,7 @@ impl Queues {
                 if self.audio.len() >= MAX_QUEUED_AUDIO
                     && let Some((dropped, _)) = self.audio.pop_front()
                 {
-                    self.stats.entry(dropped).or_default().dropped_units += 1;
+                    self.count_drop(dropped);
                 }
                 self.audio.push_back((media_id, packet.bytes));
             }
@@ -160,8 +176,7 @@ impl Queues {
             ..
         } = packet.header;
         if flags.contains(Flags::FIRST) {
-            let id = self.next_id;
-            self.next_id += 1;
+            let id = self.new_id();
             let history = self.history.entry(media_id).or_default();
             let copy = match history.get(&seq) {
                 Some(Fate::Dropped) => {
@@ -172,22 +187,12 @@ impl Queues {
                 seen => seen.is_some(),
             };
             self.video_bytes += packet.bytes.len();
-            let unit = VideoUnit {
-                id,
-                media_id,
-                bytes: packet.bytes.len(),
-                packets: VecDeque::from([packet.bytes]),
-                received: 1,
-                arrived: now,
-                last_fragment: now,
-                started: false,
+            self.video.push_back(VideoUnit {
                 complete: flags.contains(Flags::LAST),
                 discardable: flags.contains(Flags::DISCARDABLE),
-                stray: false,
-                first_seq: seq,
                 copy,
-            };
-            self.video.push_back(unit);
+                ..VideoUnit::new(id, media_id, seq, packet.bytes, now)
+            });
             remember(history, seq, Fate::Queued(id));
             return;
         }
@@ -198,10 +203,9 @@ impl Queues {
             .map(|(_, fate)| *fate);
         match fate {
             Some(Fate::Queued(id)) => {
-                if let Some(unit) = self.video.iter_mut().find(|u| u.id == id)
+                if let Some(unit) = self.position(id).map(|i| &mut self.video[i])
                     && unit.received < MAX_UNIT_FRAGMENTS
                 {
-                    unit.bytes += packet.bytes.len();
                     self.video_bytes += packet.bytes.len();
                     unit.packets.push_back(packet.bytes);
                     unit.received += 1;
@@ -210,21 +214,13 @@ impl Queues {
                 }
             }
             Some(Fate::Sent) => {
+                let id = self.new_id();
                 self.video_bytes += packet.bytes.len();
                 self.video.push_back(VideoUnit {
-                    id: u64::MAX,
-                    media_id,
-                    bytes: packet.bytes.len(),
-                    packets: VecDeque::from([packet.bytes]),
-                    received: 1,
-                    arrived: now,
-                    last_fragment: now,
-                    started: false,
                     complete: true,
                     discardable: true,
                     stray: true,
-                    first_seq: seq,
-                    copy: false,
+                    ..VideoUnit::new(id, media_id, seq, packet.bytes, now)
                 });
             }
             Some(Fate::Dropped) | None => {}
@@ -241,14 +237,14 @@ impl Queues {
             first,
         } = lost;
         if kind == TrackKind::Audio {
-            self.stats.entry(media_id).or_default().dropped_units += 1;
+            self.count_drop(media_id);
             return;
         }
         let history = self.history.entry(media_id).or_default();
         if first {
             if !history.contains_key(&seq) {
                 remember(history, seq, Fate::Dropped);
-                self.stats.entry(media_id).or_default().dropped_units += 1;
+                self.count_drop(media_id);
             }
             return;
         }
@@ -260,12 +256,12 @@ impl Queues {
             Some((_, Fate::Queued(id))) => self.drop_unit(id),
             Some((first_seq, Fate::Sent)) => {
                 remember(history, first_seq, Fate::Dropped);
-                self.stats.entry(media_id).or_default().dropped_units += 1;
+                self.count_drop(media_id);
             }
             Some((_, Fate::Dropped)) => {}
             None => {
                 remember(history, seq, Fate::Dropped);
-                self.stats.entry(media_id).or_default().dropped_units += 1;
+                self.count_drop(media_id);
             }
         }
     }
@@ -309,7 +305,7 @@ impl Queues {
 
     /// Drops a unit, counting it unless another copy of it is still queued.
     fn drop_unit(&mut self, id: u64) {
-        let Some(unit) = self.video.iter().find(|u| u.id == id) else {
+        let Some(unit) = self.position(id).map(|i| &self.video[i]) else {
             return;
         };
         let (media_id, first_seq, uncounted) =
@@ -322,32 +318,47 @@ impl Queues {
         if let Some(twin) = twin {
             twin.copy = false;
         } else if !uncounted {
-            self.stats.entry(media_id).or_default().dropped_units += 1;
+            self.count_drop(media_id);
         }
     }
 
-    /// Queued video is measured as the wait of the oldest unit not yet sending. Quinn's
-    /// buffer stays full, so the congestion controller keeps probing for more rate.
+    /// Queued video is measured as the wait of the oldest unit not yet sending, which is
+    /// the first of them. Quinn's buffer stays full, so the congestion controller keeps
+    /// probing for more rate.
     fn over_budget(&self, now: Instant) -> bool {
         self.video
             .iter()
-            .filter(|u| !u.started)
-            .map(|u| u.arrived)
-            .min()
-            .is_some_and(|t| now.duration_since(t) > VIDEO_BUDGET)
+            .find(|u| !u.started)
+            .is_some_and(|u| now.duration_since(u.arrived) > VIDEO_BUDGET)
     }
 
     fn finish(&mut self, id: u64, fate: Fate) {
-        let index = self.video.iter().position(|u| u.id == id);
-        let Some(unit) = index.and_then(|i| self.video.remove(i)) else {
+        let Some(unit) = self.position(id).and_then(|i| self.video.remove(i)) else {
             return;
         };
-        self.video_bytes -= unit.bytes;
-        if let Some(history) = self.history.get_mut(&unit.media_id) {
-            for f in history.values_mut().filter(|f| **f == Fate::Queued(id)) {
-                *f = fate;
-            }
+        self.video_bytes -= unit.packets.iter().map(Bytes::len).sum::<usize>();
+        if let Some(f) = self
+            .history
+            .get_mut(&unit.media_id)
+            .and_then(|history| history.get_mut(&unit.first_seq))
+            && *f == Fate::Queued(id)
+        {
+            *f = fate;
         }
+    }
+
+    fn position(&self, id: u64) -> Option<usize> {
+        self.video.binary_search_by_key(&id, |u| u.id).ok()
+    }
+
+    fn new_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    fn count_drop(&mut self, media_id: MediaId) {
+        self.stats.entry(media_id).or_default().dropped_units += 1;
     }
 
     pub fn pop(&mut self) -> Option<Bytes> {
@@ -357,7 +368,6 @@ impl Queues {
         }
         let unit = self.video.iter_mut().find(|u| !u.packets.is_empty())?;
         let bytes = unit.packets.pop_front()?;
-        unit.bytes -= bytes.len();
         self.video_bytes -= bytes.len();
         if !unit.started {
             unit.started = true;
@@ -403,21 +413,26 @@ pub fn spawn(connection: quinn::Connection, control: mpsc::Sender<Outgoing>) -> 
     tokio::spawn(async move {
         let mut queues = Queues::default();
         let mut next_stats = Instant::now() + LINK_STATS_INTERVAL;
+        // Swapped with the shared list each round, so neither side regrows from empty.
+        let mut lost = Vec::new();
         loop {
-            let InboxDrops { lost, overflow } =
-                std::mem::take(&mut *inbox_drops.lock().unwrap_or_else(PoisonError::into_inner));
+            let overflow = {
+                let mut drops = lock(&inbox_drops);
+                std::mem::swap(&mut drops.lost, &mut lost);
+                std::mem::take(&mut drops.overflow)
+            };
             // A lost first fragment is placed before the drain, so the rest of its unit is
             // discarded on arrival. Other losses wait until the start of their unit is queued.
-            let (first, rest): (Vec<Lost>, Vec<Lost>) = lost.into_iter().partition(|l| l.first);
-            for lost in first {
-                queues.lose(lost);
+            for first in lost.iter().filter(|l| l.first) {
+                queues.lose(*first);
             }
             while let Ok(packet) = rx.try_recv() {
                 queues.push(packet, Instant::now());
             }
-            for lost in rest {
-                queues.lose(lost);
+            for rest in lost.iter().filter(|l| !l.first) {
+                queues.lose(*rest);
             }
+            lost.clear();
             for (media_id, count) in overflow {
                 queues.stats.entry(media_id).or_default().dropped_units += count;
             }

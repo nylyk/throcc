@@ -64,7 +64,6 @@ fn migrate(conn: &mut Connection) -> Result<()> {
 
 const NEXT_MEDIA_ID: &str = "next_media_id";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoomRow {
     pub id: RoomId,
     pub name: String,
@@ -116,6 +115,7 @@ impl Database {
         Self::init(conn)
     }
 
+    #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
         Self::init(Connection::open_in_memory()?)
     }
@@ -149,6 +149,14 @@ impl Database {
         Ok(self
             .conn
             .query_row("SELECT COUNT(*) FROM users", [], |r| r.get::<_, i64>(0))? as u64)
+    }
+
+    pub fn admin_count(&self) -> Result<u64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM users WHERE role = ?1",
+            [Role::Admin.rank()],
+            |r| r.get::<_, i64>(0),
+        )? as u64)
     }
 
     pub fn user_by_pubkey(&self, pubkey: &PublicKey) -> Result<Option<UserRow>> {
@@ -249,7 +257,7 @@ impl Database {
     pub fn set_profile(&self, user: UserId, name: &str, avatar: Option<Hash>) -> Result<()> {
         self.conn.execute(
             "UPDATE users SET name = ?1, avatar_hash = ?2 WHERE id = ?3",
-            params![name, avatar.map(|h| h.0.to_vec()), user.0 as i64],
+            params![name, hash_param(&avatar), user.0 as i64],
         )?;
         Ok(())
     }
@@ -308,25 +316,26 @@ impl Database {
         Ok(RoomId(self.conn.last_insert_rowid() as u64))
     }
 
-    pub fn rename_room(&self, room: RoomId, name: &str) -> Result<bool> {
-        Ok(self.conn.execute(
+    pub fn rename_room(&self, room: RoomId, name: &str) -> Result<()> {
+        self.conn.execute(
             "UPDATE rooms SET name = ?1 WHERE id = ?2",
             params![name, room.0 as i64],
-        )? == 1)
+        )?;
+        Ok(())
     }
 
-    pub fn set_room_password_hash(&self, room: RoomId, hash: Option<&str>) -> Result<bool> {
-        Ok(self.conn.execute(
+    pub fn set_room_password_hash(&self, room: RoomId, hash: Option<&str>) -> Result<()> {
+        self.conn.execute(
             "UPDATE rooms SET password_hash = ?1 WHERE id = ?2",
             params![hash, room.0 as i64],
-        )? == 1)
+        )?;
+        Ok(())
     }
 
-    pub fn delete_room(&self, room: RoomId) -> Result<bool> {
-        Ok(self
-            .conn
-            .execute("DELETE FROM rooms WHERE id = ?1", [room.0 as i64])?
-            == 1)
+    pub fn delete_room(&self, room: RoomId) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM rooms WHERE id = ?1", [room.0 as i64])?;
+        Ok(())
     }
 
     pub fn set_epoch(&self, room: RoomId, epoch: Epoch) -> Result<()> {
@@ -447,7 +456,7 @@ impl Database {
         Ok(
             row.map_or_else(ServerProfile::default, |(name, avatar)| ServerProfile {
                 name,
-                avatar: avatar.and_then(|h| h.try_into().ok()).map(Hash),
+                avatar: hash_column(avatar),
             }),
         )
     }
@@ -465,9 +474,21 @@ impl Database {
         self.conn.execute(
             "INSERT INTO server_profile (id, avatar_hash) VALUES (0, ?1)
              ON CONFLICT (id) DO UPDATE SET avatar_hash = excluded.avatar_hash",
-            params![avatar.map(|h| h.0.to_vec())],
+            params![hash_param(&avatar)],
         )?;
         Ok(())
+    }
+
+    pub fn has_blob(&self, hash: &Hash) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM blobs WHERE hash = ?1",
+                [hash.0.as_slice()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
     }
 
     pub fn blob(&self, hash: &Hash) -> Result<Option<Vec<u8>>> {
@@ -482,12 +503,12 @@ impl Database {
     }
 }
 
-const USER_SELECT: &str = "SELECT id, pubkey, enc_key, enc_key_sig, name, avatar_hash, role, invited_by, created_at, enc_key_not_after FROM users";
+const USER_SELECT: &str = "SELECT id, pubkey, enc_key, enc_key_sig, enc_key_not_after, name, avatar_hash, role, invited_by, created_at FROM users";
 
 fn user_row(r: &rusqlite::Row) -> rusqlite::Result<UserRow> {
     let enc_key: Option<Vec<u8>> = r.get(2)?;
     let enc_key_sig: Option<Vec<u8>> = r.get(3)?;
-    let not_after: Option<i64> = r.get(9)?;
+    let not_after: Option<i64> = r.get(4)?;
     let enc_key = match (enc_key, enc_key_sig, not_after) {
         (Some(key), Some(sig), Some(not_after)) => match (key.try_into(), sig.try_into()) {
             (Ok(key), Ok(sig)) => Some(SignedEncKey {
@@ -503,14 +524,11 @@ fn user_row(r: &rusqlite::Row) -> rusqlite::Result<UserRow> {
         id: UserId(r.get::<_, i64>(0)? as u64),
         pubkey: fixed(r.get::<_, Vec<u8>>(1)?)?,
         enc_key,
-        name: r.get(4)?,
-        avatar: r
-            .get::<_, Option<Vec<u8>>>(5)?
-            .and_then(|h| h.try_into().ok())
-            .map(Hash),
-        role: Role::from_rank(r.get(6)?).unwrap_or(Role::User),
-        invited_by: r.get::<_, Option<i64>>(7)?.map(|id| UserId(id as u64)),
-        created_at: r.get::<_, i64>(8)? as u64,
+        name: r.get(5)?,
+        avatar: hash_column(r.get(6)?),
+        role: Role::from_rank(r.get(7)?).unwrap_or(Role::User),
+        invited_by: r.get::<_, Option<i64>>(8)?.map(|id| UserId(id as u64)),
+        created_at: r.get::<_, i64>(9)? as u64,
     })
 }
 
@@ -523,6 +541,14 @@ fn next_media_id(conn: &Connection) -> rusqlite::Result<i64> {
         )
         .optional()?
         .unwrap_or(1))
+}
+
+fn hash_param(hash: &Option<Hash>) -> Option<&[u8]> {
+    hash.as_ref().map(|h| h.0.as_slice())
+}
+
+fn hash_column(bytes: Option<Vec<u8>>) -> Option<Hash> {
+    bytes.and_then(|b| b.try_into().ok()).map(Hash)
 }
 
 fn fixed<const N: usize>(bytes: Vec<u8>) -> rusqlite::Result<[u8; N]> {

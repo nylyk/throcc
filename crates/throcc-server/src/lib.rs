@@ -1,18 +1,18 @@
-pub mod auth;
+mod auth;
 pub mod database;
-pub mod egress;
+mod egress;
 pub mod identity;
-pub mod limits;
-pub mod room_password;
+mod limits;
+mod room_password;
 pub mod rooms;
-pub mod session;
-pub mod sfu;
+mod session;
+mod sfu;
 pub mod tls;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use throcc_proto::Fingerprint;
@@ -20,11 +20,10 @@ use throcc_proto::invite::InviteCode;
 use throcc_proto::transport::{check_datagrams, close};
 use tracing::{info, warn};
 
-use crate::auth::{SourceKey, SourceLimiter};
 use crate::database::Database;
 use crate::identity::ServerIdentity;
-use crate::limits::{Caps, Gate, Pass};
-use crate::rooms::{Hub, unix_now};
+use crate::limits::{Caps, Gate, Pass, SourceKey, SourceLimiter};
+use crate::rooms::Hub;
 use crate::sfu::Sfu;
 pub use crate::tls::Congestion;
 
@@ -69,11 +68,11 @@ pub struct Shared {
 impl Shared {
     /// Locks the hub. Never hold the guard across an `.await`.
     pub fn hub(&self) -> MutexGuard<'_, Hub> {
-        self.hub.lock().unwrap_or_else(PoisonError::into_inner)
+        lock(&self.hub)
     }
 
     pub fn limiter(&self) -> MutexGuard<'_, SourceLimiter> {
-        self.limiter.lock().unwrap_or_else(PoisonError::into_inner)
+        lock(&self.limiter)
     }
 }
 
@@ -188,6 +187,17 @@ async fn handle(shared: Arc<Shared>, connection: quinn::Connection, unauthentica
     }
     info!(%peer, "connected");
     session::run(shared, connection, unauthenticated).await;
+}
+
+/// Locks `mutex`, carrying on past a panic of an earlier holder.
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+pub fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 fn create_private_dir(path: &std::path::Path) -> Result<()> {

@@ -14,8 +14,8 @@ use throcc_proto::messages::{
     ServerMessage, SignedEncKey, Welcome,
 };
 use throcc_server::database::Database;
-use throcc_server::rooms::{MAX_ROOMS, unix_now};
-use throcc_server::{Config, Congestion, DATABASE_FILE, Server};
+use throcc_server::rooms::MAX_ROOMS;
+use throcc_server::{Config, Congestion, DATABASE_FILE, Server, unix_now};
 use tokio::net::UdpSocket;
 
 use common::*;

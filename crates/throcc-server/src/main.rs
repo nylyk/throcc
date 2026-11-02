@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -11,7 +11,7 @@ struct Args {
     /// Directory holding server_key and the database.
     #[arg(long, default_value = "./throcc-data")]
     data: PathBuf,
-    #[arg(long, default_value = "[::]:8476")]
+    #[arg(long, default_value_t = SocketAddr::from((Ipv6Addr::UNSPECIFIED, throcc_proto::DEFAULT_PORT)))]
     listen: SocketAddr,
     #[arg(long, value_enum, default_value_t)]
     congestion: Congestion,

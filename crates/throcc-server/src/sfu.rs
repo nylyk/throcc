@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
@@ -35,8 +34,6 @@ pub struct ForwardingTable {
 #[derive(Default)]
 pub struct Sfu {
     pub table: ArcSwap<ForwardingTable>,
-    pub not_owned: AtomicU64,
-    pub malformed: AtomicU64,
 }
 
 impl Sfu {
@@ -55,23 +52,21 @@ impl Sfu {
                 return;
             }
             let Ok(header) = Header::parse(&datagram) else {
-                self.malformed.fetch_add(1, Ordering::Relaxed);
                 continue;
             };
             let table = self.table.load();
-            match table.routes.get(&header.media_id) {
-                Some(route) if route.owner == conn_id => {
-                    for subscriber in &route.subscribers {
-                        subscriber.offer(Packet {
-                            kind: route.kind,
-                            header,
-                            bytes: datagram.clone(),
-                        });
-                    }
-                }
-                _ => {
-                    self.not_owned.fetch_add(1, Ordering::Relaxed);
-                }
+            let Some(route) = table.routes.get(&header.media_id) else {
+                continue;
+            };
+            if route.owner != conn_id {
+                continue;
+            }
+            for subscriber in &route.subscribers {
+                subscriber.offer(Packet {
+                    kind: route.kind,
+                    header,
+                    bytes: datagram.clone(),
+                });
             }
         }
     }
