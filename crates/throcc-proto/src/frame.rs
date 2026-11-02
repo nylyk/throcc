@@ -22,9 +22,7 @@ impl Flags {
     pub const KEYFRAME: Self = Self(1);
     pub const FIRST: Self = Self(1 << 1);
     pub const LAST: Self = Self(1 << 2);
-    /// Nothing later references this frame.
-    pub const DISCARDABLE: Self = Self(1 << 3);
-    const DEFINED: u8 = 0x0f;
+    const DEFINED: u8 = 0x07;
 
     pub fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
@@ -153,7 +151,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn header_round_trips(media in any::<u32>(), epoch in any::<u32>(), seq in any::<u32>(), flags in 0u8..16) {
+        fn header_round_trips(media in any::<u32>(), epoch in any::<u32>(), seq in any::<u32>(), flags in 0u8..=Flags::DEFINED) {
             let header = Header { media_id: MediaId(media), epoch: Epoch(epoch), seq, flags: Flags(flags) };
             prop_assert_eq!(Header::parse_strict(&header.encode()).unwrap(), header);
         }
