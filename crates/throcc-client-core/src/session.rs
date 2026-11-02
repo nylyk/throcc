@@ -40,10 +40,13 @@ use crate::verified::VerifiedKeys;
 
 const LEVELS_EVERY: Duration = Duration::from_millis(100);
 const HEALTH_EVERY: Duration = Duration::from_secs(2);
-/// Frames dropped by the server plus datagrams lost on the way, on one watched share within
-/// one health refresh, that mark the share too slow for our connection.
-const SLOW_SHARE_LOSSES: u64 = 2;
-/// Health refreshes a share stays marked too slow after its last lossy one.
+/// Frames of one watched share the server drops for us within one health refresh that mark
+/// the share too slow for our connection.
+const SLOW_SHARE_DROPS: u64 = 2;
+/// The percentage of one watched share's datagrams lost within one health refresh that marks
+/// the share too slow for our connection.
+const SLOW_SHARE_LOSS_PERCENT: u64 = 1;
+/// Health refreshes a share stays marked too slow, counting its last lossy one.
 const SLOW_SHARE_HOLD: u8 = 3;
 const MAX_BACKOFF: Duration = Duration::from_secs(15);
 /// Each reconnect wait is spread over this fraction either side of the backoff, so clients
@@ -181,11 +184,12 @@ struct Watched {
 }
 
 impl Watched {
-    /// Counts one health refresh's losses, `lost` datagrams plus the units the server
+    /// Counts one health refresh's `received` and `lost` datagrams and the units the server
     /// dropped, and says whether the track is still too slow for our connection.
-    fn too_slow_after(&mut self, lost: u64) -> bool {
-        let losses = lost + std::mem::take(&mut self.dropped);
-        self.slow_for = if losses >= SLOW_SHARE_LOSSES {
+    fn too_slow_after(&mut self, received: u64, lost: u64) -> bool {
+        let dropped = std::mem::take(&mut self.dropped);
+        let lossy = lost > 0 && lost * 100 >= (received + lost) * SLOW_SHARE_LOSS_PERCENT;
+        self.slow_for = if dropped >= SLOW_SHARE_DROPS || lossy {
             SLOW_SHARE_HOLD
         } else {
             self.slow_for.saturating_sub(1)
@@ -1746,7 +1750,9 @@ impl Session {
                     sum.saturating_add(t.dropped_units)
                 });
                 for t in &tracks {
-                    if let Some(watched) = self.tracks.get_mut(&t.media_id) {
+                    if let Some(watched) = self.tracks.get_mut(&t.media_id)
+                        && matches!(watched.carries, Carries::ShareVideo { .. })
+                    {
                         watched.dropped += u64::from(t.dropped_units);
                     }
                 }
@@ -1832,7 +1838,8 @@ impl Session {
             let new_lost = advance(&mut track.last_lost, arrived.lost);
             received_total += new_received;
             lost_total += new_lost;
-            if matches!(track.carries, Carries::ShareVideo { .. }) && track.too_slow_after(new_lost)
+            if matches!(track.carries, Carries::ShareVideo { .. })
+                && track.too_slow_after(new_received, new_lost)
             {
                 slow_shares.insert(track.user);
             }
@@ -2054,7 +2061,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_share_stays_too_slow_for_a_few_refreshes_after_its_last_losses() {
+    fn a_share_is_too_slow_after_server_drops_or_heavy_loss_and_stays_so_briefly() {
         let mut track = Watched {
             user: UserId(4),
             carries: Carries::ShareAudio,
@@ -2064,11 +2071,14 @@ mod tests {
             dropped: 0,
             slow_for: 0,
         };
-        assert!(!track.too_slow_after(1));
+        assert!(!track.too_slow_after(1000, 3));
         track.dropped = 1;
-        assert!(track.too_slow_after(1));
-        let held: Vec<bool> = (0..4).map(|_| track.too_slow_after(0)).collect();
-        assert_eq!(held, [true, true, false, false]);
+        assert!(!track.too_slow_after(1000, 0));
+        track.dropped = 2;
+        assert!(track.too_slow_after(1000, 0));
+        let held: Vec<bool> = (0..3).map(|_| track.too_slow_after(1000, 0)).collect();
+        assert_eq!(held, [true, true, false]);
+        assert!(track.too_slow_after(990, 10));
     }
 
     #[test]
