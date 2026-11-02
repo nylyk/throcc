@@ -404,10 +404,10 @@ fn codec_name(codec: Codec) -> &'static str {
     }
 }
 
-/// "1440p60 · AV1" for a share.
+/// "1440p60 AV1" for a share.
 pub fn share_label(config: &ShareConfig) -> String {
     format!(
-        "{}p{} · {}",
+        "{}p{} {}",
         config.height,
         config.fps,
         codec_name(config.codec)

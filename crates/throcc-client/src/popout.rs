@@ -113,7 +113,7 @@ impl Render for PopOut {
             .unwrap_or_default();
         let config = person.and_then(|p| p.sharing);
         let details = match config {
-            Some(config) => format!("{room} · {}", share_label(&config)),
+            Some(config) => format!("{room} {}", share_label(&config)),
             None => room,
         };
         let fullscreen = window.is_fullscreen();
