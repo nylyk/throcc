@@ -132,14 +132,16 @@ impl Decoder {
     }
 
     /// Decodes one access unit. Returns the newest picture it produced, if any. A hardware
-    /// decoder that fails is swapped for a software one, which decodes the same unit.
+    /// decoder that FFmpeg reports failing is swapped for a software one, which decodes the
+    /// same unit. A picture too large or in a format throcc doesn't present is no fault of
+    /// the hardware, so it keeps it.
     pub fn decode(
         &mut self,
         unit: &[u8],
         timestamp: u32,
     ) -> Result<Option<VideoFrame>, DecodeError> {
         match self.decode_unit(unit, timestamp) {
-            Err(e) if self.hardware => {
+            Err(e @ DecodeError::Ffmpeg(_)) if self.hardware => {
                 warn!("hardware decoding failed ({e}); decoding in software");
                 *self = Self::in_software(self.codec, self.max_pixels)?;
                 self.decode_unit(unit, timestamp)

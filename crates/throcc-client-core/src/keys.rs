@@ -517,8 +517,9 @@ fn track_ids(tracks: &Tracks) -> impl Iterator<Item = MediaId> + '_ {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use throcc_crypto::identity::IdentityKey;
+    use throcc_proto::frame::{Flags, Header};
     use throcc_proto::messages::{Share, SignedEncKey};
 
     use super::*;
@@ -526,17 +527,17 @@ mod tests {
     const SERVER: Fingerprint = Fingerprint([5; 32]);
     const ROOM: RoomId = RoomId(1);
 
-    struct Member {
-        id: UserId,
+    pub(crate) struct Member {
+        pub(crate) id: UserId,
         identity: IdentityKey,
-        keys: KeyManager,
-        contacts: Contacts,
+        pub(crate) keys: KeyManager,
+        pub(crate) contacts: Contacts,
         enc_public: PublicKey,
-        tracks: Tracks,
+        pub(crate) tracks: Tracks,
         _dir: tempfile::TempDir,
     }
 
-    fn member(id: u64) -> Member {
+    pub(crate) fn member(id: u64) -> Member {
         let dir = tempfile::tempdir().unwrap();
         let enc = EncKeyPair::generate();
         let first = id as u32 * 10;
@@ -626,9 +627,55 @@ mod tests {
         }
     }
 
-    fn rekey(members: &mut [&mut Member], epoch: u32, now: Instant) {
+    pub(crate) fn rekey(members: &mut [&mut Member], epoch: u32, now: Instant) {
         let peers: Vec<RoomPeer> = members.iter().map(|m| peer(m)).collect();
         deliver(members, epoch, &peers, now);
+    }
+
+    /// `newcomer` joins `present` at `epoch`, with events in the server's order: the
+    /// members already there get the room state, then everyone gets the newcomer's
+    /// presence. Returns the `PublishKey`s sent, in order, by sender. None are delivered.
+    pub(crate) fn join_in_server_order(
+        present: &mut [&mut Member],
+        newcomer: &mut Member,
+        epoch: u32,
+        now: Instant,
+    ) -> Vec<(UserId, Request)> {
+        let mut peers: Vec<RoomPeer> = present.iter().map(|m| peer(m)).collect();
+        peers.push(peer(newcomer));
+        let mut published = Vec::new();
+        for m in present.iter_mut() {
+            let (request, _) = m
+                .keys
+                .room_state(ROOM, Epoch(epoch), &peers, &mut m.contacts, now);
+            published.extend(request.map(|r| (m.id, r)));
+            assert!(m.keys.set_presence(newcomer.id, Some(ROOM)));
+            let (request, _) = m.keys.reapply_room_state(&mut m.contacts, now);
+            published.extend(request.map(|r| (m.id, r)));
+        }
+        show(&mut newcomer.keys, &peers);
+        let tracks = Some(newcomer.tracks.clone());
+        let (requests, _) = newcomer.keys.placed(
+            Some(ROOM),
+            Epoch(epoch),
+            tracks,
+            &peers,
+            &mut newcomer.contacts,
+            now,
+        );
+        published.extend(requests.into_iter().map(|r| (newcomer.id, r)));
+        published
+    }
+
+    /// The secret `from` wrapped for `to` in a `PublishKey`.
+    pub(crate) fn wrapped_for(request: &Request, to: UserId) -> Option<(Epoch, Vec<u8>)> {
+        match request {
+            Request::PublishKey { epoch, wrapped } => wrapped
+                .iter()
+                .find(|(user, _)| *user == to)
+                .map(|(_, blob)| (*epoch, blob.clone())),
+            _ => None,
+        }
     }
 
     fn can_read(receiver: &mut Member, sender: &Member, epoch: u32) -> bool {
@@ -668,6 +715,39 @@ mod tests {
         );
         assert!(can_read(&mut d, &a, 1));
         assert!(can_read(&mut b, &a, 1));
+    }
+
+    /// The newcomer is in the room state before its presence shows it in the room, so each
+    /// member already there replaces its secret a second time within the epoch.
+    #[test]
+    fn a_join_in_the_servers_order_replaces_each_secret_twice_in_the_epoch() {
+        let now = Instant::now();
+        let (mut a, mut b, mut n) = (member(1), member(2), member(3));
+        rekey(&mut [&mut a, &mut b], 1, now);
+        let published = join_in_server_order(&mut [&mut a, &mut b], &mut n, 2, now);
+        let from_a: Vec<Vec<UserId>> = published
+            .iter()
+            .filter(|(from, _)| *from == a.id)
+            .map(|(_, request)| wrapped_to(Some(request)))
+            .collect();
+        assert_eq!(from_a, [vec![b.id], vec![b.id, n.id]]);
+
+        let (epoch, first) = wrapped_for(&published[0].1, b.id).unwrap();
+        b.keys.sender_key(a.id, epoch, &first, now).unwrap();
+        let held = b.keys.recv_key(a.tracks.mic, epoch).unwrap();
+        let (_, sending) = a.keys.send_key(a.tracks.mic).unwrap();
+        let header = Header {
+            media_id: a.tracks.mic,
+            epoch,
+            seq: 0,
+            flags: Flags::FIRST | Flags::LAST,
+        };
+        let mut sealed = Vec::new();
+        sending.seal(&header, &[b"hello"], &mut sealed).unwrap();
+        assert!(
+            held.open(&mut sealed).is_err(),
+            "b already holds the secret a sends with"
+        );
     }
 
     #[test]

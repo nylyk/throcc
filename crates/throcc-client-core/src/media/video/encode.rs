@@ -1,5 +1,4 @@
 use std::ffi::{CStr, CString};
-use std::ptr::{null, null_mut};
 
 use bytes::Bytes;
 use rsmpeg::avcodec::{AVCodec, AVCodecContext};
@@ -47,6 +46,9 @@ pub enum EncodeError {
     #[cfg(target_os = "linux")]
     #[error("GPU video processing: {0}")]
     Gpu(VaError),
+    #[cfg(target_os = "linux")]
+    #[error("the preview came back in pixel format {0}, which throcc doesn't present")]
+    PreviewFormat(i32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,7 +59,7 @@ pub struct EncoderConfig {
     pub kbps: u32,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Input {
     Nv12,
     Yuv420p,
@@ -188,8 +190,8 @@ pub struct Encoder {
     width: usize,
     height: usize,
     idr_next: bool,
-    /// Fits pictures of another size into the encoder's, keyed by their size.
-    scaler: Option<((usize, usize), SwsContext)>,
+    /// Fits pictures of another size into the encoder's.
+    fitter: Option<Fitter>,
     /// The VA-API device of a VA-API encoder.
     #[cfg(target_os = "linux")]
     device: Option<AVHWDeviceContext>,
@@ -248,7 +250,7 @@ impl Previews {
         let mut downloaded = AVFrame::new();
         downloaded.set_format(ffi::AV_PIX_FMT_NV12);
         downloaded.hwframe_transfer_data(&surface)?;
-        to_nv12(&downloaded, timestamp).ok_or(EncodeError::NoSurfaces)
+        to_nv12(&downloaded, timestamp).ok_or(EncodeError::PreviewFormat(downloaded.format))
     }
 }
 
@@ -280,7 +282,7 @@ impl Encoder {
                     width: config.width,
                     height: config.height,
                     idr_next: true,
-                    scaler: None,
+                    fitter: None,
                     #[cfg(target_os = "linux")]
                     device,
                     #[cfg(target_os = "linux")]
@@ -480,56 +482,101 @@ impl Encoder {
 impl Encoder {
     /// Scales `picture` into `frame` keeping its aspect ratio, with black bars around it.
     fn fit(&mut self, picture: &VideoFrame, frame: &mut AVFrame) -> Result<(), EncodeError> {
-        let input = self.backend.input();
         let source_size = (picture.width, picture.height);
-        let (x, y, width, height) = fitted(source_size, (self.width, self.height));
-        let scaler = match &mut self.scaler {
-            Some((size, scaler)) if *size == source_size => scaler,
-            slot => {
-                let scaler = SwsContext::get_context(
-                    picture.width as i32,
-                    picture.height as i32,
-                    ffi::AV_PIX_FMT_NV12,
-                    width as i32,
-                    height as i32,
-                    pixel_format(input),
-                    ffi::SWS_BILINEAR,
-                    None,
-                    None,
-                    None,
-                )
-                .ok_or(EncodeError::Scaler)?;
-                &mut slot.insert((source_size, scaler)).1
+        let fitter = match &mut self.fitter {
+            Some(fitter) if fitter.source_size == source_size => fitter,
+            slot => slot.insert(Fitter::new(
+                source_size,
+                (self.width, self.height),
+                self.backend.input(),
+            )?),
+        };
+        fitter.fit(picture, frame)
+    }
+}
+
+/// Scales NV12 pictures of one size into frames of another, keeping the aspect ratio,
+/// with black bars around them.
+struct Fitter {
+    source_size: (usize, usize),
+    input: Input,
+    /// Where the picture lands in the target frame, as (x, y, width, height).
+    rectangle: (usize, usize, usize, usize),
+    scaler: SwsContext,
+    /// sws reads and writes whole SIMD words past the end of rows, which only buffers
+    /// FFmpeg allocated are padded for. So it scales from a copy of the picture into a
+    /// frame of the rectangle's size, which is then copied into place.
+    source: AVFrame,
+    scaled: AVFrame,
+}
+
+impl Fitter {
+    fn new(
+        source_size: (usize, usize),
+        target_size: (usize, usize),
+        input: Input,
+    ) -> Result<Self, EncodeError> {
+        let rectangle = fitted(source_size, target_size);
+        let (_, _, width, height) = rectangle;
+        let scaler = SwsContext::get_context(
+            source_size.0 as i32,
+            source_size.1 as i32,
+            ffi::AV_PIX_FMT_NV12,
+            width as i32,
+            height as i32,
+            pixel_format(input),
+            ffi::SWS_BILINEAR,
+            None,
+            None,
+            None,
+        )
+        .ok_or(EncodeError::Scaler)?;
+        let mut source = new_frame(source_size.0, source_size.1, Input::Nv12)?;
+        // An odd-width picture lacks the V of its last chroma column; it stays neutral.
+        fill_black(&mut source, Input::Nv12);
+        Ok(Self {
+            source_size,
+            input,
+            rectangle,
+            scaler,
+            source,
+            scaled: new_frame(width, height, input)?,
+        })
+    }
+
+    /// Scales `picture`, of the fitter's source size, into `frame`, of its target size.
+    fn fit(&mut self, picture: &VideoFrame, frame: &mut AVFrame) -> Result<(), EncodeError> {
+        copy_into(&mut self.source, picture, Input::Nv12);
+        let rows = self.source_size.1 as i32;
+        self.scaler
+            .scale_frame(&self.source, 0, rows, &mut self.scaled)?;
+        fill_black(frame, self.input);
+        let (x, y, width, height) = self.rectangle;
+        // (plane, x in bytes, y in rows, bytes per row, rows) of the rectangle in each plane.
+        let planes = match self.input {
+            Input::Nv12 => vec![(0, x, y, width, height), (1, x, y / 2, width, height / 2)],
+            Input::Yuv420p => vec![
+                (0, x, y, width, height),
+                (1, x / 2, y / 2, width / 2, height / 2),
+                (2, x / 2, y / 2, width / 2, height / 2),
+            ],
+        };
+        for (plane, x, y, bytes, rows) in planes {
+            let (from_stride, to_stride) = (
+                self.scaled.linesize[plane] as usize,
+                frame.linesize[plane] as usize,
+            );
+            for row in 0..rows {
+                // SAFETY: `scaled` holds the rectangle's size in this plane's layout, and
+                // `fitted` keeps the rectangle inside `frame` with even offsets.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        self.scaled.data[plane].add(row * from_stride),
+                        frame.data[plane].add((y + row) * to_stride + x),
+                        bytes,
+                    );
+                }
             }
-        };
-        fill_black(frame, input);
-        let chroma_x = match input {
-            Input::Nv12 => x,
-            Input::Yuv420p => x / 2,
-        };
-        let source = [picture.y.as_ptr(), picture.uv.as_ptr(), null(), null()];
-        let source_stride = [picture.width as i32, picture.width as i32, 0, 0];
-        // SAFETY: sws reads `picture`'s NV12 planes, which hold its height in rows of its
-        // width. `fitted` keeps the rectangle inside the frame with even offsets, so every
-        // plane pointer stays within its plane and sws writes only `width`×`height` from it.
-        unsafe {
-            let destination = [
-                frame.data[0].add(y * frame.linesize[0] as usize + x),
-                frame.data[1].add(y / 2 * frame.linesize[1] as usize + chroma_x),
-                match input {
-                    Input::Nv12 => null_mut(),
-                    Input::Yuv420p => frame.data[2].add(y / 2 * frame.linesize[2] as usize + x / 2),
-                },
-                null_mut(),
-            ];
-            scaler.scale(
-                source.as_ptr(),
-                source_stride.as_ptr(),
-                0,
-                picture.height as i32,
-                destination.as_ptr(),
-                frame.linesize.as_ptr(),
-            )?;
         }
         Ok(())
     }
@@ -771,8 +818,8 @@ fn cstring(text: &str) -> CString {
     CString::new(text).unwrap_or_default()
 }
 
-/// Copies an NV12 picture into a freshly allocated frame of the encoder's input format.
-/// The frame must have been allocated at the picture's size.
+/// Copies an NV12 picture into a frame of the encoder's input format, allocated at the
+/// picture's size.
 fn copy_into(frame: &mut AVFrame, picture: &VideoFrame, input: Input) {
     let (width, height) = (picture.width, picture.height);
     let chroma_rows = height.div_ceil(2);
@@ -814,7 +861,7 @@ fn candidate(name: &CStr) -> Option<&'static Candidate> {
 
 #[cfg(test)]
 mod tests {
-    use super::fitted;
+    use super::*;
 
     #[test]
     fn fitted_rectangles_are_even_centred_and_inside() {
@@ -831,6 +878,54 @@ mod tests {
                 width >= 2 && height >= 2 && x + width <= 1280 && y + height <= 720,
                 "{source:?}"
             );
+        }
+    }
+
+    /// Odd and unaligned sizes too: run under valgrind, this catches sws reading past the
+    /// picture's planes.
+    #[test]
+    fn pictures_of_any_size_are_fitted_inside_black_bars() {
+        let target = (1280, 720);
+        let sizes = [
+            (641, 359),
+            (1000, 1000),
+            (17, 9),
+            (3, 3),
+            (1279, 721),
+            (2560, 1440),
+        ];
+        for input in [Input::Nv12, Input::Yuv420p] {
+            for source in sizes {
+                let mut picture = VideoFrame::blank(source.0, source.1);
+                picture.y.fill(200);
+                let mut fitter = Fitter::new(source, target, input).unwrap();
+                let mut frame = new_frame(target.0, target.1, input).unwrap();
+                fitter.fit(&picture, &mut frame).unwrap();
+                fitter.fit(&picture, &mut frame).unwrap();
+
+                let (x, y, width, height) = fitted(source, target);
+                let sample = |plane: usize, col: usize, row: usize| {
+                    // SAFETY: every (col, row) asked for is inside the plane.
+                    unsafe { *frame.data[plane].add(row * frame.linesize[plane] as usize + col) }
+                };
+                let luma = |col, row| sample(0, col, row);
+                let (centre_x, centre_y) = (x + width / 2, y + height / 2);
+                let centre = luma(centre_x, centre_y);
+                assert!(centre.abs_diff(200) < 4, "{input:?} {source:?}: {centre}");
+                let chroma = sample(1, centre_x / 2, centre_y / 2);
+                assert!(
+                    chroma.abs_diff(128) < 4,
+                    "{input:?} {source:?}: chroma {chroma}"
+                );
+                let (right, bottom) = (x + width, y + height);
+                for (col, row) in [(x.wrapping_sub(1), centre_y), (right, centre_y)]
+                    .into_iter()
+                    .chain([(centre_x, y.wrapping_sub(1)), (centre_x, bottom)])
+                    .filter(|&(col, row)| col < target.0 && row < target.1)
+                {
+                    assert_eq!(luma(col, row), 0, "{input:?} {source:?} at {col},{row}");
+                }
+            }
         }
     }
 }

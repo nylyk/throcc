@@ -11,11 +11,12 @@ pub struct VideoFrame {
 }
 
 impl VideoFrame {
+    /// A black picture.
     pub fn blank(width: usize, height: usize) -> Self {
         Self {
             width,
             height,
-            y: vec![16; width * height],
+            y: vec![0; width * height],
             uv: vec![128; width * height.div_ceil(2)],
             timestamp: 0,
         }
@@ -41,9 +42,9 @@ impl VideoFrame {
         let block = self.width / 16;
         for bit in 0..16 {
             let value = if number >> (15 - bit) & 1 == 1 {
-                235
+                255
             } else {
-                16
+                0
             };
             for row in 0..block.min(self.height) {
                 let start = row * self.width + bit * block;

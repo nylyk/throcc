@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use throcc_crypto::hpke::EncKeyPair;
-use throcc_crypto::media::TrackKey;
+use throcc_crypto::media::{MediaError, TrackKey};
 use throcc_proto::Fingerprint;
 use throcc_proto::frame::{Flags, HEADER_BYTES, Header, TAG_BYTES};
 use throcc_proto::ids::{Epoch, MediaId, RoomId, UserId};
@@ -19,7 +19,8 @@ use crate::contacts::{Contacts, UnsavedPins};
 use crate::keys::{KeyManager, KeyNotice};
 use crate::lock;
 
-/// How long ciphertext waits for its sender key before it counts as a decrypt failure.
+/// How long ciphertext waits for a sender key that opens it before it counts as a
+/// decrypt failure.
 pub const PENDING_KEY_WAIT: Duration = Duration::from_millis(500);
 /// Video older than this when its turn comes is dropped whole, before it gets a `seq`.
 pub const SEND_BUDGET: Duration = Duration::from_millis(100);
@@ -27,6 +28,9 @@ const TRACK_INBOX: usize = 1024;
 const SEND_QUEUE: usize = 64;
 const MAX_PENDING: usize = 512;
 const TICK: Duration = Duration::from_millis(20);
+/// Audio has no reorder stage, so a unit can complete before an earlier one; fragments
+/// this far behind the newest unit are kept for that.
+const AUDIO_STRAGGLER_SEQS: u32 = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -109,16 +113,30 @@ pub struct KeyState {
 /// and its track task's inbox while subscribed.
 #[derive(Default)]
 struct Sink {
+    /// Holds only datagrams that authenticated, so forged ones can't move it.
     window: ReplayWindow,
     inbox: Option<mpsc::Sender<Bytes>>,
     bytes: u64,
 }
 
+impl Sink {
+    /// Records an authenticated datagram of `len` bytes, unless it was seen before.
+    fn accept(&mut self, seq: u32, len: usize) -> Seen {
+        let seen = self.window.check(seq);
+        if seen == Seen::New {
+            self.bytes += len as u64;
+        }
+        seen
+    }
+}
+
+type Sinks = Arc<Mutex<HashMap<MediaId, Sink>>>;
+
 /// Moves media between this client's tracks and the connection, end-to-end encrypted.
 pub struct MediaEngine {
     keys: Arc<Mutex<KeyState>>,
     pins: Arc<UnsavedPins>,
-    sinks: Arc<Mutex<HashMap<MediaId, Sink>>>,
+    sinks: Sinks,
     audio: mpsc::Sender<Outgoing>,
     video: mpsc::Sender<Outgoing>,
     requests: mpsc::UnboundedSender<Request>,
@@ -145,7 +163,7 @@ impl MediaEngine {
             keys: KeyManager::new(me, enc, server),
             contacts,
         }));
-        let sinks: Arc<Mutex<HashMap<MediaId, Sink>>> = Arc::default();
+        let sinks: Sinks = Arc::default();
         let stats = Arc::new(Stats::default());
         let (requests, requests_rx) = mpsc::unbounded_channel();
         let (audio, audio_rx) = mpsc::channel(SEND_QUEUE);
@@ -302,21 +320,15 @@ impl MediaEngine {
         let (inbox, inbox_rx) = mpsc::channel(TRACK_INBOX);
         let (out, out_rx) = mpsc::channel(capacity);
         lock(&self.sinks).entry(media_id).or_default().inbox = Some(inbox);
-        let track = Track {
+        let track = Track::new(
             media_id,
             kind,
-            keys: self.keys.clone(),
-            stats: self.stats.clone(),
-            requests: self.requests.clone(),
+            self.keys.clone(),
+            self.sinks.clone(),
+            self.stats.clone(),
+            self.requests.clone(),
             out,
-            pending: VecDeque::new(),
-            next_tick: None,
-            tried_generation: 0,
-            scratch: Vec::new(),
-            last_unit_overflowed: false,
-            reassembler: Reassembler::default(),
-            reorder: Reorder::default(),
-        };
+        );
         tokio::spawn(track.run(inbox_rx));
         out_rx
     }
@@ -370,11 +382,7 @@ impl MediaEngine {
     }
 }
 
-async fn receive_loop(
-    connection: quinn::Connection,
-    sinks: Arc<Mutex<HashMap<MediaId, Sink>>>,
-    stats: Arc<Stats>,
-) {
+async fn receive_loop(connection: quinn::Connection, sinks: Sinks, stats: Arc<Stats>) {
     while let Ok(datagram) = connection.read_datagram().await {
         let Ok(header) = Header::parse_strict(&datagram) else {
             stats.malformed.fetch_add(1, Ordering::Relaxed);
@@ -389,18 +397,31 @@ async fn receive_loop(
             stats.unknown_track.fetch_add(1, Ordering::Relaxed);
             continue;
         };
-        match sink.window.check(header.seq) {
-            Seen::New => {
-                sink.bytes += datagram.len() as u64;
-                if inbox.try_send(datagram).is_err() {
+        match sink.window.peek(header.seq) {
+            Seen::New => match inbox.try_send(datagram) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
                     stats.track_overflow.fetch_add(1, Ordering::Relaxed);
                 }
-            }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    sink.inbox = None;
+                    stats.unknown_track.fetch_add(1, Ordering::Relaxed);
+                }
+            },
+            seen => stats.count(seen),
+        }
+    }
+}
+
+impl Stats {
+    fn count(&self, seen: Seen) {
+        match seen {
+            Seen::New => {}
             Seen::Duplicate => {
-                stats.duplicates.fetch_add(1, Ordering::Relaxed);
+                self.duplicates.fetch_add(1, Ordering::Relaxed);
             }
             Seen::TooOld => {
-                stats.too_old.fetch_add(1, Ordering::Relaxed);
+                self.too_old.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -411,9 +432,11 @@ struct Track {
     media_id: MediaId,
     kind: Kind,
     keys: Arc<Mutex<KeyState>>,
+    sinks: Sinks,
     stats: Arc<Stats>,
     requests: mpsc::UnboundedSender<Request>,
     out: mpsc::Sender<Received>,
+    /// Datagrams no key we hold opens yet, oldest first, with when they arrived.
     pending: VecDeque<(Instant, Epoch, Bytes)>,
     next_tick: Option<Instant>,
     /// The key generation the pending datagrams were last tried against.
@@ -426,6 +449,33 @@ struct Track {
 }
 
 impl Track {
+    fn new(
+        media_id: MediaId,
+        kind: Kind,
+        keys: Arc<Mutex<KeyState>>,
+        sinks: Sinks,
+        stats: Arc<Stats>,
+        requests: mpsc::UnboundedSender<Request>,
+        out: mpsc::Sender<Received>,
+    ) -> Self {
+        Self {
+            media_id,
+            kind,
+            keys,
+            sinks,
+            stats,
+            requests,
+            out,
+            pending: VecDeque::new(),
+            next_tick: None,
+            tried_generation: 0,
+            scratch: Vec::new(),
+            last_unit_overflowed: false,
+            reassembler: Reassembler::default(),
+            reorder: Reorder::default(),
+        }
+    }
+
     async fn run(mut self, mut inbox: mpsc::Receiver<Bytes>) {
         loop {
             let wake = self.next_wake();
@@ -443,10 +493,16 @@ impl Track {
             if self.out.is_closed() {
                 return;
             }
-            let now = Instant::now();
-            if let Ok(header) = Header::parse_strict(&datagram) {
-                self.handle(header.epoch, datagram, now, now);
-            }
+            self.receive(datagram, Instant::now());
+        }
+    }
+
+    /// Handles a datagram that just arrived, after any pending ones a new key opens, so
+    /// a unit that waited for its key isn't overtaken by the next one.
+    fn receive(&mut self, datagram: Bytes, now: Instant) {
+        self.retry_pending(now);
+        if let Ok(header) = Header::parse_strict(&datagram) {
+            self.handle(header.epoch, datagram, now, now);
         }
     }
 
@@ -468,47 +524,78 @@ impl Track {
         self.stats
             .decrypt_failures
             .fetch_add(expired as u64, Ordering::Relaxed);
-        let generation = lock(&self.keys).keys.generation();
-        if generation != self.tried_generation && !self.pending.is_empty() {
-            self.tried_generation = generation;
-            for (arrived, epoch, datagram) in std::mem::take(&mut self.pending) {
-                self.handle(epoch, datagram, arrived, now);
-            }
-        }
+        self.retry_pending(now);
         self.next_tick = (!self.pending.is_empty()).then(|| now + TICK);
         let outputs = self.reorder.poll(now);
         self.emit(outputs);
     }
 
+    /// Tries the pending datagrams again, oldest first, if keys changed since the last try.
+    fn retry_pending(&mut self, now: Instant) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let generation = lock(&self.keys).keys.generation();
+        if generation == self.tried_generation {
+            return;
+        }
+        self.tried_generation = generation;
+        for (arrived, epoch, datagram) in std::mem::take(&mut self.pending) {
+            self.handle(epoch, datagram, arrived, now);
+        }
+    }
+
     fn handle(&mut self, epoch: Epoch, datagram: Bytes, arrived: Instant, now: Instant) {
         let key = lock(&self.keys).keys.recv_key(self.media_id, epoch);
-        let Some(key) = key else {
-            if self.pending.len() < MAX_PENDING {
-                self.pending.push_back((arrived, epoch, datagram));
-                self.next_tick.get_or_insert(now + TICK);
-            } else {
-                self.stats.decrypt_failures.fetch_add(1, Ordering::Relaxed);
-            }
-            return;
-        };
         self.scratch.clear();
         self.scratch.extend_from_slice(&datagram);
-        let Ok((header, plaintext)) = key.open(&mut self.scratch) else {
-            self.stats.decrypt_failures.fetch_add(1, Ordering::Relaxed);
-            return;
+        let (header, plaintext) = match key.map(|key| key.open(&mut self.scratch)) {
+            Some(Ok(opened)) => opened,
+            // A sender that replaces its secret within an epoch seals with the new one
+            // about a round trip before the new one reaches us, so a datagram the key we
+            // hold doesn't open waits like one we have no key for.
+            None | Some(Err(MediaError::Auth)) => {
+                self.hold(arrived, epoch, datagram, now);
+                return;
+            }
+            Some(Err(_)) => {
+                self.stats.decrypt_failures.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
         };
+        let seen = lock(&self.sinks)
+            .get_mut(&self.media_id)
+            .map(|sink| sink.accept(header.seq, datagram.len()));
+        match seen {
+            Some(Seen::New) => {}
+            Some(seen) => {
+                self.stats.count(seen);
+                return;
+            }
+            None => return,
+        }
         let Some(unit) = self.reassembler.push(header.seq, header.flags, plaintext) else {
             return;
         };
         match self.kind {
             Kind::Audio => {
-                self.reassembler.forget_before(unit.first_seq);
+                let stragglers = unit.first_seq.saturating_sub(AUDIO_STRAGGLER_SEQS);
+                self.reassembler.forget_before(stragglers);
                 self.deliver(unit.into());
             }
             Kind::Video => {
                 let outputs = self.reorder.push(unit, now);
                 self.emit(outputs);
             }
+        }
+    }
+
+    fn hold(&mut self, arrived: Instant, epoch: Epoch, datagram: Bytes, now: Instant) {
+        if self.pending.len() < MAX_PENDING {
+            self.pending.push_back((arrived, epoch, datagram));
+            self.next_tick.get_or_insert(now + TICK);
+        } else {
+            self.stats.decrypt_failures.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -705,6 +792,144 @@ mod tests {
     use throcc_crypto::identity::random;
 
     use super::*;
+    use crate::keys::tests::{Member, join_in_server_order, member, rekey, wrapped_for};
+    use crate::media::fragment::WINDOW_BITS;
+
+    /// A track task for `media_id` on `receiver`'s keys, and what it delivers.
+    fn track(receiver: Member, media_id: MediaId, kind: Kind) -> (Track, mpsc::Receiver<Received>) {
+        let keys = Arc::new(Mutex::new(KeyState {
+            keys: receiver.keys,
+            contacts: receiver.contacts,
+        }));
+        let sinks = Arc::new(Mutex::new(HashMap::from([(media_id, Sink::default())])));
+        let (requests, _) = mpsc::unbounded_channel();
+        let (out, out_rx) = mpsc::channel(16);
+        let track = Track::new(media_id, kind, keys, sinks, Arc::default(), requests, out);
+        (track, out_rx)
+    }
+
+    /// `sender`'s unit on `media_id`, sealed under its current key.
+    fn sealed(
+        sender: &Member,
+        sealer: &mut Sealer,
+        media_id: MediaId,
+        len: usize,
+        timestamp: u32,
+        keyframe: bool,
+    ) -> Vec<Bytes> {
+        let (epoch, key) = sender.keys.send_key(media_id).unwrap();
+        let unit = Outgoing::new(
+            media_id,
+            Bytes::from(vec![timestamp as u8; len]),
+            timestamp,
+            keyframe,
+        );
+        sealer.seal(&unit, epoch, &key)
+    }
+
+    fn timestamps(out: &mut mpsc::Receiver<Received>) -> Vec<u32> {
+        std::iter::from_fn(|| out.try_recv().ok())
+            .map(|r| r.timestamp)
+            .collect()
+    }
+
+    /// With the server's event order, a member already in the room sends under its second
+    /// secret of the epoch while the others still hold its first.
+    #[test]
+    fn media_sealed_under_a_secret_replaced_within_the_epoch_waits_for_it() {
+        let now = Instant::now();
+        let (mut a, mut b, mut n) = (member(1), member(2), member(3));
+        rekey(&mut [&mut a, &mut b], 1, now);
+        let published = join_in_server_order(&mut [&mut a, &mut b], &mut n, 2, now);
+        let mut from_a = published.iter().filter(|(from, _)| *from == a.id);
+        let first = wrapped_for(&from_a.next().unwrap().1, b.id).unwrap();
+        let second = wrapped_for(&from_a.next().unwrap().1, b.id).unwrap();
+        b.keys.sender_key(a.id, first.0, &first.1, now).unwrap();
+
+        let mic = a.tracks.mic;
+        let mut sealer = Sealer::default();
+        let early = sealed(&a, &mut sealer, mic, 100, 1, false);
+        let later = sealed(&a, &mut sealer, mic, 100, 2, false);
+        let (mut track, mut out) = track(b, mic, Kind::Audio);
+        for datagram in early {
+            track.receive(datagram, now);
+        }
+        assert!(timestamps(&mut out).is_empty());
+
+        lock(&track.keys)
+            .keys
+            .sender_key(a.id, second.0, &second.1, now)
+            .unwrap();
+        for datagram in later {
+            track.receive(datagram, now);
+        }
+        assert_eq!(timestamps(&mut out), [1, 2]);
+        assert_eq!(track.stats.decrypt_failures.load(Ordering::Relaxed), 0);
+    }
+
+    /// A new subscription's first keyframe waits for the key; the unit after it must not
+    /// overtake it once the key is there.
+    #[test]
+    fn units_waiting_for_their_key_go_out_before_newer_ones() {
+        let now = Instant::now();
+        let (mut a, mut b) = (member(1), member(2));
+        rekey(&mut [&mut a, &mut b], 1, now);
+        let mut n = member(3);
+        let published = join_in_server_order(&mut [&mut a, &mut b], &mut n, 2, now);
+        let (_, request) = published.iter().rfind(|(from, _)| *from == a.id).unwrap();
+        let key = wrapped_for(request, n.id).unwrap();
+
+        let video = a.tracks.shares[0].video;
+        let mut sealer = Sealer::default();
+        let keyframe = sealed(&a, &mut sealer, video, 3000, 1, true);
+        let delta = sealed(&a, &mut sealer, video, 100, 2, false);
+        let (mut track, mut out) = track(n, video, Kind::Video);
+        for datagram in keyframe {
+            track.receive(datagram, now);
+        }
+        lock(&track.keys)
+            .keys
+            .sender_key(a.id, key.0, &key.1, now)
+            .unwrap();
+        for datagram in delta {
+            track.receive(datagram, now);
+        }
+        let received: Vec<(u32, bool)> = std::iter::from_fn(|| out.try_recv().ok())
+            .map(|r| (r.timestamp, r.flags.contains(Flags::KEYFRAME)))
+            .collect();
+        assert_eq!(received, [(1, true), (2, false)]);
+        assert_eq!(track.stats.late_units.load(Ordering::Relaxed), 0);
+    }
+
+    /// Only datagrams that authenticate move the replay window, so a forged one can't
+    /// shut out the real datagram with its `seq`, or every later one.
+    #[test]
+    fn a_forged_datagram_does_not_move_the_replay_window() {
+        let now = Instant::now();
+        let (mut a, mut b) = (member(1), member(2));
+        rekey(&mut [&mut a, &mut b], 1, now);
+        let mic = a.tracks.mic;
+        let mut sealer = Sealer::default();
+        let first = sealed(&a, &mut sealer, mic, 100, 1, false).remove(0);
+        let second = sealed(&a, &mut sealer, mic, 100, 2, false).remove(0);
+        let (mut track, mut out) = track(b, mic, Kind::Audio);
+        for seq in [1, WINDOW_BITS * 4] {
+            let mut forged = first.to_vec();
+            forged[8..12].copy_from_slice(&seq.to_be_bytes());
+            track.receive(Bytes::from(forged), now);
+        }
+        track.tick(now + PENDING_KEY_WAIT);
+        assert_eq!(track.stats.decrypt_failures.load(Ordering::Relaxed), 2);
+
+        for datagram in [&second, &second, &first] {
+            track.receive(datagram.clone(), now);
+        }
+        assert_eq!(timestamps(&mut out), [2, 1]);
+        assert_eq!(track.stats.duplicates.load(Ordering::Relaxed), 1);
+        let sinks = lock(&track.sinks);
+        let window = &sinks[&mic].window;
+        assert_eq!((window.received(), window.lost()), (2, 0));
+    }
 
     proptest! {
         /// Across epoch changes and tracks, (media_id, epoch, seq) never repeats under one key.

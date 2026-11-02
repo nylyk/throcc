@@ -149,6 +149,8 @@ struct Worker {
     output_volume: f32,
     /// Samples played, the local 48 kHz clock that packet arrivals are stamped with.
     played: u64,
+    /// Device stream errors already logged.
+    stream_errors_logged: u64,
 }
 
 impl Worker {
@@ -187,6 +189,7 @@ impl Worker {
             loopback: false,
             output_volume,
             played: 0,
+            stream_errors_logged: 0,
         }
     }
 
@@ -217,6 +220,7 @@ impl Worker {
             if pulls >= LEVELS_EVERY {
                 pulls = 0;
                 self.publish_levels();
+                self.log_stream_errors();
             }
             if !busy {
                 std::thread::sleep(IDLE);
@@ -414,6 +418,19 @@ impl Worker {
             Err(e) => warn!("mic processing: {e}"),
         }
         *self.chain.processed()
+    }
+
+    fn log_stream_errors(&mut self) {
+        let errors = self
+            .devices
+            .counters
+            .stream_errors
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if errors > self.stream_errors_logged {
+            let new = errors - self.stream_errors_logged;
+            warn!("the audio devices reported {new} stream errors ({errors} in all)");
+            self.stream_errors_logged = errors;
+        }
     }
 
     fn publish_levels(&self) {

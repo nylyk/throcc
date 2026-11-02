@@ -67,34 +67,50 @@ pub struct ReplayWindow {
 }
 
 impl ReplayWindow {
+    /// Whether `seq` is new, and records it if so.
     pub fn check(&mut self, seq: u32) -> Seen {
-        let Some(highest) = self.highest else {
-            self.highest = Some(seq);
-            self.first = seq;
-            self.set(0);
-            self.received = 1;
+        let seen = self.peek(seq);
+        if seen == Seen::New {
+            self.record(seq);
+        }
+        seen
+    }
+
+    /// What [`ReplayWindow::check`] would say about `seq`, without recording it.
+    pub fn peek(&self, seq: u32) -> Seen {
+        let Some(behind) = self.highest.and_then(|highest| highest.checked_sub(seq)) else {
             return Seen::New;
         };
-        if seq > highest {
-            if seq - highest >= WINDOW_BITS {
-                self.skipped_by_restarts += u64::from(seq - highest - 1);
-            }
-            self.shift(seq - highest);
-            self.highest = Some(seq);
-            self.set(0);
+        if behind >= WINDOW_BITS {
+            Seen::TooOld
+        } else if self.get(behind) {
+            Seen::Duplicate
         } else {
-            let behind = highest - seq;
-            if behind >= WINDOW_BITS {
-                return Seen::TooOld;
+            Seen::New
+        }
+    }
+
+    fn record(&mut self, seq: u32) {
+        match self.highest {
+            Some(highest) if seq <= highest => {
+                self.set(highest - seq);
+                self.first = self.first.min(seq);
             }
-            if self.get(behind) {
-                return Seen::Duplicate;
+            Some(highest) => {
+                if seq - highest >= WINDOW_BITS {
+                    self.skipped_by_restarts += u64::from(seq - highest - 1);
+                }
+                self.shift(seq - highest);
+                self.highest = Some(seq);
+                self.set(0);
             }
-            self.set(behind);
-            self.first = self.first.min(seq);
+            None => {
+                self.highest = Some(seq);
+                self.first = seq;
+                self.set(0);
+            }
         }
         self.received += 1;
-        Seen::New
     }
 
     pub fn received(&self) -> u64 {
@@ -274,6 +290,49 @@ mod tests {
     }
 
     #[test]
+    fn a_unit_carries_its_first_fragments_flags_and_ends_last() {
+        let fragments: Vec<(u32, Fragment)> = fragment(&unit(3000), 7, true)
+            .into_iter()
+            .enumerate()
+            .map(|(i, f)| (10 + i as u32, f))
+            .collect();
+        let units = reassemble(&fragments);
+        assert_eq!(units[0].flags, Flags::KEYFRAME | Flags::FIRST | Flags::LAST);
+        let delta = reassemble(&[(0, fragment(&unit(10), 7, false).remove(0))]);
+        assert_eq!(delta[0].flags, Flags::FIRST | Flags::LAST);
+    }
+
+    #[test]
+    fn forget_before_drops_only_older_fragments() {
+        let fragments: Vec<(u32, Fragment)> = [
+            fragment(&unit(3000), 1, false),
+            fragment(&unit(3000), 2, false),
+        ]
+        .concat()
+        .into_iter()
+        .enumerate()
+        .map(|(i, f)| (i as u32, f))
+        .collect();
+        let (first, second) = fragments.split_at(3);
+        let mut reassembler = Reassembler::default();
+        for (seq, f) in [&first[..2], &second[..2]].concat() {
+            assert_eq!(
+                reassembler.push(seq, f.flags, &f.plaintext_parts().concat()),
+                None
+            );
+        }
+        reassembler.forget_before(second[0].0);
+        let (seq, f) = &first[2];
+        assert_eq!(
+            reassembler.push(*seq, f.flags, &f.plaintext_parts().concat()),
+            None
+        );
+        let (seq, f) = &second[2];
+        let unit = reassembler.push(*seq, f.flags, &f.plaintext_parts().concat());
+        assert_eq!(unit.map(|u| (u.first_seq, u.timestamp)), Some((3, 2)));
+    }
+
+    #[test]
     fn window_drops_duplicates_and_old_seqs() {
         let mut window = ReplayWindow::default();
         assert_eq!(window.check(5000), Seen::New);
@@ -337,6 +396,7 @@ mod tests {
                 } else {
                     Seen::New
                 };
+                prop_assert_eq!(window.peek(seq), expected, "seq {}", seq);
                 prop_assert_eq!(window.check(seq), expected, "seq {}", seq);
                 if expected == Seen::New {
                     seen.insert(seq);

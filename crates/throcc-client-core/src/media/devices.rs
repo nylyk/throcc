@@ -42,6 +42,9 @@ pub struct DeviceCounters {
     pub overruns: AtomicU64,
     /// Speaker samples played as silence because the playback ring was empty.
     pub underruns: AtomicU64,
+    /// Errors either stream reported, such as an xrun or the device going away. Counted
+    /// rather than logged, since the callback runs on the device's real-time thread.
+    pub stream_errors: AtomicU64,
 }
 
 /// An open mic and speaker pair. Dropping it stops both streams.
@@ -87,23 +90,53 @@ fn pick<D: Iterator<Item = Device>, E: std::fmt::Display>(
         .ok_or_else(|| DeviceError::NotFound(name.to_owned()))
 }
 
-/// `default` at [`SAMPLE_RATE`] if the device supports it, so no resampling is needed.
-fn stream_config<E>(
-    default: &SupportedStreamConfig,
+/// The sample formats the callbacks take, best first.
+const HANDLED: [SampleFormat; 3] = [SampleFormat::F32, SampleFormat::I16, SampleFormat::I32];
+
+/// The configs to open a device with, best first: one at [`SAMPLE_RATE`], so no
+/// resampling is needed, in a sample format the callbacks take, preferring the default's
+/// channel count and then F32; then the default config as it is.
+fn configs<E>(
+    default: SupportedStreamConfig,
     supported: Result<impl Iterator<Item = SupportedStreamConfigRange>, E>,
-) -> StreamConfig {
-    let at_sample_rate = supported.is_ok_and(|mut ranges| {
-        ranges.any(|r| (r.min_sample_rate()..=r.max_sample_rate()).contains(&SAMPLE_RATE))
-    });
-    StreamConfig {
-        channels: default.channels(),
-        sample_rate: if at_sample_rate {
-            SAMPLE_RATE
-        } else {
-            default.sample_rate()
-        },
-        buffer_size: cpal::BufferSize::Default,
+) -> Vec<SupportedStreamConfig> {
+    let rank = |format: SampleFormat| HANDLED.iter().position(|handled| *handled == format);
+    let at_sample_rate = supported
+        .into_iter()
+        .flatten()
+        .filter_map(|range| range.try_with_sample_rate(SAMPLE_RATE))
+        .filter_map(|config| {
+            Some((
+                config.channels() != default.channels(),
+                rank(config.sample_format())?,
+                config,
+            ))
+        })
+        .min_by_key(|(other_channels, rank, _)| (*other_channels, *rank))
+        .map(|(.., config)| config);
+    let mut configs = Vec::from_iter(at_sample_rate);
+    if !configs.contains(&default) {
+        configs.push(default);
     }
+    configs
+}
+
+/// Opens a stream with the first of `configs` that works, or returns the last error.
+fn open_first<T>(
+    configs: Vec<SupportedStreamConfig>,
+    mut open: impl FnMut(&SupportedStreamConfig) -> Result<T, DeviceError>,
+) -> Result<T, DeviceError> {
+    let mut last = DeviceError::Cpal("the device offers no stream config".into());
+    for config in configs {
+        match open(&config) {
+            Ok(opened) => return Ok(opened),
+            Err(e) => {
+                tracing::debug!(?config, "could not open the audio device: {e}");
+                last = e;
+            }
+        }
+    }
+    Err(last)
 }
 
 /// Opens the named devices, or the system defaults.
@@ -121,36 +154,52 @@ pub fn open(input: Option<&str>, output: Option<&str>) -> Result<Devices, Device
         || host.default_output_device(),
         "output",
     )?;
-
-    let input_config = input_device.default_input_config().map_err(cpal_error)?;
-    let output_config = output_device.default_output_config().map_err(cpal_error)?;
-    let in_config = stream_config(&input_config, input_device.supported_input_configs());
-    let out_config = stream_config(&output_config, output_device.supported_output_configs());
-    let (input_rate, output_rate) = (in_config.sample_rate, out_config.sample_rate);
-
     let counters = Arc::new(DeviceCounters::default());
-    let (capture_tx, capture) = rtrb::RingBuffer::new((input_rate * RING_SECONDS) as usize);
-    let (playback, playback_rx) = rtrb::RingBuffer::new((output_rate * RING_SECONDS) as usize * 2);
-    let input_stream = match input_config.sample_format() {
-        SampleFormat::F32 => {
-            build_input::<f32>(&input_device, &in_config, capture_tx, counters.clone())
-        }
-        SampleFormat::I16 => {
-            build_input::<i16>(&input_device, &in_config, capture_tx, counters.clone())
-        }
-        other => Err(DeviceError::Format("input", other)),
-    }?;
-    let output_stream = match output_config.sample_format() {
-        SampleFormat::F32 => {
-            build_output::<f32>(&output_device, &out_config, playback_rx, counters.clone())
-        }
-        SampleFormat::I16 => {
-            build_output::<i16>(&output_device, &out_config, playback_rx, counters.clone())
-        }
-        other => Err(DeviceError::Format("output", other)),
-    }?;
-    input_stream.play().map_err(cpal_error)?;
-    output_stream.play().map_err(cpal_error)?;
+
+    let input_configs = configs(
+        input_device.default_input_config().map_err(cpal_error)?,
+        input_device.supported_input_configs(),
+    );
+    let (input_stream, input_rate, capture) = open_first(input_configs, |config| {
+        let rate = config.sample_rate();
+        let (ring, capture) = rtrb::RingBuffer::new((rate * RING_SECONDS) as usize);
+        let counters = counters.clone();
+        let stream_config = config.config();
+        let stream = match config.sample_format() {
+            SampleFormat::F32 => build_input::<f32>(&input_device, &stream_config, ring, counters),
+            SampleFormat::I16 => build_input::<i16>(&input_device, &stream_config, ring, counters),
+            SampleFormat::I32 => build_input::<i32>(&input_device, &stream_config, ring, counters),
+            other => Err(DeviceError::Format("input", other)),
+        }?;
+        stream.play().map_err(cpal_error)?;
+        Ok((stream, rate, capture))
+    })?;
+
+    let output_configs = configs(
+        output_device.default_output_config().map_err(cpal_error)?,
+        output_device.supported_output_configs(),
+    );
+    let (output_stream, output_rate, playback) = open_first(output_configs, |config| {
+        let rate = config.sample_rate();
+        let (playback, ring) = rtrb::RingBuffer::new((rate * RING_SECONDS) as usize * 2);
+        let counters = counters.clone();
+        let stream_config = config.config();
+        let stream = match config.sample_format() {
+            SampleFormat::F32 => {
+                build_output::<f32>(&output_device, &stream_config, ring, counters)
+            }
+            SampleFormat::I16 => {
+                build_output::<i16>(&output_device, &stream_config, ring, counters)
+            }
+            SampleFormat::I32 => {
+                build_output::<i32>(&output_device, &stream_config, ring, counters)
+            }
+            other => Err(DeviceError::Format("output", other)),
+        }?;
+        stream.play().map_err(cpal_error)?;
+        Ok((stream, rate, playback))
+    })?;
+
     Ok(Devices {
         _input: input_stream,
         _output: output_stream,
@@ -174,6 +223,7 @@ where
     f32: FromSample<T>,
 {
     let channels = usize::from(config.channels.max(1));
+    let errors = counters.clone();
     device
         .build_input_stream::<T, _, _>(
             *config,
@@ -185,7 +235,9 @@ where
                     }
                 }
             },
-            |e| tracing::warn!("input stream: {e}"),
+            move |_| {
+                errors.stream_errors.fetch_add(1, Ordering::Relaxed);
+            },
             None,
         )
         .map_err(cpal_error)
@@ -204,6 +256,7 @@ where
     T: SizedSample + FromSample<f32> + Send + 'static,
 {
     let channels = usize::from(config.channels.max(1));
+    let errors = counters.clone();
     device
         .build_output_stream::<T, _, _>(
             *config,
@@ -222,8 +275,72 @@ where
                     }
                 }
             },
-            |e| tracing::warn!("output stream: {e}"),
+            move |_| {
+                errors.stream_errors.fetch_add(1, Ordering::Relaxed);
+            },
             None,
         )
         .map_err(cpal_error)
+}
+
+#[cfg(test)]
+mod tests {
+    use cpal::SupportedBufferSize;
+
+    use super::*;
+
+    fn range(channels: u16, rates: (u32, u32), format: SampleFormat) -> SupportedStreamConfigRange {
+        SupportedStreamConfigRange::new(
+            channels,
+            rates.0,
+            rates.1,
+            SupportedBufferSize::Unknown,
+            format,
+        )
+    }
+
+    fn config(channels: u16, rate: u32, format: SampleFormat) -> SupportedStreamConfig {
+        SupportedStreamConfig::new(channels, rate, SupportedBufferSize::Unknown, format)
+    }
+
+    fn picked(
+        default: SupportedStreamConfig,
+        ranges: &[SupportedStreamConfigRange],
+    ) -> Vec<SupportedStreamConfig> {
+        configs::<()>(default, Ok(ranges.iter().copied()))
+    }
+
+    #[test]
+    fn a_handled_format_at_48k_comes_first_then_the_default() {
+        use SampleFormat::{F32, I16, I32, U8};
+        let alsa_hw = config(2, 44_100, I32);
+        let ranges = [
+            range(2, (8_000, 192_000), I32),
+            range(2, (8_000, 192_000), I16),
+        ];
+        assert_eq!(picked(alsa_hw, &ranges), [config(2, 48_000, I16), alsa_hw]);
+
+        let default = config(2, 44_100, F32);
+        let ranges = [
+            range(2, (44_100, 44_100), F32),
+            range(1, (48_000, 48_000), F32),
+            range(2, (48_000, 48_000), U8),
+        ];
+        assert_eq!(picked(default, &ranges), [config(1, 48_000, F32), default]);
+
+        let ranges = [
+            range(2, (48_000, 48_000), I16),
+            range(2, (48_000, 48_000), F32),
+            range(1, (48_000, 48_000), F32),
+        ];
+        assert_eq!(picked(default, &ranges), [config(2, 48_000, F32), default]);
+
+        let default = config(2, 48_000, F32);
+        assert_eq!(
+            picked(default, &[range(2, (48_000, 48_000), F32)]),
+            [default]
+        );
+        let unknown: Result<std::iter::Empty<_>, ()> = Err(());
+        assert_eq!(configs(default, unknown), [default]);
+    }
 }
