@@ -659,10 +659,14 @@ mod tests {
         let mut queues = Queues::default();
         unit(&mut queues, 1, 0, 2, now);
         assert_eq!(drain(&mut queues), vec![0, 1]);
+        let later = now + Duration::from_millis(100);
         unit(&mut queues, 1, 3, 3, now);
-        queues.push(packet(TrackKind::Video, 1, 2, Flags::default(), 1000), now);
         unit(&mut queues, 1, 6, 3, now);
-        unit(&mut queues, 1, 9, 3, now + Duration::from_millis(100));
+        queues.push(
+            packet(TrackKind::Video, 1, 2, Flags::default(), 1000),
+            later,
+        );
+        unit(&mut queues, 1, 9, 3, later);
         queues.pop();
         queues.enforce_budget(now + Duration::from_millis(200));
         assert_eq!(drain(&mut queues), vec![4, 5, 9, 10, 11]);
@@ -925,8 +929,7 @@ mod tests {
 
     /// One second of a flood of the smallest units into a receiver that drains 20,000
     /// datagrams a second, after one unit was sent, so fragments that start no unit queue
-    /// as strays. Every step must stay cheap however long the queue gets; the scans this
-    /// replaced took seconds of CPU per second of flood.
+    /// as strays. Every step must stay cheap however long the queue gets.
     fn flood(flags: Flags) -> Duration {
         let start = Instant::now();
         let mut queues = Queues::default();
