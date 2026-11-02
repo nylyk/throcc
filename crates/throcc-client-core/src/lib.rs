@@ -11,6 +11,7 @@ mod keys;
 pub mod keystore;
 mod known_servers;
 pub mod media;
+mod people;
 mod playback;
 mod profile;
 pub mod server_look;

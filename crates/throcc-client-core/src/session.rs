@@ -31,7 +31,7 @@ use crate::playback::SavedPlayback;
 use crate::profile::Profile;
 use crate::server_look::ServerLook;
 use crate::state::{
-    ConnectionStatus, CurrentRoom, Health, KeyWarning, MIC_KBPS, Person, Playback,
+    ConnectionStatus, CurrentRoom, Health, KeyWarning, MIC_KBPS, Person, PersonPlayback, Playback,
     SHARE_AUDIO_DETAIL, SHARE_AUDIO_KBPS, SentTrack, ServerView, Sound, State, TrackHealth,
     VOICE_DETAIL, person_name, room_name, share_detail, shown_name,
 };
@@ -235,6 +235,9 @@ pub(crate) struct Session {
     pending_avatar: Option<Option<Hash>>,
     profile: Profile,
     saved_playback: SavedPlayback,
+    /// Each sound set for people who presented no identity key yet, saved under the key
+    /// once they do.
+    unkeyed_playback: HashMap<(UserId, Sound), Playback>,
     server_look: ServerLook,
     avatar_fetches: Arc<Semaphore>,
     #[cfg(feature = "ffmpeg")]
@@ -331,9 +334,9 @@ impl Session {
             warn!("no saved profile: {e:#}");
             Profile::default()
         });
-        let saved_playback = SavedPlayback::load(keystore.dir(), &server).unwrap_or_else(|e| {
+        let saved_playback = SavedPlayback::load(keystore.dir()).unwrap_or_else(|e| {
             warn!("no saved playback: {e:#}");
-            SavedPlayback::empty(keystore.dir(), &server)
+            SavedPlayback::empty(keystore.dir())
         });
         let server_look = ServerLook::load(keystore.dir(), &server).unwrap_or_else(|e| {
             warn!("no kept server look: {e:#}");
@@ -368,6 +371,7 @@ impl Session {
             pending_avatar: None,
             profile,
             saved_playback,
+            unkeyed_playback: HashMap::new(),
             server_look,
             avatar_fetches: Arc::new(Semaphore::new(AVATAR_FETCHES)),
             #[cfg(feature = "ffmpeg")]
@@ -452,9 +456,8 @@ impl Session {
                 }
             }
         }
-        for (user, sound, playback) in self.saved_playback.iter() {
-            self.voice(gain_command(user, sound, playback));
-        }
+        let heard: Vec<UserId> = self.peers.keys().copied().collect();
+        self.play_as_kept(heard);
         self.voice(VoiceCommand::Loopback(self.mic_test));
         if self.room.is_some() {
             self.sync_voice();
@@ -580,9 +583,6 @@ impl Session {
         }
         if let Err(e) = self.call.floors.save_last() {
             warn!("saving epoch floors before leaving: {e:#}");
-        }
-        if let Err(e) = self.saved_playback.save_last() {
-            warn!("saving playback before leaving: {e:#}");
         }
         if let Err(e) = self.keystore.known_servers.leave(&self.address) {
             warn!("forgetting the server: {e:#}");
@@ -742,7 +742,11 @@ impl Session {
         self.remember_server(welcome.server.name.clone(), welcome.server.avatar);
         let address = self.address.clone();
         let media = self.media;
-        let saved = &self.saved_playback;
+        let playbacks: Vec<PersonPlayback> = welcome
+            .presence
+            .iter()
+            .map(|p| self.playback_of(p.user))
+            .collect();
         self.shared.update(move |s| {
             s.mic = media.mic;
             s.deafened = media.deafened;
@@ -760,8 +764,8 @@ impl Session {
                 s.add_room(room.into());
             }
             s.people.clear();
-            for p in &welcome.presence {
-                s.add_person(p.user, person(p, saved));
+            for (p, playback) in welcome.presence.iter().zip(playbacks) {
+                s.add_person(p.user, person(p, playback));
             }
             s.current = None;
         });
@@ -811,6 +815,8 @@ impl Session {
         let current: BTreeMap<UserId, RoomPeer> =
             trusted.into_iter().map(|p| (p.user, p)).collect();
         let changed = current != self.peers;
+        self.note_identities(&current);
+        self.play_as_kept(current.keys().copied());
         for (user, old) in &self.peers {
             if current
                 .get(user)
@@ -846,21 +852,65 @@ impl Session {
         }
         self.peers = current;
         self.show_shares();
-        self.note_identities();
         changed
     }
 
-    /// Notes the identity keys of the peers our key is wrapped to, then shows who is
-    /// verified and whose verified key changed.
-    fn note_identities(&mut self) {
-        let presented: Vec<(UserId, PublicKey)> = self
-            .peers
+    /// Notes the identity keys `peers` present, saves playback set before under them, then
+    /// shows who is verified and whose verified key changed.
+    fn note_identities(&mut self, peers: &BTreeMap<UserId, RoomPeer>) {
+        let presented: Vec<(UserId, PublicKey)> = peers
             .iter()
             .map(|(user, peer)| (*user, peer.identity_key))
             .collect();
-        if self.trust.note(&presented) {
+        let noted = self.trust.note(&presented);
+        for (user, key) in &presented {
+            for sound in Sound::ALL {
+                if let Some(playback) = self.unkeyed_playback.remove(&(*user, sound)) {
+                    self.saved_playback.set(key, sound, playback);
+                }
+            }
+        }
+        if noted {
             self.refresh_trust();
         }
+    }
+
+    /// How `user` plays: each sound as set before they presented an identity key, else as
+    /// saved for the key they presented.
+    fn playback_of(&self, user: UserId) -> PersonPlayback {
+        let mut playback = self
+            .trust
+            .of(user)
+            .1
+            .map_or_else(PersonPlayback::default, |key| {
+                self.saved_playback.person(&key)
+            });
+        for sound in Sound::ALL {
+            if let Some(set) = self.unkeyed_playback.get(&(user, sound)) {
+                *playback.get_mut(sound) = *set;
+            }
+        }
+        playback
+    }
+
+    /// Plays each of `users` as [`Self::playback_of`] says, and shows it.
+    fn play_as_kept(&mut self, users: impl IntoIterator<Item = UserId>) {
+        let kept: Vec<(UserId, PersonPlayback)> = users
+            .into_iter()
+            .map(|user| (user, self.playback_of(user)))
+            .collect();
+        for (user, playback) in &kept {
+            for sound in Sound::ALL {
+                self.voice(gain_command(*user, sound, playback.get(sound)));
+            }
+        }
+        self.shared.update(|s| {
+            for (user, playback) in &kept {
+                if let Some(p) = s.people.get_mut(user) {
+                    p.playback = *playback;
+                }
+            }
+        });
     }
 
     /// Follows a change in who we share keys with, and in the shares we watch from them.
@@ -990,7 +1040,12 @@ impl Session {
             }
             Command::SetPlayback(user, sound, playback) => {
                 self.voice(gain_command(user, sound, playback));
-                self.saved_playback.set(user, sound, playback);
+                match self.trust.of(user).1 {
+                    Some(key) => self.saved_playback.set(&key, sound, playback),
+                    None => {
+                        self.unkeyed_playback.insert((user, sound), playback);
+                    }
+                }
                 self.shared.update(|s| {
                     if let Some(p) = s.people.get_mut(&user) {
                         *p.playback.get_mut(sound) = playback;
@@ -1615,7 +1670,7 @@ impl Session {
             ServerEvent::PresenceChanged(p) => {
                 self.room_cue(p.user, p.room);
                 let (verified, identity_key) = self.trust.of(p.user);
-                let saved = &self.saved_playback;
+                let playback = self.playback_of(p.user);
                 let sharing = self.sharing_of(p.user);
                 self.shared.update(|s| {
                     let speaking = s.people.get(&p.user).is_some_and(|old| old.speaking);
@@ -1624,7 +1679,7 @@ impl Session {
                         identity_key,
                         speaking,
                         sharing,
-                        ..person(&p, saved)
+                        ..person(&p, playback)
                     };
                     s.add_person(p.user, updated);
                 });
@@ -1836,8 +1891,8 @@ fn shown_users(users: Vec<User>) -> Vec<User> {
         .collect()
 }
 
-/// `p` as a person, playing as loud as `saved` keeps them.
-fn person(p: &Presence, saved: &SavedPlayback) -> Person {
+/// `p` as a person, playing as `playback` says.
+fn person(p: &Presence, playback: PersonPlayback) -> Person {
     Person {
         name: person_name(p.user, &p.name),
         avatar: p.avatar,
@@ -1846,7 +1901,7 @@ fn person(p: &Presence, saved: &SavedPlayback) -> Person {
         deafened: p.deafened,
         sharing: None,
         speaking: false,
-        playback: saved.person(p.user),
+        playback,
         verified: false,
         identity_key: None,
         role: p.role,

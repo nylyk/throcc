@@ -7,7 +7,7 @@ use throcc_client_core::account;
 use throcc_client_core::call::{Call, CallEvent};
 use throcc_client_core::client::{Client, ClientApi, ClientOptions, Command, Event};
 use throcc_client_core::keystore::Keystore;
-use throcc_client_core::state::{ConnectionStatus, KeyWarning, State};
+use throcc_client_core::state::{ConnectionStatus, KeyWarning, Playback, Sound, State};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::invite::InviteCode;
@@ -538,6 +538,76 @@ fn a_verified_key_is_verified_on_every_server_it_shows_up_on() {
     assert_eq!(verified.len(), 1);
     assert_eq!(verified[0].key, Fingerprint(identity_in(bob_dir.path())));
     assert_eq!(verified[0].servers.len(), 2);
+}
+
+/// A room, and another one to keep someone out of it, both made by `admin`.
+fn room_and_elsewhere(admin: &Client) -> (RoomId, RoomId) {
+    let room = create_room(admin);
+    admin.command(Command::CreateRoom("Elsewhere".into(), None));
+    wait_for(admin, "the other room", |s| s.rooms.len() == 2);
+    let elsewhere = admin
+        .state()
+        .rooms
+        .iter()
+        .find(|r| r.id != room)
+        .unwrap()
+        .id;
+    (room, elsewhere)
+}
+
+/// Has `alice`, the admin, set `sound` for `bob` while he is in another room, so before he
+/// presents his key, then brings him into her room until she holds his key.
+fn set_before_his_key(alice: &Client, bob: &Client, sound: Sound, playback: Playback) -> UserId {
+    let (room, elsewhere) = room_and_elsewhere(alice);
+    let bob_id = bob.state().me.unwrap();
+    bob.command(Command::Join(Some(elsewhere)));
+    wait_for(alice, "bob in the other room", |s| {
+        s.person(bob_id).is_some_and(|p| p.identity_key.is_none())
+    });
+    alice.command(Command::SetPlayback(bob_id, sound, playback));
+    alice.command(Command::Join(Some(room)));
+    bob.command(Command::Join(Some(room)));
+    key_of(alice, bob_id);
+    bob_id
+}
+
+#[test]
+fn playback_follows_the_identity_key_to_every_server() {
+    let (alice_dir, bob_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let quiet = Playback {
+        volume: 0.25,
+        muted: false,
+    };
+    let loud = Playback {
+        volume: 2.0,
+        muted: false,
+    };
+    let muted = Playback {
+        volume: 1.0,
+        muted: true,
+    };
+    let (first, first_admin, _first) = server();
+    {
+        let alice = client_in(alice_dir.path(), &first, Some(&first_admin));
+        wait_connected(&alice, "alice connected");
+        let bob = client_in(bob_dir.path(), &first, Some(&invite(&alice)));
+        let bob_id = set_before_his_key(&alice, &bob, Sound::Voice, quiet);
+        alice.command(Command::SetPlayback(bob_id, Sound::Share, muted));
+        wait_for(&alice, "bob quiet and his stream muted", |s| {
+            s.person(bob_id)
+                .is_some_and(|p| p.playback.voice == quiet && p.playback.share == muted)
+        });
+    }
+
+    let (second, second_admin, _second) = server();
+    let alice = client_in(alice_dir.path(), &second, Some(&second_admin));
+    wait_connected(&alice, "alice on the second server");
+    let bob = client_in(bob_dir.path(), &second, Some(&invite(&alice)));
+    let bob_id = set_before_his_key(&alice, &bob, Sound::Voice, loud);
+    wait_for(&alice, "bob louder, his stream still muted", |s| {
+        s.person(bob_id)
+            .is_some_and(|p| p.playback.voice == loud && p.playback.share == muted)
+    });
 }
 
 #[test]

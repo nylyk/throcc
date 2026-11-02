@@ -7,7 +7,6 @@ use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Epoch, Hash, RoomId, UserId};
 
 use crate::json_file;
-use crate::state::PersonPlayback;
 
 const FILE: &str = "servers.json";
 
@@ -25,7 +24,6 @@ pub(crate) struct Servers {
 pub(crate) struct Server {
     pub name: Option<String>,
     pub avatar: Option<Hex>,
-    pub playback: BTreeMap<UserId, PersonPlayback>,
     /// The newest epoch each of our users took part in, per room.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub epochs: BTreeMap<UserId, BTreeMap<RoomId, Epoch>>,

@@ -163,7 +163,7 @@ pub struct Person {
 }
 
 /// Which of someone's sounds a [`Playback`] is for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Sound {
     Voice,
     Share,
