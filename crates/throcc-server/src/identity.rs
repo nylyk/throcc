@@ -7,6 +7,8 @@ use rcgen::{CertificateParams, KeyPair, PKCS_ED25519, PublicKeyData};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use throcc_proto::{Fingerprint, SERVER_NAME};
 
+use crate::files;
+
 const KEY_FILE: &str = "server_key";
 
 pub struct ServerIdentity {
@@ -16,8 +18,10 @@ pub struct ServerIdentity {
 
 impl ServerIdentity {
     /// Loads `server_key` from the data directory, creating it at mode 0600 on first start.
+    /// A key another user owns is refused.
     pub fn load_or_create(data_dir: &Path) -> Result<Self> {
         let path = data_dir.join(KEY_FILE);
+        files::check_private_file(&path)?;
         let key = match fs::read(&path) {
             Ok(der) => KeyPair::try_from(&PrivatePkcs8KeyDer::from(der))
                 .with_context(|| format!("{} is not an Ed25519 PKCS#8 key", path.display()))?,

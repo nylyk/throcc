@@ -20,7 +20,7 @@ use crate::auth::InviteRuns;
 use crate::database::{Database, InviteRow, UserRow};
 use crate::egress::{EgressHandle, TrackKind};
 use crate::limits::Buckets;
-use crate::room_password;
+use crate::room_password::{self, Wait};
 use crate::sfu::{ForwardingTable, KeyframeAggregator, Route, Sfu};
 use crate::unix_now;
 
@@ -50,6 +50,20 @@ const UNUSED_BLOB_GRACE: Duration = Duration::from_secs(10 * 60);
 const PASSWORD_BURST: f64 = 5.0;
 /// One password guess every 5 seconds, which also bounds the Argon2 work a user can cause.
 const PASSWORDS_PER_SECOND: f64 = 0.2;
+/// Every room change moves two rooms to a new epoch, which makes every member there
+/// re-key, and uses up media ids that are never reused. Plenty for clicking around.
+const ROOM_CHANGE_BURST: f64 = 5.0;
+const ROOM_CHANGES_PER_SECOND: f64 = 0.5;
+/// A new encryption key re-keys the user's room. Clients replace theirs once a month.
+const ENC_KEY_CHANGE_BURST: f64 = 3.0;
+const ENC_KEY_CHANGES_PER_SECOND: f64 = 1.0 / 60.0;
+/// Starting or stopping a share sends the room's state to every member.
+const SHARE_CHANGE_BURST: f64 = 5.0;
+const SHARE_CHANGES_PER_SECOND: f64 = 1.0;
+/// Sender keys a member may publish for one epoch outside the request allowance: one,
+/// and a retry. Epochs move only as fast as room and key changes allow, so re-keying never
+/// spends what honest members need for their other requests.
+const FREE_KEY_PUBLISHES: u32 = 2;
 
 pub struct Refusal(pub ErrorCode, pub String);
 
@@ -186,6 +200,8 @@ struct Session {
     media: MediaState,
     watching: Vec<MediaId>,
     last_profile: Option<Instant>,
+    /// Sender keys published for the room's current epoch, outside the request allowance.
+    key_publishes: Option<(RoomId, Epoch, u32)>,
 }
 
 struct RoomEntry {
@@ -208,6 +224,10 @@ pub struct Hub {
     cheap_requests: Buckets<UserId>,
     uploads: Buckets<UserId>,
     password_tries: Buckets<UserId>,
+    guesses: room_password::Guesses,
+    room_changes: Buckets<UserId>,
+    enc_key_changes: Buckets<UserId>,
+    share_changes: Buckets<UserId>,
     /// The room each user last moved into themselves, which a reconnect may return them to
     /// without its password.
     last_joined: HashMap<UserId, RoomId>,
@@ -244,6 +264,10 @@ impl Hub {
             cheap_requests: Buckets::new(CHEAP_REQUEST_BURST, CHEAP_REQUESTS_PER_SECOND),
             uploads: Buckets::new(UPLOAD_BURST_BYTES, UPLOAD_BYTES_PER_SECOND),
             password_tries: Buckets::new(PASSWORD_BURST, PASSWORDS_PER_SECOND),
+            guesses: room_password::Guesses::default(),
+            room_changes: Buckets::new(ROOM_CHANGE_BURST, ROOM_CHANGES_PER_SECOND),
+            enc_key_changes: Buckets::new(ENC_KEY_CHANGE_BURST, ENC_KEY_CHANGES_PER_SECOND),
+            share_changes: Buckets::new(SHARE_CHANGE_BURST, SHARE_CHANGES_PER_SECOND),
             last_joined: HashMap::new(),
             invite_runs: InviteRuns::default(),
         })
@@ -281,10 +305,12 @@ impl Hub {
                 media: MediaState::default(),
                 watching: Vec::new(),
                 last_profile: None,
+                key_publishes: None,
             },
         );
         let placed = want_room
             .filter(|room| self.may_rejoin(user, *room))
+            .filter(|_| self.room_changes.take(user, 1.0, Instant::now()))
             .and_then(|room| self.place(user, Some(room)).ok())
             .unwrap_or_else(lobby);
         let server = self.db.server_profile().unwrap_or_else(|e| {
@@ -353,6 +379,10 @@ impl Hub {
         request: Request,
     ) -> Result<Handled, Refusal> {
         self.require_current(user, conn_id)?;
+        let free = match &request {
+            Request::PublishKey { epoch, .. } => self.free_key_publish(user, *epoch),
+            _ => false,
+        };
         let cheap = matches!(
             request,
             Request::RequestKeyframe { .. } | Request::GetAvatar(_)
@@ -362,7 +392,7 @@ impl Hub {
         } else {
             &mut self.requests
         };
-        if !bucket.take(user, 1.0, Instant::now()) {
+        if !free && !bucket.take(user, 1.0, Instant::now()) {
             return Err(Refusal::new(
                 ErrorCode::RateLimited,
                 "too many requests; slow down",
@@ -400,6 +430,30 @@ impl Hub {
             Request::KickFromRoom { user: target, room } => self.kick_from_room(user, target, room),
         };
         outcome.map(Handled::Done)
+    }
+
+    /// Counts a sender-key publish for the room's current epoch, and says whether it is
+    /// still within [`FREE_KEY_PUBLISHES`].
+    fn free_key_publish(&mut self, user: UserId, epoch: Epoch) -> bool {
+        let Some(session) = self.sessions.get_mut(&user) else {
+            return false;
+        };
+        let Some(room) = session.room else {
+            return false;
+        };
+        if self
+            .rooms
+            .get(&room)
+            .is_none_or(|entry| entry.epoch != epoch)
+        {
+            return false;
+        }
+        let published = match &mut session.key_publishes {
+            Some((r, e, count)) if *r == room && *e == epoch => count,
+            slot => &mut slot.insert((room, epoch, 0)).2,
+        };
+        *published += 1;
+        *published <= FREE_KEY_PUBLISHES
     }
 
     fn finish(&mut self, user: UserId, conn_id: u64, done: PasswordDone) -> Outcome {
@@ -569,6 +623,10 @@ impl Hub {
         target: Option<RoomId>,
         password: Option<String>,
     ) -> Result<Handled, Refusal> {
+        let now = Instant::now();
+        if self.session(user)?.room != target && !self.room_changes.holds(user, 1.0, now) {
+            return Err(changing_rooms_too_fast());
+        }
         let needed = match target {
             Some(room) => self.password_to_enter(user, room)?.map(|hash| (room, hash)),
             None => None,
@@ -582,8 +640,26 @@ impl Hub {
                 "this room needs a password",
             ));
         };
+        match self.guesses.check(user, room, now) {
+            Ok(()) => {}
+            Err(Wait::User(wait)) => {
+                return Err(Refusal::new(
+                    ErrorCode::RateLimited,
+                    format!(
+                        "too many wrong passwords; try again in {} seconds",
+                        wait.as_secs().max(1)
+                    ),
+                ));
+            }
+            Err(Wait::Room) => {
+                return Err(Refusal::new(
+                    ErrorCode::RateLimited,
+                    "this room has had too many wrong passwords; try again later",
+                ));
+            }
+        }
         // Taken before the work is handed out, so guesses can't make Argon2 run faster.
-        if !self.password_tries.take(user, 1.0, Instant::now()) {
+        if !self.password_tries.take(user, 1.0, now) {
             return Err(Refusal::new(
                 ErrorCode::RateLimited,
                 "too many password attempts; wait a few seconds",
@@ -600,8 +676,22 @@ impl Hub {
     /// asks for that same password.
     fn finish_join(&mut self, user: UserId, room: RoomId, hash: &str, matched: bool) -> Outcome {
         if !matched {
+            let (failures, exhausted) = self.guesses.failed(user, room, Instant::now());
+            info!(
+                user = user.0,
+                room = room.0,
+                failures,
+                "wrong room password"
+            );
+            if exhausted {
+                warn!(
+                    room = room.0,
+                    "the room's allowance of wrong passwords is used up"
+                );
+            }
             return Err(Refusal::new(ErrorCode::WrongPassword, "wrong password"));
         }
+        self.guesses.succeeded(user, room);
         if self
             .password_to_enter(user, room)?
             .is_some_and(|current| current != hash)
@@ -615,6 +705,10 @@ impl Hub {
     }
 
     fn enter(&mut self, user: UserId, target: Option<RoomId>) -> Outcome {
+        let moving = self.session(user)?.room != target;
+        if moving && !self.room_changes.take(user, 1.0, Instant::now()) {
+            return Err(changing_rooms_too_fast());
+        }
         let placed = self.place(user, target)?;
         match target {
             Some(room) => self.last_joined.insert(user, room),
@@ -844,6 +938,8 @@ impl Hub {
         }
     }
 
+    /// Stores a user's encryption key. Only a new key re-keys their room; the same key again,
+    /// which clients send at every sign-in, changes nothing.
     fn set_enc_key(&mut self, user: UserId, enc_key: SignedEncKey) -> Outcome {
         let session = self.session(user)?;
         let now = unix_now();
@@ -853,6 +949,10 @@ impl Hub {
                 "the encryption key's expiry is out of range",
             ));
         }
+        let stored = session.row.enc_key;
+        if stored == Some(enc_key) {
+            return Ok(Response::Ok);
+        }
         let message =
             identity::enc_key_message(&self.fingerprint.0, user, enc_key.not_after, &enc_key.key);
         identity::verify(&session.row.pubkey, &message, &enc_key.sig).map_err(|_| {
@@ -861,13 +961,22 @@ impl Hub {
                 "the encryption key's signature is wrong",
             )
         })?;
+        if stored.is_some() && !self.enc_key_changes.take(user, 1.0, Instant::now()) {
+            return Err(Refusal::new(
+                ErrorCode::RateLimited,
+                "the encryption key changes too often",
+            ));
+        }
         self.db
             .set_enc_key(user, &enc_key)
             .map_err(Refusal::internal)?;
         let session = self.session_mut(user)?;
         session.row.enc_key = Some(enc_key);
         if let Some(room) = session.room {
-            self.bump_epochs(&[room])?;
+            // The same key with a new expiry needs no new sender keys; peers only learn it.
+            if stored.is_none_or(|stored| stored.key != enc_key.key) {
+                self.bump_epochs(&[room])?;
+            }
             self.broadcast_room_state(room, None);
         }
         Ok(Response::Ok)
@@ -875,10 +984,16 @@ impl Hub {
 
     fn set_media(&mut self, user: UserId, media: MediaState) -> Outcome {
         let room = self.current_room(user)?;
-        let session = self.session_mut(user)?;
+        let session = self.session(user)?;
         let share_changed = session.media.share != media.share;
         let deafened_changed = session.media.deafened != media.deafened;
-        session.media = media;
+        if share_changed && !self.share_changes.take(user, 1.0, Instant::now()) {
+            return Err(Refusal::new(
+                ErrorCode::RateLimited,
+                "sharing changes too often; wait a moment",
+            ));
+        }
+        self.session_mut(user)?.media = media;
         if share_changed {
             self.broadcast_room_state(room, None);
         }
@@ -990,9 +1105,24 @@ impl Hub {
         Ok(Response::Ok)
     }
 
+    /// Deleting a room moves its members out, so a manager may delete only rooms whose other
+    /// members they could kick. Admins may delete any.
     fn delete_room(&mut self, user: UserId, room: RoomId) -> Outcome {
-        require(permissions::can_manage_rooms(self.role(user)?))?;
-        for member in self.room_entry(room)?.members.clone() {
+        let actor = self.role(user)?;
+        require(permissions::can_manage_rooms(actor))?;
+        let members = self.room_entry(room)?.members.clone();
+        let outranked = members
+            .iter()
+            .filter(|member| **member != user)
+            .filter_map(|member| self.sessions.get(member))
+            .any(|member| !permissions::can_kick_from_room(actor, member.row.role));
+        if actor != Role::Admin && outranked {
+            return Err(Refusal::new(
+                ErrorCode::Forbidden,
+                "someone in this room outranks you; it can be deleted once they leave",
+            ));
+        }
+        for member in members {
             self.place(member, None)?;
         }
         self.db.delete_room(room).map_err(Refusal::internal)?;
@@ -1060,11 +1190,24 @@ impl Hub {
 
     fn set_role(&mut self, user: UserId, target: UserId, role: Role) -> Outcome {
         let actor = self.role(user)?;
+        // Checked before the lookup too, so a refusal says nothing about who exists.
+        require(permissions::can_set_role(actor, Role::User, role))?;
         let row = self.stored_user(target)?;
         require(permissions::can_set_role(actor, row.role, role))?;
         self.db.set_role(target, role).map_err(Refusal::internal)?;
         if let Some(session) = self.sessions.get_mut(&target) {
             session.row.role = role;
+        }
+        // A manager enters locked rooms without their password; once demoted, a reconnect
+        // must not return them to one.
+        let locked = |room: &RoomId| {
+            self.rooms
+                .get(room)
+                .is_some_and(|entry| entry.password_hash.is_some())
+        };
+        if !permissions::can_manage_rooms(role) && self.last_joined.get(&target).is_some_and(locked)
+        {
+            self.last_joined.remove(&target);
         }
         self.announce_presence(target);
         let event = Event::RoleChanged { user: target, role };
@@ -1100,6 +1243,8 @@ impl Hub {
                 "you are the server's only admin, so you can't leave it",
             ));
         }
+        // Checked before the lookup too, so a refusal says nothing about who exists.
+        require(leaving || permissions::can_remove(actor, Role::User))?;
         let removed = if cascade {
             self.db.invite_tree(target).map_err(Refusal::internal)?
         } else {
@@ -1277,6 +1422,13 @@ fn require(allowed: bool) -> Result<(), Refusal> {
     } else {
         Err(Refusal::new(ErrorCode::Forbidden, "you can't do that"))
     }
+}
+
+fn changing_rooms_too_fast() -> Refusal {
+    Refusal::new(
+        ErrorCode::RateLimited,
+        "you are changing rooms too fast; wait a moment",
+    )
 }
 
 fn no_such_room() -> Refusal {

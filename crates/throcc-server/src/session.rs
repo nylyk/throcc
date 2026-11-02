@@ -83,26 +83,39 @@ pub async fn write_frame<T: Serialize>(
     Ok(())
 }
 
+/// Serves one connection. Everything before sign-in is logged as counts, since one source
+/// can fail sign-ins as fast as it can connect.
 pub async fn run(shared: Arc<Shared>, connection: quinn::Connection, unauthenticated: Pass) {
     let peer = connection.remote_address();
     match serve(&shared, &connection, unauthenticated).await {
-        Ok(()) => info!(%peer, "session ended"),
-        Err(ReadError::Closed) => info!(%peer, "session closed"),
+        Ok(()) => debug!(%peer, "session ended"),
+        Err(ReadError::Closed) => {
+            debug!(%peer, "closed before signing in");
+            shared.refusals.count("closed before signing in");
+        }
         Err(ReadError::Frame(e)) => {
-            warn!(%peer, "protocol error: {e}");
+            debug!(%peer, "protocol error before signing in: {e}");
+            shared.refusals.count("protocol error before signing in");
             connection.close(close::PROTOCOL_ERROR.into(), e.to_string().as_bytes());
         }
     }
 }
 
+/// Signs a connection in and serves it. Errors are returned only before sign-in.
 async fn serve(
     shared: &Shared,
     connection: &quinn::Connection,
     unauthenticated: Pass,
 ) -> Result<(), ReadError> {
-    let source = SourceKey::of(connection.remote_address().ip());
+    let peer = connection.remote_address();
+    // Nothing reads datagrams until sign-in, and quinn would otherwise keep them, together
+    // with the receive buffers they arrived in.
+    let discarding = AbortOnDrop(tokio::spawn(discard_datagrams(connection.clone())));
+    let source = SourceKey::of(peer.ip());
     let Ok(permit) = tokio::time::timeout(HELLO_TIMEOUT, shared.handshakes.enter(source)).await
     else {
+        debug!(%peer, "no handshake slot in time");
+        shared.refusals.count("refused: no sign-in slot in time");
         connection.close(
             close::SERVER_BUSY.into(),
             b"too many connections are signing in",
@@ -110,12 +123,17 @@ async fn serve(
         return Ok(());
     };
     let Ok(greeted) = tokio::time::timeout(HELLO_TIMEOUT, greet(connection)).await else {
+        debug!(%peer, "no hello in time");
+        shared.refusals.count("no hello in time");
         connection.close(close::PROTOCOL_ERROR.into(), b"no hello in time");
         return Ok(());
     };
     let (mut stream, server_nonce, hello) = greeted?;
     let Some(_signed_in) = shared.connections.try_enter(source) else {
-        warn!(peer = %connection.remote_address(), "refusing sign-in: its network is full");
+        debug!(%peer, "refusing sign-in: its network is full");
+        shared
+            .refusals
+            .count("refused sign-in: too many signed in from its network");
         connection.close(
             close::SERVER_BUSY.into(),
             b"too many connections from your network",
@@ -127,11 +145,14 @@ async fn serve(
     let authenticated = match tokio::time::timeout(SIGN_IN_TIMEOUT, signing_in).await {
         Ok(Ok(authenticated)) => authenticated,
         Ok(Err(refused)) => {
-            info!(peer = %connection.remote_address(), "authentication failed: {refused:?}");
+            debug!(%peer, "authentication failed: {refused:?}");
+            shared.refusals.count("authentication failed");
             refuse(connection, stream, refused).await;
             return Ok(());
         }
         Err(_) => {
+            debug!(%peer, "signing in took too long");
+            shared.refusals.count("signing in took too long");
             connection.close(close::PROTOCOL_ERROR.into(), b"signing in took too long");
             return Ok(());
         }
@@ -161,8 +182,9 @@ async fn serve(
     };
     drop(permit);
     drop(unauthenticated);
+    drop(discarding);
     let ingress = tokio::spawn(shared.sfu.clone().ingress(conn_id, connection.clone()));
-    info!(user = user.0, "authenticated");
+    info!(user = user.0, %peer, "authenticated");
 
     let FrameStream { mut send, mut recv } = stream;
     let sent = write_frame(&mut send, &AuthResult::Ok(Box::new(welcome))).await;
@@ -174,7 +196,27 @@ async fn serve(
     shared.hub().disconnect(user, conn_id);
     writer.abort();
     ingress.abort();
-    result
+    match result {
+        Err(ReadError::Frame(e)) => {
+            warn!(user = user.0, "protocol error: {e}");
+            connection.close(close::PROTOCOL_ERROR.into(), e.to_string().as_bytes());
+        }
+        Ok(()) | Err(ReadError::Closed) => info!(user = user.0, "signed out"),
+    }
+    Ok(())
+}
+
+async fn discard_datagrams(connection: quinn::Connection) {
+    while connection.read_datagram().await.is_ok() {}
+}
+
+/// Aborts its task when dropped.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// Opens the control stream, sends `ServerHello` and reads the client's `Hello`.

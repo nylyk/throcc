@@ -14,7 +14,7 @@ use throcc_proto::messages::{
     AuthError, ErrorCode, Event, Hello, PROTOCOL, Request, Response, ServerHello,
 };
 use throcc_server::database::Database;
-use throcc_server::{Congestion, DATABASE_FILE, HANDSHAKES, tls};
+use throcc_server::{Congestion, DATABASE_FILE, HANDSHAKES, UNAUTHENTICATED, tls};
 
 use common::*;
 
@@ -309,7 +309,7 @@ async fn concurrent_runs_on_one_invite_enroll_at_most_one_user() {
 async fn parallel_runs_from_one_source_are_rate_limited() {
     let server = start_server();
     let unknown: InviteCode = "ZZZ-ZZZZZ".parse().unwrap();
-    let runs: Vec<_> = (0..20)
+    let runs: Vec<_> = (0..UNAUTHENTICATED.per_source)
         .map(|_| {
             let (addr, code) = (server.addr.clone(), unknown.clone());
             tokio::spawn(async move { try_enroll(&addr, &code).await.err().unwrap() })
@@ -323,7 +323,7 @@ async fn parallel_runs_from_one_source_are_rate_limited() {
             SignInError::Login(LoginError::Refused(AuthError::RateLimited))
         ));
     }
-    assert_eq!(limited, 10);
+    assert_eq!(limited, UNAUTHENTICATED.per_source - 10);
 }
 
 #[tokio::test]

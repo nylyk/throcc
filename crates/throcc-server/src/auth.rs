@@ -6,10 +6,10 @@ use throcc_crypto::pake::{ServerPake, Transcript};
 use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::invite::{self, ID_CHARS, SECRET_CHARS};
 use throcc_proto::messages::{AuthError, Event, Hello, PakeFinish, PakeReply, PakeStep, PublicKey};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::database::{InviteRow, UserRow};
-use crate::limits::SourceKey;
+use crate::limits::{Limited, SourceKey};
 use crate::session::{FrameStream, read_handshake, write_frame};
 use crate::{Shared, unix_now};
 
@@ -96,8 +96,12 @@ struct Enrollment<'a> {
 impl Enrollment<'_> {
     async fn run(&self, stream: &mut FrameStream, pake_a: &[u8]) -> Result<UserRow, Refused> {
         // A run counts against its source from the start, so parallel runs can't outpace the limit.
-        if !self.shared.limiter().begin(self.source, Instant::now()) {
-            warn!(source = ?self.source, "enrollment rate-limited");
+        if let Err(limited) = self.shared.limiter().begin(self.source, Instant::now()) {
+            debug!(source = ?self.source, ?limited, "enrollment rate-limited");
+            self.shared.refusals.count(match limited {
+                Limited::Source => "enrollment refused: too many from its source or network",
+                Limited::Server => "enrollment refused: too many failed enrollments server-wide",
+            });
             return Err(Refused::Enroll(AuthError::RateLimited));
         }
         let now = unix_now();
@@ -155,7 +159,10 @@ impl Enrollment<'_> {
             hub.invite_runs.start(&self.code_id);
         } else {
             let shown: String = self.code_id.chars().take(8).collect();
-            warn!(source = ?self.source, code_id = %shown, "enrollment with an unknown invite id");
+            debug!(source = ?self.source, code_id = %shown, "enrollment with an unknown invite id");
+            self.shared
+                .refusals
+                .count("enrollment with an unknown invite id");
         }
         Ok(invite)
     }

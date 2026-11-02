@@ -10,7 +10,17 @@ use crate::lock;
 
 const SOURCE_RUNS: usize = 10;
 const NETWORK_RUNS: usize = 30;
+const REGION_RUNS: usize = 100;
+/// Failed runs the whole server allows per window. A blind sweep of invite ids needs about
+/// 98,000 runs to burn every invite; at this rate an invite expires long before a sweep
+/// lands three guesses on its id. Reaching it takes several regions, and then pauses
+/// enrollment until the window passes instead of losing the invites.
+const ALL_RUNS: usize = 600;
 const SOURCE_WINDOW: Duration = Duration::from_secs(10 * 60);
+const SOURCE_ARRIVALS: f64 = 32.0;
+const SOURCE_ARRIVALS_PER_SECOND: f64 = 1.0;
+const NETWORK_ARRIVALS: f64 = 64.0;
+const NETWORK_ARRIVALS_PER_SECOND: f64 = 2.0;
 /// How often [`Buckets`] forgets its full buckets.
 const BUCKET_SWEEP: Duration = Duration::from_secs(1);
 /// How often [`SourceLimiter`] forgets sources whose runs have all left the window. The
@@ -37,12 +47,17 @@ impl TokenBucket {
 
     /// Takes `cost` tokens if the bucket holds that many.
     pub fn take(&mut self, cost: f64, now: Instant) -> bool {
-        self.refill(now);
-        if self.tokens < cost {
+        if !self.holds(cost, now) {
             return false;
         }
         self.tokens -= cost;
         true
+    }
+
+    /// Whether the bucket holds `cost` tokens, without taking them.
+    pub fn holds(&mut self, cost: f64, now: Instant) -> bool {
+        self.refill(now);
+        self.tokens >= cost
     }
 
     pub fn is_full(&mut self, now: Instant) -> bool {
@@ -76,6 +91,15 @@ impl<K: Hash + Eq + Copy> Buckets<K> {
     }
 
     pub fn take(&mut self, key: K, cost: f64, now: Instant) -> bool {
+        self.bucket(key, now).take(cost, now)
+    }
+
+    /// Whether `key`'s bucket holds `cost` tokens, without taking them.
+    pub fn holds(&mut self, key: K, cost: f64, now: Instant) -> bool {
+        self.bucket(key, now).holds(cost, now)
+    }
+
+    fn bucket(&mut self, key: K, now: Instant) -> &mut TokenBucket {
         // A full bucket behaves like a missing one, so forgetting it late changes nothing.
         if self.next_sweep.is_none_or(|t| now >= t) {
             self.buckets.retain(|_, bucket| !bucket.is_full(now));
@@ -84,7 +108,6 @@ impl<K: Hash + Eq + Copy> Buckets<K> {
         self.buckets
             .entry(key)
             .or_insert_with(|| TokenBucket::full(self.capacity, self.per_second, now))
-            .take(cost, now)
     }
 }
 
@@ -206,40 +229,97 @@ impl SourceKey {
             Self::V6(prefix) => Self::V6(prefix & !0xffff),
         }
     }
+
+    /// The wider region around this source: its IPv4 /16, or its IPv6 /32.
+    pub fn region(self) -> Self {
+        match self {
+            Self::V4(v4) => Self::V4(v4 & !0xffff),
+            Self::V6(prefix) => Self::V6(prefix & !0xffff_ffff),
+        }
+    }
 }
 
-/// Counts enrollment runs per source and per network in a sliding window. Successful runs
-/// are forgiven.
+/// Why [`SourceLimiter::begin`] refused a run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Limited {
+    /// The source, its network or its region.
+    Source,
+    /// The whole server.
+    Server,
+}
+
+/// New connections allowed per source and per network. Without it one host could keep
+/// its share of the sign-in slots full forever by opening a fresh connection whenever one
+/// times out.
+pub struct ArrivalLimiter {
+    sources: Buckets<SourceKey>,
+    networks: Buckets<SourceKey>,
+}
+
+impl Default for ArrivalLimiter {
+    fn default() -> Self {
+        Self {
+            sources: Buckets::new(SOURCE_ARRIVALS, SOURCE_ARRIVALS_PER_SECOND),
+            networks: Buckets::new(NETWORK_ARRIVALS, NETWORK_ARRIVALS_PER_SECOND),
+        }
+    }
+}
+
+impl ArrivalLimiter {
+    /// Counts a new connection from `source`, or returns false if its source or network
+    /// has used up its allowance.
+    pub fn admit(&mut self, source: SourceKey, now: Instant) -> bool {
+        let network = source.network();
+        if !(self.sources.holds(source, 1.0, now) && self.networks.holds(network, 1.0, now)) {
+            return false;
+        }
+        self.sources.take(source, 1.0, now) && self.networks.take(network, 1.0, now)
+    }
+}
+
+/// Counts enrollment runs per source, network and region, and across the server, in a
+/// sliding window. Successful runs are forgiven.
 #[derive(Default)]
 pub struct SourceLimiter {
     sources: RunWindow,
     networks: RunWindow,
+    regions: RunWindow,
+    all: VecDeque<Instant>,
     next_sweep: Option<Instant>,
 }
 
 impl SourceLimiter {
-    /// Records the start of a run, or returns false if the source or its network is over
-    /// its limit.
-    pub fn begin(&mut self, source: SourceKey, now: Instant) -> bool {
+    /// Records the start of a run, or says which limit it is over.
+    pub fn begin(&mut self, source: SourceKey, now: Instant) -> Result<(), Limited> {
         if self.next_sweep.is_none_or(|t| now >= t) {
             self.sources.expire_all(now);
             self.networks.expire_all(now);
+            self.regions.expire_all(now);
             self.next_sweep = Some(now + RUN_SWEEP);
         }
-        let network = source.network();
+        let (network, region) = (source.network(), source.region());
         if self.sources.count(source, now) >= SOURCE_RUNS
             || self.networks.count(network, now) >= NETWORK_RUNS
+            || self.regions.count(region, now) >= REGION_RUNS
         {
-            return false;
+            return Err(Limited::Source);
+        }
+        expire(&mut self.all, now);
+        if self.all.len() >= ALL_RUNS {
+            return Err(Limited::Server);
         }
         self.sources.record(source, now);
         self.networks.record(network, now);
-        true
+        self.regions.record(region, now);
+        self.all.push_back(now);
+        Ok(())
     }
 
     pub fn forgive(&mut self, source: SourceKey) {
         self.sources.forgive(source);
         self.networks.forgive(source.network());
+        self.regions.forgive(source.region());
+        self.all.pop_back();
     }
 }
 
@@ -315,6 +395,25 @@ mod tests {
     }
 
     #[test]
+    fn new_connections_are_metered_per_source_and_per_network() {
+        let start = Instant::now();
+        let mut arrivals = ArrivalLimiter::default();
+        let host = source("192.0.2.1");
+        for _ in 0..SOURCE_ARRIVALS as usize {
+            assert!(arrivals.admit(host, start));
+        }
+        assert!(!arrivals.admit(host, start));
+        let neighbours = (2..).map(|last| source(&format!("192.0.2.{last}")));
+        let admitted = neighbours
+            .take(100)
+            .filter(|s| arrivals.admit(*s, start))
+            .count();
+        assert_eq!(admitted, (NETWORK_ARRIVALS - SOURCE_ARRIVALS) as usize);
+        assert!(arrivals.admit(source("198.51.100.1"), start));
+        assert!(arrivals.admit(host, start + Duration::from_secs(1)));
+    }
+
+    #[test]
     fn a_gate_caps_each_source_each_network_and_the_total() {
         let gate = Gate::new(Caps {
             per_source: 2,
@@ -384,12 +483,12 @@ mod tests {
         let mut limiter = SourceLimiter::default();
         let failing = source("192.0.2.1");
         for _ in 0..SOURCE_RUNS {
-            assert!(limiter.begin(failing, now));
+            assert!(limiter.begin(failing, now).is_ok());
         }
-        assert!(!limiter.begin(failing, now));
+        assert_eq!(limiter.begin(failing, now), Err(Limited::Source));
         limiter.forgive(failing);
-        assert!(limiter.begin(failing, now));
-        assert!(limiter.begin(source("192.0.2.2"), now));
+        assert!(limiter.begin(failing, now).is_ok());
+        assert!(limiter.begin(source("192.0.2.2"), now).is_ok());
     }
 
     #[test]
@@ -398,14 +497,53 @@ mod tests {
         let mut limiter = SourceLimiter::default();
         let sources = (0..NETWORK_RUNS as u16).map(|i| source(&format!("2001:db8:1:{i:x}::1")));
         for source in sources {
-            assert!(limiter.begin(source, now));
+            assert!(limiter.begin(source, now).is_ok());
         }
-        assert!(!limiter.begin(source("2001:db8:1:ffff::1"), now));
-        assert!(limiter.begin(source("2001:db8:2::1"), now));
+        assert!(limiter.begin(source("2001:db8:1:ffff::1"), now).is_err());
+        assert!(limiter.begin(source("2001:db8:2::1"), now).is_ok());
         for last in 0..NETWORK_RUNS as u8 {
-            limiter.begin(source(&format!("198.51.100.{last}")), now);
+            limiter
+                .begin(source(&format!("198.51.100.{last}")), now)
+                .ok();
         }
-        assert!(!limiter.begin(source("198.51.100.200"), now));
+        assert!(limiter.begin(source("198.51.100.200"), now).is_err());
+    }
+
+    #[test]
+    fn limiter_caps_a_region_of_many_networks() {
+        let now = Instant::now();
+        let mut limiter = SourceLimiter::default();
+        let v6 = (0..REGION_RUNS as u32).map(|i| format!("2001:db8:{i:x}::1"));
+        let v4 = (0..REGION_RUNS as u32).map(|i| format!("10.7.{}.{}", i / 2, i % 2));
+        for ip in v6.chain(v4) {
+            assert!(limiter.begin(source(&ip), now).is_ok(), "{ip}");
+        }
+        assert_eq!(
+            limiter.begin(source("2001:db8:ffff::1"), now),
+            Err(Limited::Source)
+        );
+        assert_eq!(
+            limiter.begin(source("10.7.200.1"), now),
+            Err(Limited::Source)
+        );
+        assert!(limiter.begin(source("2001:db9::1"), now).is_ok());
+        assert!(limiter.begin(source("10.8.0.1"), now).is_ok());
+    }
+
+    #[test]
+    fn the_server_allows_a_bounded_number_of_failed_runs_and_forgives_successes() {
+        let now = Instant::now();
+        let mut limiter = SourceLimiter::default();
+        let regions = (0..ALL_RUNS as u32).map(|i| SourceKey::V4((i + 1) << 16));
+        for region in regions {
+            assert!(limiter.begin(region, now).is_ok());
+        }
+        let fresh = source("203.0.113.9");
+        assert_eq!(limiter.begin(fresh, now), Err(Limited::Server));
+        limiter.forgive(SourceKey::V4(1 << 16));
+        assert!(limiter.begin(fresh, now).is_ok());
+        let later = now + SOURCE_WINDOW + Duration::from_secs(1);
+        assert!(limiter.begin(source("203.0.113.10"), later).is_ok());
     }
 
     #[test]
@@ -414,14 +552,18 @@ mod tests {
         let mut limiter = SourceLimiter::default();
         let busy = source("192.0.2.1");
         for _ in 0..SOURCE_RUNS {
-            assert!(limiter.begin(busy, start));
+            assert!(limiter.begin(busy, start).is_ok());
         }
         for last in 0..100u8 {
-            limiter.begin(source(&format!("203.0.113.{last}")), start);
+            limiter
+                .begin(source(&format!("203.0.113.{last}")), start)
+                .ok();
         }
         let later = start + SOURCE_WINDOW + Duration::from_secs(1);
-        assert!(limiter.begin(busy, later));
+        assert!(limiter.begin(busy, later).is_ok());
         assert_eq!(limiter.sources.0.len(), 1);
         assert_eq!(limiter.networks.0.len(), 1);
+        assert_eq!(limiter.regions.0.len(), 1);
+        assert_eq!(limiter.all.len(), 1);
     }
 }

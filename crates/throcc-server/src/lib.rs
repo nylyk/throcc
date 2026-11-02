@@ -1,8 +1,10 @@
 mod auth;
 pub mod database;
 mod egress;
+mod files;
 pub mod identity;
 mod limits;
+mod refusals;
 mod room_password;
 pub mod rooms;
 mod session;
@@ -12,20 +14,22 @@ pub mod tls;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use throcc_proto::Fingerprint;
 use throcc_proto::invite::InviteCode;
 use throcc_proto::transport::{check_datagrams, close};
 use tokio::sync::Semaphore;
-use tracing::{info, warn};
+use tracing::debug;
 
 use crate::database::Database;
 use crate::identity::ServerIdentity;
-use crate::limits::{Caps, Gate, Pass, SourceKey, SourceLimiter};
+use crate::limits::{ArrivalLimiter, Caps, Gate, Pass, SourceKey, SourceLimiter};
+use crate::refusals::{REFUSAL_REPORT, RefusalLog};
 use crate::rooms::Hub;
 use crate::sfu::Sfu;
+pub use crate::sfu::{AUDIO_BURST_PACKETS, AUDIO_PACKETS_PER_SECOND};
 pub use crate::tls::Congestion;
 
 pub const DATABASE_FILE: &str = "throcc.sqlite";
@@ -35,10 +39,11 @@ pub const CONNECTIONS: Caps = Caps {
     per_network: 128,
     total: 1024,
 };
-/// Connections from their first packet until they have signed in.
+/// Connections from their first packet until they have signed in. A network gets a 32nd
+/// of them, so filling them takes hosts in 32 networks.
 pub const UNAUTHENTICATED: Caps = Caps {
-    per_source: 32,
-    per_network: 32,
+    per_source: 16,
+    per_network: 16,
     total: 512,
 };
 pub const HANDSHAKES: Caps = Caps {
@@ -46,7 +51,8 @@ pub const HANDSHAKES: Caps = Caps {
     per_network: 16,
     total: 128,
 };
-pub const TLS_TIMEOUT: Duration = Duration::from_secs(10);
+/// A real handshake takes a few round trips; this leaves room for several lost packets.
+pub const TLS_TIMEOUT: Duration = Duration::from_secs(5);
 /// Room-password Argon2 runs allowed at once; each takes 19 MiB.
 const PASSWORD_WORKERS: usize = 2;
 const KEYFRAME_TICK: Duration = Duration::from_millis(100);
@@ -63,6 +69,8 @@ pub struct Shared {
     pub sfu: Arc<Sfu>,
     hub: Mutex<Hub>,
     limiter: Mutex<SourceLimiter>,
+    arrivals: Mutex<ArrivalLimiter>,
+    refusals: RefusalLog,
     unauthenticated: Arc<Gate>,
     connections: Arc<Gate>,
     handshakes: Arc<Gate>,
@@ -89,7 +97,7 @@ pub struct Server {
 impl Server {
     /// Binds the UDP listener. Must be called inside a tokio runtime.
     pub fn bind(config: &Config) -> Result<Self> {
-        create_private_dir(&config.data_dir)?;
+        files::prepare_data_dir(&config.data_dir)?;
         let identity = ServerIdentity::load_or_create(&config.data_dir)?;
         let sfu = Arc::new(Sfu::default());
         let mut hub = Hub::new(
@@ -114,6 +122,8 @@ impl Server {
             sfu,
             hub: Mutex::new(hub),
             limiter: Mutex::default(),
+            arrivals: Mutex::default(),
+            refusals: RefusalLog::default(),
             unauthenticated: Gate::new(UNAUTHENTICATED),
             connections: Gate::new(CONNECTIONS),
             handshakes: Gate::new(HANDSHAKES),
@@ -153,6 +163,18 @@ impl Server {
                 interval.tick().await;
             }
         });
+        let reporter = Arc::downgrade(&self.shared);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(REFUSAL_REPORT);
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let Some(shared) = reporter.upgrade() else {
+                    return;
+                };
+                shared.refusals.report();
+            }
+        });
         while let Some(incoming) = self.endpoint.accept().await {
             let peer = incoming.remote_address();
             // The per-source caps count validated addresses only, so spoofed packets can't
@@ -163,21 +185,35 @@ impl Server {
                 }
                 continue;
             }
-            let Some(pass) = self
-                .shared
-                .unauthenticated
-                .try_enter(SourceKey::of(peer.ip()))
-            else {
-                warn!(%peer, "refusing connection: too many sign-ins from its network");
+            let source = SourceKey::of(peer.ip());
+            let Some(pass) = self.shared.unauthenticated.try_enter(source) else {
+                debug!(%peer, "refusing connection: too many sign-ins from its network");
+                self.shared
+                    .refusals
+                    .count("refused: too many from its network are signing in");
                 incoming.refuse();
                 continue;
             };
+            if !lock(&self.shared.arrivals).admit(source, Instant::now()) {
+                debug!(%peer, "ignoring connection: its network connects too often");
+                self.shared
+                    .refusals
+                    .count("ignored: its source or network connects too often");
+                incoming.ignore();
+                continue;
+            }
             let shared = self.shared.clone();
             tokio::spawn(async move {
                 match tokio::time::timeout(TLS_TIMEOUT, incoming).await {
                     Ok(Ok(connection)) => handle(shared, connection, pass).await,
-                    Ok(Err(e)) => warn!(%peer, "handshake failed: {e}"),
-                    Err(_) => warn!(%peer, "handshake timed out"),
+                    Ok(Err(e)) => {
+                        debug!(%peer, "handshake failed: {e}");
+                        shared.refusals.count("TLS handshake failed");
+                    }
+                    Err(_) => {
+                        debug!(%peer, "handshake timed out");
+                        shared.refusals.count("TLS handshake timed out");
+                    }
                 }
             });
         }
@@ -188,11 +224,12 @@ impl Server {
 async fn handle(shared: Arc<Shared>, connection: quinn::Connection, unauthenticated: Pass) {
     let peer = connection.remote_address();
     if let Err(e) = check_datagrams(connection.max_datagram_size()) {
-        warn!(%peer, "refusing connection: {e}");
+        debug!(%peer, "refusing connection: {e}");
+        shared.refusals.count("refused: no QUIC datagrams");
         connection.close(close::DATAGRAMS_REQUIRED.into(), e.to_string().as_bytes());
         return;
     }
-    info!(%peer, "connected");
+    debug!(%peer, "connected");
     session::run(shared, connection, unauthenticated).await;
 }
 
@@ -205,14 +242,4 @@ pub fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
-}
-
-fn create_private_dir(path: &std::path::Path) -> Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder
-        .create(path)
-        .with_context(|| format!("creating {}", path.display()))
 }

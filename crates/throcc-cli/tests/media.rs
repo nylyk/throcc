@@ -6,9 +6,11 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use throcc_client_core::call::CallEvent;
 use throcc_client_core::media::engine::{Kind, Outgoing};
-use throcc_proto::frame::VIDEO_CLOCK_HZ;
+use throcc_proto::frame::{Flags, Header, TAG_BYTES, VIDEO_CLOCK_HZ};
+use throcc_proto::ids::Epoch;
 use throcc_proto::messages::{Codec, Event, MediaState, Request, Response};
 use throcc_proto::transport::{self, close};
+use throcc_server::{AUDIO_BURST_PACKETS, AUDIO_PACKETS_PER_SECOND};
 
 use common::unit::{unit, unit_index};
 use common::*;
@@ -239,4 +241,51 @@ async fn a_member_who_sends_too_fast_is_disconnected() {
     };
     assert_eq!(closed.error_code, close::PROTOCOL_ERROR.into());
     assert_eq!(&closed.reason[..], b"sent media too fast");
+}
+
+#[tokio::test]
+async fn a_member_flooding_their_mic_is_held_to_its_allowance_and_stays_connected() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let general = create_room(&mut alice, "General").await;
+    let mut bob = invited(&server, &alice).await;
+    let mic = alice.join(Some(general)).await.tracks.unwrap().mic;
+    bob.join(Some(general)).await;
+
+    let connection = &alice.link.connected.connection;
+    let flooding = Instant::now();
+    for seq in 0..20_000 {
+        let header = Header {
+            media_id: mic,
+            epoch: Epoch(0),
+            seq,
+            flags: Flags::FIRST | Flags::LAST,
+        };
+        let mut datagram = header.encode().to_vec();
+        datagram.extend([0; TAG_BYTES]);
+        connection
+            .send_datagram_wait(datagram.into())
+            .await
+            .unwrap();
+    }
+    let flooded_for = flooding.elapsed().as_secs_f64();
+
+    let mut forwarded = 0;
+    let quiet = Duration::from_secs(5);
+    while let Ok(Some(event)) = tokio::time::timeout(quiet, bob.link.events.recv()).await {
+        if let Event::LinkStats { tracks } = event {
+            forwarded += tracks
+                .iter()
+                .filter(|t| t.media_id == mic)
+                .map(|t| t.forwarded)
+                .sum::<u32>();
+        }
+    }
+    let allowed = AUDIO_BURST_PACKETS + AUDIO_PACKETS_PER_SECOND * (flooded_for + 1.0);
+    assert!(
+        f64::from(forwarded) >= AUDIO_BURST_PACKETS * 0.9 && f64::from(forwarded) <= allowed,
+        "forwarded {forwarded} of 20000 in {flooded_for:.1} s"
+    );
+    assert!(connection.close_reason().is_none());
+    assert_eq!(alice.join(Some(general)).await.room, Some(general));
 }

@@ -14,7 +14,8 @@ RUN cargo chef cook --release --recipe-path recipe.json -p throcc-server
 COPY . .
 RUN cargo build --release -p throcc-server \
     && mkdir -p /data \
-    && chown 65532:65532 /data
+    && chown 65532:65532 /data \
+    && chmod 0700 /data
 
 FROM chef AS dev
 RUN cargo install watchexec-cli --locked --version 2.8.0

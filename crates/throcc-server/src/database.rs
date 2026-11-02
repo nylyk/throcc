@@ -5,6 +5,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use throcc_proto::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
 use throcc_proto::messages::{PublicKey, ServerProfile, SignedEncKey, User};
 
+use crate::files;
+
 const SCHEMA_V1: &str = "
 CREATE TABLE users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,7 +112,15 @@ pub struct Database {
 }
 
 impl Database {
+    /// Opens the database at `path`, creating it at mode 0600. SQLite gives its journal
+    /// files the database's mode. Files another user owns are refused.
     pub fn open(path: &Path) -> Result<Self> {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let mut file = path.as_os_str().to_owned();
+            file.push(suffix);
+            files::check_private_file(Path::new(&file))?;
+        }
+        files::create_private_file(path)?;
         let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         Self::init(conn)
     }
@@ -619,6 +629,30 @@ mod tests {
             Database::open(&path).unwrap().server_profile().unwrap(),
             profile
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_database_and_its_journal_are_private_even_in_an_open_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.path().join("db");
+        let db = Database::open(&path).unwrap();
+        db.set_server_name(Some("Moss")).unwrap();
+        let mode = |suffix: &str| {
+            let file = dir.path().join(format!("db{suffix}"));
+            std::fs::metadata(file).unwrap().permissions().mode() & 0o777
+        };
+        assert_eq!(
+            (mode(""), mode("-wal"), mode("-shm")),
+            (0o600, 0o600, 0o600)
+        );
+        drop(db);
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        Database::open(&path).unwrap();
+        assert_eq!(mode(""), 0o600);
     }
 
     #[test]

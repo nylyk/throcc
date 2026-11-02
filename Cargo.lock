@@ -7836,6 +7836,7 @@ dependencies = [
  "argon2",
  "bytes",
  "clap",
+ "libc",
  "quinn",
  "rcgen",
  "rusqlite",

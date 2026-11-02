@@ -5,11 +5,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use throcc_crypto::identity::enc_key_message;
 use throcc_proto::framing;
 use throcc_proto::ids::{Epoch, Hash, Role, RoomId, UserId};
 use throcc_proto::messages::{
-    ClientMessage, ErrorCode, Event, MAX_AVATAR_BYTES, Presence, Request, Response, ServerMessage,
-    SignedEncKey, Welcome,
+    ClientMessage, Codec, ErrorCode, Event, MAX_AVATAR_BYTES, MediaState, Presence, Request,
+    Response, ServerMessage, SignedEncKey, Welcome,
 };
 use throcc_server::database::Database;
 use throcc_server::rooms::{Handled, MAX_ROOMS, PasswordWork};
@@ -743,4 +744,234 @@ async fn managers_kick_lower_ranks_out_of_rooms() {
         room: RoomId(999),
     };
     assert_error(&bob.request(elsewhere).await, ErrorCode::NotFound);
+}
+
+/// `client`'s encryption key replaced by `key`, signed for the server it is connected to.
+fn signed_key(client: &TestClient, key: [u8; 32]) -> SignedEncKey {
+    let server = client.link.connected.fingerprint;
+    let not_after = unix_now() + 24 * 60 * 60;
+    let message = enc_key_message(&server.0, client.link.welcome.me, not_after, &key);
+    SignedEncKey {
+        key,
+        not_after,
+        sig: client.keystore.identity().sign(&message),
+    }
+}
+
+#[tokio::test]
+async fn only_a_new_encryption_key_rekeys_the_room_and_new_keys_are_rate_limited() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let general = create_room(&mut alice, "General").await;
+    let epoch = alice.join(Some(general)).await.epoch;
+    let current = alice
+        .keystore
+        .signed_enc_key(&alice.link.connected.fingerprint, alice.link.welcome.me);
+    for _ in 0..10 {
+        assert_eq!(
+            alice.request(Request::SetEncKey(current)).await,
+            Response::Ok
+        );
+    }
+    assert_eq!(alice.join(Some(general)).await.epoch, epoch);
+
+    for (i, key) in [[1; 32], [2; 32], [3; 32]].into_iter().enumerate() {
+        let set = Request::SetEncKey(signed_key(&alice, key));
+        assert_eq!(alice.request(set).await, Response::Ok);
+        let rekeyed = Epoch(epoch.0 + 1 + i as u32);
+        assert_eq!(alice.join(Some(general)).await.epoch, rekeyed);
+    }
+    let fourth = Request::SetEncKey(signed_key(&alice, [4; 32]));
+    assert_error(&alice.request(fourth).await, ErrorCode::RateLimited);
+}
+
+#[tokio::test]
+async fn hopping_between_rooms_is_rate_limited() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let one = create_room(&mut alice, "One").await;
+    let two = create_room(&mut alice, "Two").await;
+    let mut hops = 0;
+    let refused = loop {
+        let room = if hops % 2 == 0 { one } else { two };
+        match alice.set_room(Some(room), None).await {
+            Response::Placed(_) if hops < 100 => hops += 1,
+            other => break other,
+        }
+    };
+    assert_error(&refused, ErrorCode::RateLimited);
+    assert_eq!(hops, 5);
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    assert_eq!(alice.join(None).await.room, None);
+}
+
+#[tokio::test]
+async fn sender_keys_for_the_current_epoch_need_no_request_allowance() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let general = create_room(&mut alice, "General").await;
+    let bob = invited(&server, &alice).await;
+    alice.join(Some(general)).await;
+    let epoch = bob.join(Some(general)).await.epoch;
+    while !matches!(
+        bob.request(Request::ListUsers).await,
+        Response::Err {
+            code: ErrorCode::RateLimited,
+            ..
+        }
+    ) {}
+
+    let publish = || Request::PublishKey {
+        epoch,
+        wrapped: vec![(alice.link.welcome.me, vec![7; 32])],
+    };
+    assert_eq!(bob.request(publish()).await, Response::Ok);
+    assert_eq!(bob.request(publish()).await, Response::Ok);
+    assert_error(&bob.request(publish()).await, ErrorCode::RateLimited);
+    let from = alice
+        .event(|e| match e {
+            Event::SenderKey { from, .. } => Some(*from),
+            _ => None,
+        })
+        .await;
+    assert_eq!(from, bob.link.welcome.me);
+}
+
+#[tokio::test]
+async fn wrong_room_passwords_make_that_guesser_wait() {
+    let server = start_server();
+    let alice = admin(&server).await;
+    let mut bob = invited(&server, &alice).await;
+    let carol = invited(&server, &alice).await;
+    let create = Request::CreateRoom {
+        name: "Private".into(),
+        password: Some("hunter2".into()),
+    };
+    assert_eq!(alice.request(create).await, Response::Ok);
+    let private = bob
+        .event(|e| match e {
+            Event::RoomCreated(room) => Some(room.id),
+            _ => None,
+        })
+        .await;
+    for _ in 0..5 {
+        assert_error(
+            &bob.set_room(Some(private), Some("guess")).await,
+            ErrorCode::WrongPassword,
+        );
+    }
+    let waiting = bob.set_room(Some(private), Some("hunter2")).await;
+    assert!(
+        matches!(&waiting, Response::Err { code: ErrorCode::RateLimited, message } if message.contains("wrong passwords")),
+        "{waiting:?}"
+    );
+    let placed = carol.set_room(Some(private), Some("hunter2")).await;
+    assert!(matches!(placed, Response::Placed(p) if p.room == Some(private)));
+}
+
+#[tokio::test]
+async fn managers_cannot_delete_a_room_holding_someone_they_cannot_kick() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let general = create_room(&mut alice, "General").await;
+    let bob = invited(&server, &alice).await;
+    let carol = invited(&server, &alice).await;
+    let promote = Request::SetRole {
+        user: bob.link.welcome.me,
+        role: Role::Manager,
+    };
+    assert_eq!(alice.request(promote).await, Response::Ok);
+    alice.join(Some(general)).await;
+    bob.join(Some(general)).await;
+
+    let delete = Request::DeleteRoom(general);
+    assert_error(&bob.request(delete.clone()).await, ErrorCode::Forbidden);
+    assert_eq!(alice.join(None).await.room, None);
+    carol.join(Some(general)).await;
+    assert_eq!(bob.request(delete).await, Response::Ok);
+    assert_eq!(bob.join(None).await.room, None);
+
+    let lobby = create_room(&mut alice, "Lobby").await;
+    bob.join(Some(lobby)).await;
+    assert_eq!(
+        alice.request(Request::DeleteRoom(lobby)).await,
+        Response::Ok
+    );
+}
+
+#[tokio::test]
+async fn role_and_removal_requests_tell_non_admins_nothing_about_who_exists() {
+    let server = start_server();
+    let alice = admin(&server).await;
+    let carol = invited(&server, &alice).await;
+    let nobody = UserId(999);
+    let set_role = Request::SetRole {
+        user: nobody,
+        role: Role::Manager,
+    };
+    let remove = Request::RemoveUser {
+        user: nobody,
+        cascade: true,
+    };
+    assert_error(&carol.request(set_role.clone()).await, ErrorCode::Forbidden);
+    assert_error(&carol.request(remove).await, ErrorCode::Forbidden);
+    assert_error(&alice.request(set_role).await, ErrorCode::NotFound);
+}
+
+#[tokio::test]
+async fn a_demoted_manager_needs_the_password_to_return_to_a_locked_room() {
+    let server = start_server();
+    let alice = admin(&server).await;
+    let mut bob = invited(&server, &alice).await;
+    let bob_id = bob.link.welcome.me;
+    let set_role = |role| Request::SetRole { user: bob_id, role };
+    assert_eq!(alice.request(set_role(Role::Manager)).await, Response::Ok);
+    let create = Request::CreateRoom {
+        name: "Private".into(),
+        password: Some("hunter2".into()),
+    };
+    assert_eq!(alice.request(create).await, Response::Ok);
+    let private = bob
+        .event(|e| match e {
+            Event::RoomCreated(room) => Some(room.id),
+            _ => None,
+        })
+        .await;
+    assert_eq!(bob.join(Some(private)).await.room, Some(private));
+
+    assert_eq!(alice.request(set_role(Role::User)).await, Response::Ok);
+    bob.reconnect(&server.addr, Some(private)).await;
+    assert_eq!(bob.link.welcome.placed.room, None);
+}
+
+#[tokio::test]
+async fn starting_and_stopping_a_share_is_rate_limited_but_the_mic_is_not() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let general = create_room(&mut alice, "General").await;
+    alice.join(Some(general)).await;
+    let share = sharing(share_1080p60(Codec::H264, 8000));
+    let media = |n: usize| {
+        if n.is_multiple_of(2) {
+            share
+        } else {
+            MediaState::default()
+        }
+    };
+    let mut changes = 0;
+    let refused = loop {
+        match alice.request(Request::SetMedia(media(changes))).await {
+            Response::Ok if changes < 100 => changes += 1,
+            other => break other,
+        }
+    };
+    assert_error(&refused, ErrorCode::RateLimited);
+    assert_eq!(changes, 5);
+    for mic in [true, false, true, false, true, false] {
+        let toggled = MediaState { mic, ..share };
+        assert_eq!(
+            alice.request(Request::SetMedia(toggled)).await,
+            Response::Ok
+        );
+    }
 }
