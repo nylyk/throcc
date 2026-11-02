@@ -183,7 +183,7 @@ fn sidebar(
             div()
                 .max_w(server_name_width)
                 .flex()
-                .items_center()
+                .items_baseline()
                 .gap_1p5()
                 .typeset(theme::TITLE_3)
                 .child(
@@ -197,8 +197,7 @@ fn sidebar(
                     div()
                         .min_w_0()
                         .truncate()
-                        .font_weight(FontWeight::NORMAL)
-                        .font_family(theme::mono_font())
+                        .typeset(theme::CALLOUT)
                         .text_color(theme::text_3())
                         .child(format!("({server_address})"))
                 })),
@@ -392,11 +391,18 @@ fn occupant(
         .child(
             div()
                 .min_w_0()
-                .truncate()
-                .text_color(theme::text_2_muted())
-                .child(person.name.clone()),
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme::text_2_muted())
+                        .child(person.name.clone()),
+                )
+                .children(trust_marker(user, trust)),
         )
-        .children(trust_marker(user, trust))
         .child(div().flex_1())
         .children(person.sharing.is_some().then(|| sharing_icon(px(16.))))
         .children(muted_icon(person, px(16.)))
@@ -922,7 +928,10 @@ fn tile(
 fn card_fit(height: Pixels, sharing: bool, compact: bool) -> (bool, Pixels) {
     let full_rest = if sharing { px(126.) } else { px(56.) };
     if !compact && height - full_rest >= px(32.) {
-        return (false, (height - full_rest).min(px(56.)).floor());
+        let picture = (height - full_rest)
+            .min((height * 0.35).max(px(32.)))
+            .min(px(80.));
+        return (false, picture.floor());
     }
     let compact_rest = if sharing { px(76.) } else { px(48.) };
     (
@@ -1051,6 +1060,9 @@ mod tests {
                     (true, false) => 48.,
                 };
                 assert!(f32::from(picture) + rest <= f32::from(height), "{height:?}");
+                if !compact {
+                    assert!((32. ..=80.).contains(&f32::from(picture)), "{height:?}");
+                }
             }
         }
     }
