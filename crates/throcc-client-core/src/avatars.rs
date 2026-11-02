@@ -83,6 +83,15 @@ fn path(cache: &Path, hash: Hash) -> PathBuf {
 mod tests {
     use super::*;
 
+    fn last_used(cache: &Path, hash: Hash, at: SystemTime) {
+        fs::File::options()
+            .write(true)
+            .open(path(cache, hash))
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    }
+
     #[test]
     fn a_cached_picture_loads_back_only_while_it_matches() {
         let cache = tempfile::tempdir().unwrap();
@@ -102,25 +111,11 @@ mod tests {
         save(cache.path(), old, b"old").unwrap();
         save(cache.path(), fresh, b"fresh").unwrap();
         let month_ago = SystemTime::now() - KEPT_UNUSED - Duration::from_secs(60);
-        fs::File::options()
-            .write(true)
-            .open(path(cache.path(), old))
-            .unwrap()
-            .set_modified(month_ago)
-            .unwrap();
+        last_used(cache.path(), old, month_ago);
 
         assert_eq!(prune(cache.path(), SystemTime::now()).unwrap(), 1);
         assert_eq!(load(cache.path(), old), None);
         assert!(load(cache.path(), fresh).is_some());
-    }
-
-    fn last_used(cache: &Path, hash: Hash, at: SystemTime) {
-        fs::File::options()
-            .write(true)
-            .open(path(cache, hash))
-            .unwrap()
-            .set_modified(at)
-            .unwrap();
     }
 
     #[test]
@@ -153,12 +148,7 @@ mod tests {
         let hash = Hash::of(b"png");
         save(cache.path(), hash, b"png").unwrap();
         let month_ago = SystemTime::now() - KEPT_UNUSED - Duration::from_secs(60);
-        fs::File::options()
-            .write(true)
-            .open(path(cache.path(), hash))
-            .unwrap()
-            .set_modified(month_ago)
-            .unwrap();
+        last_used(cache.path(), hash, month_ago);
 
         assert!(load(cache.path(), hash).is_some());
         assert_eq!(prune(cache.path(), SystemTime::now()).unwrap(), 0);

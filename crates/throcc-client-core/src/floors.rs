@@ -188,6 +188,6 @@ mod tests {
         std::fs::write(&config, b"not a directory").unwrap();
         floors.raise(ME, ROOM, Epoch(5));
         floors.raise(ME, ROOM, Epoch(2));
-        floors.save().expect("a write was tried");
+        floors.save().expect("saved although nothing rose");
     }
 }

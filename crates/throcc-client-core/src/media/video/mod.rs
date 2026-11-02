@@ -83,7 +83,7 @@ mod tests {
             kbps: 4000,
         };
         let Ok(mut encoder) = Encoder::open(config) else {
-            eprintln!("no hardware video encoder here; skipping");
+            eprintln!("skipped: no video encoder in this ffmpeg");
             return;
         };
         eprintln!("opened {}", encoder.name());
@@ -137,7 +137,7 @@ mod tests {
             kbps: 4000,
         };
         let Ok(mut encoder) = Encoder::open(config) else {
-            eprintln!("no hardware video encoder here; skipping");
+            eprintln!("skipped: no video encoder in this ffmpeg");
             return;
         };
         eprintln!("opened {}", encoder.name());

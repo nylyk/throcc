@@ -106,7 +106,7 @@ jobs:
           key: ${{ steps.ffmpeg.outputs.cache-primary-key }}
       - run: ./scripts/ci-run.sh cargo clippy -p throcc-client-core --features ffmpeg --all-targets -- -D warnings
         shell: bash
-      - run: ./scripts/ci-run.sh cargo test -p throcc-client-core --features ffmpeg --lib -- vaapi gpu_input
+      - run: ./scripts/ci-run.sh cargo test -p throcc-client-core --features ffmpeg --lib -- media::video media::share
         shell: bash
 
   surface:

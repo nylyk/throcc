@@ -1298,7 +1298,9 @@ pub(crate) mod tests {
 
         let mut forged = peer(&b);
         forged.enc_key.key = EncKeyPair::generate().public();
-        let peers = vec![peer(&a), forged, peer(&c)];
+        // The keys signed before: signing them again in the next second would change their
+        // expiry, and so give them a new signature to check.
+        let peers = vec![peers[0].clone(), forged, peers[2].clone()];
         let (request, notices) = a.keys.room_state(ROOM, Epoch(1), &peers, now);
         assert_eq!(wrapped_to(request.as_ref()), [c.id]);
         assert!(notices.contains(&KeyNotice::BadEncKey { user: b.id }));

@@ -369,13 +369,13 @@ pub fn dbfs(samples: &[f32]) -> f32 {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use ropus::{DecodeMode, Decoder};
 
     use super::*;
 
     /// Speech-like test signal: a gliding voiced harmonic series, shaped into syllables.
-    pub fn speech(seed: u32, seconds: f32) -> Vec<f32> {
+    fn speech(seed: u32, seconds: f32) -> Vec<f32> {
         let n = (seconds * SAMPLE_RATE as f32) as usize;
         let mut phase = 0.0f32;
         let mut noise = seed.wrapping_mul(2_654_435_761) | 1;
@@ -612,6 +612,68 @@ pub(crate) mod tests {
         let mut out = [1.0f32; PULL];
         mixer.mix(&mut out);
         assert!(out.iter().all(|s| *s == 0.0));
+
+        let mut encoder = Encoder::builder(SAMPLE_RATE, Channels::Mono, Application::Voip)
+            .frame_duration(FrameDuration::Ms20)
+            .build()
+            .unwrap();
+        let packets: Vec<Vec<u8>> = speech(0, 0.4)
+            .as_chunks::<FRAME>()
+            .0
+            .iter()
+            .map(|frame| {
+                let mut packet = vec![0u8; MAX_PACKET];
+                let n = encoder.encode_float(frame, &mut packet).unwrap();
+                packet.truncate(n);
+                packet
+            })
+            .collect();
+        let mixed = |volumes: &[(UserId, f32)]| {
+            let mut mixer = Mixer::default();
+            for &(user, volume) in volumes {
+                mixer.set_volume(user, volume);
+                for (i, packet) in packets.iter().enumerate() {
+                    let timestamp = (i * FRAME) as u32;
+                    mixer
+                        .insert(user, timestamp, packet, u64::from(timestamp))
+                        .unwrap();
+                }
+            }
+            let (mut out, mut samples) = ([0.0f32; PULL], Vec::new());
+            for _ in 0..(packets.len() + 2) * FRAME / PULL {
+                mixer.mix(&mut out);
+                samples.extend(out);
+            }
+            samples
+        };
+        let same = |got: Vec<f32>, want: Vec<f32>| {
+            got.iter().zip(&want).all(|(g, w)| (g - w).abs() < 1e-6)
+        };
+        let (mara, ilse) = (UserId(1), UserId(2));
+        let alone = mixed(&[(mara, 1.0)]);
+        let peak = alone.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!(
+            peak > 0.1 && peak < 0.5,
+            "peak {peak} outside soft clip's linear range"
+        );
+        assert!(
+            same(mixed(&[(mara, 0.5), (ilse, 0.5)]), alone.clone()),
+            "two streams at half volume don't sum to one at full"
+        );
+        assert!(
+            same(
+                mixed(&[(mara, 0.25)]),
+                alone.iter().map(|s| s * 0.25).collect()
+            ),
+            "volume isn't applied"
+        );
+        assert!(
+            same(
+                mixed(&[(mara, 1.0), (ilse, 1.0)]),
+                alone.iter().map(|s| soft_clip(2.0 * s)).collect()
+            ),
+            "the sum isn't soft clipped"
+        );
     }
 
     #[test]

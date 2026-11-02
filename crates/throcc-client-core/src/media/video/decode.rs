@@ -56,6 +56,7 @@ pub struct MaxSize {
 }
 
 impl MaxSize {
+    #[cfg(test)]
     pub const ANY: Self = Self {
         width: MAX_SIDE,
         height: MAX_SIDE,
@@ -150,6 +151,7 @@ impl Decoder {
     }
 
     /// Whether frames are decoded on a hardware device.
+    #[cfg(test)]
     pub fn is_hardware(&self) -> bool {
         self.hardware
     }

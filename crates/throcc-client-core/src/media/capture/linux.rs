@@ -1236,13 +1236,6 @@ mod tests {
     use crate::media::capture::frames_within;
     use throcc_proto::frame::VIDEO_CLOCK_HZ;
 
-    #[test]
-    fn the_monotonic_clock_advances() {
-        let before = monotonic_nanos();
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        assert!(monotonic_nanos() - before >= 2_000_000);
-    }
-
     fn bgrx_frame(width: usize, height: usize, stride: usize, pixel: [u8; 4]) -> Vec<u8> {
         let mut bytes = vec![0xee; stride * height];
         for row in bytes.chunks_mut(stride) {

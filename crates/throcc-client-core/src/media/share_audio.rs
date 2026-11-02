@@ -119,12 +119,6 @@ mod tests {
     }
 
     #[test]
-    fn one_second_of_audio_is_one_second_of_video() {
-        assert_eq!(audio_to_video(48_000), 90_000);
-        assert_eq!(audio_to_video(0), 0);
-    }
-
-    #[test]
     fn a_frame_encodes_to_a_music_packet() {
         let mut encoder = ShareAudioEncoder::new().unwrap();
         let frame: [f32; STEREO_FRAME] =

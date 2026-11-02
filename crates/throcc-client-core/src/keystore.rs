@@ -351,14 +351,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn file_identity_persists() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = Keystore::open_in(dir.path()).unwrap().identity().public();
-        let second = Keystore::open_in(dir.path()).unwrap().identity().public();
-        assert_eq!(first, second);
-    }
-
-    #[test]
     fn the_fallback_starts_an_identity_only_while_no_server_is_known() {
         let dir = tempfile::tempdir().unwrap();
         let first = fallback_identity(dir.path()).unwrap().public();

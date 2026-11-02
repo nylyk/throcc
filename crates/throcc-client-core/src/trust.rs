@@ -138,6 +138,15 @@ mod tests {
         Trust::new(SERVER, VerifiedKeys::load(dir).unwrap())
     }
 
+    /// Mara verified with her real key, then shown with the impostor's.
+    fn verified_then_changed(dir: &std::path::Path) -> Trust {
+        let mut trust = trust_in(dir);
+        trust.note(&[(MARA, REAL)]);
+        trust.set_verified(MARA, &REAL, true, "Mara").unwrap();
+        trust.note(&[(MARA, IMPOSTOR)]);
+        trust
+    }
+
     #[test]
     fn only_the_key_whose_number_was_compared_is_verified() {
         let dir = tempfile::tempdir().unwrap();
@@ -191,10 +200,7 @@ mod tests {
     #[test]
     fn a_changed_key_is_warned_of_after_a_restart_and_once_the_old_key_is_back() {
         let dir = tempfile::tempdir().unwrap();
-        let mut trust = trust_in(dir.path());
-        trust.note(&[(MARA, REAL)]);
-        trust.set_verified(MARA, &REAL, true, "Mara").unwrap();
-        trust.note(&[(MARA, IMPOSTOR)]);
+        let _changed = verified_then_changed(dir.path());
 
         let mut next = trust_in(dir.path());
         assert!(next.warning(MARA).is_some(), "lost on a restart");
@@ -207,10 +213,7 @@ mod tests {
     #[test]
     fn a_swap_after_dismissing_while_the_verified_key_is_back_is_warned_of() {
         let dir = tempfile::tempdir().unwrap();
-        let mut trust = trust_in(dir.path());
-        trust.note(&[(MARA, REAL)]);
-        trust.set_verified(MARA, &REAL, true, "Mara").unwrap();
-        trust.note(&[(MARA, IMPOSTOR)]);
+        let mut trust = verified_then_changed(dir.path());
         trust.note(&[(MARA, REAL)]);
         assert!(trust.dismiss_change(MARA, Some(&REAL)).unwrap());
         assert!(trust.warning(MARA).is_none());
@@ -224,10 +227,7 @@ mod tests {
     #[test]
     fn dismissing_while_a_new_key_is_shown_accepts_it() {
         let dir = tempfile::tempdir().unwrap();
-        let mut trust = trust_in(dir.path());
-        trust.note(&[(MARA, REAL)]);
-        trust.set_verified(MARA, &REAL, true, "Mara").unwrap();
-        trust.note(&[(MARA, IMPOSTOR)]);
+        let mut trust = verified_then_changed(dir.path());
         assert!(trust.dismiss_change(MARA, Some(&IMPOSTOR)).unwrap());
         trust.note(&[(MARA, [10; 32])]);
         assert!(trust.warning(MARA).is_none());
@@ -236,10 +236,7 @@ mod tests {
     #[test]
     fn a_dismiss_for_a_key_no_longer_shown_changes_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let mut trust = trust_in(dir.path());
-        trust.note(&[(MARA, REAL)]);
-        trust.set_verified(MARA, &REAL, true, "Mara").unwrap();
-        trust.note(&[(MARA, IMPOSTOR)]);
+        let mut trust = verified_then_changed(dir.path());
         trust.note(&[(MARA, REAL)]);
         trust.note(&[(MARA, [10; 32])]);
         assert!(!trust.dismiss_change(MARA, Some(&REAL)).unwrap());
@@ -249,10 +246,7 @@ mod tests {
     #[test]
     fn people_with_a_changed_key_stay_noted_when_many_are() {
         let dir = tempfile::tempdir().unwrap();
-        let mut trust = trust_in(dir.path());
-        trust.note(&[(MARA, REAL)]);
-        trust.set_verified(MARA, &REAL, true, "Mara").unwrap();
-        trust.note(&[(MARA, IMPOSTOR)]);
+        let mut trust = verified_then_changed(dir.path());
         for batch in 0..(MAX_PEOPLE as u64 / 256 + 1) {
             let peers: Vec<(UserId, PublicKey)> = (0..256)
                 .map(|i| (UserId(1000 + batch * 256 + i), [7; 32]))

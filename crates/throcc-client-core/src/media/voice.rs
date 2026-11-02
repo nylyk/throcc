@@ -59,8 +59,6 @@ pub struct Levels {
     pub mic_dbfs: f32,
     pub transmitting: bool,
     pub speaking: HashMap<UserId, bool>,
-    pub overruns: u64,
-    pub underruns: u64,
 }
 
 /// The audio worker: one thread that mixes, plays, captures, cancels echo and encodes.
@@ -149,8 +147,8 @@ struct Worker {
     output_volume: f32,
     /// Samples played, the local 48 kHz clock that packet arrivals are stamped with.
     played: u64,
-    /// Device stream errors already logged.
-    stream_errors_logged: u64,
+    /// The device counters already logged: stream errors, overruns and underruns.
+    device_counters_logged: [u64; 3],
 }
 
 impl Worker {
@@ -189,7 +187,7 @@ impl Worker {
             loopback: false,
             output_volume,
             played: 0,
-            stream_errors_logged: 0,
+            device_counters_logged: [0; 3],
         }
     }
 
@@ -220,7 +218,7 @@ impl Worker {
             if pulls >= LEVELS_EVERY {
                 pulls = 0;
                 self.publish_levels();
-                self.log_stream_errors();
+                self.log_device_counters();
             }
             if !busy {
                 std::thread::sleep(IDLE);
@@ -420,16 +418,22 @@ impl Worker {
         *self.chain.processed()
     }
 
-    fn log_stream_errors(&mut self) {
-        let errors = self
-            .devices
-            .counters
-            .stream_errors
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if errors > self.stream_errors_logged {
-            let new = errors - self.stream_errors_logged;
-            warn!("the audio devices reported {new} stream errors ({errors} in all)");
-            self.stream_errors_logged = errors;
+    fn log_device_counters(&mut self) {
+        let counters = &self.devices.counters;
+        let watched = [
+            (&counters.stream_errors, "stream errors"),
+            (&counters.overruns, "mic samples dropped on a full ring"),
+            (&counters.underruns, "speaker frames played as silence"),
+        ];
+        for ((counter, what), logged) in watched.into_iter().zip(&mut self.device_counters_logged) {
+            let count = counter.load(std::sync::atomic::Ordering::Relaxed);
+            if count > *logged {
+                warn!(
+                    "the audio devices reported {} {what} ({count} in all)",
+                    count - *logged
+                );
+                *logged = count;
+            }
         }
     }
 
@@ -439,15 +443,5 @@ impl Worker {
         levels.transmitting = self.chain.transmitting();
         levels.speaking.clear();
         levels.speaking.extend(self.mixer.speaking());
-        levels.overruns = self
-            .devices
-            .counters
-            .overruns
-            .load(std::sync::atomic::Ordering::Relaxed);
-        levels.underruns = self
-            .devices
-            .counters
-            .underruns
-            .load(std::sync::atomic::Ordering::Relaxed);
     }
 }

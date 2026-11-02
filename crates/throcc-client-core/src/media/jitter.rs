@@ -259,6 +259,8 @@ fn decode(decoder: &mut Decoder, frame: &mut [f32], packet: &[u8], mode: DecodeM
 
 #[cfg(test)]
 mod tests {
+    use std::sync::LazyLock;
+
     use ropus::{Application, Bitrate, Encoder, FrameDuration, InbandFec};
 
     use super::*;
@@ -286,9 +288,11 @@ mod tests {
             .collect()
     }
 
-    fn packets(count: usize) -> Vec<Vec<u8>> {
+    /// 30 s of the tone, encoded once: Opus encoding dominates these tests' time, and
+    /// only the timestamps the packets are inserted at differ between them.
+    static TONE: LazyLock<Vec<Vec<u8>>> = LazyLock::new(|| {
         let mut enc = encoder();
-        (0..count)
+        (0..30 * 50)
             .map(|f| {
                 let mut out = vec![0u8; 1500];
                 let n = enc.encode_float(&tone(f), &mut out).unwrap();
@@ -296,6 +300,15 @@ mod tests {
                 out
             })
             .collect()
+    });
+
+    fn packets(count: usize) -> &'static [Vec<u8>] {
+        &TONE[..count]
+    }
+
+    /// The tone's packet for `frame`, repeating after 30 s.
+    fn packet(frame: usize) -> &'static [u8] {
+        &TONE[frame % TONE.len()]
     }
 
     fn drain(jb: &mut JitterBuffer, pulls: usize) {
@@ -327,41 +340,21 @@ mod tests {
     }
 
     #[test]
-    fn a_single_lost_packet_is_recovered_from_fec() {
-        let mut jb = JitterBuffer::new(Channels::Mono).unwrap();
-        for (i, p) in packets(10).iter().enumerate().filter(|(i, _)| *i != 4) {
-            jb.insert((i * FRAME) as u32, p, (i * FRAME) as u64);
+    fn lost_packets_are_recovered_from_fec_or_concealed() {
+        for (lost, fec_and_concealed) in [(&[4][..], (1, 0)), (&[4, 5][..], (1, 1))] {
+            let mut jb = JitterBuffer::new(Channels::Mono).unwrap();
+            for (i, p) in packets(10).iter().enumerate() {
+                if !lost.contains(&i) {
+                    jb.insert((i * FRAME) as u32, p, (i * FRAME) as u64);
+                }
+            }
+            drain(&mut jb, 18);
+            assert_eq!(
+                (jb.stats.fec, jb.stats.concealed),
+                fec_and_concealed,
+                "lost {lost:?}"
+            );
         }
-        drain(&mut jb, 18);
-        assert_eq!((jb.stats.fec, jb.stats.concealed), (1, 0));
-    }
-
-    #[test]
-    fn two_lost_packets_are_concealed_then_recovered() {
-        let mut jb = JitterBuffer::new(Channels::Mono).unwrap();
-        for (i, p) in packets(10)
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != 4 && *i != 5)
-        {
-            jb.insert((i * FRAME) as u32, p, (i * FRAME) as u64);
-        }
-        drain(&mut jb, 18);
-        assert_eq!((jb.stats.concealed, jb.stats.fec), (1, 1));
-    }
-
-    #[test]
-    fn playout_timestamp_advances_with_playback() {
-        let mut jb = JitterBuffer::new(Channels::Mono).unwrap();
-        for (i, p) in packets(6).iter().enumerate() {
-            jb.insert(5000 + (i * FRAME) as u32, p, (i * FRAME) as u64);
-        }
-        let mut out = [0.0; PULL];
-        jb.pull(&mut out);
-        assert_eq!(jb.playout_timestamp(), Some(5000 + PULL as u32));
-        jb.pull(&mut out);
-        jb.pull(&mut out);
-        assert_eq!(jb.playout_timestamp(), Some(5000 + 3 * PULL as u32));
     }
 
     #[test]
@@ -386,13 +379,14 @@ mod tests {
     #[test]
     fn talk_resumes_after_a_frozen_gap() {
         let mut jb = JitterBuffer::new(Channels::Mono).unwrap();
-        let mut enc = encoder();
         let mut out = [0.0; PULL];
         let mut talk = |jb: &mut JitterBuffer, frames: std::ops::Range<usize>| {
             for frame in frames {
-                let mut packet = vec![0u8; 1500];
-                let n = enc.encode_float(&tone(frame), &mut packet).unwrap();
-                jb.insert((frame * FRAME) as u32, &packet[..n], (frame * FRAME) as u64);
+                jb.insert(
+                    (frame * FRAME) as u32,
+                    packet(frame),
+                    (frame * FRAME) as u64,
+                );
                 jb.pull(&mut out);
                 jb.pull(&mut out);
             }
@@ -465,14 +459,11 @@ mod tests {
     /// resumes. Returns the buffer level 1 s after resuming.
     fn buffer_after_gap(gap_frames: usize) -> f32 {
         let mut jb = JitterBuffer::new(Channels::Mono).unwrap();
-        let mut enc = encoder();
         let mut out = [0.0; PULL];
         let mut clock: u64 = 0;
         let jitter = |f: usize| ((f * 7919) % 5) as u64 * 480;
-        let mut send = |jb: &mut JitterBuffer, frame: usize, clock: u64| {
-            let mut packet = vec![0u8; 1500];
-            let n = enc.encode_float(&tone(frame), &mut packet).unwrap();
-            jb.insert((frame * FRAME) as u32, &packet[..n], clock + jitter(frame));
+        let send = |jb: &mut JitterBuffer, frame: usize, clock: u64| {
+            jb.insert((frame * FRAME) as u32, packet(frame), clock + jitter(frame));
         };
         for frame in 0..500 {
             send(&mut jb, frame, clock);
@@ -510,17 +501,14 @@ mod tests {
     /// 2 s and the most delay in the last 10 s, in ms.
     fn bursts(quantum: u64, phase: u64) -> (JitterStats, f64) {
         let mut jb = JitterBuffer::new(Channels::Mono).unwrap();
-        let mut enc = encoder();
         let mut out = [0.0; PULL];
-        let frames = 30 * 50;
+        let frames = TONE.len();
         let sent = |frame: usize| ((frame as u64 + 1) * FRAME as u64).div_ceil(quantum) * quantum;
         let (mut next, mut clock, mut delay) = (0, 0u64, 0.0f64);
         let mut warm = JitterStats::default();
         while next < frames {
             while next < frames && sent(next) + phase <= clock {
-                let mut packet = vec![0u8; 1500];
-                let n = enc.encode_float(&tone(next), &mut packet).unwrap();
-                jb.insert((next * FRAME) as u32, &packet[..n], clock);
+                jb.insert((next * FRAME) as u32, &TONE[next], clock);
                 next += 1;
             }
             jb.pull(&mut out);

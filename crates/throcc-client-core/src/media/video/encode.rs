@@ -1026,16 +1026,17 @@ mod first_tried {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod failed_open {
     use super::*;
 
     #[test]
     fn an_encoder_that_fails_to_open_is_cleaned_up_safely() {
-        let Some(codec) = AVCodec::find_encoder_by_name(c"hevc_videotoolbox") else {
-            return;
-        };
-        let Some(candidate) = candidate(c"hevc_videotoolbox") else {
+        let (Some(codec), Some(candidate)) = (
+            AVCodec::find_encoder_by_name(c"hevc_videotoolbox"),
+            candidate(c"hevc_videotoolbox"),
+        ) else {
+            eprintln!("skipped: no VideoToolbox HEVC encoder in this ffmpeg");
             return;
         };
         for _ in 0..20 {
@@ -1105,11 +1106,16 @@ mod round_trip {
         for n in 0..config.fps * (seconds + 1) {
             let mut input = VideoFrame::test_pattern(1920, 1080, n as u16, n * 1500);
             if noisy {
-                for sample in &mut input.y {
+                for samples in input.y.as_chunks_mut::<8>().0 {
                     noise ^= noise << 13;
                     noise ^= noise >> 7;
                     noise ^= noise << 17;
-                    *sample = sample.wrapping_add(noise as u8 & 0x3f);
+                    // Adds up to 63 to each of the eight samples, each wrapping on its own:
+                    // the low seven bits can't carry into the next sample.
+                    let picture = u64::from_le_bytes(*samples);
+                    let sum = ((picture & 0x7f7f_7f7f_7f7f_7f7f) + (noise & 0x3f3f_3f3f_3f3f_3f3f))
+                        ^ (picture & 0x8080_8080_8080_8080);
+                    *samples = sum.to_le_bytes();
                 }
             }
             if idr_every_second && n % config.fps == config.fps / 2 {
@@ -1130,6 +1136,7 @@ mod round_trip {
                 [("noise", true, false), ("a keyframe a second", false, true)]
             {
                 let Some(kbps) = sent_kbps(candidate, noisy, idr_every_second) else {
+                    eprintln!("skipped: {:?} doesn't open here", candidate.name);
                     continue;
                 };
                 eprintln!("{:?} with {what}: {kbps} kbps for 6000 set", candidate.name);
@@ -1151,14 +1158,16 @@ mod round_trip {
             (c"h264_vaapi", Codec::H264),
             (c"libvpx-vp9", Codec::Vp9),
         ] {
-            if let Some(hardware) = round_trip(encoder, codec) {
-                eprintln!("{encoder:?} decoded on hardware: {hardware}");
-                if encoder.to_bytes().ends_with(b"videotoolbox") {
-                    assert!(
-                        hardware,
-                        "{encoder:?} encodes on the GPU but decodes in software"
-                    );
-                }
+            let Some(hardware) = round_trip(encoder, codec) else {
+                eprintln!("skipped: {encoder:?} doesn't open here");
+                continue;
+            };
+            eprintln!("{encoder:?} decoded on hardware: {hardware}");
+            if encoder.to_bytes().ends_with(b"videotoolbox") {
+                assert!(
+                    hardware,
+                    "{encoder:?} encodes on the GPU but decodes in software"
+                );
             }
         }
     }
@@ -1248,7 +1257,7 @@ mod gpu_input {
     #[test]
     fn previews_are_scaled_and_converted_on_the_gpu() {
         let Some(mut encoder) = vaapi_encoder(1280, 720) else {
-            eprintln!("no VA-API encoder here; skipping");
+            eprintln!("skipped: no VA-API encoder here");
             return;
         };
         let mut frame = shared_picture(&encoder, 2560, 1440);
@@ -1265,7 +1274,7 @@ mod gpu_input {
     #[test]
     fn frames_in_gpu_memory_are_encoded_with_black_bars() {
         let Some(mut encoder) = vaapi_encoder(1280, 720) else {
-            eprintln!("no VA-API encoder here; skipping");
+            eprintln!("skipped: no VA-API encoder here");
             return;
         };
         let mut frame = shared_picture(&encoder, 1200, 900);
@@ -1290,21 +1299,20 @@ mod gpu_input {
     #[test]
     fn a_software_encoder_takes_no_frames_in_gpu_memory() {
         let Some(mut vaapi) = vaapi_encoder(1280, 720) else {
-            eprintln!("no VA-API encoder here; skipping");
+            eprintln!("skipped: no VA-API encoder here");
             return;
         };
         let frame = shared_picture(&vaapi, 640, 360);
         assert!(vaapi.encode_dmabuf(&frame, None).is_ok());
-        let Some(candidate) = candidate(c"libvpx-vp9") else {
-            return;
-        };
         let config = EncoderConfig {
             width: 640,
             height: 360,
             fps: 30,
             kbps: 1000,
         };
-        let Some(mut vp9) = Encoder::open_with(candidate, config) else {
+        let Some(mut vp9) = candidate(c"libvpx-vp9").and_then(|c| Encoder::open_with(c, config))
+        else {
+            eprintln!("skipped: no libvpx-vp9 encoder here");
             return;
         };
         assert!(matches!(
@@ -1334,7 +1342,7 @@ mod pixel_buffers {
     #[test]
     fn captured_pixel_buffers_encode_uncopied_and_decode_back() {
         let Some(mut encoder) = opened(c"hevc_videotoolbox") else {
-            eprintln!("no VideoToolbox HEVC encoder here; skipping");
+            eprintln!("skipped: no VideoToolbox HEVC encoder here");
             return;
         };
         let mut decoder = Decoder::new(Codec::Hevc, MaxSize::ANY).unwrap();
@@ -1374,86 +1382,6 @@ mod pixel_buffers {
                 vp9.encode_pixel_buffer(&picture),
                 Err(EncodeError::NoGpuInput)
             ));
-        }
-    }
-}
-
-#[cfg(all(test, target_os = "macos"))]
-mod main_display {
-    use std::time::{Duration, Instant};
-
-    use super::*;
-    use crate::media::capture::{Capture, CaptureConfig, macos};
-
-    /// CPU time this process has used, in seconds.
-    fn cpu_seconds() -> f64 {
-        // SAFETY: getrusage fills the zeroed struct it is handed.
-        let usage = unsafe {
-            let mut usage = std::mem::zeroed::<libc::rusage>();
-            libc::getrusage(libc::RUSAGE_SELF, &mut usage);
-            usage
-        };
-        let seconds = |t: libc::timeval| t.tv_sec as f64 + f64::from(t.tv_usec) / 1e6;
-        seconds(usage.ru_utime) + seconds(usage.ru_stime)
-    }
-
-    #[test]
-    #[ignore = "needs a display, the screen recording permission and a changing picture"]
-    fn a_main_display_share_runs_for_profiling() {
-        let seconds = std::env::var("THROCC_PROFILE_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(20);
-        let config = CaptureConfig {
-            width: 2560,
-            height: 1440,
-            fps: 60,
-            audio: false,
-        };
-        let mut capture = macos::main_display(config);
-        let mut frame = VideoFrame::blank(2, 2);
-        while !capture.next_frame(&mut frame) {
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        let mut encoder = Encoder::open(EncoderConfig {
-            width: frame.width,
-            height: frame.height,
-            fps: 60,
-            kbps: 8000,
-        })
-        .unwrap();
-        let size = (frame.width, frame.height);
-        for copied in [true, false] {
-            let (started, cpu) = (Instant::now(), cpu_seconds());
-            let mut frames = 0;
-            while started.elapsed() < Duration::from_secs(seconds) {
-                let encoded = if copied {
-                    capture
-                        .next_frame(&mut frame)
-                        .then(|| encoder.encode(&frame))
-                } else {
-                    capture
-                        .next_pixel_buffer()
-                        .map(|picture| encoder.encode_pixel_buffer(&picture))
-                };
-                match encoded {
-                    Some(units) => {
-                        units.unwrap();
-                        frames += 1;
-                    }
-                    None => std::thread::sleep(Duration::from_millis(2)),
-                }
-            }
-            let elapsed = started.elapsed().as_secs_f64();
-            eprintln!(
-                "{} at {}×{}, {}: {:.0} fps, {:.1} % of a core",
-                encoder.name(),
-                size.0,
-                size.1,
-                if copied { "copied" } else { "uncopied" },
-                f64::from(frames) / elapsed,
-                (cpu_seconds() - cpu) / elapsed * 100.0
-            );
         }
     }
 }

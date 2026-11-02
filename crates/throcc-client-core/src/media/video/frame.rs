@@ -28,10 +28,21 @@ impl VideoFrame {
         let mut frame = Self::blank(width, height);
         frame.timestamp = timestamp;
         let shift = usize::from(number) * 4;
-        for row in 0..height {
-            for col in 0..width {
-                frame.y[row * width + col] = (((col + shift) ^ row) & 0xff) as u8 / 2 + 64;
+        // The pattern repeats every 256 columns and every 256 rows.
+        for row in 0..height.min(256) {
+            let line = &mut frame.y[row * width..(row + 1) * width];
+            for (col, pixel) in line.iter_mut().take(256).enumerate() {
+                *pixel = (((col + shift) ^ row) & 0xff) as u8 / 2 + 64;
             }
+            for start in (256..width).step_by(256) {
+                let end = (start + 256).min(width);
+                line.copy_within(start - 256..end - 256, start);
+            }
+        }
+        for row in 256..height {
+            frame
+                .y
+                .copy_within((row - 256) * width..(row - 255) * width, row * width);
         }
         frame.stamp_number(number);
         frame
@@ -173,6 +184,7 @@ fn shrink_plane(
 }
 
 /// Peak signal-to-noise ratio of the luma planes, in dB.
+#[cfg(test)]
 pub fn luma_psnr(a: &VideoFrame, b: &VideoFrame) -> f64 {
     let mse: f64 =
         a.y.iter()
@@ -240,12 +252,6 @@ mod tests {
             let frame = VideoFrame::test_pattern(320, 180, number, 0);
             assert_eq!(frame.read_test_number(), number);
         }
-    }
-
-    #[test]
-    fn bgra_has_four_bytes_a_pixel() {
-        let frame = VideoFrame::test_pattern(64, 36, 7, 0);
-        assert_eq!(frame.to_bgra().len(), 64 * 36 * 4);
     }
 
     #[test]

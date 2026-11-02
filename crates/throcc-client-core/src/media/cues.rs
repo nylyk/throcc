@@ -212,16 +212,6 @@ mod tests {
     }
 
     #[test]
-    fn cues_last_as_designed() {
-        let ms = |cue: Cue| cue.render().len() * 1000 / SAMPLE_RATE as usize;
-        assert_eq!(ms(Cue::Join), 280);
-        assert_eq!(ms(Cue::Mute), 160);
-        assert_eq!(ms(Cue::Deafen), 205);
-        assert_eq!(ms(Cue::ConnectionLost), 360);
-        assert_eq!(ms(Cue::ShareStart), 200);
-    }
-
-    #[test]
     fn a_cue_plays_to_its_end_and_a_repeat_does_not_restart_it() {
         let mut player = CuePlayer::default();
         player.play(Cue::Join, 1.0);

@@ -18,7 +18,7 @@ Trust follows identity keys, not servers. The key manager wraps our sender secre
 | `trust.rs` | Who is verified on one server: the identity keys presented this connection, checked against the verified ones, and the key-changed warnings |
 | `account.rs`, `connection.rs`, `control.rs` | Sign-in and enrollment, the pinned QUIC connection, the control stream. Each enrollment takes a new encryption key and drops the epoch floors kept for the user id it gets, which may have stood for an earlier account of ours |
 | `keystore.rs`, `known_servers.rs`, `verified.rs`, `floors.rs`, `profile.rs`, `playback.rs`, `server_look.rs` | What stays on this machine: our keys, pinned servers, the identity keys we verified, the newest epoch we took part in per room, our name and picture, how loud we play each person, each server's name and picture as last seen. The identity key lives in the OS keychain (a 0600 `identity_key` file where there is none), the encryption key in `enc_key` |
-| `settings.rs`, `servers.rs`, `json_file.rs`, `files.rs` | Where it stays: in the platform config directory, app-wide settings in `settings.json`, the verified identity keys with the server and user id pairs each was seen under in `verified.json`, everything per server (epoch floors included) in `servers.json`, and our picture in `profile_picture`. Every JSON change locks and re-reads the file first, so no writer undoes another. Files are written 0600 and replaced in one step |
+| `settings.rs`, `servers.rs`, `json_file.rs`, `files.rs` | Where it stays: in the platform config directory, app-wide settings in `settings.json`, the verified identity keys with the server and user id pairs each was seen under in `verified.json`, everything per server (epoch floors included) in `servers.json`, and our picture in `profile_picture`. Every JSON change locks and re-reads the file first, so no writer undoes another. Files are written 0600 and replaced in one step. Each JSON file carries a `version`: an older one is migrated forward through its `json_file::Format::MIGRATIONS` as it loads, and a newer one is refused |
 | `avatars.rs` | Everyone's pictures, users' and servers', in the cache directory by hash. Each use marks a picture used; when a client connects, ones unused for 30 days go, then the least recently used until the cache is under 64 MiB |
 | `keys.rs` | Sender secrets per epoch, wrapped to every peer with a validly signed encryption key; a new secret whenever those peers or their keys change, so a peer's routine encryption-key renewal starts a new secret too. Once we come back to a room, nothing at or before the newest epoch we took part in there (`floors.rs`, saved on each placement, every few seconds after, on disconnect and at exit, and kept across restarts) is accepted; within one stay, only the epoch just before the current one is, for a short grace |
 | `call.rs` | A signed-in connection with its media engine |
@@ -30,3 +30,22 @@ Trust follows identity keys, not servers. The key manager wraps our sender secre
 | `media/video/` | Encode and decode through ffmpeg, hardware first, and the NV12 frames between them |
 
 Video needs the `ffmpeg` feature. Without it the client does voice only. Audio and capture callbacks never block, allocate, lock or panic; they reach tokio only through bounded rings that drop when full.
+
+## Manual hardware tests
+
+These tests are `#[ignore]`d because they need a display, a desktop session or audio hardware, and no CI job runs them. Run one by name on a machine that has what its `ignore` reason names:
+
+```sh
+cargo test -p throcc-client-core --features ffmpeg --lib -- --ignored <name>
+```
+
+| OS | Test | Needs |
+| --- | --- | --- |
+| Linux | `pipewire_source_delivers_converted_frames` | A PipeWire daemon and a session manager |
+| Linux | `desktop_audio_has_other_apps_but_not_ours` | The same, an audio sink and `pw-play` |
+| Linux | `portal_share_delivers_frames_and_asks_every_time` | A desktop session with xdg-desktop-portal, and someone to pick a screen |
+| macOS | `main_display_delivers_frames`, `share_audio_arrives_in_order_with_sound` | A display, the screen recording permission, and speakers for the second |
+| macOS | `sending_1440p60_takes_under_one_core` | The same, with moving content on the display |
+| Windows | `primary_monitor_delivers_frames`, `share_audio_arrives_in_order_with_sound` | A display, a GPU, and speakers for the second |
+
+The VA-API tests (`gpu_input`) and the VideoToolbox ones run in the normal suite and print `skipped:` where the hardware is missing.

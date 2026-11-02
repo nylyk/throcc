@@ -708,8 +708,9 @@ mod tests {
             prop_assert_eq!(reassembler.buffered(), 0);
         }
 
+        /// Bodies shorter than the timestamp and the video limit too: no input may panic.
         #[test]
-        fn emitted_units_are_whole_runs_within_the_limit(max in 1usize..6, input in proptest::collection::vec((0u32..64, 0u8..16, proptest::collection::vec(any::<u8>(), 4..8)), 0..128)) {
+        fn emitted_units_are_whole_runs_within_the_limit(max in prop_oneof![1usize..6, Just(MAX_VIDEO_UNIT_FRAGMENTS)], input in proptest::collection::vec((0u32..64, 0u8..16, proptest::collection::vec(any::<u8>(), 0..8)), 0..128)) {
             let mut reassembler = Reassembler::new(max);
             let mut pushed = std::collections::HashMap::new();
             for (seq, flags, body) in input {
@@ -721,14 +722,6 @@ mod tests {
                     let len: usize = (unit.first_seq..=unit.last_seq).map(|s| pushed[&s].1).sum();
                     prop_assert_eq!(unit.data.len() + TIMESTAMP_BYTES, len);
                 }
-            }
-        }
-
-        #[test]
-        fn reassembler_never_panics(input in proptest::collection::vec((0u32..64, 0u8..16, proptest::collection::vec(any::<u8>(), 0..8)), 0..64)) {
-            let mut reassembler = Reassembler::new(MAX_VIDEO_UNIT_FRAGMENTS);
-            for (seq, flags, body) in input {
-                let _ = reassembler.push(seq, Flags(flags), &body);
             }
         }
     }
