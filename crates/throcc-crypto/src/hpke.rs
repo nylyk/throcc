@@ -146,20 +146,15 @@ mod tests {
     }
 
     #[test]
-    fn wrap_round_trips() {
-        let alice = EncKeyPair::generate();
-        let bob = EncKeyPair::generate();
-        let wrapped = wrap(&alice, &bob.public(), &context(5), &[9; 32]).unwrap();
-        let secret = unwrap(&bob, &alice.public(), &context(5), &wrapped).unwrap();
-        assert_eq!(*secret, [9; 32]);
-    }
-
-    #[test]
-    fn unwrap_checks_sender_and_context() {
+    fn unwrap_needs_the_right_sender_recipient_context_and_bytes() {
         let alice = EncKeyPair::generate();
         let bob = EncKeyPair::generate();
         let mallory = EncKeyPair::generate();
         let wrapped = wrap(&alice, &bob.public(), &context(5), &[9; 32]).unwrap();
+        assert_eq!(
+            *unwrap(&bob, &alice.public(), &context(5), &wrapped).unwrap(),
+            [9; 32]
+        );
         assert_eq!(
             unwrap(&bob, &mallory.public(), &context(5), &wrapped).err(),
             Some(HpkeError::Open)

@@ -9,7 +9,6 @@ publish.workspace = true
 workspace = true
 
 [features]
-default = []
 media = ["dep:hpke", "dep:aes-gcm"]
 
 [dependencies]
@@ -27,6 +26,8 @@ zeroize.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
-# The version spake2 0.4 takes for its seeded starts.
-rand_core = "0.6.4"
+rand_core.workspace = true
 ring.workspace = true
+# Runs the media and HPKE tests in `cargo test -p throcc-crypto` too. Dev-dependency features
+# reach only test builds, so the server still builds this crate without `media`.
+throcc-crypto = { workspace = true, features = ["media"] }

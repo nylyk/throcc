@@ -17,14 +17,6 @@ RUN cargo build --release --locked -p throcc-server \
     && chown 65532:65532 /data \
     && chmod 0700 /data
 
-FROM chef AS dev
-RUN cargo install watchexec-cli --locked --version 2.8.0
-ENV CARGO_TARGET_DIR=/target
-VOLUME /src /target /data
-EXPOSE 8476/udp
-CMD ["watchexec", "--restart", "--exts", "rs,toml", "--", \
-     "cargo", "run", "-p", "throcc-server", "--", "--data", "/data", "--listen", "[::]:8476"]
-
 FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
 COPY --from=build /src/target/release/throcc-server /throcc-server
 COPY --from=build --chown=65532:65532 /data /data

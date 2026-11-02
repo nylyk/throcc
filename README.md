@@ -45,7 +45,7 @@ docker exec throcc /throcc-server admin-invite --data /data
   ```
 
 - **Nix:** `nix run github:nylyk/throcc`. On macOS this needs the Xcode Command Line Tools.
-- **macOS and Windows:** the `packaging` workflow builds a `.dmg` and a zip on tags and weekly, and keeps them for a week. The `.dmg` is not signed with a Developer ID, so open it the first time with right-click, Open.
+- **macOS and Windows:** the `packaging` workflow builds a `.dmg` and a zip on tags, weekly and on changes to packaging or video code, and keeps them for a week. The `.dmg` is not signed with a Developer ID, so open it the first time with right-click, Open.
 
 Start the client, enter the server's address and an invite code, and check that the fingerprint it shows matches the one `admin-invite` printed or the server logged.
 
@@ -57,7 +57,7 @@ cargo build --release -p throcc-client --features ffmpeg
 
 Screen share needs ffmpeg 8 (`--features ffmpeg`). Without it the client still does voice.
 
-- **macOS:** Xcode 26 or its Command Line Tools, and `brew install ffmpeg@8` with `FFMPEG_PKG_CONFIG_PATH=/opt/homebrew/opt/ffmpeg@8/lib/pkgconfig`.
+- **macOS:** Xcode 26 or its Command Line Tools, and `brew install ffmpeg@8` with `FFMPEG_PKG_CONFIG_PATH=/opt/homebrew/opt/ffmpeg@8/lib/pkgconfig`. To build against the LGPL ffmpeg the packages ship, run `packaging/ffmpeg/build.sh deps/ffmpeg-lgpl` and use `FFMPEG_PKG_CONFIG_PATH=$PWD/deps/ffmpeg-lgpl/lib/pkgconfig`.
 - **Linux:** the packages in `.github/workflows/ci.yml`, plus ffmpeg 8 development files. With clang 21 or newer, generate the bindings with `packaging/ffmpeg/bindings.sh <ffmpeg prefix> binding.rs` (needs `bindgen` 0.72) and build with `FFMPEG_DLL_PATH=<prefix>/lib FFMPEG_BINDING_PATH=binding.rs`.
 - **Windows:** ffmpeg 8 development files found through `FFMPEG_PKG_CONFIG_PATH` or vcpkg.
 

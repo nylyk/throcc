@@ -47,11 +47,4 @@ mod tests {
         assert_eq!(safety_number(&[1; 32], &counting()), expected);
         assert_eq!(safety_number(&counting(), &[1; 32]), expected);
     }
-
-    #[test]
-    fn is_sixty_digits() {
-        let number = safety_number(&[1; 32], &[2; 32]);
-        assert_eq!(number.len(), 60);
-        assert!(number.bytes().all(|b| b.is_ascii_digit()));
-    }
 }

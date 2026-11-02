@@ -166,6 +166,7 @@ fn verify(key: &[u8; 32], transcript: &[u8], tag: &[u8; 32]) -> Result<(), PakeE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hex;
     use rand_core::{CryptoRng, RngCore};
 
     /// A seeded stand-in for the OS RNG, so a whole SPAKE2 run is reproducible.
@@ -237,6 +238,21 @@ mod tests {
     }
 
     #[test]
+    fn a_forged_confirm_a_is_refused() {
+        let (_, pake_a) = ClientPake::start("K7Q", "M2XPD");
+        let server = ServerPake::respond("K7Q", "M2XPD", &pake_a).unwrap();
+        let confirm = server.confirm(&transcript(&pake_a, &server.pake_b, &[5; 32]));
+        assert_eq!(
+            confirm.check_confirm_a(&confirm.confirm_b),
+            Err(PakeError::Confirmation)
+        );
+        assert_eq!(
+            confirm.check_confirm_a(&[0; 32]),
+            Err(PakeError::Confirmation)
+        );
+    }
+
+    #[test]
     fn different_tls_exporter_fails_at_the_client() {
         assert_eq!(run("M2XPD", "M2XPD", [6; 32]), Err(PakeError::Confirmation));
     }
@@ -263,7 +279,6 @@ mod tests {
             "K7Q",
             "M2XPD",
         );
-        let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
         assert_eq!(
             hex(&pake_a),
             "41bac7d1092946476da64a1878384f9d38f455baec30131d726374561bf50a42df"
@@ -287,13 +302,12 @@ mod tests {
     fn confirmation_tags_are_pinned() {
         let t = transcript(&[6; 32], &[7; 32], &[5; 32]).to_bytes();
         let keys = ConfirmKeys::derive(&[9; 32], &t);
-        let hex = |tag: [u8; 32]| tag.map(|b| format!("{b:02x}")).concat();
         assert_eq!(
-            hex(mac(&keys.a, &t)),
+            hex(&mac(&keys.a, &t)),
             "b2b93f7d6ed5a2f63448f19105da720986925d0178d6e2abefbd5470a6eaa3c3"
         );
         assert_eq!(
-            hex(mac(&keys.b, &t)),
+            hex(&mac(&keys.b, &t)),
             "ea8af693a860f75877ec752cac0d6e7b086e0969a426b46105d53522875da3d7"
         );
     }

@@ -20,7 +20,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 #[derive(Parser)]
 #[command(about = "Headless throcc client")]
 struct Cli {
-    /// Directory holding this client's keys. Defaults to the platform data directory.
+    /// Directory for this client's keys, servers and settings. Without it the identity key is in
+    /// the OS keychain and the rest in the platform config directory.
     #[arg(long, global = true)]
     profile: Option<PathBuf>,
     #[command(subcommand)]

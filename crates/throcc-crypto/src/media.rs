@@ -135,9 +135,8 @@ mod tests {
         let mut out = Vec::new();
         key.seal(&header(1), &[b"throcc"], &mut out).unwrap();
         assert_eq!(out, seal_with_ring(&[0x42; 32], &header(1), b"throcc"));
-        let hex: String = out.iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(
-            hex,
+            crate::hex(&out),
             "00000007000000030000000106f8e2e7162665ddc39b31c48f1ecc0fb414e005aa3c92"
         );
     }

@@ -2,7 +2,8 @@ target
 fuzz/target
 fuzz/corpus
 fuzz/artifacts
+deps
+result
+ci-run.log
 .git
-*.html
-target-screens
 .claude

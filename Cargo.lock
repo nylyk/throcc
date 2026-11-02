@@ -7747,8 +7747,6 @@ dependencies = [
  "gpui-pre-wgpu",
  "gpui-pre-windows",
  "image",
- "libc",
- "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "raw-window-handle",
  "smallvec",
@@ -7812,6 +7810,7 @@ dependencies = [
  "sha2 0.11.1",
  "spake2",
  "thiserror 2.0.21",
+ "throcc-crypto",
  "throcc-proto",
  "zeroize",
 ]

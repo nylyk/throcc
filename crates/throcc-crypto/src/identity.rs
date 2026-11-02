@@ -86,6 +86,7 @@ pub fn random<const N: usize>() -> [u8; N] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hex;
 
     #[test]
     fn signatures_verify_and_bind_the_message() {
@@ -95,10 +96,6 @@ mod tests {
         assert_eq!(verify(&key.public(), &message, &signature), Ok(()));
         let other = auth_message(&[1; 32], &[2; 32], &[4; 32]);
         assert_eq!(verify(&key.public(), &other, &signature), Err(BadSignature));
-    }
-
-    fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     #[test]
