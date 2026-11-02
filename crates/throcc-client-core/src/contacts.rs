@@ -2,14 +2,16 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::UserId;
 use throcc_proto::messages::PublicKey;
 
-use crate::servers::{Hex, SavedContact, Servers};
+use crate::servers::Servers;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Contact {
+    #[serde(with = "crate::servers::hex32")]
     pub key: PublicKey,
     pub verified: bool,
 }
@@ -30,18 +32,7 @@ pub struct Contacts {
 
 impl Contacts {
     pub fn load(dir: &Path, server: &Fingerprint) -> Result<Self> {
-        let pins = Servers::load(dir)?
-            .take(server)
-            .contacts
-            .into_iter()
-            .map(|(user, c)| {
-                let contact = Contact {
-                    key: c.key.0,
-                    verified: c.verified,
-                };
-                (user, contact)
-            })
-            .collect();
+        let pins = Servers::load(dir)?.take(server).contacts;
         Ok(Self {
             dir: dir.to_owned(),
             server: *server,
@@ -80,13 +71,9 @@ impl Contacts {
     }
 
     fn keep(&mut self, user: UserId, contact: Contact) -> Result<()> {
-        let saved = SavedContact {
-            key: Hex(contact.key),
-            verified: contact.verified,
-        };
         self.pins.insert(user, contact);
         Servers::update(&self.dir, |s| {
-            s.server_mut(&self.server).contacts.insert(user, saved);
+            s.server_mut(&self.server).contacts.insert(user, contact);
         })
     }
 }

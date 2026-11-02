@@ -691,8 +691,8 @@ impl ThroccApp {
             user,
             window: window.window_handle(),
             position,
-            voice: Self::playback_control(Sound::Voice, person.voice, cx),
-            share: Self::playback_control(Sound::Share, person.share_audio, cx),
+            voice: Self::playback_control(Sound::Voice, person.playback.voice, cx),
+            share: Self::playback_control(Sound::Share, person.playback.share, cx),
         });
         cx.notify();
     }

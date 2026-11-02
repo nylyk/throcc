@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use throcc_proto::ids::Hash;
 
-use crate::keystore::replace_file;
+use crate::files::replace_file;
 
 const DIR: &str = "avatars";
 /// How long a cached picture stays after it was last used.

@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
-use throcc_crypto::hpke::EncKeyPair;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{MediaId, RoomId, UserId};
 use throcc_proto::messages::{Event, Placed, Request, Response, Welcome};
@@ -10,7 +9,7 @@ use tracing::warn;
 
 use crate::connection::Connected;
 use crate::contacts::Contacts;
-use crate::control::{Link, Requester};
+use crate::control::{self, Link, Requester};
 use crate::keys::KeyNotice;
 use crate::keystore::Keystore;
 use crate::media::engine::MediaEngine;
@@ -44,7 +43,7 @@ impl Call {
             events: mut server_events,
         } = link;
         let connection = connected.connection.clone();
-        let enc = EncKeyPair::from_secret(&keystore.enc_key().secret())?;
+        let enc = keystore.enc_key_pair()?;
         let contacts = Contacts::load(keystore.dir(), &connected.fingerprint)?;
         let (engine, mut engine_requests, recovery) = MediaEngine::start(
             connection.clone(),
@@ -134,8 +133,7 @@ impl Call {
                 let notices = self.engine.placed(&placed);
                 Ok((placed, notices))
             }
-            Response::Err { message, .. } => bail!("{message}"),
-            other => bail!("unexpected reply {other:?}"),
+            other => bail!("{}", control::refusal(other)),
         }
     }
 }

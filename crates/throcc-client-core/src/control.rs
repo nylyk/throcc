@@ -60,9 +60,7 @@ pub async fn login(
     identity: &IdentityKey,
     want_room: Option<RoomId>,
 ) -> Result<Link, LoginError> {
-    let (mut send, mut recv) = open(&connected).await?;
-    let hello: ServerHello = read(&mut recv).await?;
-    check_protocol(&connected, &hello)?;
+    let (mut send, recv, hello) = greet(&connected).await?;
     let client_nonce: [u8; 32] = random();
     let message = identity::auth_message(&hello.nonce, &client_nonce, &connected.exporter);
     let auth = Hello::Auth {
@@ -81,9 +79,7 @@ pub async fn enroll(
     identity: &IdentityKey,
     code: &InviteCode,
 ) -> Result<Link, LoginError> {
-    let (mut send, mut recv) = open(&connected).await?;
-    let hello: ServerHello = read(&mut recv).await?;
-    check_protocol(&connected, &hello)?;
+    let (mut send, mut recv, hello) = greet(&connected).await?;
     let client_nonce: [u8; 32] = random();
     let pubkey = identity.public();
     let (pake, pake_a) = ClientPake::start(&code.id, &code.secret);
@@ -124,21 +120,24 @@ pub async fn enroll(
     finish_login(connected, send, recv).await
 }
 
-async fn open(connected: &Connected) -> Result<(quinn::SendStream, quinn::RecvStream), LoginError> {
-    tokio::time::timeout(HANDSHAKE_TIMEOUT, connected.connection.accept_bi())
-        .await
-        .map_err(|_| LoginError::Closed)?
-        .map_err(|_| LoginError::Closed)
-}
-
-fn check_protocol(connected: &Connected, hello: &ServerHello) -> Result<(), LoginError> {
+/// Accepts the control stream the server opens and reads its hello, which must speak our
+/// protocol.
+async fn greet(
+    connected: &Connected,
+) -> Result<(quinn::SendStream, quinn::RecvStream, ServerHello), LoginError> {
+    let (send, mut recv) =
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, connected.connection.accept_bi())
+            .await
+            .map_err(|_| LoginError::Closed)?
+            .map_err(|_| LoginError::Closed)?;
+    let hello: ServerHello = read(&mut recv).await?;
     if hello.protocol != PROTOCOL {
         connected
             .connection
             .close(close::PROTOCOL_ERROR.into(), b"protocol mismatch");
         return Err(LoginError::Protocol(hello.protocol));
     }
-    Ok(())
+    Ok((send, recv, hello))
 }
 
 async fn finish_login(
@@ -168,8 +167,8 @@ async fn read<T: DeserializeOwned>(recv: &mut quinn::RecvStream) -> Result<T, Lo
         .await
         .map_err(|_| LoginError::Closed)?
         .map_err(|e| match e {
-            ReadError::Closed => LoginError::Closed,
-            ReadError::Frame(e) => LoginError::Malformed(e),
+            StreamError::Closed => LoginError::Closed,
+            StreamError::Frame(e) => LoginError::Malformed(e),
         })
 }
 
@@ -180,7 +179,7 @@ async fn write<T: Serialize>(send: &mut quinn::SendStream, message: &T) -> Resul
 }
 
 #[derive(Debug, thiserror::Error)]
-enum ReadError {
+enum StreamError {
     #[error("stream closed")]
     Closed,
     #[error(transparent)]
@@ -188,24 +187,26 @@ enum ReadError {
 }
 
 /// Reads one frame. The body is allocated only after its length passes the cap.
-async fn read_frame<T: DeserializeOwned>(recv: &mut quinn::RecvStream) -> Result<T, ReadError> {
+async fn read_frame<T: DeserializeOwned>(recv: &mut quinn::RecvStream) -> Result<T, StreamError> {
     let mut header = [0u8; LEN_BYTES];
     recv.read_exact(&mut header)
         .await
-        .map_err(|_| ReadError::Closed)?;
+        .map_err(|_| StreamError::Closed)?;
     let mut body = vec![0u8; framing::body_len(header)?];
     recv.read_exact(&mut body)
         .await
-        .map_err(|_| ReadError::Closed)?;
+        .map_err(|_| StreamError::Closed)?;
     Ok(framing::decode(&body)?)
 }
 
 async fn write_frame<T: Serialize>(
     send: &mut quinn::SendStream,
     message: &T,
-) -> Result<(), ReadError> {
+) -> Result<(), StreamError> {
     let frame = framing::encode(message)?;
-    send.write_all(&frame).await.map_err(|_| ReadError::Closed)
+    send.write_all(&frame)
+        .await
+        .map_err(|_| StreamError::Closed)
 }
 
 #[derive(Default)]
@@ -231,6 +232,22 @@ impl Pending {
     fn close(&mut self) {
         self.closed = true;
         self.waiting.clear();
+    }
+}
+
+/// `Ok(())` for [`Response::Ok`], otherwise why not, in the server's words where it gave some.
+pub fn expect_ok(response: Response) -> Result<(), String> {
+    match response {
+        Response::Ok => Ok(()),
+        other => Err(refusal(other)),
+    }
+}
+
+/// Why the server answered `response` instead of what was asked for.
+pub fn refusal(response: Response) -> String {
+    match response {
+        Response::Err { message, .. } => message,
+        other => format!("unexpected reply {other:?}"),
     }
 }
 
@@ -284,8 +301,8 @@ fn spawn_link(
         loop {
             let message = match read_frame::<ServerMessage>(&mut recv).await {
                 Ok(message) => message,
-                Err(ReadError::Closed) => break,
-                Err(ReadError::Frame(e)) => {
+                Err(StreamError::Closed) => break,
+                Err(StreamError::Frame(e)) => {
                     warn!("protocol error from server: {e}");
                     reader_connection.close(close::PROTOCOL_ERROR.into(), e.to_string().as_bytes());
                     break;

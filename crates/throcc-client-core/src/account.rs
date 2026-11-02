@@ -1,10 +1,10 @@
 use throcc_proto::Fingerprint;
-use throcc_proto::ids::RoomId;
+use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::invite::InviteCode;
-use throcc_proto::messages::{Request, Response};
+use throcc_proto::messages::Request;
 
 use crate::connection::{self, ConnectError};
-use crate::control::{self, Link, LinkError, LoginError};
+use crate::control::{self, Link, LinkError, LoginError, Requester};
 use crate::keystore::Keystore;
 
 #[derive(Debug, thiserror::Error)]
@@ -47,7 +47,8 @@ pub async fn sign_in(
         .ok_or_else(|| SignInError::NotEnrolled(address.to_owned()))?;
     let connected = connection::connect(address, Some(pin)).await?;
     let link = control::login(connected, keystore.identity(), want_room).await?;
-    publish_enc_key(keystore, &link).await?;
+    let server = &link.connected.fingerprint;
+    publish_enc_key(keystore, &link.requester, server, link.welcome.me).await?;
     Ok(link)
 }
 
@@ -62,15 +63,19 @@ pub async fn enroll(
     keystore
         .known_servers
         .trust(address, link.connected.fingerprint)?;
-    publish_enc_key(keystore, &link).await?;
+    let server = &link.connected.fingerprint;
+    publish_enc_key(keystore, &link.requester, server, link.welcome.me).await?;
     Ok(link)
 }
 
-async fn publish_enc_key(keystore: &Keystore, link: &Link) -> Result<(), SignInError> {
-    let signed = keystore.signed_enc_key(&link.connected.fingerprint, link.welcome.me);
-    match link.requester.request(Request::SetEncKey(signed)).await? {
-        Response::Ok => Ok(()),
-        Response::Err { message, .. } => Err(SignInError::EncKey(message)),
-        other => Err(SignInError::EncKey(format!("unexpected reply {other:?}"))),
-    }
+/// Gives `server` our encryption key, signed for it and for us as `me`.
+pub(crate) async fn publish_enc_key(
+    keystore: &Keystore,
+    requester: &Requester,
+    server: &Fingerprint,
+    me: UserId,
+) -> Result<(), SignInError> {
+    let signed = keystore.signed_enc_key(server, me);
+    let response = requester.request(Request::SetEncKey(signed)).await?;
+    control::expect_ok(response).map_err(SignInError::EncKey)
 }

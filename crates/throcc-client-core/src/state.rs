@@ -3,7 +3,12 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
-use throcc_proto::messages::{Codec, ShareConfig};
+use throcc_proto::messages::{Codec, Room, ShareConfig};
+
+pub(crate) const MIC_KBPS: u32 = 64;
+pub(crate) const SHARE_AUDIO_KBPS: u32 = 128;
+pub(crate) const VOICE_DETAIL: &str = "Opus voice, mono";
+pub(crate) const SHARE_AUDIO_DETAIL: &str = "Opus music, stereo";
 
 /// Everything the UI shows, rebuilt by the core and sent whole after every change.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -40,6 +45,10 @@ impl State {
     pub fn room(&self, room: RoomId) -> Option<&RoomView> {
         self.rooms.iter().find(|r| r.id == room)
     }
+
+    pub fn room_mut(&mut self, room: RoomId) -> Option<&mut RoomView> {
+        self.rooms.iter_mut().find(|r| r.id == room)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -62,7 +71,6 @@ impl ServerView {
 pub enum ConnectionStatus {
     #[default]
     Disconnected,
-    Connecting,
     Connected,
     Reconnecting {
         attempt: u32,
@@ -79,6 +87,16 @@ pub struct RoomView {
     pub locked: bool,
 }
 
+impl From<&Room> for RoomView {
+    fn from(room: &Room) -> Self {
+        Self {
+            id: room.id,
+            name: room.name.clone(),
+            locked: room.locked,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Person {
     pub name: String,
@@ -88,26 +106,9 @@ pub struct Person {
     pub deafened: bool,
     pub sharing: Option<ShareConfig>,
     pub speaking: bool,
-    pub voice: Playback,
-    pub share_audio: Playback,
+    pub playback: PersonPlayback,
     pub verified: bool,
     pub role: Role,
-}
-
-impl Person {
-    pub fn playback(&self, sound: Sound) -> Playback {
-        match sound {
-            Sound::Voice => self.voice,
-            Sound::Share => self.share_audio,
-        }
-    }
-
-    pub fn playback_mut(&mut self, sound: Sound) -> &mut Playback {
-        match sound {
-            Sound::Voice => &mut self.voice,
-            Sound::Share => &mut self.share_audio,
-        }
-    }
 }
 
 /// Which of someone's sounds a [`Playback`] is for.
@@ -115,6 +116,33 @@ impl Person {
 pub enum Sound {
     Voice,
     Share,
+}
+
+impl Sound {
+    pub const ALL: [Sound; 2] = [Sound::Voice, Sound::Share];
+}
+
+/// How loud one person's voice and share audio play.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PersonPlayback {
+    pub voice: Playback,
+    pub share: Playback,
+}
+
+impl PersonPlayback {
+    pub fn get(&self, sound: Sound) -> Playback {
+        match sound {
+            Sound::Voice => self.voice,
+            Sound::Share => self.share,
+        }
+    }
+
+    pub fn get_mut(&mut self, sound: Sound) -> &mut Playback {
+        match sound {
+            Sound::Voice => &mut self.voice,
+            Sound::Share => &mut self.share,
+        }
+    }
 }
 
 /// How loud one of someone's sounds plays on this machine. It is never sent.
@@ -299,7 +327,7 @@ impl ShareChoice {
     }
 }
 
-pub fn codec_name(codec: Codec) -> &'static str {
+fn codec_name(codec: Codec) -> &'static str {
     match codec {
         Codec::Av1 => "AV1",
         Codec::Hevc => "HEVC",

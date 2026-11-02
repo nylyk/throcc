@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use throcc_crypto::hpke::{self, EncKeyPair, WrapContext};
 use throcc_crypto::identity::{self, random};
@@ -14,7 +14,7 @@ use zeroize::Zeroizing;
 use crate::contacts::{ContactStatus, Contacts};
 
 /// How long a sender's previous epoch key stays usable after it moves on.
-pub const OLD_KEY_GRACE: Duration = Duration::from_secs(2);
+const OLD_KEY_GRACE: Duration = Duration::from_secs(2);
 /// How long our encryption key still unwraps secrets after a renewal replaced it.
 const RETIRED_ENC_KEPT: Duration = OLD_KEY_GRACE.saturating_mul(5);
 const MAX_EARLY: usize = 64;
@@ -146,7 +146,8 @@ impl KeyManager {
     }
 
     /// True when the room state last applied gives `user` the identity key `key`.
-    pub fn presents(&self, user: UserId, key: &PublicKey) -> bool {
+    #[cfg(test)]
+    fn presents(&self, user: UserId, key: &PublicKey) -> bool {
         self.room_peers
             .iter()
             .any(|p| p.user == user && p.identity_key == *key)
@@ -257,22 +258,18 @@ impl KeyManager {
             self.trusted_peers(room, peers, contacts)
         };
         self.room_peers = peers.to_vec();
-        for (user, _) in self
+        let departed: Vec<UserId> = self
             .peers
-            .iter()
-            .filter(|(user, _)| !trusted.contains_key(*user))
-        {
-            for ((from, _), received) in self.received.iter_mut() {
-                if from == user && received.retire_at.is_none() {
-                    received.retire_at = Some(now + OLD_KEY_GRACE);
-                }
-            }
-        }
+            .keys()
+            .filter(|user| !trusted.contains_key(*user))
+            .copied()
+            .collect();
+        self.retire_received(now, |from, _| departed.contains(&from));
         self.peers = trusted;
         self.owners = self
             .peers
             .iter()
-            .flat_map(|(user, peer)| track_ids(&peer.tracks).into_iter().map(|id| (id, *user)))
+            .flat_map(|(user, peer)| track_ids(&peer.tracks).map(|id| (id, *user)))
             .collect();
 
         let peer_set: BTreeSet<UserId> = self.peers.keys().copied().collect();
@@ -312,9 +309,7 @@ impl KeyManager {
     ) -> (BTreeMap<UserId, Peer>, Vec<KeyNotice>) {
         let mut notices = Vec::new();
         let mut trusted = BTreeMap::new();
-        let unix_now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
+        let unix_now = crate::unix_now().unwrap_or(0);
         let shown = |p: &&RoomPeer| p.user != self.me && self.present.get(&p.user) == Some(&room);
         for peer in peers.iter().filter(shown) {
             let signed = &peer.enc_key;
@@ -358,11 +353,7 @@ impl KeyManager {
 
     fn start_epoch(&mut self, epoch: Epoch, now: Instant) {
         if epoch != self.epoch {
-            for ((_, old), received) in self.received.iter_mut() {
-                if *old < epoch && received.retire_at.is_none() {
-                    received.retire_at = Some(now + OLD_KEY_GRACE);
-                }
-            }
+            self.retire_received(now, |_, old| old < epoch);
             self.epoch = epoch;
             self.epoch_since = now;
         }
@@ -460,11 +451,7 @@ impl KeyManager {
                     None => Err(e),
                 }
             })?;
-        for ((user, old), received) in self.received.iter_mut() {
-            if *user == from && *old < epoch && received.retire_at.is_none() {
-                received.retire_at = Some(now + OLD_KEY_GRACE);
-            }
-        }
+        self.retire_received(now, |user, old| user == from && old < epoch);
         self.received
             .insert((from, epoch), Received { secret, retire_at });
         self.recv_keys
@@ -473,13 +460,22 @@ impl KeyManager {
         Ok(())
     }
 
+    /// Starts the grace period of the received secrets `which` picks, unless one has started.
+    fn retire_received(&mut self, now: Instant, which: impl Fn(UserId, Epoch) -> bool) {
+        for (&(from, epoch), received) in &mut self.received {
+            if which(from, epoch) && received.retire_at.is_none() {
+                received.retire_at = Some(now + OLD_KEY_GRACE);
+            }
+        }
+    }
+
     /// The key and epoch to send on one of our tracks.
     pub fn send_key(&self, media_id: MediaId) -> Option<(Epoch, Arc<TrackKey>)> {
         Some((self.epoch, self.send_keys.get(&media_id)?.clone()))
     }
 
     /// Who sends on `media_id`, among trusted peers.
-    pub fn owner(&self, media_id: MediaId) -> Option<UserId> {
+    fn owner(&self, media_id: MediaId) -> Option<UserId> {
         self.owners.get(&media_id).copied()
     }
 
@@ -518,10 +514,8 @@ impl KeyManager {
     }
 }
 
-pub fn track_ids(tracks: &Tracks) -> Vec<MediaId> {
-    std::iter::once(tracks.mic)
-        .chain(tracks.shares.iter().flat_map(|s| [s.video, s.audio]))
-        .collect()
+fn track_ids(tracks: &Tracks) -> impl Iterator<Item = MediaId> + '_ {
+    std::iter::once(tracks.mic).chain(tracks.shares.iter().flat_map(|s| [s.video, s.audio]))
 }
 
 #[cfg(test)]
@@ -566,10 +560,7 @@ mod tests {
     }
 
     fn unix_now() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
+        crate::unix_now().unwrap()
     }
 
     fn signed(m: &Member, not_after: u64) -> SignedEncKey {

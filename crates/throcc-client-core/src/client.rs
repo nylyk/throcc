@@ -1,16 +1,13 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
-use std::path::PathBuf;
+use throcc_crypto::safety;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
-use throcc_proto::messages::{Codec, ShareConfig, User};
-
-use throcc_crypto::safety;
 use throcc_proto::invite::InviteCode;
-use throcc_proto::messages::PublicKey;
-use tokio::sync::{broadcast, mpsc};
+use throcc_proto::messages::{Codec, PublicKey, ShareConfig, User};
+use tokio::sync::{broadcast, mpsc, watch};
 use tracing::warn;
 
 use crate::account::{self, SignInError};
@@ -23,15 +20,21 @@ use crate::media::audio::VoiceSettings;
 use crate::media::cues::Cue;
 use crate::media::video::Picture;
 use crate::media::video::frame::VideoFrame;
-pub use crate::session::ClientOptions;
-use crate::session::{Session, Shared};
-
+use crate::session::{AvatarSlot, Session, Shared};
 use crate::state::{
-    ConnectionStatus, CurrentRoom, Health, KeyWarning, Person, Playback, RoomView, SentTrack,
-    ServerView, Sound, State, TrackHealth,
+    ConnectionStatus, CurrentRoom, Health, KeyWarning, MIC_KBPS, Person, PersonPlayback, Playback,
+    RoomView, SHARE_AUDIO_DETAIL, SHARE_AUDIO_KBPS, SentTrack, ServerView, Sound, State,
+    TrackHealth, VOICE_DETAIL, share_detail,
 };
 
-const EVENTS: usize = 256;
+#[derive(Clone, Debug, Default)]
+pub struct ClientOptions {
+    pub voice: VoiceSettings,
+    pub input_device: Option<String>,
+    pub output_device: Option<String>,
+    /// Opens audio devices. Off for headless tests.
+    pub audio: bool,
+}
 
 /// What the UI asks the core to do. The core's own type, never `throcc-proto`'s.
 #[derive(Clone, Debug, PartialEq)]
@@ -179,15 +182,7 @@ impl Client {
                 warn!("removing unused cached pictures: {e:#}");
             }
         });
-        let (events, _) = broadcast::channel(EVENTS);
-        let shared = Arc::new(Shared {
-            state: Mutex::new(Arc::new(State::default())),
-            events,
-            pictures: Mutex::default(),
-            preview: Mutex::default(),
-            avatars: Mutex::default(),
-            mic_level: Mutex::default(),
-        });
+        let shared = Arc::new(Shared::new(State::default()));
         let (commands, commands_rx) = mpsc::channel(COMMANDS);
         let session = {
             let _guard = runtime.enter();
@@ -261,9 +256,9 @@ impl ClientApi for Client {
 
 /// A client with canned people and rooms that reacts to commands locally.
 pub struct MockClient {
-    state: Mutex<Arc<State>>,
-    events: broadcast::Sender<Event>,
-    avatars: Mutex<HashMap<Hash, Arc<[u8]>>>,
+    shared: Shared,
+    /// A test pattern every share shows.
+    picture: watch::Sender<Option<Arc<VideoFrame>>>,
     started: Instant,
 }
 
@@ -277,26 +272,22 @@ impl MockClient {
     /// Keeps `bytes` as a picture, as the server would, and returns its hash.
     fn keep_avatar(&self, bytes: Vec<u8>) -> Hash {
         let hash = Hash::of(&bytes);
-        lock(&self.avatars).insert(hash, bytes.into());
+        self.shared
+            .set_avatar(hash, AvatarSlot::Ready(bytes.into()));
         hash
     }
 
     pub fn new() -> Self {
-        let (events, _) = broadcast::channel(EVENTS);
+        let frame = VideoFrame::test_pattern(1280, 720, 1, 0);
         Self {
-            state: Mutex::new(Arc::new(sample_state())),
-            events,
-            avatars: Mutex::default(),
+            shared: Shared::new(sample_state()),
+            picture: watch::Sender::new(Some(Arc::new(frame))),
             started: Instant::now(),
         }
     }
 
     fn update(&self, change: impl FnOnce(&mut State)) {
-        let mut guard = lock(&self.state);
-        let mut state = (**guard).clone();
-        change(&mut state);
-        *guard = Arc::new(state);
-        self.events.send(Event::State(guard.clone())).ok();
+        self.shared.update(change);
     }
 
     fn me(&self) -> UserId {
@@ -361,7 +352,7 @@ impl ClientApi for MockClient {
             }),
             Command::SetPlayback(user, sound, playback) => self.update(|s| {
                 if let Some(p) = s.people.get_mut(&user) {
-                    *p.playback_mut(sound) = playback;
+                    *p.playback.get_mut(sound) = playback;
                 }
             }),
             Command::SetProfile { name, picture } => {
@@ -380,7 +371,7 @@ impl ClientApi for MockClient {
                         s.profile_picture = hash;
                     }
                 });
-                self.events.send(Event::ProfileSaved).ok();
+                self.shared.emit(Event::ProfileSaved);
             }
             Command::SetServerProfile { name, picture } => {
                 let hash = picture.map(|p| p.map(|bytes| self.keep_avatar(bytes)));
@@ -394,7 +385,7 @@ impl ClientApi for MockClient {
                         }
                     }
                 });
-                self.events.send(Event::ServerProfileSaved).ok();
+                self.shared.emit(Event::ServerProfileSaved);
             }
             Command::FetchAvatar(_) => {}
             Command::CreateRoom(name, password) => self.update(|s| {
@@ -406,12 +397,12 @@ impl ClientApi for MockClient {
                 });
             }),
             Command::RenameRoom(room, name) => self.update(|s| {
-                if let Some(r) = s.rooms.iter_mut().find(|r| r.id == room) {
+                if let Some(r) = s.room_mut(room) {
                     r.name = name;
                 }
             }),
             Command::SetRoomPassword(room, password) => self.update(|s| {
-                if let Some(r) = s.rooms.iter_mut().find(|r| r.id == room) {
+                if let Some(r) = s.room_mut(room) {
                     r.locked = password.is_some();
                 }
             }),
@@ -430,16 +421,12 @@ impl ClientApi for MockClient {
                     s.current = None;
                 }
             }),
-            Command::CreateInvite => {
-                self.events
-                    .send(Event::Invite {
-                        code: "K7Q-M2XPD".into(),
-                        expires: 0,
-                    })
-                    .ok();
-            }
+            Command::CreateInvite => self.shared.emit(Event::Invite {
+                code: "K7Q-M2XPD".into(),
+                expires: 0,
+            }),
             Command::ListUsers | Command::SetRole(..) | Command::RemoveUser { .. } => {
-                self.events.send(Event::Users(sample_users())).ok();
+                self.shared.emit(Event::Users(sample_users()));
             }
             Command::SetVerified(user, verified) => self.update(|s| {
                 if let Some(p) = s.people.get_mut(&user) {
@@ -453,18 +440,18 @@ impl ClientApi for MockClient {
             | Command::PlayCue(_) => {}
             Command::LeaveServer => {
                 self.update(|s| s.connection = ConnectionStatus::Disconnected);
-                self.events.send(Event::LeftServer).ok();
+                self.shared.emit(Event::LeftServer);
             }
             Command::Disconnect => self.update(|s| s.connection = ConnectionStatus::Disconnected),
         }
     }
 
     fn events(&self) -> broadcast::Receiver<Event> {
-        self.events.subscribe()
+        self.shared.events.subscribe()
     }
 
     fn state(&self) -> Arc<State> {
-        lock(&self.state).clone()
+        self.shared.state()
     }
 
     fn safety_number(&self, _user: UserId) -> Option<String> {
@@ -472,15 +459,15 @@ impl ClientApi for MockClient {
     }
 
     fn picture(&self, _user: UserId) -> Option<Picture> {
-        let frame = VideoFrame::test_pattern(1280, 720, 1, 0);
-        Some(tokio::sync::watch::channel(Some(Arc::new(frame))).1)
+        Some(self.picture.subscribe())
     }
 
     fn avatar(&self, hash: Hash) -> Option<Arc<[u8]>> {
-        lock(&self.avatars).get(&hash).cloned()
+        self.shared.avatar(hash).0
     }
+
     fn mic_level(&self) -> Option<f32> {
-        let wave = Instant::now().duration_since(self.started).as_secs_f32() * 3.0;
+        let wave = self.started.elapsed().as_secs_f32() * 3.0;
         Some(-38.0 + 14.0 * wave.sin())
     }
 }
@@ -500,8 +487,7 @@ fn person(name: &str, room: Option<u64>) -> Person {
         deafened: false,
         sharing: None,
         speaking: false,
-        voice: Playback::default(),
-        share_audio: Playback::default(),
+        playback: PersonPlayback::default(),
         verified: false,
         role: Role::User,
     }
@@ -582,37 +568,37 @@ fn sample_state() -> State {
             receiving: vec![
                 TrackHealth {
                     label: "Ilse, screen".into(),
-                    detail: "AV1 · 2560×1440 · 60 fps · VideoToolbox".into(),
-                    set_kbps: Some(10_000),
+                    detail: share_detail(&ilse_share, "VideoToolbox"),
+                    set_kbps: Some(ilse_share.kbps),
                     arriving_kbps: Some(6_100),
                     loss: Some(4.2),
                 },
                 TrackHealth {
                     label: "Ilse, screen audio".into(),
-                    detail: "Opus music, stereo".into(),
-                    set_kbps: Some(128),
+                    detail: SHARE_AUDIO_DETAIL.into(),
+                    set_kbps: Some(SHARE_AUDIO_KBPS),
                     arriving_kbps: Some(128),
                     loss: Some(0.0),
                 },
                 TrackHealth {
                     label: "Mara, mic".into(),
-                    detail: "Opus voice, mono".into(),
-                    set_kbps: Some(64),
+                    detail: VOICE_DETAIL.into(),
+                    set_kbps: Some(MIC_KBPS),
                     arriving_kbps: Some(61),
                     loss: Some(0.3),
                 },
                 TrackHealth {
                     label: "Jonas, mic".into(),
-                    detail: "Opus voice, mono".into(),
-                    set_kbps: Some(64),
+                    detail: VOICE_DETAIL.into(),
+                    set_kbps: Some(MIC_KBPS),
                     arriving_kbps: None,
                     loss: None,
                 },
             ],
             sending: vec![SentTrack {
                 label: "mic",
-                detail: "Opus voice, mono".into(),
-                set_kbps: 64,
+                detail: VOICE_DETAIL.into(),
+                set_kbps: MIC_KBPS,
                 leaving_kbps: 61,
                 dropped: None,
             }],

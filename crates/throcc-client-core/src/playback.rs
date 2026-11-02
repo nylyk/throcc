@@ -1,42 +1,22 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::UserId;
+use tracing::warn;
 
 use crate::servers::Servers;
-use crate::state::{MAX_VOLUME, Playback, Sound};
-
-/// How loud one person's voice and share audio play.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct PersonPlayback {
-    pub voice: Playback,
-    pub share: Playback,
-}
-
-impl PersonPlayback {
-    fn get(&self, sound: Sound) -> Playback {
-        match sound {
-            Sound::Voice => self.voice,
-            Sound::Share => self.share,
-        }
-    }
-
-    fn get_mut(&mut self, sound: Sound) -> &mut Playback {
-        match sound {
-            Sound::Voice => &mut self.voice,
-            Sound::Share => &mut self.share,
-        }
-    }
-}
+use crate::state::{MAX_VOLUME, PersonPlayback, Playback, Sound};
 
 /// How loud each person's voice and share audio play, kept per server on this computer.
+/// Changes reach the file on [`SavedPlayback::save`] and on drop, not at every step of a
+/// dragged slider.
 pub struct SavedPlayback {
     dir: PathBuf,
     server: Fingerprint,
     people: BTreeMap<UserId, PersonPlayback>,
+    unsaved: BTreeSet<UserId>,
 }
 
 impl SavedPlayback {
@@ -45,6 +25,7 @@ impl SavedPlayback {
             dir: dir.to_owned(),
             server: *server,
             people: BTreeMap::new(),
+            unsaved: BTreeSet::new(),
         }
     }
 
@@ -52,7 +33,7 @@ impl SavedPlayback {
         let mut saved = Self::empty(dir, server);
         saved.people = Servers::load(dir)?.take(server).playback;
         for person in saved.people.values_mut() {
-            for sound in [Sound::Voice, Sound::Share] {
+            for sound in Sound::ALL {
                 let playback = person.get_mut(sound);
                 playback.volume = playback.volume.clamp(0.0, MAX_VOLUME);
             }
@@ -60,34 +41,51 @@ impl SavedPlayback {
         Ok(saved)
     }
 
-    pub fn get(&self, user: UserId, sound: Sound) -> Playback {
-        self.people
-            .get(&user)
-            .map_or_else(Playback::default, |p| p.get(sound))
+    pub fn person(&self, user: UserId) -> PersonPlayback {
+        self.people.get(&user).copied().unwrap_or_default()
     }
 
     /// Both sounds of everyone saved.
     pub fn iter(&self) -> impl Iterator<Item = (UserId, Sound, Playback)> + '_ {
-        self.people.iter().flat_map(|(user, p)| {
-            [Sound::Voice, Sound::Share].map(|sound| (*user, sound, p.get(sound)))
-        })
+        self.people
+            .iter()
+            .flat_map(|(user, p)| Sound::ALL.map(|sound| (*user, sound, p.get(sound))))
     }
 
-    pub fn set(&mut self, user: UserId, sound: Sound, playback: Playback) -> Result<()> {
-        let mut person = self.people.get(&user).copied().unwrap_or_default();
+    pub fn set(&mut self, user: UserId, sound: Sound, playback: Playback) {
+        let mut person = self.person(user);
         *person.get_mut(sound) = playback;
-        let kept = (person != PersonPlayback::default()).then_some(person);
-        match kept {
-            Some(person) => self.people.insert(user, person),
-            None => self.people.remove(&user),
-        };
+        if person == PersonPlayback::default() {
+            self.people.remove(&user);
+        } else {
+            self.people.insert(user, person);
+        }
+        self.unsaved.insert(user);
+    }
+
+    /// Writes the changes made since the last save.
+    pub fn save(&mut self) -> Result<()> {
+        if self.unsaved.is_empty() {
+            return Ok(());
+        }
+        let unsaved = std::mem::take(&mut self.unsaved);
         Servers::update(&self.dir, |s| {
-            let people = &mut s.server_mut(&self.server).playback;
-            match kept {
-                Some(person) => people.insert(user, person),
-                None => people.remove(&user),
-            };
+            let kept = &mut s.server_mut(&self.server).playback;
+            for user in unsaved {
+                match self.people.get(&user) {
+                    Some(person) => kept.insert(user, *person),
+                    None => kept.remove(&user),
+                };
+            }
         })
+    }
+}
+
+impl Drop for SavedPlayback {
+    fn drop(&mut self) {
+        if let Err(e) = self.save() {
+            warn!("saving playback: {e:#}");
+        }
     }
 }
 
@@ -108,15 +106,26 @@ mod tests {
             muted: true,
         };
         let mut saved = SavedPlayback::load(dir.path(), &server).unwrap();
-        saved.set(UserId(4), Sound::Voice, quiet).unwrap();
-        saved.set(UserId(4), Sound::Share, muted).unwrap();
+        saved.set(UserId(4), Sound::Voice, quiet);
+        saved.set(UserId(4), Sound::Share, muted);
+        assert_eq!(
+            SavedPlayback::load(dir.path(), &server)
+                .unwrap()
+                .person(UserId(4)),
+            PersonPlayback::default(),
+            "nothing is written before a save"
+        );
+        saved.save().unwrap();
 
         let saved = SavedPlayback::load(dir.path(), &server).unwrap();
-        assert_eq!(saved.get(UserId(4), Sound::Voice), quiet);
-        assert_eq!(saved.get(UserId(4), Sound::Share), muted);
-        assert_eq!(saved.get(UserId(5), Sound::Voice), Playback::default());
+        let expected = PersonPlayback {
+            voice: quiet,
+            share: muted,
+        };
+        assert_eq!(saved.person(UserId(4)), expected);
+        assert_eq!(saved.person(UserId(5)), PersonPlayback::default());
         let other = SavedPlayback::load(dir.path(), &Fingerprint([8; 32])).unwrap();
-        assert_eq!(other.get(UserId(4), Sound::Voice), Playback::default());
+        assert_eq!(other.person(UserId(4)), PersonPlayback::default());
     }
 
     #[test]
@@ -128,10 +137,12 @@ mod tests {
             volume: 0.5,
             muted: false,
         };
-        saved.set(UserId(4), Sound::Voice, quiet).unwrap();
-        saved
-            .set(UserId(4), Sound::Voice, Playback::default())
-            .unwrap();
+        saved.set(UserId(4), Sound::Voice, quiet);
+        saved.save().unwrap();
+        saved.set(UserId(4), Sound::Voice, Playback::default());
         assert_eq!(saved.iter().count(), 0);
+        drop(saved);
+        let saved = SavedPlayback::load(dir.path(), &server).unwrap();
+        assert_eq!(saved.iter().count(), 0, "a drop saves what changed");
     }
 }

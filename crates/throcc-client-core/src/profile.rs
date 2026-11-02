@@ -1,11 +1,9 @@
-use std::fs;
-use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
-use crate::keystore::replace_file;
+use crate::files::{read_if_exists, remove_if_exists, replace_file};
 use crate::settings::Settings;
 
 const PICTURE_FILE: &str = "profile_picture";
@@ -24,12 +22,7 @@ impl Profile {
             .profile_name
             .map(|name| name.trim().to_owned())
             .filter(|name| !name.is_empty());
-        let path = dir.join(PICTURE_FILE);
-        let picture = match fs::read(&path) {
-            Ok(bytes) => Some(bytes.into()),
-            Err(e) if e.kind() == ErrorKind::NotFound => None,
-            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-        };
+        let picture = read_if_exists(&dir.join(PICTURE_FILE))?.map(Arc::from);
         Ok(Self { name, picture })
     }
 
@@ -38,12 +31,7 @@ impl Profile {
         let path = dir.join(PICTURE_FILE);
         match &self.picture {
             Some(bytes) => replace_file(&path, bytes),
-            None => match fs::remove_file(&path) {
-                Err(e) if e.kind() != ErrorKind::NotFound => {
-                    Err(e).with_context(|| format!("removing {}", path.display()))
-                }
-                _ => Ok(()),
-            },
+            None => remove_if_exists(&path),
         }
     }
 }

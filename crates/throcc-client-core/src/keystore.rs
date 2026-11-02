@@ -1,7 +1,6 @@
 use std::fs;
-use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use throcc_crypto::hpke::EncKeyPair;
@@ -12,7 +11,9 @@ use throcc_proto::messages::SignedEncKey;
 use tracing::warn;
 use zeroize::Zeroizing;
 
+use crate::files::{read_if_exists, write_private};
 use crate::known_servers::KnownServers;
+use crate::unix_now;
 
 const KEYCHAIN_SERVICE: &str = "throcc";
 const KEYCHAIN_IDENTITY: &str = "identity";
@@ -83,6 +84,11 @@ impl Keystore {
         &self.enc_key
     }
 
+    /// A copy of the encryption key, for a key manager to hold.
+    pub fn enc_key_pair(&self) -> Result<EncKeyPair> {
+        Ok(EncKeyPair::from_secret(&self.enc_key.secret())?)
+    }
+
     /// Replaces the encryption key when it expires within a week. True if it was replaced.
     pub fn renew_enc_key_if_due(&mut self) -> Result<bool> {
         let now = unix_now()?;
@@ -128,10 +134,6 @@ pub fn cache_dir() -> Result<PathBuf> {
 fn project_dirs() -> Result<directories::ProjectDirs> {
     directories::ProjectDirs::from("", "", "throcc")
         .context("no home directory to keep throcc's data in")
-}
-
-fn unix_now() -> Result<u64> {
-    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
 
 fn renewal_due(created: u64, now: u64) -> bool {
@@ -190,14 +192,13 @@ fn fallback_identity(dir: &Path) -> Result<IdentityKey> {
 
 fn file_identity(dir: &Path) -> Result<IdentityKey> {
     let path = dir.join(IDENTITY_FILE);
-    match fs::read(&path) {
-        Ok(bytes) => seed_to_key(&Zeroizing::new(bytes)),
-        Err(e) if e.kind() == ErrorKind::NotFound => {
+    match read_if_exists(&path)? {
+        Some(bytes) => seed_to_key(&Zeroizing::new(bytes)),
+        None => {
             let key = IdentityKey::generate();
             write_private(&path, key.seed().as_slice())?;
             Ok(key)
         }
-        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
 }
 
@@ -206,26 +207,6 @@ fn seed_to_key(bytes: &[u8]) -> Result<IdentityKey> {
         bail!("the stored identity key is corrupt");
     };
     Ok(IdentityKey::from_seed(seed))
-}
-
-pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("writing {}", path.display()))?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(())
-}
-
-/// Replaces the contents of `path` with `bytes` in one step, as a 0600 file.
-pub(crate) fn replace_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("tmp");
-    write_private(&tmp, bytes)?;
-    fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
 }
 
 #[cfg(test)]

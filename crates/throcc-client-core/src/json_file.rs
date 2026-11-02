@@ -1,5 +1,4 @@
 use std::fs;
-use std::io::ErrorKind;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -7,16 +6,14 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::keystore::replace_file;
+use crate::files::{read_if_exists, replace_file};
 
 const VERSION: u64 = 1;
 
 /// The contents of the JSON file at `path`, the default where there is none.
 pub fn load<T: DeserializeOwned + Default>(path: &Path) -> Result<T> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(T::default()),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    let Some(bytes) = read_if_exists(path)? else {
+        return Ok(T::default());
     };
     let read = || -> Result<T> {
         let mut value: Value = serde_json::from_slice(&bytes)?;
