@@ -65,4 +65,4 @@ Each crate's `README.md` explains its modules and how they fit together. Update 
 
 ## Review baseline
 
-The whole workspace was simplified, deep-reviewed line by line and security-reviewed through commit `1ee9e2c5a52e5b15b56015e9a990b06033f8fbb9` (2026-11-03), including the owner's follow-up decisions. Later deep reviews start from there: `git diff 1ee9e2c..HEAD`. Run them with the `deep-review` skill, which moves this baseline when it finishes.
+The whole workspace was simplified, deep-reviewed line by line and security-reviewed through commit `9f584b88d8dc84d03aafe436118f08facb8c2bf2` (2026-11-03), including the owner's follow-up decisions. Later deep reviews start from there: `git diff 9f584b8..HEAD`. Run them with the `deep-review` skill, which moves this baseline when it finishes.
