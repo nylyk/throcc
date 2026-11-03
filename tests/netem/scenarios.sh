@@ -65,11 +65,10 @@ start_server() {
     done
     local code
     code=$(throcc-server admin-invite --data "$WORK/srv" | awk '$1 == "invite" {print $2}')
-    cli s enroll "$SERVER" "$code" >/dev/null
-    cli s name "$SERVER" Sender >/dev/null
+    cli s enroll --name Sender "$SERVER" "$code" >/dev/null
     cli s create-room "$SERVER" General >/dev/null
     for ns in a b c; do
-        cli "$ns" enroll "$SERVER" "$(cli s invite "$SERVER" | awk '{print $2}')" >/dev/null
+        cli "$ns" enroll --name "Receiver $ns" "$SERVER" "$(cli s invite "$SERVER" | awk '{print $2}')" >/dev/null
     done
 }
 
