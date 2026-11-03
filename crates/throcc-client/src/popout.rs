@@ -15,9 +15,14 @@ use crate::video::Feeds;
 use crate::views::common::{
     CONTROLS_LINGER, TRAFFIC_LIGHTS, Typeset, app_titlebar, caption, ghost_icon, moves_window,
 };
-use crate::views::overlay::ShareOverlay;
+use crate::views::overlay::{self, ShareOverlay};
 
-const TRAFFIC_LIGHTS_AT: Point<Pixels> = point(px(20.), px(25.));
+/// Where the traffic lights sit: centred on the overlay's title, as far from the left edge
+/// as from the top.
+fn traffic_lights_at() -> Point<Pixels> {
+    let top = overlay::INSET + (overlay::LABEL_HEIGHT - px(14.)) / 2.;
+    point(top, top)
+}
 
 /// One watched share in a window of its own.
 pub struct PopOut {
@@ -45,7 +50,7 @@ impl PopOut {
                 window_min_size: Some(size(px(320.), px(228.))),
                 ..Default::default()
             },
-            TRAFFIC_LIGHTS_AT,
+            traffic_lights_at(),
             false,
         );
         let opened = cx.open_window(options, |window, cx| {
@@ -226,7 +231,7 @@ fn show_traffic_lights(gpui_window: &Window, shown: bool) {
         }
     }
     if shown {
-        gpui_window.set_traffic_light_position(TRAFFIC_LIGHTS_AT);
+        gpui_window.set_traffic_light_position(traffic_lights_at());
     }
 }
 
