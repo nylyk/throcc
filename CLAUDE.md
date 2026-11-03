@@ -52,7 +52,7 @@ Each crate's `README.md` explains its modules and how they fit together. Update 
 ## UI
 
 - Every colour lives in `throcc-client/theme.rs`: an 8-colour palette the user picks, everything else mixed from it in Oklab.
-- Quiet and minimal: one accent, no gradients, no shadows beyond focus rings, no emoji. The one gradient is the shade behind controls over video, which keeps them readable on any picture.
+- Quiet and minimal: one accent, no gradients, no shadows beyond focus rings, no emoji.
 - Geist and Geist Mono; mono for addresses, codes, fingerprints, numbers and codecs. Spacing on a 4 px grid.
 - Match the existing screens. Add a `--mock --screen` sample for any new screen or dialog.
 
