@@ -838,6 +838,7 @@ impl Session {
                 &mut self.audiences,
                 audience.video,
                 audience.watchers.clone(),
+                |_| false,
             );
         }
         self.voice(VoiceCommand::ForgetAll);
@@ -1076,7 +1077,11 @@ impl Session {
                     .collect();
                 cue = cue.or(audience_cue(&still_here, &watchers));
             }
-            keep_audience(&mut self.audiences, video, watchers);
+            let (peers, mine) = (&self.peers, &self.my_tracks);
+            keep_audience(&mut self.audiences, video, watchers, |video| {
+                let shares = |t: &Tracks| t.shares.iter().any(|s| s.video == video);
+                mine.as_ref().is_some_and(shares) || peers.values().any(|p| shares(&p.tracks))
+            });
         }
         if let Some(cue) = cue
             && self
@@ -2137,15 +2142,22 @@ fn jittered(backoff: Duration, random: u64) -> Duration {
 }
 
 /// Keeps who watches `video`, within what a room can hold, so a server can't grow
-/// `audiences` without bound.
+/// `audiences` without bound. The server never empties the audience of someone who left, so
+/// a full map first drops every share `current` no longer knows.
 fn keep_audience(
     audiences: &mut HashMap<MediaId, Vec<UserId>>,
     video: MediaId,
     mut watchers: Vec<UserId>,
+    current: impl Fn(MediaId) -> bool,
 ) {
-    if watchers.is_empty() || (audiences.len() >= MAX_ROOM_PEERS && !audiences.contains_key(&video))
-    {
+    if watchers.is_empty() {
         return;
+    }
+    if audiences.len() >= MAX_ROOM_PEERS && !audiences.contains_key(&video) {
+        audiences.retain(|video, _| current(*video));
+        if audiences.len() >= MAX_ROOM_PEERS {
+            return;
+        }
     }
     watchers.truncate(MAX_ROOM_PEERS);
     audiences.insert(video, watchers);
@@ -2294,13 +2306,19 @@ mod tests {
     fn audiences_stay_within_what_a_room_holds() {
         let mut audiences = HashMap::new();
         let crowd: Vec<UserId> = (0..1000).map(UserId).collect();
+        let all = |_| true;
         for video in 0..1000 {
-            keep_audience(&mut audiences, MediaId(video), crowd.clone());
+            keep_audience(&mut audiences, MediaId(video), crowd.clone(), all);
         }
         assert_eq!(audiences.len(), MAX_ROOM_PEERS);
         assert!(audiences.values().all(|w| w.len() == MAX_ROOM_PEERS));
-        keep_audience(&mut audiences, MediaId(0), vec![UserId(7)]);
+        keep_audience(&mut audiences, MediaId(0), vec![UserId(7)], all);
         assert_eq!(audiences[&MediaId(0)], [UserId(7)]);
+
+        // Shares of people who left make room for a new one.
+        let only_new = |video: MediaId| video == MediaId(5000);
+        keep_audience(&mut audiences, MediaId(5000), vec![UserId(7)], only_new);
+        assert_eq!(audiences.keys().collect::<Vec<_>>(), [&MediaId(5000)]);
     }
 
     #[test]
