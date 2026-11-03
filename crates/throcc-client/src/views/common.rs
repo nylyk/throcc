@@ -421,7 +421,7 @@ pub fn moves_window<E: InteractiveElement>(element: E) -> E {
 }
 
 /// How long the controls over a fullscreen stream stay after the pointer last moved.
-pub const CONTROLS_LINGER: std::time::Duration = std::time::Duration::from_secs(3);
+pub const CONTROLS_LINGER: std::time::Duration = std::time::Duration::from_secs(2);
 /// How long a tile's overlay stays after the pointer leaves the tile.
 pub const OVERLAY_LINGER: std::time::Duration = std::time::Duration::from_secs(1);
 
