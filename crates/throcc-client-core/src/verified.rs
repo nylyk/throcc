@@ -463,7 +463,6 @@ mod tests {
         assert!(reloaded.is_verified(&[4; 32]) && reloaded.is_verified(&[5; 32]));
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_store_takes_in_what_another_process_wrote_once_reloaded() {
         let dir = tempfile::tempdir().unwrap();
@@ -485,6 +484,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_file_is_private() {
         use std::os::unix::fs::PermissionsExt;
