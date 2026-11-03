@@ -917,15 +917,15 @@ impl ThroccApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(person) = self.state.person(user).cloned() else {
+        let Some(playback) = self.state.person(user).map(|p| p.playback) else {
             return;
         };
         self.person_menu = Some(PersonMenu {
             user,
             window: window.window_handle(),
             position,
-            voice: Self::playback_control(Sound::Voice, person.playback.voice, cx),
-            share: Self::playback_control(Sound::Share, person.playback.share, cx),
+            voice: Self::playback_control(Sound::Voice, playback.voice, cx),
+            share: Self::playback_control(Sound::Share, playback.share, cx),
         });
         cx.notify();
     }
@@ -1739,10 +1739,11 @@ impl ThroccApp {
 
     /// Opens a screen of the mock client by name, for screenshots: welcome, join, joinfailed,
     /// lost, personmenu, addserver, removeserver, room, unwatched, alone, emptylobby, focus,
-    /// fullscreen, popout, share, connection, person, personverified, personchanged, keychange,
-    /// ownprofile, pinmismatch, settings, appearance, verified, newroom, editroom, roompassword,
-    /// deleteroom, profile, server, keys, members, invites, removeuser, leaveserver,
-    /// identitymissing, identityback or startedover. Any other name leaves the lobby.
+    /// fullscreen, popout, slow, slowpopout, slowfullscreen, share, connection, person,
+    /// personverified, personchanged, keychange, ownprofile, pinmismatch, settings, appearance,
+    /// verified, newroom, editroom, roompassword, deleteroom, profile, server, keys, members,
+    /// invites, removeuser, leaveserver, identitymissing, identityback or startedover. Any
+    /// other name leaves the lobby.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         let room = RoomId(1);
         let joined = |app: &mut Self| {
@@ -1759,6 +1760,13 @@ impl ThroccApp {
                 name: None,
                 picture: Some(Some(crate::avatar::sample())),
             });
+        };
+        let slow = screen.starts_with("slow");
+        let make_slow = |app: &mut Self| {
+            Arc::make_mut(&mut app.state)
+                .health
+                .slow_shares
+                .insert(UserId(4));
         };
         match screen {
             "welcome" => {
@@ -1813,48 +1821,30 @@ impl ThroccApp {
                 joined(self);
                 self.focus = Some(UserId(4));
             }
-            "fullscreen" => {
+            "fullscreen" | "slowfullscreen" => {
                 joined(self);
-                after_a_moment(cx, |app, _| {
+                after_a_moment(cx, move |app, _| {
                     app.fullscreen = Some(UserId(4));
                     app.controls_until = Instant::now() + Duration::from_secs(60);
+                    if slow {
+                        make_slow(app);
+                    }
                 });
             }
-            "popout" => {
+            "popout" | "slowpopout" => {
                 joined(self);
-                after_a_moment(cx, |app, cx| {
+                after_a_moment(cx, move |app, cx| {
+                    if slow {
+                        make_slow(app);
+                    }
                     app.pop_out(UserId(4), Duration::from_secs(60), cx)
                 });
             }
             "slow" => {
                 joined(self);
-                after_a_moment(cx, |app, _| {
+                after_a_moment(cx, move |app, _| {
                     app.overlay = Some((UserId(4), Some(Instant::now() + Duration::from_secs(60))));
-                    Arc::make_mut(&mut app.state)
-                        .health
-                        .slow_shares
-                        .insert(UserId(4));
-                });
-            }
-            "slowpopout" => {
-                joined(self);
-                after_a_moment(cx, |app, cx| {
-                    Arc::make_mut(&mut app.state)
-                        .health
-                        .slow_shares
-                        .insert(UserId(4));
-                    app.pop_out(UserId(4), Duration::from_secs(60), cx);
-                });
-            }
-            "slowfullscreen" => {
-                joined(self);
-                after_a_moment(cx, |app, _| {
-                    app.fullscreen = Some(UserId(4));
-                    app.controls_until = Instant::now() + Duration::from_secs(60);
-                    Arc::make_mut(&mut app.state)
-                        .health
-                        .slow_shares
-                        .insert(UserId(4));
+                    make_slow(app);
                 });
             }
             "share" => {
