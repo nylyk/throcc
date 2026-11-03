@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use sonora_common_audio::push_sinc_resampler::PushSincResampler;
@@ -23,6 +23,7 @@ use crate::lock;
 const PLAYBACK_AHEAD: usize = 4;
 const IDLE: Duration = Duration::from_millis(2);
 const LEVELS_EVERY: u32 = 10;
+const DEVICE_COUNTERS_EVERY: Duration = Duration::from_secs(10);
 
 pub enum VoiceCommand {
     Settings(VoiceSettings),
@@ -149,6 +150,7 @@ struct Worker {
     played: u64,
     /// The device counters already logged: stream errors, overruns and underruns.
     device_counters_logged: [u64; 3],
+    device_counters_logged_at: Option<Instant>,
 }
 
 impl Worker {
@@ -188,6 +190,7 @@ impl Worker {
             output_volume,
             played: 0,
             device_counters_logged: [0; 3],
+            device_counters_logged_at: None,
         }
     }
 
@@ -418,7 +421,16 @@ impl Worker {
         *self.chain.processed()
     }
 
+    /// Logs what the devices reported since the last log, at most every
+    /// [`DEVICE_COUNTERS_EVERY`], so a device that underruns on every callback doesn't flood
+    /// the log.
     fn log_device_counters(&mut self) {
+        if self
+            .device_counters_logged_at
+            .is_some_and(|at| at.elapsed() < DEVICE_COUNTERS_EVERY)
+        {
+            return;
+        }
         let counters = &self.devices.counters;
         let watched = [
             (&counters.stream_errors, "stream errors"),
@@ -433,6 +445,7 @@ impl Worker {
                     count - *logged
                 );
                 *logged = count;
+                self.device_counters_logged_at = Some(Instant::now());
             }
         }
     }

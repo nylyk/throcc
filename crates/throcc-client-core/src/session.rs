@@ -832,11 +832,14 @@ impl Session {
         self.reset_room();
         self.room = placed.room;
         self.my_tracks = placed.tracks.clone();
-        self.audiences = placed
-            .audiences
-            .iter()
-            .map(|a| (a.video, a.watchers.clone()))
-            .collect();
+        self.audiences.clear();
+        for audience in &placed.audiences {
+            keep_audience(
+                &mut self.audiences,
+                audience.video,
+                audience.watchers.clone(),
+            );
+        }
         self.voice(VoiceCommand::ForgetAll);
         self.sync_voice();
         self.sync_peers();
@@ -1073,9 +1076,7 @@ impl Session {
                     .collect();
                 cue = cue.or(audience_cue(&still_here, &watchers));
             }
-            if !watchers.is_empty() {
-                self.audiences.insert(video, watchers);
-            }
+            keep_audience(&mut self.audiences, video, watchers);
         }
         if let Some(cue) = cue
             && self
@@ -2135,6 +2136,21 @@ fn jittered(backoff: Duration, random: u64) -> Duration {
     backoff.mul_f64(1.0 - BACKOFF_JITTER + 2.0 * BACKOFF_JITTER * unit)
 }
 
+/// Keeps who watches `video`, within what a room can hold, so a server can't grow
+/// `audiences` without bound.
+fn keep_audience(
+    audiences: &mut HashMap<MediaId, Vec<UserId>>,
+    video: MediaId,
+    mut watchers: Vec<UserId>,
+) {
+    if watchers.is_empty() || (audiences.len() >= MAX_ROOM_PEERS && !audiences.contains_key(&video))
+    {
+        return;
+    }
+    watchers.truncate(MAX_ROOM_PEERS);
+    audiences.insert(video, watchers);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2272,6 +2288,19 @@ mod tests {
             &Command::Watch(UserId(1)),
             &Command::Watch(UserId(2))
         ));
+    }
+
+    #[test]
+    fn audiences_stay_within_what_a_room_holds() {
+        let mut audiences = HashMap::new();
+        let crowd: Vec<UserId> = (0..1000).map(UserId).collect();
+        for video in 0..1000 {
+            keep_audience(&mut audiences, MediaId(video), crowd.clone());
+        }
+        assert_eq!(audiences.len(), MAX_ROOM_PEERS);
+        assert!(audiences.values().all(|w| w.len() == MAX_ROOM_PEERS));
+        keep_audience(&mut audiences, MediaId(0), vec![UserId(7)]);
+        assert_eq!(audiences[&MediaId(0)], [UserId(7)]);
     }
 
     #[test]
