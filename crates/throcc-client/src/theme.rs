@@ -419,7 +419,7 @@ pub fn scrim() -> Hsla {
 }
 /// Labels laid over a stream.
 pub fn overlay() -> Hsla {
-    surface().opacity(0.7)
+    surface().opacity(0.85)
 }
 
 /// Avatar hues mixed from the palette, picked by user id.

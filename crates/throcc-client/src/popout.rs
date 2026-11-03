@@ -15,7 +15,7 @@ use crate::video::Feeds;
 use crate::views::common::{
     CONTROLS_LINGER, TRAFFIC_LIGHTS, Typeset, app_titlebar, caption, ghost_icon, moves_window,
 };
-use crate::views::overlay::{Place, ShareOverlay};
+use crate::views::overlay::ShareOverlay;
 
 const TRAFFIC_LIGHTS_AT: Point<Pixels> = point(px(20.), px(25.));
 
@@ -181,7 +181,6 @@ impl Render for PopOut {
             .child(picture)
             .children(
                 ShareOverlay {
-                    place: Place::Player,
                     name: name.to_owned().into(),
                     seed: user.0,
                     picture: sharer_picture,

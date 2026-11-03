@@ -21,7 +21,7 @@ use super::common::{
     toggle_icon, top_bar, trust,
 };
 use super::mascot;
-use super::overlay::{Place, ShareOverlay};
+use super::overlay::ShareOverlay;
 use super::page::{resize_handle, sidebar_column};
 use crate::app::{Dialog, Screen, ServerPage, ThroccApp, ToggleDeafen, ToggleMic};
 use crate::theme;
@@ -74,7 +74,6 @@ fn fullscreen(
             .on_click(cx.listener(|app, _, window, cx| app.exit_fullscreen(window, cx))),
     ];
     let overlay = ShareOverlay {
-        place: Place::Player,
         name: person.map_or("Someone", |p| &p.name).to_owned().into(),
         seed: user.0,
         picture,
@@ -918,7 +917,6 @@ fn tile(
         pop_out.into_iter().chain([stop, fullscreen]).collect()
     };
     let overlay = ShareOverlay {
-        place: Place::Tile,
         name: t.person.name.clone().into(),
         seed: user.0,
         picture: t.picture.clone(),
