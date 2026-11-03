@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use throcc_crypto::identity::random;
 use throcc_proto::ids::{Hash, MediaId, RoomId, UserId};
 use throcc_proto::messages::{
-    Audience, AuthError, ErrorCode, Event as ServerEvent, MediaState, Placed, Presence, PublicKey,
+    Audiences, AuthError, ErrorCode, Event as ServerEvent, MediaState, Placed, Presence, PublicKey,
     Recovery, Request, Response, RoomPeer, Share, ShareConfig, Tracks, User, Welcome,
 };
 use throcc_proto::transport::close;
@@ -256,7 +256,7 @@ pub(crate) struct Session {
     trust: Trust,
     watching: Vec<UserId>,
     /// Who watches each watched share in our room, by its video.
-    audiences: HashMap<MediaId, Vec<UserId>>,
+    audiences: Audiences,
     last_audience_cue: Option<Instant>,
     /// The shares we receive, by who shares them.
     watched_shares: HashMap<UserId, WatchedShare>,
@@ -391,7 +391,7 @@ impl Session {
             peers: BTreeMap::new(),
             trust: Trust::new(server, verified),
             watching: Vec::new(),
-            audiences: HashMap::new(),
+            audiences: Audiences::default(),
             last_audience_cue: None,
             watched_shares: HashMap::new(),
             mic_test: false,
@@ -751,9 +751,10 @@ impl Session {
             epoch: throcc_proto::ids::Epoch(0),
             tracks: None,
             peers: vec![],
-            audiences: Vec::new(),
+            audiences: Audiences::default(),
         });
         self.reset_room();
+        self.audiences.shares.clear();
         self.voice(VoiceCommand::ForgetAll);
         self.voice(VoiceCommand::SendOn(None));
         self.shared.update(|s| s.current = None);
@@ -770,11 +771,12 @@ impl Session {
         self.tracks.clear();
         self.last.sent_bytes.clear();
         self.watching.clear();
-        self.audiences.clear();
         self.show_shares();
     }
 
     fn apply_welcome(&mut self, welcome: &Welcome) {
+        // A new connection counts audiences afresh.
+        self.audiences = Audiences::default();
         let fingerprint = self.call.server();
         self.remember_server(welcome.server.name.clone(), welcome.server.avatar);
         let address = self.address.clone();
@@ -832,14 +834,10 @@ impl Session {
         self.reset_room();
         self.room = placed.room;
         self.my_tracks = placed.tracks.clone();
-        self.audiences.clear();
-        for audience in &placed.audiences {
-            keep_audience(
-                &mut self.audiences,
-                audience.video,
-                audience.watchers.clone(),
-                |_| false,
-            );
+        if placed.room.is_some() {
+            self.take_newer(placed.audiences.clone());
+        } else {
+            self.audiences.shares.clear();
         }
         self.voice(VoiceCommand::ForgetAll);
         self.sync_voice();
@@ -1053,43 +1051,51 @@ impl Session {
     fn audience_of(&self, user: UserId) -> usize {
         self.tracks_of(user)
             .and_then(|t| t.shares.first())
-            .and_then(|share| self.audiences.get(&share.video))
-            .map_or(0, Vec::len)
+            .and_then(|share| watchers_of(&self.audiences, share.video))
+            .map_or(0, <[UserId]>::len)
     }
 
-    /// Notes who watches the shares in our room. Plays one join or leave when someone joins
-    /// or leaves the audience of our live share, at most once per [`AUDIENCE_CUE_GAP`].
-    fn audiences_changed(&mut self, changed: Vec<Audience>) {
-        let room = self.room;
-        let state = self.shared.state();
-        let mut cue = None;
-        for Audience { video, watchers } in changed {
-            let ours = self.media.share.is_some()
-                && self
-                    .my_tracks
-                    .as_ref()
-                    .is_some_and(|t| t.shares.iter().any(|s| s.video == video));
-            let before = self.audiences.remove(&video).unwrap_or_default();
-            if ours {
-                let still_here: Vec<UserId> = before
-                    .into_iter()
-                    .filter(|user| state.person(*user).is_some_and(|p| p.room == room))
-                    .collect();
-                cue = cue.or(audience_cue(&still_here, &watchers));
-            }
-            let (peers, mine) = (&self.peers, &self.my_tracks);
-            keep_audience(&mut self.audiences, video, watchers, |video| {
-                let shares = |t: &Tracks| t.shares.iter().any(|s| s.video == video);
-                mine.as_ref().is_some_and(shares) || peers.values().any(|p| shares(&p.tracks))
-            });
+    /// Takes `audiences` unless it is older than the one we hold.
+    fn take_newer(&mut self, audiences: Audiences) -> bool {
+        let Some(audiences) = newer_audiences(&self.audiences, audiences) else {
+            return false;
+        };
+        self.audiences = audiences;
+        true
+    }
+
+    /// Notes who receives the shares in our room. Plays a join or leave when someone joins or
+    /// leaves the audience of our live share, at most once per [`AUDIENCE_CUE_GAP`].
+    fn audiences_changed(&mut self, audiences: Audiences) {
+        let ours = self
+            .media
+            .share
+            .and(self.my_tracks.as_ref())
+            .and_then(|t| t.shares.first())
+            .map(|share| share.video);
+        let before = ours
+            .and_then(|video| watchers_of(&self.audiences, video))
+            .unwrap_or_default()
+            .to_vec();
+        if !self.take_newer(audiences) {
+            return;
         }
-        if let Some(cue) = cue
-            && self
-                .last_audience_cue
-                .is_none_or(|at| at.elapsed() >= AUDIENCE_CUE_GAP)
-        {
-            self.last_audience_cue = Some(Instant::now());
-            self.cue(cue);
+        if let Some(video) = ours {
+            let room = self.room;
+            let state = self.shared.state();
+            let still_here: Vec<UserId> = before
+                .into_iter()
+                .filter(|user| state.person(*user).is_some_and(|p| p.room == room))
+                .collect();
+            let after = watchers_of(&self.audiences, video).unwrap_or_default();
+            if let Some(cue) = audience_cue(&still_here, after)
+                && self
+                    .last_audience_cue
+                    .is_none_or(|at| at.elapsed() >= AUDIENCE_CUE_GAP)
+            {
+                self.last_audience_cue = Some(Instant::now());
+                self.cue(cue);
+            }
         }
         self.show_shares();
     }
@@ -2141,26 +2147,26 @@ fn jittered(backoff: Duration, random: u64) -> Duration {
     backoff.mul_f64(1.0 - BACKOFF_JITTER + 2.0 * BACKOFF_JITTER * unit)
 }
 
-/// Keeps who watches `video`, within what a room can hold, so a server can't grow
-/// `audiences` without bound. The server never empties the audience of someone who left, so
-/// a full map first drops every share `current` no longer knows.
-fn keep_audience(
-    audiences: &mut HashMap<MediaId, Vec<UserId>>,
-    video: MediaId,
-    mut watchers: Vec<UserId>,
-    current: impl Fn(MediaId) -> bool,
-) {
-    if watchers.is_empty() {
-        return;
+/// `new` unless it is older than `held`, cut to what a room can hold so a server can't make
+/// us keep or search more.
+fn newer_audiences(held: &Audiences, mut new: Audiences) -> Option<Audiences> {
+    if new.seq < held.seq {
+        return None;
     }
-    if audiences.len() >= MAX_ROOM_PEERS && !audiences.contains_key(&video) {
-        audiences.retain(|video, _| current(*video));
-        if audiences.len() >= MAX_ROOM_PEERS {
-            return;
-        }
+    new.shares.truncate(MAX_ROOM_PEERS);
+    for audience in &mut new.shares {
+        audience.watchers.truncate(MAX_ROOM_PEERS);
     }
-    watchers.truncate(MAX_ROOM_PEERS);
-    audiences.insert(video, watchers);
+    Some(new)
+}
+
+/// Who receives the share sent on `video`, if anyone does.
+fn watchers_of(audiences: &Audiences, video: MediaId) -> Option<&[UserId]> {
+    audiences
+        .shares
+        .iter()
+        .find(|a| a.video == video)
+        .map(|a| a.watchers.as_slice())
 }
 
 #[cfg(test)]
@@ -2303,22 +2309,29 @@ mod tests {
     }
 
     #[test]
-    fn audiences_stay_within_what_a_room_holds() {
-        let mut audiences = HashMap::new();
-        let crowd: Vec<UserId> = (0..1000).map(UserId).collect();
-        let all = |_| true;
-        for video in 0..1000 {
-            keep_audience(&mut audiences, MediaId(video), crowd.clone(), all);
-        }
-        assert_eq!(audiences.len(), MAX_ROOM_PEERS);
-        assert!(audiences.values().all(|w| w.len() == MAX_ROOM_PEERS));
-        keep_audience(&mut audiences, MediaId(0), vec![UserId(7)], all);
-        assert_eq!(audiences[&MediaId(0)], [UserId(7)]);
-
-        // Shares of people who left make room for a new one.
-        let only_new = |video: MediaId| video == MediaId(5000);
-        keep_audience(&mut audiences, MediaId(5000), vec![UserId(7)], only_new);
-        assert_eq!(audiences.keys().collect::<Vec<_>>(), [&MediaId(5000)]);
+    fn only_audiences_as_new_as_held_are_taken_and_within_a_room() {
+        let audiences = |seq, shares: usize, watchers: u64| Audiences {
+            seq,
+            shares: (0..shares as u32)
+                .map(|video| throcc_proto::messages::Audience {
+                    video: MediaId(video),
+                    watchers: (0..watchers).map(UserId).collect(),
+                })
+                .collect(),
+        };
+        let held = audiences(5, 1, 1);
+        assert_eq!(newer_audiences(&held, audiences(4, 0, 0)), None);
+        assert_eq!(
+            newer_audiences(&held, audiences(5, 0, 0)),
+            Some(audiences(5, 0, 0))
+        );
+        let huge = newer_audiences(&held, audiences(6, 1000, 1000)).unwrap();
+        assert_eq!(huge.shares.len(), MAX_ROOM_PEERS);
+        assert!(
+            huge.shares
+                .iter()
+                .all(|a| a.watchers.len() == MAX_ROOM_PEERS)
+        );
     }
 
     #[test]
