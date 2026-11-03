@@ -302,7 +302,7 @@ pub struct Placed {
     pub epoch: Epoch,
     pub tracks: Option<Tracks>,
     pub peers: Vec<RoomPeer>,
-    /// Who watches each share in the room that anyone watches.
+    /// Who watches each share in the room; shares nobody watches are left out.
     pub audiences: Vec<Audience>,
 }
 
