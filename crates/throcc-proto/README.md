@@ -14,4 +14,4 @@ The wire types that the server and clients share. It is plain data and pure func
 | `fingerprint.rs` | Server and identity fingerprints (SHA-256 of an SPKI) |
 | `transport.rs` | QUIC settings both sides use, and the connection close codes |
 
-Any change to `messages.rs` bumps `PROTOCOL`. New enum variants go last, because postcard encodes a variant by its index. The media header in `frame.rs` is frozen.
+Any change to `messages.rs` bumps `PROTOCOL`. New enum variants go last, because postcard encodes a variant by its index. The media header in `frame.rs` is security-critical, and changing its layout changes the protocol.
