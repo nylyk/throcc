@@ -119,7 +119,7 @@ mod tests {
         );
     }
 
-    /// The signed encryption key is frozen: peers and the server verify these exact bytes.
+    /// The signed encryption key is part of the protocol: peers and the server verify these exact bytes.
     #[test]
     fn enc_key_message_and_its_signature_are_pinned() {
         let message = enc_key_message(
