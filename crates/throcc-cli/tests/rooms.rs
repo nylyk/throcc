@@ -665,8 +665,7 @@ async fn accounts_unseen_for_a_year_are_removed() {
         .await;
     let long_ago = unix_now() - INACTIVE_ACCOUNT_LIFETIME.as_secs() - 60;
     {
-        let mut hub = server.shared.hub();
-        hub.db.mark_seen(alice.link.welcome.me, long_ago).unwrap();
+        let hub = server.shared.hub();
         hub.db.mark_seen(bob_id, long_ago).unwrap();
         hub.db.mark_seen(carol_id, long_ago).unwrap();
     }
@@ -688,10 +687,6 @@ async fn accounts_unseen_for_a_year_are_removed() {
         panic!("expected the user list");
     };
     let ids: Vec<UserId> = users.iter().map(|u| u.id).collect();
-    assert!(
-        ids.contains(&alice.link.welcome.me),
-        "alice is connected: {ids:?}"
-    );
     assert!(ids.contains(&bob_id), "bob signed in again: {ids:?}");
     assert!(
         !ids.contains(&carol_id),

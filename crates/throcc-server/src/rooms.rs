@@ -1358,11 +1358,8 @@ impl Hub {
         Ok(Response::Ok)
     }
 
-    /// Removes every account not signed in to for [`INACTIVE_ACCOUNT_LIFETIME`]. Being
-    /// connected counts as being seen, so a connection open for a year doesn't end in removal.
+    /// Removes every account not signed in to for [`INACTIVE_ACCOUNT_LIFETIME`].
     pub fn remove_inactive(&mut self, now: u64) -> anyhow::Result<()> {
-        let connected: Vec<UserId> = self.sessions.keys().copied().collect();
-        self.db.mark_all_seen(&connected, now)?;
         let before = now.saturating_sub(INACTIVE_ACCOUNT_LIFETIME.as_secs());
         let inactive = self.db.unseen_since(before)?;
         if inactive.is_empty() {
@@ -1371,6 +1368,7 @@ impl Hub {
         self.db.remove_users(&inactive)?;
         for id in &inactive {
             self.last_joined.remove(id);
+            self.evict(*id, "you were removed from this server");
             self.emit_user_list_change(Event::UserRemoved(*id));
         }
         info!(removed = ?inactive, "removed inactive accounts");

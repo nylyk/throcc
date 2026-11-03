@@ -351,20 +351,11 @@ impl Database {
     }
 
     /// Notes that `user` signed in at `now`.
-    pub fn mark_seen(&mut self, user: UserId, now: u64) -> Result<()> {
-        self.mark_all_seen(&[user], now)
-    }
-
-    /// Notes that all of `users` were seen at `now`, in one write.
-    pub fn mark_all_seen(&mut self, users: &[UserId], now: u64) -> Result<()> {
-        let tx = self.write()?;
-        for user in users {
-            tx.execute(
-                "UPDATE users SET last_seen = ?1 WHERE id = ?2",
-                params![now as i64, user.0 as i64],
-            )?;
-        }
-        tx.commit()?;
+    pub fn mark_seen(&self, user: UserId, now: u64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE users SET last_seen = ?1 WHERE id = ?2",
+            params![now as i64, user.0 as i64],
+        )?;
         Ok(())
     }
 
