@@ -17,9 +17,13 @@ RUN cargo build --release --locked -p throcc-server \
     && chown 65532:65532 /data \
     && chmod 0700 /data
 
+FROM debian:bookworm-slim AS init
+RUN apt-get update && apt-get install -y --no-install-recommends tini
+
 FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
+COPY --from=init /usr/bin/tini-static /tini
 COPY --from=build /src/target/release/throcc-server /throcc-server
 COPY --from=build --chown=65532:65532 /data /data
 VOLUME /data
 EXPOSE 8476/udp
-ENTRYPOINT ["/throcc-server", "--data", "/data", "--listen", "[::]:8476"]
+ENTRYPOINT ["/tini", "--", "/throcc-server","--data", "/data", "--listen", "[::]:8476"]
