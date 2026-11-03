@@ -98,19 +98,19 @@ impl VerifiedKeys {
     /// None verified, kept in `dir`, for when the file there can't be read. Every change
     /// re-reads it first, so a file that can't be read is never overwritten.
     pub fn empty(dir: &Path) -> Self {
-        Self {
-            dir: Some(dir.to_owned()),
-            records: VerifiedRecords::default(),
-            shown_since: BTreeMap::new(),
-        }
+        Self::new(Some(dir.to_owned()), VerifiedRecords::default())
     }
 
     pub fn load(dir: &Path) -> Result<Self> {
-        Ok(Self {
-            dir: Some(dir.to_owned()),
-            records: People::load(dir)?.verified,
+        Ok(Self::new(Some(dir.to_owned()), People::load(dir)?.verified))
+    }
+
+    fn new(dir: Option<PathBuf>, records: VerifiedRecords) -> Self {
+        Self {
+            dir,
+            records,
             shown_since: BTreeMap::new(),
-        })
+        }
     }
 
     pub fn is_verified(&self, key: &PublicKey) -> bool {
@@ -244,23 +244,18 @@ impl VerifiedKeys {
             }
             change(records);
         };
-        let written = match &self.dir {
+        match &self.dir {
             Some(dir) => {
                 let mut written = None;
                 People::update(dir, |people| {
                     apply(&mut people.verified);
                     written = Some(people.verified.clone());
                 })?;
-                written.unwrap_or_default()
+                self.records = written.unwrap_or_default();
             }
-            None => {
-                let mut records = self.records.clone();
-                apply(&mut records);
-                records
-            }
-        };
+            None => apply(&mut self.records),
+        }
         self.shown_since.clear();
-        self.records = written;
         Ok(())
     }
 }
@@ -281,11 +276,7 @@ impl VerifiedStore {
 
     /// None verified, kept in memory only.
     pub fn in_memory() -> Self {
-        Self::of(VerifiedKeys {
-            dir: None,
-            records: VerifiedRecords::default(),
-            shown_since: BTreeMap::new(),
-        })
+        Self::of(VerifiedKeys::new(None, VerifiedRecords::default()))
     }
 
     /// Reads the file again, taking in changes other processes made. When it can't be
@@ -335,6 +326,7 @@ fn seen_as(server: &Fingerprint, user: UserId) -> SeenAs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::people::FILE;
 
     const HERE: Fingerprint = Fingerprint([1; 32]);
     const THERE: Fingerprint = Fingerprint([2; 32]);
@@ -363,7 +355,7 @@ mod tests {
         let mut verified = VerifiedKeys::load(dir.path()).unwrap();
         verified.presented(&HERE, UserId(4), &[4; 32]).unwrap();
         assert_eq!(verified.verified_at(&HERE, UserId(4)), None);
-        assert!(!dir.path().join(crate::people::FILE).exists());
+        assert!(!dir.path().join(FILE).exists());
     }
 
     #[test]
@@ -423,17 +415,14 @@ mod tests {
         let mut verified = VerifiedKeys::load(dir.path()).unwrap();
         verified.verify(&HERE, UserId(4), &[4; 32], "Mara").unwrap();
         verified.presented(&HERE, UserId(4), &[9; 32]).unwrap();
-        let written = std::fs::read(dir.path().join(crate::people::FILE)).unwrap();
+        let written = std::fs::read(dir.path().join(FILE)).unwrap();
         for _ in 0..10 {
             verified.presented(&HERE, UserId(4), &[8; 32]).unwrap();
             verified.presented(&HERE, UserId(4), &[9; 32]).unwrap();
         }
         verified.presented(&HERE, UserId(4), &[8; 32]).unwrap();
         verified.presented(&HERE, UserId(4), &[4; 32]).unwrap();
-        assert_eq!(
-            std::fs::read(dir.path().join(crate::people::FILE)).unwrap(),
-            written
-        );
+        assert_eq!(std::fs::read(dir.path().join(FILE)).unwrap(), written);
         assert_eq!(verified.changed_at(&HERE, UserId(4)), Some([8; 32]));
 
         verified.verify(&HERE, UserId(5), &[5; 32], "Teo").unwrap();
@@ -476,7 +465,7 @@ mod tests {
         here.reload().unwrap();
         assert_eq!(here.list().len(), 1);
 
-        std::fs::write(dir.path().join(crate::people::FILE), "not json").unwrap();
+        std::fs::write(dir.path().join(FILE), "not json").unwrap();
         assert!(here.reload().is_err());
         assert!(
             here.list().is_empty(),
@@ -491,7 +480,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut verified = VerifiedKeys::load(dir.path()).unwrap();
         verified.verify(&HERE, UserId(4), &[4; 32], "Mara").unwrap();
-        let mode = std::fs::metadata(dir.path().join(crate::people::FILE))
+        let mode = std::fs::metadata(dir.path().join(FILE))
             .unwrap()
             .permissions()
             .mode();

@@ -1814,10 +1814,8 @@ impl Session {
             }
             ServerEvent::AudiencesChanged(changed) => self.audiences_changed(changed),
             ServerEvent::LinkStats { tracks } => {
-                self.dropped_for_you = tracks.iter().fold(self.dropped_for_you, |sum, t| {
-                    sum.saturating_add(t.dropped_units)
-                });
                 for t in &tracks {
+                    self.dropped_for_you = self.dropped_for_you.saturating_add(t.dropped_units);
                     if let Some(watched) = self.tracks.get_mut(&t.media_id)
                         && matches!(watched.carries, Carries::ShareVideo { .. })
                     {

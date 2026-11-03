@@ -508,7 +508,7 @@ mod tests {
         let mut warm = JitterStats::default();
         while next < frames {
             while next < frames && sent(next) + phase <= clock {
-                jb.insert((next * FRAME) as u32, &TONE[next], clock);
+                jb.insert((next * FRAME) as u32, packet(next), clock);
                 next += 1;
             }
             jb.pull(&mut out);
