@@ -363,7 +363,6 @@ fn checked_name(typed: &str) -> Result<Option<String>, &'static str> {
     match valid_name(typed) {
         Some(name) => Ok(Some(name.to_owned())),
         None if typed.trim().chars().count() > MAX_NAME_CHARS => Err(NAME_TOO_LONG),
-        // The key drops the characters a name may hold that draw nothing.
         None if !shows_something(typed) => Err(NAME_SHOWS_NOTHING),
         None => Err(NAME_HIDES_TEXT),
     }
