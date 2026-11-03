@@ -8,7 +8,7 @@ use throcc_client_core::state::ConnectionStatus;
 use throcc_proto::DEFAULT_PORT;
 use throcc_proto::messages::AuthError;
 
-use super::common::{Typeset, description, error_box, moves_window, primary};
+use super::common::{description, error_box, moves_window, primary};
 use super::mascot;
 use crate::app::{Dialog, ThroccApp};
 use crate::theme;
@@ -69,17 +69,16 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
         mascot::GREETERS
     });
     let hint = if app.joining {
-        "Joining…"
+        Some("Joining…")
     } else if first_run {
-        "Add a server with its address and an invite code."
+        Some("Add your first server to get started.")
     } else if error.is_some() {
-        "Try again, or pick another server on the left."
+        Some("Try again, or pick another server on the left.")
     } else {
-        "Join a server on the left, or add a new one."
+        None
     };
     frame(mascot)
-        .children(first_run.then(|| div().typeset(theme::LARGE_TITLE).child("Welcome to throcc")))
-        .child(description(hint))
+        .children(hint.map(description))
         .children(error.map(|e| div().w(px(420.)).child(error_box(e))))
         .children((first_run && !app.joining).then(|| {
             primary("add-first-server", "Add Server")

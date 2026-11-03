@@ -19,9 +19,7 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
         .on_click(cx.listener(|app, _, window, cx| app.finish_onboarding(window, cx)));
     frame(app.mascot.pick(mascot::WELCOMERS))
         .child(div().typeset(theme::LARGE_TITLE).child("Welcome to throcc"))
-        .child(description(
-            "Choose the name people see on every server. A picture is optional.",
-        ))
+        .child(description("Choose the name people see you as."))
         .child(
             card()
                 .w(px(420.))
