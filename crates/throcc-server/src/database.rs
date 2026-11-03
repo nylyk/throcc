@@ -250,11 +250,11 @@ impl Database {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Consumes the invite and adds its user, named `name`, in one transaction. Returns `None`, changing
-    /// nothing, when the invite is gone or expired. An invite without a minter, from
-    /// `throcc-server admin-invite`, enrolls an admin, and promotes an existing key to admin
-    /// so an owner who was demoted can recover; any other invite leaves an existing key's
-    /// user and role as they are.
+    /// Consumes the invite and adds its user, named `name`, in one transaction. Returns
+    /// `None`, changing nothing, when the invite is gone or expired. An invite without a
+    /// minter, from `throcc-server admin-invite`, enrolls an admin, and promotes an existing
+    /// key to admin so an owner who was demoted can recover; any other invite leaves an
+    /// existing key's user, name and role as they are.
     pub fn enroll(
         &mut self,
         pubkey: &PublicKey,

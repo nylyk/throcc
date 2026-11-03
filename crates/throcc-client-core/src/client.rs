@@ -122,9 +122,9 @@ pub enum UiEvent {
     RemovedFromServer(String),
     /// A profile picture asked for with [`ClientApi::avatar`] has arrived.
     AvatarReady(Hash),
-    /// The server took our new name or picture.
+    /// The server has our profile as kept on this computer.
     ProfileSaved,
-    /// The server refused our new name or picture, for this reason.
+    /// The server refused our profile, for this reason.
     ProfileRefused(String),
     /// The server took the server's new name or picture.
     ServerProfileSaved,

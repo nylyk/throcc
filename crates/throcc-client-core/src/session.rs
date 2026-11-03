@@ -416,8 +416,18 @@ impl Session {
     }
 
     /// Gives the server our profile, uploading the picture only if the server lacks it, and
-    /// returns why the server refused it if it did.
-    async fn push_profile(&mut self) -> Result<(), String> {
+    /// tells the UI how that went. A push the closing connection cut off tells it nothing,
+    /// since the session pushes again once reconnected.
+    async fn push_profile(&mut self) {
+        let event = match self.try_push_profile().await {
+            Ok(()) => UiEvent::ProfileSaved,
+            Err(_) if self.call.connection.close_reason().is_some() => return,
+            Err(reason) => UiEvent::ProfileRefused(reason),
+        };
+        self.shared.emit(event);
+    }
+
+    async fn try_push_profile(&mut self) -> Result<(), String> {
         let wanted = UserProfile {
             name: self.profile.name.clone(),
             avatar: self.profile.avatar(),
@@ -528,10 +538,7 @@ impl Session {
     }
 
     async fn run_until_done(&mut self, mut commands: mpsc::Receiver<UiCommand>) {
-        if let Err(reason) = self.push_profile().await {
-            self.shared
-                .notice(format!("This server refused your profile: {reason}"));
-        }
+        self.push_profile().await;
         let mut levels = tokio::time::interval(LEVELS_EVERY);
         let mut health = tokio::time::interval(HEALTH_EVERY);
         let mut renewal = tokio::time::interval(RENEWAL_CHECK_EVERY);
@@ -554,6 +561,7 @@ impl Session {
                                 return;
                             }
                         }
+                        self.push_profile().await;
                     }
                 },
                 _ = levels.tick() => {
@@ -1157,11 +1165,7 @@ impl Session {
             }
             UiCommand::SetProfile(profile) => {
                 self.profile = profile;
-                let event = match self.push_profile().await {
-                    Ok(()) => UiEvent::ProfileSaved,
-                    Err(reason) => UiEvent::ProfileRefused(reason),
-                };
-                self.shared.emit(event);
+                self.push_profile().await;
             }
             UiCommand::FetchAvatar(hash) => self.fetch_avatar(hash),
             UiCommand::SetServerProfile { name, picture } => {
@@ -2279,6 +2283,13 @@ mod tests {
             &UiCommand::SetMic(false),
             &UiCommand::SetDeafened(true)
         ));
+        let profile = |name: &str| {
+            UiCommand::SetProfile(Profile {
+                name: name.into(),
+                picture: None,
+            })
+        };
+        assert!(supersedes(&profile("Ilse"), &profile("Mara")));
         let volume = |user, sound, v| {
             let level = SoundLevel {
                 volume: v,

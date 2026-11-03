@@ -452,7 +452,7 @@ pub struct ThroccApp {
     pub start_over: StartOver,
     /// Our name and picture as kept on this computer, `None` until onboarding keeps them.
     pub profile: Option<Profile>,
-    profile_avatar: Option<Hash>,
+    pub profile_avatar: Option<Hash>,
     pub profile_form: PictureForm,
     pub known_servers: Vec<(String, Fingerprint)>,
     pub verified: VerifiedStore,
@@ -548,7 +548,7 @@ impl ThroccApp {
         subscriptions.extend([
             cx.subscribe_in(&code, window, Self::on_code_input),
             cx.on_focus_lost(window, |app, window, cx| window.focus(&app.root_focus, cx)),
-            cx.subscribe(&name, Self::on_edit),
+            cx.subscribe_in(&name, window, Self::on_name_field),
             cx.subscribe(&server_name, Self::on_edit),
             cx.subscribe_in(&room_name, window, Self::on_room_field),
             cx.subscribe_in(&room_password, window, Self::on_room_field),
@@ -657,10 +657,10 @@ impl ThroccApp {
         } else {
             match keystore::config_dir().and_then(|dir| Profile::load(&dir)) {
                 Ok(Some(profile)) => app.set_profile(profile, cx),
-                Ok(None) => app.screen = Screen::Onboarding,
+                Ok(None) => app.show_screen(Screen::Onboarding, window, cx),
                 Err(e) => {
                     tracing::warn!("no saved profile: {e:#}");
-                    app.screen = Screen::Onboarding;
+                    app.show_screen(Screen::Onboarding, window, cx);
                 }
             }
         }
@@ -724,6 +724,9 @@ impl ThroccApp {
         match event {
             UiEvent::State(state) => {
                 self.state = state;
+                if self.connected_server().is_none() {
+                    self.settle_profile_save();
+                }
                 if let Some(Dialog::RoomPassword { room, .. }) = self.dialog
                     && self.state.current.as_ref().is_some_and(|c| c.room == room)
                 {
@@ -754,10 +757,14 @@ impl ThroccApp {
             UiEvent::ProfileSaved if self.profile_form.saving() => {
                 self.profile_form.status = Some(SaveStatus::Saved)
             }
+            UiEvent::ProfileSaved => {}
             UiEvent::ProfileRefused(reason) if self.profile_form.saving() => {
                 self.profile_form.status = Some(SaveStatus::Failed(reason))
             }
-            UiEvent::ProfileSaved | UiEvent::ProfileRefused(_) => {}
+            UiEvent::ProfileRefused(reason) => {
+                let notice = format!("This server refused your profile: {reason}");
+                window.push_notification(Notification::new().message(notice), cx)
+            }
             UiEvent::ServerProfileSaved => {
                 self.server_form.edit = None;
                 self.server_form.status = Some(SaveStatus::Saved);
@@ -1374,16 +1381,24 @@ impl ThroccApp {
         else {
             return;
         };
-        if !self.keep_profile(profile.clone(), window, cx) {
+        if self.joining || !self.keep_profile(profile.clone(), window, cx) {
             return;
         }
-        if self.client.is_some() {
+        if self.connected_server().is_some() {
             self.profile_form.status = Some(SaveStatus::Saving);
             self.command(UiCommand::SetProfile(profile));
         } else {
             self.profile_form.status = Some(SaveStatus::Saved);
         }
         cx.notify();
+    }
+
+    /// Counts a save still waiting on a server that is gone as saved, since it is kept on this
+    /// computer and the next server we join gets it.
+    fn settle_profile_save(&mut self) {
+        if self.profile_form.saving() {
+            self.profile_form.status = Some(SaveStatus::Saved);
+        }
     }
 
     /// Keeps the onboarding screen's profile and moves on to joining a server.
@@ -1454,6 +1469,22 @@ impl ThroccApp {
         cx.notify();
     }
 
+    fn on_name_field(
+        &mut self,
+        _: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::Change => cx.notify(),
+            InputEvent::PressEnter { .. } if self.screen == Screen::Onboarding => {
+                self.finish_onboarding(window, cx)
+            }
+            _ => {}
+        }
+    }
+
     fn on_edit(&mut self, _: Entity<InputState>, event: &InputEvent, cx: &mut Context<Self>) {
         if matches!(event, InputEvent::Change) {
             cx.notify();
@@ -1463,6 +1494,10 @@ impl ThroccApp {
     /// Shows `screen`, first filling in what its page needs.
     pub fn show_screen(&mut self, screen: Screen, window: &mut Window, cx: &mut Context<Self>) {
         match screen {
+            Screen::Onboarding => {
+                self.profile_form.reset();
+                set_field(&self.name, "", true, window, cx);
+            }
             Screen::Settings(SettingsPage::Profile) => {
                 self.profile_form.reset();
                 let name = self.profile.as_ref().map(|p| p.name.clone());
@@ -1768,6 +1803,7 @@ impl ThroccApp {
         self.preview_self = false;
         self.push_to_talk = None;
         self.server_form.reset();
+        self.settle_profile_save();
         self.screen = Screen::Join;
         self.reload_known_servers();
     }
@@ -1849,7 +1885,7 @@ impl ThroccApp {
                 self.known_servers.clear();
                 self.profile = None;
                 self.profile_avatar = None;
-                self.screen = Screen::Onboarding;
+                self.show_screen(Screen::Onboarding, window, cx);
             }
             "welcome" => {
                 offline(self);
