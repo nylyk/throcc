@@ -97,6 +97,12 @@ struct Enrollment<'a> {
 
 impl Enrollment<'_> {
     async fn run(&self, stream: &mut FrameStream, pake_a: &[u8]) -> Result<UserRow, AuthRefusal> {
+        // Checked before the run counts or the invite is touched, so a full server spends
+        // neither. Someone may still sign in during the run; then the account is made and the
+        // sign-in refused.
+        if self.shared.hub().is_full() {
+            return Err(AuthRefusal::Enroll(AuthError::ServerFull));
+        }
         // A run counts against its source from the start, so parallel runs can't outpace the limit.
         if !self.shared.limiter().begin(self.source, Instant::now()) {
             debug!(source = ?self.source, "enrollment rate-limited");

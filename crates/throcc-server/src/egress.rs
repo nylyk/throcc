@@ -5,21 +5,26 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use throcc_proto::frame::{Flags, Header};
 use throcc_proto::ids::MediaId;
+use throcc_proto::limits::{MAX_ROOM_MEMBERS, MAX_ROOM_SHARES};
 use throcc_proto::messages::{Event, ServerMessage, TrackStats};
 use tokio::sync::mpsc;
 
 use crate::lock;
 use crate::rooms::Outbound;
+use crate::sfu::MAX_INGRESS_BYTES_PER_SECOND;
 
 /// Queued video beyond this is dropped, in whole units that haven't started sending.
 pub const VIDEO_BUDGET: Duration = Duration::from_millis(150);
 const LINK_STATS_INTERVAL: Duration = Duration::from_secs(2);
 const INBOX: usize = 8192;
-/// About 150 ms of 16 watched senders at 25 Mbps. Over this, even started units are dropped.
-const MAX_QUEUED_VIDEO_BYTES: usize = 8 * 1024 * 1024;
-/// Two seconds of 20 mic tracks at 50 frames/s: a cap against a receiver that stops
-/// reading, not a drop policy. Reaching it costs the longest track a packet.
-const MAX_QUEUED_AUDIO: usize = 2000;
+/// The video budget of every share in a room at the ingress limit. Over this, even started
+/// units are dropped.
+const MAX_QUEUED_VIDEO_BYTES: usize =
+    (MAX_ROOM_SHARES as f64 * MAX_INGRESS_BYTES_PER_SECOND * VIDEO_BUDGET.as_secs_f64()) as usize;
+/// Two seconds of every audio track a full room sends one receiver, at 50 frames/s: a cap
+/// against a receiver that stops reading, not a drop policy. Reaching it costs the longest
+/// track a packet.
+const MAX_QUEUED_AUDIO: usize = 2 * 50 * (MAX_ROOM_MEMBERS - 1 + MAX_ROOM_SHARES);
 /// A unit's fragment limit: a 1440p keyframe at 15 Mbps is well under 1000.
 const MAX_UNIT_FRAGMENTS: usize = 4096;
 /// A started unit that gets no fragment for this long is given up on.
@@ -920,11 +925,15 @@ mod tests {
                 heard.push(bytes[0]);
             }
         }
-        assert_eq!(heard, (0..60).collect::<Vec<u8>>());
+        let spoken = (MAX_QUEUED_AUDIO * 3).div_ceil(100);
+        assert_eq!(heard, (0..spoken as u8).collect::<Vec<u8>>());
         let stats = queues.take_stats();
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].media_id, MediaId(flood));
-        assert_eq!(stats[0].dropped_units as usize, MAX_QUEUED_AUDIO * 2 + 60);
+        assert_eq!(
+            stats[0].dropped_units as usize,
+            MAX_QUEUED_AUDIO * 2 + spoken
+        );
     }
 
     /// One second of a flood of the smallest units into a receiver that drains 20,000

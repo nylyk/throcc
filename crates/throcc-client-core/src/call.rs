@@ -73,7 +73,7 @@ impl Call {
         );
         let engine = Arc::new(engine);
 
-        for p in &welcome.online {
+        for p in &welcome.presence {
             engine.set_presence(p.user, p.room);
         }
         let placement_notices = match welcome.placement.room {

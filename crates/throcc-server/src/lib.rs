@@ -19,9 +19,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use throcc_proto::Fingerprint;
 use throcc_proto::invite::InviteCode;
+use throcc_proto::limits::MAX_ONLINE;
 use throcc_proto::transport::{self, check_datagrams, close};
 use tokio::sync::Semaphore;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::database::Database;
 use crate::identity::ServerIdentity;
@@ -33,11 +34,12 @@ pub use crate::sfu::{AUDIO_BURST_PACKETS, AUDIO_PACKETS_PER_SECOND};
 pub use crate::tls::Congestion;
 
 pub const DATABASE_FILE: &str = "throcc.sqlite";
-/// Connections that have signed in.
+/// Connections past their hello, signing in or signed in: everyone who may be online, and as
+/// many again signing in or replacing their connection.
 pub const CONNECTIONS: Caps = Caps {
     per_source: 32,
     per_network: 128,
-    total: 1024,
+    total: 2 * MAX_ONLINE,
 };
 /// Connections from their first packet until they have signed in. A network gets a 16th
 /// of them, so filling them takes hosts in 16 networks; a source gets as many as its
@@ -57,6 +59,8 @@ pub const TLS_TIMEOUT: Duration = Duration::from_secs(5);
 /// Room-password Argon2 runs allowed at once; each takes 19 MiB.
 const PASSWORD_WORKERS: usize = 2;
 const KEYFRAME_TICK: Duration = Duration::from_millis(100);
+/// How often accounts are checked for inactivity.
+const INACTIVE_SWEEP: Duration = Duration::from_secs(60 * 60);
 
 pub struct Config {
     pub data_dir: PathBuf,
@@ -162,6 +166,21 @@ impl Server {
                 shared.hub().flush_keyframes();
                 drop(shared);
                 interval.tick().await;
+            }
+        });
+        let sweeper = Arc::downgrade(&self.shared);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(INACTIVE_SWEEP);
+            // Not at startup: everyone gets a sweep's time to sign in again first.
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let Some(shared) = sweeper.upgrade() else {
+                    return;
+                };
+                if let Err(e) = shared.hub().remove_inactive(unix_now()) {
+                    warn!("removing inactive accounts: {e:#}");
+                }
             }
         });
         let reporter = Arc::downgrade(&self.shared);

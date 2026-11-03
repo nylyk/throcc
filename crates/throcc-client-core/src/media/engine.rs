@@ -244,7 +244,7 @@ impl MediaEngine {
                 Vec::new()
             }
             Event::PresenceChanged(p) => self.set_presence(p.user, p.room),
-            Event::WentOffline(user) => self.set_presence(*user, None),
+            Event::PresenceEnded(user) => self.set_presence(*user, None),
             _ => Vec::new(),
         }
     }

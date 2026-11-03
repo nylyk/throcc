@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use throcc_crypto::identity::random;
 use throcc_proto::ids::{Hash, MediaId, RoomId, UserId};
+use throcc_proto::limits::{MAX_ROOM_MEMBERS, MAX_ROOM_SHARES};
 use throcc_proto::messages::{
     Audiences, AuthError, ErrorCode, Event as ServerEvent, MediaState, Peer, Placement, Presence,
     PublicKey, Recovery, Request, Response, ShareConfig, ShareTracks, Tracks, User, Welcome,
@@ -19,7 +20,7 @@ use crate::avatars;
 use crate::call::{Call, CallEvent};
 use crate::client::{ClientOptions, UiCommand, UiEvent};
 use crate::control::{self, LoginError};
-use crate::keys::{KeyNotice, MAX_ROOM_PEERS};
+use crate::keys::KeyNotice;
 use crate::keystore::Keystore;
 use crate::lock;
 use crate::media::cues::Cue;
@@ -640,11 +641,12 @@ impl Session {
         &mut self,
         commands: &mut mpsc::Receiver<UiCommand>,
     ) -> Option<Vec<UiCommand>> {
-        let reason = self
+        let lost = self
             .call
             .connection
             .close_reason()
             .map_or("connection lost".to_owned(), |e| e.to_string());
+        let mut reason = lost.clone();
         self.cue(Cue::ConnectionLost);
         let mut backoff = Duration::from_secs(1);
         let mut queued = Vec::new();
@@ -693,7 +695,10 @@ impl Session {
                 Err(e) => {
                     let fatal = match &e {
                         SignInError::Login(LoginError::Refused(reason))
-                            if *reason != AuthError::RateLimited =>
+                            if !matches!(
+                                reason,
+                                AuthError::RateLimited | AuthError::ServerFull
+                            ) =>
                         {
                             Some(format!("The server refused you: {reason}"))
                         }
@@ -710,6 +715,12 @@ impl Session {
                             .update(|s| s.connection = ConnectionStatus::Failed(failed));
                         return None;
                     }
+                    reason = match e {
+                        SignInError::Login(LoginError::Refused(AuthError::ServerFull)) => {
+                            "the server is full".to_owned()
+                        }
+                        _ => lost.clone(),
+                    };
                     info!("reconnect attempt {attempt} failed: {e}");
                     continue;
                 }
@@ -789,7 +800,7 @@ impl Session {
         let address = self.address.clone();
         let media = self.media;
         let playbacks: Vec<Playback> = welcome
-            .online
+            .presence
             .iter()
             .map(|p| self.playback_of(p.user))
             .collect();
@@ -810,7 +821,7 @@ impl Session {
                 s.add_room(room.into());
             }
             s.people.clear();
-            for (p, playback) in welcome.online.iter().zip(playbacks) {
+            for (p, playback) in welcome.presence.iter().zip(playbacks) {
                 s.add_person(p.user, person(p, playback));
             }
             s.current = None;
@@ -1414,7 +1425,14 @@ impl Session {
         self.show_shares();
         let response = self.call.request(Request::SetMedia(media)).await;
         if refuses_share_start(&response, media.share, self.server_share) {
-            self.undo_refused_share().await;
+            let full = matches!(
+                response,
+                Ok(Response::Err {
+                    code: ErrorCode::Full,
+                    ..
+                })
+            );
+            self.undo_refused_share(full).await;
             return;
         }
         match response {
@@ -1423,10 +1441,11 @@ impl Session {
         }
     }
 
-    /// Stops a share the server wouldn't start. Leaving it running would carry the refused
+    /// Stops a share the server wouldn't start, because the room had all the shares it holds
+    /// (`full`) or because of the share allowance. Leaving it running would carry the refused
     /// start in every later `SetMedia`, such as each push-to-talk press. A share the server
     /// still holds from before is stopped there too, which it never refuses.
-    async fn undo_refused_share(&mut self) {
+    async fn undo_refused_share(&mut self, full: bool) {
         self.stop_share();
         self.shared.update(|s| {
             if let Some(c) = s.current.as_mut() {
@@ -1434,17 +1453,23 @@ impl Session {
             }
         });
         self.show_shares();
-        self.shared
-            .notice("Sharing was started too often. Try again in a moment.");
+        self.shared.notice(if full {
+            format!("This room already has {MAX_ROOM_SHARES} screen shares running.")
+        } else {
+            "Sharing was started too often. Try again in a moment.".to_owned()
+        });
         if self.server_share.is_some() {
             Box::pin(self.push_media()).await;
         }
     }
 
+    /// Tells the server which shares we watch. Only running shares are named: one that ended
+    /// would still count against [`throcc_proto::limits::MAX_WATCHED`].
     async fn push_watching(&mut self) {
         let mut ids = Vec::new();
         for user in &self.watching {
-            if let Some(share) = self.peers.get(user).and_then(|p| p.tracks.shares.first()) {
+            let running = self.peers.get(user).filter(|p| p.share.is_some());
+            if let Some(share) = running.and_then(|p| p.tracks.shares.first()) {
                 ids.push(share.video);
                 ids.push(share.audio);
             }
@@ -1751,7 +1776,7 @@ impl Session {
                     "The server described the room with two tracks under one id, so the call is paused until it sends a valid one.",
                 ),
                 KeyNotice::TooManyPeers => self.shared.notice(format!(
-                    "The server described the room with more than {MAX_ROOM_PEERS} people, so the call is paused until it sends a valid one."
+                    "The server described the room with more than {MAX_ROOM_MEMBERS} people, so the call is paused until it sends a valid one."
                 )),
                 KeyNotice::OldEpoch => self.shared.notice(
                     "The server put this room back to keys older than ones you've used here, as a restored backup or a replayed call would. You won't hear anyone here until the room moves past them.",
@@ -1802,7 +1827,7 @@ impl Session {
                 self.refresh_trust();
                 self.follow_room().await;
             }
-            ServerEvent::WentOffline(user) => {
+            ServerEvent::PresenceEnded(user) => {
                 self.room_cue(user, None);
                 self.shared.update(|s| {
                     s.people.remove(&user);
@@ -2045,21 +2070,22 @@ fn refusal(response: anyhow::Result<Response>) -> String {
     response.map_or_else(|e| e.to_string(), control::refusal)
 }
 
-/// Whether `response` to a `SetMedia` carrying `sent` refused to start that share. The server
-/// still applies the mic and deafen then, and keeps the share it had (`on_server`).
+/// Whether `response` to a `SetMedia` carrying `sent` refused to start that share, because
+/// of the share allowance or because the room has all the shares it holds. The server still
+/// applies the mic and deafen then, and keeps the share it had (`on_server`).
 fn refuses_share_start(
     response: &anyhow::Result<Response>,
     sent: Option<ShareConfig>,
     on_server: Option<ShareConfig>,
 ) -> bool {
-    let rate_limited = matches!(
+    let refused = matches!(
         response,
         Ok(Response::Err {
-            code: ErrorCode::RateLimited,
+            code: ErrorCode::RateLimited | ErrorCode::Full,
             ..
         })
     );
-    rate_limited && sent.is_some() && sent != on_server
+    refused && sent.is_some() && sent != on_server
 }
 
 /// How far `counter` has moved since `last`, which it then replaces.
@@ -2165,9 +2191,9 @@ fn newer_audiences(held: &Audiences, mut new: Audiences) -> Option<Audiences> {
     if new.seq < held.seq {
         return None;
     }
-    new.shares.truncate(MAX_ROOM_PEERS);
+    new.shares.truncate(MAX_ROOM_SHARES);
     for audience in &mut new.shares {
-        audience.receivers.truncate(MAX_ROOM_PEERS);
+        audience.receivers.truncate(MAX_ROOM_MEMBERS);
     }
     Some(new)
 }
@@ -2207,7 +2233,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_rate_limited_share_start_is_undone() {
+    fn only_a_share_start_refused_for_limits_is_undone() {
         let share = Some(ShareConfig {
             codec: throcc_proto::messages::Codec::H264,
             width: 1920,
@@ -2232,6 +2258,11 @@ mod tests {
             message: "no".into(),
         });
         assert!(!refuses_share_start(&forbidden, share, None));
+        let full = Ok(Response::Err {
+            code: ErrorCode::Full,
+            message: "this room already has 5 screen shares running".into(),
+        });
+        assert!(refuses_share_start(&full, share, None));
         assert!(!refuses_share_start(
             &Err(anyhow::anyhow!("timed out")),
             share,
@@ -2341,11 +2372,11 @@ mod tests {
             Some(audiences(5, 0, 0))
         );
         let huge = newer_audiences(&held, audiences(6, 1000, 1000)).unwrap();
-        assert_eq!(huge.shares.len(), MAX_ROOM_PEERS);
+        assert_eq!(huge.shares.len(), MAX_ROOM_SHARES);
         assert!(
             huge.shares
                 .iter()
-                .all(|a| a.receivers.len() == MAX_ROOM_PEERS)
+                .all(|a| a.receivers.len() == MAX_ROOM_MEMBERS)
         );
     }
 

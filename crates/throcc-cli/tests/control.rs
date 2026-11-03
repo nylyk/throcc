@@ -89,7 +89,7 @@ async fn unknown_reply_id_closes_the_connection() {
             me: UserId(1),
             role: Role::User,
             rooms: vec![],
-            online: vec![],
+            presence: vec![],
             placement: Placement {
                 room: None,
                 epoch: Epoch(0),

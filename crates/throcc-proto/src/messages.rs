@@ -105,7 +105,7 @@ pub struct Welcome {
     pub me: UserId,
     pub role: Role,
     pub rooms: Vec<Room>,
-    pub online: Vec<Presence>,
+    pub presence: Vec<Presence>,
     pub placement: Placement,
     pub server: ServerProfile,
 }
@@ -131,6 +131,8 @@ pub enum AuthError {
     Banned,
     #[error("too many attempts; try again later")]
     RateLimited,
+    #[error("the server is full; try again later")]
+    ServerFull,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,12 +227,14 @@ pub enum ErrorCode {
     StaleEpoch,
     Internal,
     WrongPassword,
+    /// The room, or its shares, are at their limit.
+    Full,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Event {
     PresenceChanged(Presence),
-    WentOffline(UserId),
+    PresenceEnded(UserId),
     RoomCreated(Room),
     RoomRenamed {
         room: RoomId,

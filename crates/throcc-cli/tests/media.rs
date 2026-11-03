@@ -117,6 +117,7 @@ async fn watching_a_share_asks_its_sender_for_an_idr() {
 async fn the_room_learns_who_watches_a_share() {
     let server = start_server();
     let (mut alice, bob, room) = room_with_two(&server).await;
+    start_sharing(&alice).await;
     let video = first_share(&bob, &alice).await.video;
     let watching = Request::SetWatched(vec![video]);
     assert_eq!(bob.request(watching).await.unwrap(), Response::Ok);
@@ -136,9 +137,25 @@ async fn the_room_learns_who_watches_a_share() {
 }
 
 #[tokio::test]
+async fn a_share_that_ends_has_no_audience() {
+    let server = start_server();
+    let (mut alice, bob, _) = room_with_two(&server).await;
+    start_sharing(&alice).await;
+    let video = first_share(&bob, &alice).await.video;
+    let watching = Request::SetWatched(vec![video]);
+    assert_eq!(bob.request(watching).await.unwrap(), Response::Ok);
+    assert_eq!(audience(&mut alice, video).await, vec![bob.me()]);
+
+    let stopped = Request::SetMedia(MediaState::default());
+    assert_eq!(alice.request(stopped).await.unwrap(), Response::Ok);
+    assert_eq!(audience(&mut alice, video).await, vec![]);
+}
+
+#[tokio::test]
 async fn hearing_a_share_counts_as_watching_it() {
     let server = start_server();
     let (mut alice, bob, _) = room_with_two(&server).await;
+    start_sharing(&alice).await;
     let share = first_share(&bob, &alice).await;
     let listening = Request::SetWatched(vec![share.audio]);
     assert_eq!(bob.request(listening).await.unwrap(), Response::Ok);
@@ -167,6 +184,7 @@ async fn nobody_outside_the_room_learns_who_watches() {
     let dave = enroll(&server, &mint_admin_invite(server.dir.path())).await;
     let mut dave = Call::start(dave.link, &dave.keystore).unwrap();
 
+    start_sharing(&alice).await;
     let video = first_share(&bob, &alice).await.video;
     let watching = Request::SetWatched(vec![video]);
     assert_eq!(bob.request(watching).await.unwrap(), Response::Ok);
@@ -196,6 +214,11 @@ async fn nobody_outside_the_room_learns_who_watches() {
         carol_seq + 1,
         "carol's seq counted changes in another room"
     );
+}
+
+async fn start_sharing(call: &Call) {
+    let share = Request::SetMedia(sharing(share_1080p60(Codec::H264, 8000)));
+    assert_eq!(call.request(share).await.unwrap(), Response::Ok);
 }
 
 /// Waits for the next audiences in our room, and returns who receives `video`.

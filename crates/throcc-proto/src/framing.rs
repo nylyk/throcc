@@ -112,7 +112,7 @@ mod tests {
         }
 
         #[test]
-        fn watching_round_trips(id in any::<u32>(), ids in proptest::collection::vec(any::<u32>(), 0..16)) {
+        fn watching_round_trips(id in any::<u32>(), ids in proptest::collection::vec(any::<u32>(), 0..=crate::limits::MAX_WATCHED)) {
             let message = ClientMessage::Request {
                 id,
                 request: Request::SetWatched(ids.into_iter().map(MediaId).collect()),

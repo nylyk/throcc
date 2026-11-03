@@ -20,7 +20,8 @@ CREATE TABLE users (
     avatar_hash BLOB,
     role INTEGER NOT NULL,
     invited_by INTEGER NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    last_seen INTEGER NOT NULL
 );
 CREATE TABLE rooms (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -301,7 +302,7 @@ impl Database {
             }
             None => {
                 tx.execute(
-                    "INSERT INTO users (pubkey, name, role, invited_by, created_at) VALUES (?1, '', ?2, ?3, ?4)",
+                    "INSERT INTO users (pubkey, name, role, invited_by, created_at, last_seen) VALUES (?1, '', ?2, ?3, ?4, ?4)",
                     params![pubkey.as_slice(), role.rank(), minted_by, now as i64],
                 )?;
                 let id = tx.last_insert_rowid();
@@ -347,6 +348,35 @@ impl Database {
             params![role.rank(), user.0 as i64],
         )?;
         Ok(())
+    }
+
+    /// Notes that `user` signed in at `now`.
+    pub fn mark_seen(&mut self, user: UserId, now: u64) -> Result<()> {
+        self.mark_all_seen(&[user], now)
+    }
+
+    /// Notes that all of `users` were seen at `now`, in one write.
+    pub fn mark_all_seen(&mut self, users: &[UserId], now: u64) -> Result<()> {
+        let tx = self.write()?;
+        for user in users {
+            tx.execute(
+                "UPDATE users SET last_seen = ?1 WHERE id = ?2",
+                params![now as i64, user.0 as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Everyone last seen before `before`.
+    pub fn unseen_since(&self, before: u64) -> Result<Vec<UserId>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM users WHERE last_seen < ?1 ORDER BY id")?;
+        let ids = stmt.query_map([before as i64], |r| r.get::<_, i64>(0))?;
+        Ok(ids
+            .map(|id| id.map(|id| UserId(id as u64)))
+            .collect::<rusqlite::Result<_>>()?)
     }
 
     /// `user` and everyone they invited, transitively.
@@ -681,6 +711,19 @@ mod tests {
             .unwrap()
             .into_row()
             .id
+    }
+
+    #[test]
+    fn enrolling_counts_as_seen_and_signing_in_moves_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Database::open(&dir.path().join("db")).unwrap();
+        let mara = enroll(&mut db, 1, None);
+        let teo = enroll(&mut db, 2, Some(mara));
+        assert_eq!(db.unseen_since(100).unwrap(), []);
+        assert_eq!(db.unseen_since(101).unwrap(), [mara, teo]);
+        db.mark_seen(teo, 500).unwrap();
+        assert_eq!(db.unseen_since(501).unwrap(), [mara, teo]);
+        assert_eq!(db.unseen_since(500).unwrap(), [mara]);
     }
 
     #[test]

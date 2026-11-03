@@ -179,7 +179,7 @@ pub async fn recv(call: &mut Call, room: RoomId, options: RecvOptions<'_>) -> Re
         idle,
     } = options;
     call.join(Some(room), None).await?;
-    let mut presence: Vec<Presence> = call.welcome.online.clone();
+    let mut presence: Vec<Presence> = call.welcome.presence.clone();
     let sender = loop {
         if let Some(user) = find_user(&presence, from) {
             break user;

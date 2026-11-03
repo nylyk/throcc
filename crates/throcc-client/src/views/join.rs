@@ -25,6 +25,9 @@ pub fn explain(error: &SignInError, address: &str) -> String {
         SignInError::Login(LoginError::Refused(AuthError::RateLimited)) => {
             "Too many wrong codes from your network. Wait ten minutes, then try again.".into()
         }
+        SignInError::Login(LoginError::Refused(AuthError::ServerFull)) => {
+            "The server is full right now. Try again in a while.".into()
+        }
         SignInError::Login(LoginError::Refused(AuthError::UnknownKey)) => {
             "This server doesn’t know you anymore. Join again with a fresh invite code.".into()
         }

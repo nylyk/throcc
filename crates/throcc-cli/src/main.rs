@@ -166,7 +166,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Connect { address } => {
             let link = sign_in(&keystore, &address).await?;
-            print_rooms(&link.welcome.rooms, &link.welcome.online);
+            print_rooms(&link.welcome.rooms, &link.welcome.presence);
             interactive(link).await?;
         }
         Command::Rooms { address } => one_shot(&keystore, &address, "rooms").await?,
@@ -432,7 +432,7 @@ async fn run_command(requester: &Requester, welcome: &Welcome, line: &str) -> Re
     let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
     let request = match word {
         "rooms" => {
-            print_rooms(&welcome.rooms, &welcome.online);
+            print_rooms(&welcome.rooms, &welcome.presence);
             return Ok(());
         }
         "join" => Request::JoinRoom {
@@ -528,12 +528,12 @@ fn print_rooms(rooms: &[Room], presence: &[Presence]) {
 fn follow(welcome: &mut Welcome, event: &Event) {
     match event {
         Event::PresenceChanged(p) => {
-            match welcome.online.iter_mut().find(|old| old.user == p.user) {
+            match welcome.presence.iter_mut().find(|old| old.user == p.user) {
                 Some(old) => *old = p.clone(),
-                None => welcome.online.push(p.clone()),
+                None => welcome.presence.push(p.clone()),
             }
         }
-        Event::WentOffline(user) => welcome.online.retain(|p| p.user != *user),
+        Event::PresenceEnded(user) => welcome.presence.retain(|p| p.user != *user),
         Event::RoomCreated(room) => welcome.rooms.push(room.clone()),
         Event::RoomRenamed { room, name } => {
             if let Some(r) = welcome.rooms.iter_mut().find(|r| r.id == *room) {
@@ -560,7 +560,7 @@ fn print_event(event: &Event) {
             p.deafened,
             p.sharing
         ),
-        Event::WentOffline(user) => println!("* user {} left", user.0),
+        Event::PresenceEnded(user) => println!("* user {} left", user.0),
         Event::RoomCreated(room) => {
             println!("* room {} created: {}", room.id.0, shown(&room.name))
         }
@@ -675,7 +675,7 @@ mod tests {
             me: UserId(1),
             role: Role::Admin,
             rooms: vec![],
-            online: vec![],
+            presence: vec![],
             placement: Placement {
                 room: None,
                 epoch: Epoch(0),
@@ -776,9 +776,9 @@ mod tests {
             &mut welcome,
             &Event::PresenceChanged(presence(2, Some(RoomId(3)))),
         );
-        assert_eq!(welcome.online, [presence(2, Some(RoomId(3)))]);
+        assert_eq!(welcome.presence, [presence(2, Some(RoomId(3)))]);
 
-        follow(&mut welcome, &Event::WentOffline(UserId(2)));
-        assert!(welcome.online.is_empty());
+        follow(&mut welcome, &Event::PresenceEnded(UserId(2)));
+        assert!(welcome.presence.is_empty());
     }
 }

@@ -6,8 +6,8 @@ use serde::de::DeserializeOwned;
 use throcc_crypto::identity::random;
 use throcc_proto::framing::{self, FrameError, LEN_BYTES};
 use throcc_proto::messages::{
-    AuthError, AuthResult, ClientHello, ClientMessage, ErrorCode, Event, PROTOCOL, PakeStep,
-    Request, Response, ServerHello, ServerMessage,
+    AuthResult, ClientHello, ClientMessage, ErrorCode, Event, PROTOCOL, PakeStep, Request,
+    Response, ServerHello, ServerMessage,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{Semaphore, mpsc};
@@ -169,9 +169,10 @@ async fn serve(
         .hub()
         .connect(authenticated.row, handle, authenticated.want_room);
     let (conn_id, welcome) = match connected {
-        Ok(Some(connected)) => connected,
-        Ok(None) => {
-            refuse(connection, stream, AuthRefusal::Auth(AuthError::UnknownKey)).await;
+        Ok(Ok(connected)) => connected,
+        Ok(Err(refused)) => {
+            debug!(%peer, "connection refused: {refused}");
+            refuse(connection, stream, AuthRefusal::Auth(refused)).await;
             return Ok(());
         }
         Err(e) => {

@@ -7,21 +7,19 @@ use throcc_crypto::identity::{self, random};
 use throcc_crypto::media::TrackKey;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Epoch, MediaId, RoomId, UserId};
+use throcc_proto::limits::{MAX_ONLINE, MAX_ROOM_MEMBERS};
 use throcc_proto::messages::{Peer, PublicKey, Request, SignedEncryptionKey, Tracks};
 use tracing::warn;
 use zeroize::Zeroizing;
 
 use crate::floors::EpochFloors;
-use crate::state::MAX_PEOPLE;
 
 /// How long a sender's previous epoch key stays usable after it moves on.
 const OLD_KEY_GRACE: Duration = Duration::from_secs(2);
 /// How long our encryption key still unwraps secrets after a renewal replaced it.
 const RETIRED_ENCRYPTION_KEPT: Duration = OLD_KEY_GRACE.saturating_mul(5);
-const MAX_EARLY: usize = 64;
-/// The most peers a room state may list: far above the rooms of about 20 this is built
-/// for, and low enough that verifying and wrapping to all of them stays cheap.
-pub const MAX_ROOM_PEERS: usize = 256;
+/// Sender keys kept from senders the room state hasn't named yet: two epochs of a full room.
+const MAX_EARLY: usize = 2 * MAX_ROOM_MEMBERS;
 /// A wrapped sender secret: the 32-byte encapsulated key, then the 32-byte secret sealed
 /// with a 16-byte tag.
 const WRAPPED_BYTES: usize = 32 + 32 + 16;
@@ -34,7 +32,7 @@ pub enum KeyNotice {
     /// The room state gave two tracks the same media id. Nobody gets our key until a
     /// valid one arrives.
     ClashingTracks,
-    /// The room state listed more than [`MAX_ROOM_PEERS`] peers. Nobody gets our key until
+    /// The room state listed more than [`MAX_ROOM_MEMBERS`] people. Nobody gets our key until
     /// a valid one arrives.
     TooManyPeers,
     /// We were placed in a room at an epoch no newer than one we took part in there
@@ -160,7 +158,7 @@ impl KeyManager {
     /// shown in our room, so the current room state should be applied again.
     pub fn set_presence(&mut self, user: UserId, room: Option<RoomId>) -> bool {
         let before = match room {
-            Some(_) if self.present.len() >= MAX_PEOPLE && !self.present.contains_key(&user) => {
+            Some(_) if self.present.len() >= MAX_ONLINE && !self.present.contains_key(&user) => {
                 return false;
             }
             Some(room) => self.present.insert(user, room),
@@ -279,7 +277,7 @@ impl KeyManager {
         if epoch < self.epoch {
             return (None, Vec::new());
         }
-        let invalid = if peers.len() > MAX_ROOM_PEERS {
+        let invalid = if peers.len() > MAX_ROOM_MEMBERS {
             Some(KeyNotice::TooManyPeers)
         } else if self.clashing_tracks(peers) {
             Some(KeyNotice::ClashingTracks)
@@ -1292,13 +1290,13 @@ pub(crate) mod tests {
         let now = Instant::now();
         let mut a = member(1);
         let mut peers = vec![peer(&a)];
-        peers.extend((100..).take(MAX_ROOM_PEERS - 1).map(invented_peer));
+        peers.extend((100..).take(MAX_ROOM_MEMBERS - 1).map(invented_peer));
         show(&mut a.keys, &peers);
         let tracks = Some(a.tracks.clone());
         let (requests, _) = a
             .keys
             .apply_placement(Some(ROOM), Epoch(1), tracks, &peers, now);
-        assert_eq!(wrapped_to(requests.first()).len(), MAX_ROOM_PEERS - 1);
+        assert_eq!(wrapped_to(requests.first()).len(), MAX_ROOM_MEMBERS - 1);
 
         let crowd = invented_peer(99);
         peers.push(crowd.clone());

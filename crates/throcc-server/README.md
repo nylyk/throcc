@@ -35,6 +35,10 @@ fingerprint  69bc f041 9c8c ad2a 61dc e085 1c32 e666 6dc3 b538 dcdc bf42 840d bc
 
 An invite without a minter enrolls an admin, or promotes the member whose identity key redeems it, which is how an owner who was demoted gets back in; it works once, lasts a day and has the usual three tries and rate limits. The running server reads invites from the database at each enrollment, so it accepts the invite without a restart. The command must run as the user that owns the data directory's files, and says so to anyone else, since the server's own advice for a foreign file, handing the directory to the current user, would lock the real server out. It refuses a data directory where the server hasn't started yet instead of creating one: a mistyped `--data` would otherwise print an invite and a fingerprint no server knows. It never creates or migrates the database, and refuses one whose schema version differs from its own. Both connections wait up to 5 s for each other's writes, and write transactions take the write lock up front, so neither fails on the other's commit.
 
+## Limits
+
+The limits in `throcc_proto::limits` hold always, for admins too: a full room refuses a join, a reconnect into it lands in the lobby, a sixth screen share in a room is refused, and a server with 250 people signed in refuses the next sign-in. An account nobody has signed in to for a year is removed, unless it is connected now; whoever it invited stays.
+
 ## Media limits
 
 Ingress polices each sender; egress shares each receiver's link. A well-behaved client never reaches any of these.
@@ -42,8 +46,8 @@ Ingress polices each sender; egress shares each receiver's link. A well-behaved 
 - A connection that sends more than 25 Mbps is closed.
 - Datagrams beyond 6,000 a second per connection are dropped and counted. 25 Mbps of full-size datagrams is about 2,600.
 - Each audio track may send 150 packets and 80 KiB a second, with bursts of 2,500 packets and 256 KiB. That covers Opus at its 510 kbps ceiling, and a flush of a client's whole 64 KiB datagram send buffer after a stall. Packets over it are dropped and counted, and the connection stays open. This is admission policing of a sender that doesn't conform, not an egress drop policy.
-- Egress never drops audio by policy. Each receiver queues audio per track and sends one packet per track in turn. Its 2,000-packet cap guards against a receiver that stops reading; at the cap the longest track's oldest packet goes, so a track that floods only loses its own packets.
-- Egress drops video in whole units. Beyond the 150 ms budget it drops only units that haven't started sending. A unit that has started is dropped only at the 8 MiB hard cap, a guard against a receiver that stops reading, or when it can't arrive whole anyway: one of its fragments is lost, none comes for a second, or it grows past 4,096 fragments.
+- Egress never drops audio by policy. Each receiver queues audio per track and sends one packet per track in turn. Its cap of two seconds of every audio track a full room sends (3,400 packets) guards against a receiver that stops reading; at the cap the longest track's oldest packet goes, so a track that floods only loses its own packets.
+- Egress drops video in whole units. Beyond the 150 ms budget it drops only units that haven't started sending. A unit that has started is dropped only at the hard cap, the 150 ms budget of five shares at the 25 Mbps ingress limit (about 2.2 MiB), a guard against a receiver that stops reading, or when it can't arrive whole anyway: one of its fragments is lost, none comes for a second, or it grows past 4,096 fragments.
 - Work per packet is logarithmic in the queue, and the periodic sweeps are bounded, so tiny datagrams can't make a receiver's task expensive.
 
 The server never depends on codecs, capture, audio or media crypto. `scripts/check-server-deps.sh` checks this. Its integration tests live in `throcc-cli/tests/`.

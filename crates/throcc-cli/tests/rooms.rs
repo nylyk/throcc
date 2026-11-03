@@ -8,11 +8,12 @@ use std::time::{Duration, Instant};
 use throcc_crypto::identity::encryption_key_message;
 use throcc_proto::framing;
 use throcc_proto::ids::{Epoch, Hash, Role, RoomId, UserId};
+use throcc_proto::limits::{MAX_ROOM_MEMBERS, MAX_ROOM_SHARES, MAX_ROOMS};
 use throcc_proto::messages::{
     ClientMessage, Codec, ErrorCode, Event, MAX_AVATAR_BYTES, MediaState, Presence, Request,
     Response, ServerMessage, SignedEncryptionKey, Welcome,
 };
-use throcc_server::rooms::{Handled, MAX_ROOMS, PasswordWork};
+use throcc_server::rooms::{Handled, INACTIVE_ACCOUNT_LIFETIME, PasswordWork};
 use throcc_server::unix_now;
 
 use common::*;
@@ -23,7 +24,7 @@ struct View(BTreeMap<UserId, Option<RoomId>>);
 
 impl View {
     fn from_welcome(welcome: &Welcome) -> Self {
-        Self(welcome.online.iter().map(|p| (p.user, p.room)).collect())
+        Self(welcome.presence.iter().map(|p| (p.user, p.room)).collect())
     }
 
     fn apply(&mut self, event: &Event) {
@@ -31,7 +32,7 @@ impl View {
             Event::PresenceChanged(Presence { user, room, .. }) => {
                 self.0.insert(*user, *room);
             }
-            Event::WentOffline(user) => {
+            Event::PresenceEnded(user) => {
                 self.0.remove(user);
             }
             _ => {}
@@ -116,9 +117,9 @@ async fn three_clients_see_consistent_presence() {
     carol.disconnect();
     for (client, view) in [&mut alice, &mut bob].into_iter().zip(views.iter_mut()) {
         client
-            .event(|e| matches!(e, Event::WentOffline(u) if *u == carol_id).then_some(()))
+            .event(|e| matches!(e, Event::PresenceEnded(u) if *u == carol_id).then_some(()))
             .await;
-        view.apply(&Event::WentOffline(carol_id));
+        view.apply(&Event::PresenceEnded(carol_id));
     }
     let expected = View(BTreeMap::from([(bob_id, Some(gaming))]));
     assert_eq!(views[0], expected);
@@ -128,7 +129,7 @@ async fn three_clients_see_consistent_presence() {
         alice.request(Request::DeleteRoom(gaming)).await,
         Response::Ok
     );
-    bob.event(|e| matches!(e, Event::WentOffline(u) if *u == bob_id).then_some(()))
+    bob.event(|e| matches!(e, Event::PresenceEnded(u) if *u == bob_id).then_some(()))
         .await;
     bob.event(|e| matches!(e, Event::RoomDeleted(r) if *r == gaming).then_some(()))
         .await;
@@ -369,7 +370,7 @@ async fn killed_connection_retracts_presence_within_the_idle_timeout() {
     let started = Instant::now();
     tokio::time::timeout(IDLE_TIMEOUT * 3, async {
         loop {
-            if let Some(Event::WentOffline(user)) = alice.link.events.recv().await
+            if let Some(Event::PresenceEnded(user)) = alice.link.events.recv().await
                 && user == bob_id
             {
                 return;
@@ -572,8 +573,134 @@ async fn a_leave_that_cannot_bump_the_epoch_still_ends_presence() {
         .await;
 
     alice.disconnect();
-    bob.event(|e| matches!(e, Event::WentOffline(u) if *u == alice_id).then_some(()))
+    bob.event(|e| matches!(e, Event::PresenceEnded(u) if *u == alice_id).then_some(()))
         .await;
+}
+
+#[tokio::test]
+async fn a_full_room_takes_nobody_until_someone_leaves() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let room = create_room(&mut alice, "General").await;
+    alice.join(Some(room)).await;
+    let mut members = Vec::new();
+    for _ in 1..MAX_ROOM_MEMBERS {
+        let member = invited(&server, &alice).await;
+        member.join(Some(room)).await;
+        members.push(member);
+    }
+    let late = invited(&server, &alice).await;
+    assert_error(&late.set_room(Some(room), None).await, ErrorCode::Full);
+
+    // A member who drops out finds their place taken when they come back.
+    let mut dropped = members.pop().unwrap();
+    dropped.disconnect();
+    wait_for("the dropped member's place to free up", || {
+        server
+            .shared
+            .hub()
+            .conn_id(dropped.link.welcome.me)
+            .is_none()
+    })
+    .await;
+    late.join(Some(room)).await;
+    dropped.reconnect(&server.addr, Some(room)).await;
+    assert_eq!(dropped.link.welcome.placement.room, None);
+}
+
+#[tokio::test]
+async fn a_room_runs_a_bounded_number_of_shares() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let room = create_room(&mut alice, "General").await;
+    let share = share_1080p60(Codec::H264, 8000);
+    let mut sharers = Vec::new();
+    for _ in 0..MAX_ROOM_SHARES {
+        let sharer = invited(&server, &alice).await;
+        sharer.join(Some(room)).await;
+        assert_eq!(
+            sharer.request(Request::SetMedia(sharing(share))).await,
+            Response::Ok
+        );
+        sharers.push(sharer);
+    }
+    let late = invited(&server, &alice).await;
+    late.join(Some(room)).await;
+    assert_error(
+        &late.request(Request::SetMedia(sharing(share))).await,
+        ErrorCode::Full,
+    );
+
+    // A running share may still change, and a stopped one makes room.
+    let sharper = share_1080p60(Codec::H264, 12000);
+    assert_eq!(
+        sharers[0]
+            .request(Request::SetMedia(sharing(sharper)))
+            .await,
+        Response::Ok
+    );
+    let stopped = Request::SetMedia(MediaState::default());
+    assert_eq!(sharers[0].request(stopped).await, Response::Ok);
+    assert_eq!(
+        late.request(Request::SetMedia(sharing(share))).await,
+        Response::Ok
+    );
+}
+
+#[tokio::test]
+async fn accounts_unseen_for_a_year_are_removed() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let room = create_room(&mut alice, "General").await;
+    let mut bob = invited(&server, &alice).await;
+    let carol = invited(&server, &alice).await;
+    let (bob_id, carol_id) = (bob.link.welcome.me, carol.link.welcome.me);
+    let dave = invited(&server, &carol).await;
+    // Presence shows people in rooms, so theirs shows when they go.
+    bob.join(Some(room)).await;
+    carol.join(Some(room)).await;
+    carol.disconnect();
+    alice
+        .event(|e| matches!(e, Event::PresenceEnded(u) if *u == carol_id).then_some(()))
+        .await;
+    let long_ago = unix_now() - INACTIVE_ACCOUNT_LIFETIME.as_secs() - 60;
+    {
+        let mut hub = server.shared.hub();
+        hub.db.mark_seen(alice.link.welcome.me, long_ago).unwrap();
+        hub.db.mark_seen(bob_id, long_ago).unwrap();
+        hub.db.mark_seen(carol_id, long_ago).unwrap();
+    }
+    // Signing in again counts as being seen.
+    bob.reconnect(&server.addr, Some(room)).await;
+    alice
+        .event(|e| matches!(e, Event::PresenceChanged(p) if p.user == bob_id).then_some(()))
+        .await;
+    bob.disconnect();
+    alice
+        .event(|e| matches!(e, Event::PresenceEnded(u) if *u == bob_id).then_some(()))
+        .await;
+
+    server.shared.hub().remove_inactive(unix_now()).unwrap();
+    alice
+        .event(|e| matches!(e, Event::UserRemoved(u) if *u == carol_id).then_some(()))
+        .await;
+    let Response::Users(users) = alice.request(Request::ListUsers).await else {
+        panic!("expected the user list");
+    };
+    let ids: Vec<UserId> = users.iter().map(|u| u.id).collect();
+    assert!(
+        ids.contains(&alice.link.welcome.me),
+        "alice is connected: {ids:?}"
+    );
+    assert!(ids.contains(&bob_id), "bob signed in again: {ids:?}");
+    assert!(
+        !ids.contains(&carol_id),
+        "carol was unseen for a year: {ids:?}"
+    );
+    assert!(
+        ids.contains(&dave.link.welcome.me),
+        "who carol invited stays: {ids:?}"
+    );
 }
 
 #[tokio::test]

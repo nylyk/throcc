@@ -3,6 +3,7 @@ pub mod frame;
 pub mod framing;
 pub mod ids;
 pub mod invite;
+pub mod limits;
 pub mod messages;
 pub mod permissions;
 pub mod transport;

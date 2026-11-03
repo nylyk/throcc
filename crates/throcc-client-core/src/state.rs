@@ -3,16 +3,13 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use serde::{Deserialize, Serialize};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
+use throcc_proto::limits::{MAX_ONLINE, MAX_ROOMS};
 use throcc_proto::messages::{Codec, PublicKey, Room, ShareConfig, valid_name};
 
 pub(crate) const MIC_KBPS: u32 = 64;
 pub(crate) const SHARE_AUDIO_KBPS: u32 = crate::media::share_audio::KBPS;
 pub(crate) const VOICE_DETAIL: &str = "Opus voice, mono";
 pub(crate) const SHARE_AUDIO_DETAIL: &str = "Opus music, stereo";
-/// The most people shown online, and rooms listed, from one server: far above what an
-/// honest server sends, low enough that a hostile one can't make every update expensive.
-pub(crate) const MAX_PEOPLE: usize = 2048;
-pub(crate) const MAX_ROOMS: usize = 1000;
 
 /// Everything the UI shows, rebuilt by the core and sent whole after every change.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -74,9 +71,9 @@ impl State {
         }
     }
 
-    /// Shows `person` as `user`, unless that would show more than [`MAX_PEOPLE`].
+    /// Shows `person` as `user`, unless that would show more than [`MAX_ONLINE`].
     pub(crate) fn add_person(&mut self, user: UserId, person: Person) {
-        if self.people.len() < MAX_PEOPLE || self.people.contains_key(&user) {
+        if self.people.len() < MAX_ONLINE || self.people.contains_key(&user) {
             self.people.insert(user, person);
         }
     }
@@ -477,14 +474,14 @@ mod tests {
         }
         assert_eq!(state.rooms.len(), MAX_ROOMS);
 
-        for id in 0..MAX_PEOPLE as u64 + 10 {
+        for id in 0..MAX_ONLINE as u64 + 10 {
             state.add_person(UserId(id), named("p"));
         }
-        assert_eq!(state.people.len(), MAX_PEOPLE);
+        assert_eq!(state.people.len(), MAX_ONLINE);
         state.add_person(UserId(0), named("renamed"));
         assert_eq!(state.people[&UserId(0)].name, "renamed");
-        state.add_person(UserId(MAX_PEOPLE as u64), named("over"));
-        assert!(state.person(UserId(MAX_PEOPLE as u64)).is_none());
+        state.add_person(UserId(MAX_ONLINE as u64), named("over"));
+        assert!(state.person(UserId(MAX_ONLINE as u64)).is_none());
     }
 
     #[test]

@@ -3,10 +3,11 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::UserId;
+use throcc_proto::limits::MAX_ONLINE;
 use throcc_proto::messages::PublicKey;
 use tracing::warn;
 
-use crate::state::{KeyWarning, MAX_PEOPLE};
+use crate::state::KeyWarning;
 use crate::verified::VerifiedStore;
 
 /// Who is verified on one server. Only a key presented this session counts: someone
@@ -34,7 +35,7 @@ impl Trust {
         self.presented.clear();
     }
 
-    /// Notes the identity keys `peers` present. True if any is new. Once [`MAX_PEOPLE`] are
+    /// Notes the identity keys `peers` present. True if any is new. Once [`MAX_ONLINE`] are
     /// noted, only those of `peers` and of people with a changed key stay.
     pub fn note(&mut self, peers: &[(UserId, PublicKey)]) -> bool {
         let new: Vec<(UserId, PublicKey)> = peers
@@ -46,7 +47,7 @@ impl Trust {
             return false;
         }
         let mut verified = self.verified.lock();
-        if self.presented.len() + new.len() > MAX_PEOPLE {
+        if self.presented.len() + new.len() > MAX_ONLINE {
             let here: HashSet<UserId> = peers.iter().map(|(user, _)| *user).collect();
             let server = &self.server;
             self.presented.retain(|user, _| {
@@ -241,13 +242,14 @@ mod tests {
     fn people_with_a_changed_key_stay_noted_when_many_are() {
         let dir = tempfile::tempdir().unwrap();
         let mut trust = verified_then_changed(dir.path());
-        for batch in 0..(MAX_PEOPLE as u64 / 256 + 1) {
-            let peers: Vec<(UserId, PublicKey)> = (0..256)
-                .map(|i| (UserId(1000 + batch * 256 + i), [7; 32]))
+        let room = throcc_proto::limits::MAX_ROOM_MEMBERS as u64;
+        for batch in 0..(MAX_ONLINE as u64 / room + 1) {
+            let peers: Vec<(UserId, PublicKey)> = (0..room)
+                .map(|i| (UserId(1000 + batch * room + i), [7; 32]))
                 .collect();
             trust.note(&peers);
         }
         assert_eq!(trust.of(MARA), (false, Some(IMPOSTOR)));
-        assert!(trust.presented.len() <= MAX_PEOPLE + 256);
+        assert!(trust.presented.len() <= MAX_ONLINE + room as usize);
     }
 }

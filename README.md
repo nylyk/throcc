@@ -4,8 +4,8 @@ Self-hosted voice and screen share, end-to-end encrypted. Written in Rust.
 
 ![In a room, watching a share](docs/screens/room.png)
 
-- Persistent rooms with low-latency voice, push-to-talk or voice activation, echo cancellation and noise suppression.
-- Screen share up to 1440p60 with its system audio, encoded in hardware as AV1, HEVC or H.264, or as VP9 in software.
+- Persistent rooms of up to 30 people with low-latency voice, push-to-talk or voice activation, echo cancellation and noise suppression.
+- Screen share up to 1440p60 with its system audio, five at a time in a room, encoded in hardware as AV1, HEVC or H.264, or as VP9 in software.
 - Viewers choose which shares to watch, so nobody pays bandwidth for a share they don't watch.
 - All media is end-to-end encrypted. The server relays it but holds no key.
 - One server binary and one data directory. Joining takes an address and an invite code.
@@ -32,7 +32,7 @@ docker exec throcc /throcc-server admin-invite --data /data
 
 1. Allow UDP 8476 in the firewall, and forward it if the server is behind NAT. Clients only need outbound UDP.
 2. Once the server is running, `throcc-server admin-invite --data <data directory>` prints an invite code, its expiry and the server's fingerprint. Whoever joins with that code becomes an admin, or is promoted to one if they are already a member. Run it again whenever you need one, for instance after losing your identity or admin role. Run it as the user the server runs as; in Docker, plain `docker exec throcc /throcc-server admin-invite --data /data` already does.
-3. Anyone can make more invites from Server Settings: admins without limit, everyone else 3 a day. Each code works once and expires after a day.
+3. Anyone can make more invites from Server Settings: admins without limit, everyone else 3 a day. Each code works once and expires after a day. An account nobody signs in to for a year is removed; whoever it invited stays.
 
 **Back up** the data directory: `server_key` and the SQLite database. Stop the server and copy it, or run `sqlite3 throcc.sqlite '.backup copy.sqlite'` and copy `server_key`. Losing `server_key` gives the server a new identity, and every client has to rejoin.
 

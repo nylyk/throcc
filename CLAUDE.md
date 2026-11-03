@@ -2,7 +2,7 @@
 
 Self-hosted voice and screen share in Rust, in the spirit of TeamSpeak. Persistent rooms with low-latency voice, screen share up to 1440p60 with its system audio, and end-to-end encryption for all media. The server relays everything; there is no peer-to-peer path. One server binary, one data directory; clients join with an address and an invite code.
 
-Not in scope: web or mobile clients, rooms beyond about 20 people, recording, transcoding, simulcast, a TCP fallback, text chat.
+Not in scope: web or mobile clients, rooms beyond 30 people, recording, transcoding, simulcast, a TCP fallback, text chat.
 
 ## Commands
 
@@ -38,6 +38,7 @@ Each crate's `README.md` explains its modules and how they fit together. Update 
 ## Rules
 
 - Only the main agent changes `throcc-proto`. Any change to messages bumps `PROTOCOL` in `messages.rs`; new enum variants go last.
+- Limits that server and client share live in `throcc_proto::limits` and nowhere else; anything sized by a room or a server derives from them.
 - The server never depends on codecs, capture, audio or media crypto. `check-server-deps.sh` enforces this.
 - The server never reads media past the 13-byte header and holds no media key.
 - **Security-critical:** the media header, the media AEAD and track-key derivation, HPKE sender-key wrapping and its info, the signed encryption key, and the safety-number construction. Fix real issues here with great care and without changing the protocol; a fix that needs a protocol change needs a human decision.

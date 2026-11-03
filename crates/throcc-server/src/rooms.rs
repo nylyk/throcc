@@ -7,10 +7,12 @@ use throcc_crypto::identity::{self, random};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
 use throcc_proto::invite::InviteCode;
+use throcc_proto::limits::{MAX_ONLINE, MAX_ROOM_MEMBERS, MAX_ROOM_SHARES, MAX_ROOMS, MAX_WATCHED};
 use throcc_proto::messages::{
-    Audience, Audiences, ErrorCode, Event, MAX_AVATAR_BYTES, MAX_NAME_CHARS, MAX_PASSWORD_CHARS,
-    MediaState, Peer, Placement, Presence, Recovery, Request, Response, Room, ServerMessage,
-    ServerProfile, ShareTracks, SignedEncryptionKey, Tracks, Welcome, valid_name, valid_password,
+    Audience, Audiences, AuthError, ErrorCode, Event, MAX_AVATAR_BYTES, MAX_NAME_CHARS,
+    MAX_PASSWORD_CHARS, MediaState, Peer, Placement, Presence, Recovery, Request, Response, Room,
+    ServerMessage, ServerProfile, ShareTracks, SignedEncryptionKey, Tracks, Welcome, valid_name,
+    valid_password,
 };
 use throcc_proto::permissions;
 use throcc_proto::transport::close;
@@ -26,15 +28,14 @@ use crate::sfu::{ForwardingTable, KeyframeAggregator, Route, Sfu};
 use crate::unix_now;
 
 const INVITE_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
+/// An account not signed in to for this long is removed. Whoever it invited stays.
+pub const INACTIVE_ACCOUNT_LIFETIME: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 const PROFILE_INTERVAL: Duration = Duration::from_secs(10);
 const TRACKS_PER_MEMBERSHIP: u32 = 3;
 const MINT_ATTEMPTS: usize = 64;
-const MAX_WATCHED: usize = 16;
 /// Clients rotate encryption keys every 30 days; a day of slack covers clock skew.
 const MAX_ENCRYPTION_KEY_LIFETIME: Duration = Duration::from_secs(31 * 24 * 60 * 60);
 const MAX_WRAPPED_BYTES: usize = 256;
-/// Welcome lists every room, and must stay under the frame cap.
-pub const MAX_ROOMS: usize = 500;
 const REQUEST_BURST: f64 = 100.0;
 const REQUESTS_PER_SECOND: f64 = 20.0;
 /// Keyframe requests and picture fetches come in bursts, so they get their own larger
@@ -290,23 +291,28 @@ impl Hub {
         })
     }
 
-    /// Registers a connection that has authenticated as `row`. A previous connection of the
-    /// same user is kicked. Returns the connection id and the welcome snapshot, or `None`
-    /// if the user was removed after authenticating.
+    /// Registers a connection that has authenticated as `row`, and notes that its user was
+    /// seen. A previous connection of the same user is kicked. Returns the connection id and
+    /// the welcome snapshot, or why the user can't connect: they were removed after
+    /// authenticating, or [`MAX_ONLINE`] others are signed in.
     pub fn connect(
         &mut self,
         row: UserRow,
         handle: ConnectionHandle,
         want_room: Option<RoomId>,
-    ) -> anyhow::Result<Option<(u64, Welcome)>> {
+    ) -> anyhow::Result<Result<(u64, Welcome), AuthError>> {
         let user = row.id;
         let Some(row) = self
             .db
             .user(user)?
             .filter(|current| current.pubkey == row.pubkey)
         else {
-            return Ok(None);
+            return Ok(Err(AuthError::UnknownKey));
         };
+        self.db.mark_seen(user, unix_now())?;
+        if !self.sessions.contains_key(&user) && self.sessions.len() >= MAX_ONLINE {
+            return Ok(Err(AuthError::ServerFull));
+        }
         self.evict(user, "you signed in from somewhere else");
         self.next_conn += 1;
         let conn_id = self.next_conn;
@@ -338,11 +344,11 @@ impl Hub {
             me: user,
             role,
             rooms: self.room_list(),
-            online: self.sessions.values().filter_map(presence).collect(),
+            presence: self.sessions.values().filter_map(presence).collect(),
             placement,
             server,
         };
-        Ok(Some((conn_id, welcome)))
+        Ok(Ok((conn_id, welcome)))
     }
 
     /// Leaving the room already rebuilds the routes, and a session outside a room has none.
@@ -647,6 +653,13 @@ impl Hub {
         if self.enters_another_room(user, target)? && !self.room_changes.holds(user, 1.0, now) {
             return Err(changing_rooms_too_fast());
         }
+        // Checked before any password work, which a full room would only waste.
+        if let Some(room) = target
+            && self.session(user)?.room != target
+            && self.room_entry(room)?.members.len() >= MAX_ROOM_MEMBERS
+        {
+            return Err(room_full());
+        }
         let needed = match target {
             Some(room) => self.password_to_enter(user, room)?.map(|hash| (room, hash)),
             None => None,
@@ -799,7 +812,9 @@ impl Hub {
             return Ok(self.placement(user));
         }
         if let Some(room) = target {
-            self.room_entry(room)?;
+            if self.room_entry(room)?.members.len() >= MAX_ROOM_MEMBERS {
+                return Err(room_full());
+            }
             let now = unix_now();
             if session
                 .row
@@ -832,7 +847,7 @@ impl Hub {
         }
         match self.sessions.get(&user).and_then(presence) {
             Some(p) => self.emit_all(Event::PresenceChanged(p)),
-            None => self.emit_all(Event::WentOffline(user)),
+            None => self.emit_all(Event::PresenceEnded(user)),
         }
         self.rebuild_routes();
         Ok(self.placement(user))
@@ -855,7 +870,7 @@ impl Hub {
         }
         self.set_membership(user, None, None);
         self.broadcast_peers(room, None);
-        self.emit_all(Event::WentOffline(user));
+        self.emit_all(Event::PresenceEnded(user));
         self.rebuild_routes();
     }
 
@@ -1043,14 +1058,20 @@ impl Hub {
     }
 
     /// Mic and deafen always apply, since push-to-talk sends `SetMedia`. Only starting or
-    /// changing a share counts against the share allowance; over it, the rest still applies,
-    /// the share stays as it was, and the reply says so. Stopping is never refused: stops are
-    /// bounded by starts, and a stop shrinks fan-out.
+    /// changing a share counts against the share allowance, and a new share is refused once
+    /// the room has [`MAX_ROOM_SHARES`]; either way the rest still applies, the share stays
+    /// as it was, and the reply says so. Stopping is never refused: stops are bounded by
+    /// starts, and a stop shrinks fan-out.
     fn set_media(&mut self, user: UserId, media: MediaState) -> Outcome {
         let room = self.current_room(user)?;
         let stored = self.session(user)?.media;
-        let starting = media.share.is_some() && media.share != stored.share;
-        let refused = starting && !self.share_changes.take(user, 1.0, Instant::now());
+        let starting = media.share.is_some() && stored.share.is_none();
+        let full = starting && self.shares_in(room) >= MAX_ROOM_SHARES;
+        let limited = media.share.is_some()
+            && media.share != stored.share
+            && !full
+            && !self.share_changes.take(user, 1.0, Instant::now());
+        let refused = full || limited;
         let applied = MediaState {
             share: if refused { stored.share } else { media.share },
             ..media
@@ -1059,17 +1080,42 @@ impl Hub {
         if applied.share != stored.share {
             self.broadcast_peers(room, None);
         }
-        if applied.deafened != stored.deafened {
+        // Audiences list only running shares, so a share starting or ending changes them.
+        if applied.deafened != stored.deafened || applied.share.is_some() != stored.share.is_some()
+        {
             self.rebuild_routes();
         }
         self.announce_presence(user);
-        if refused {
+        if full {
+            return Err(Refusal::new(
+                ErrorCode::Full,
+                format!("this room already has {MAX_ROOM_SHARES} screen shares running"),
+            ));
+        }
+        if limited {
             return Err(Refusal::new(
                 ErrorCode::RateLimited,
                 "too many share starts; the share stays as it was, try again in a moment",
             ));
         }
         Ok(Response::Ok)
+    }
+
+    /// Whether [`MAX_ONLINE`] people are signed in.
+    pub fn is_full(&self) -> bool {
+        self.sessions.len() >= MAX_ONLINE
+    }
+
+    /// How many screen shares run in `room`.
+    fn shares_in(&self, room: RoomId) -> usize {
+        self.rooms.get(&room).map_or(0, |entry| {
+            entry
+                .members
+                .iter()
+                .filter_map(|m| self.sessions.get(m))
+                .filter(|s| s.media.share.is_some())
+                .count()
+        })
     }
 
     fn create_room(
@@ -1304,11 +1350,31 @@ impl Hub {
         }
         self.db.remove_users(&removed).map_err(Refusal::internal)?;
         for id in &removed {
+            self.last_joined.remove(id);
             self.evict(*id, "you were removed from this server");
             self.emit_user_list_change(Event::UserRemoved(*id));
         }
         info!(?removed, "removed users");
         Ok(Response::Ok)
+    }
+
+    /// Removes every account not signed in to for [`INACTIVE_ACCOUNT_LIFETIME`]. Being
+    /// connected counts as being seen, so a connection open for a year doesn't end in removal.
+    pub fn remove_inactive(&mut self, now: u64) -> anyhow::Result<()> {
+        let connected: Vec<UserId> = self.sessions.keys().copied().collect();
+        self.db.mark_all_seen(&connected, now)?;
+        let before = now.saturating_sub(INACTIVE_ACCOUNT_LIFETIME.as_secs());
+        let inactive = self.db.unseen_since(before)?;
+        if inactive.is_empty() {
+            return Ok(());
+        }
+        self.db.remove_users(&inactive)?;
+        for id in &inactive {
+            self.last_joined.remove(id);
+            self.emit_user_list_change(Event::UserRemoved(*id));
+        }
+        info!(removed = ?inactive, "removed inactive accounts");
+        Ok(())
     }
 
     fn set_watched(&mut self, user: UserId, ids: Vec<MediaId>) -> Outcome {
@@ -1479,7 +1545,9 @@ impl Hub {
                     table
                         .routes
                         .insert(share.audio, route(owner, TrackKind::Audio, audio));
-                    if !receivers.is_empty() {
+                    // A share that ended can keep watchers until they unwatch it, but it has
+                    // no audience to show.
+                    if sender.media.share.is_some() && !receivers.is_empty() {
                         room_audiences.push(Audience {
                             video: share.video,
                             receivers,
@@ -1526,6 +1594,13 @@ fn changing_rooms_too_fast() -> Refusal {
     Refusal::new(
         ErrorCode::RateLimited,
         "you are changing rooms too fast; wait a moment",
+    )
+}
+
+fn room_full() -> Refusal {
+    Refusal::new(
+        ErrorCode::Full,
+        format!("this room is full; it holds {MAX_ROOM_MEMBERS} people"),
     )
 }
 
