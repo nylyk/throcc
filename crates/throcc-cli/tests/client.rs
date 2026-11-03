@@ -562,16 +562,16 @@ fn room_and_elsewhere(admin: &Client) -> (RoomId, RoomId) {
     (room, elsewhere)
 }
 
-/// Has `alice`, the admin, set `sound` for `bob` while he is in another room, so before he
-/// presents his key, then brings him into her room until she holds his key.
-fn set_before_his_key(alice: &Client, bob: &Client, sound: Sound, playback: Playback) -> UserId {
+/// Has `alice`, the admin, set `bob`'s voice playback while he is in another room, so before
+/// he presents his key, then brings him into her room until she holds his key.
+fn set_before_his_key(alice: &Client, bob: &Client, voice: Playback) -> UserId {
     let (room, elsewhere) = room_and_elsewhere(alice);
     let bob_id = bob.state().me.unwrap();
     bob.command(Command::Join(Some(elsewhere)));
     wait_for(alice, "bob in the other room", |s| {
         s.person(bob_id).is_some_and(|p| p.identity_key.is_none())
     });
-    alice.command(Command::SetPlayback(bob_id, sound, playback));
+    alice.command(Command::SetPlayback(bob_id, Sound::Voice, voice));
     alice.command(Command::Join(Some(room)));
     bob.command(Command::Join(Some(room)));
     key_of(alice, bob_id);
@@ -598,7 +598,7 @@ fn playback_follows_the_identity_key_to_every_server() {
         let alice = client_in(alice_dir.path(), &first, Some(&first_admin));
         wait_connected(&alice, "alice connected");
         let bob = client_in(bob_dir.path(), &first, Some(&invite(&alice)));
-        let bob_id = set_before_his_key(&alice, &bob, Sound::Voice, quiet);
+        let bob_id = set_before_his_key(&alice, &bob, quiet);
         alice.command(Command::SetPlayback(bob_id, Sound::Share, muted));
         wait_for(&alice, "bob quiet and his stream muted", |s| {
             s.person(bob_id)
@@ -610,7 +610,7 @@ fn playback_follows_the_identity_key_to_every_server() {
     let alice = client_in(alice_dir.path(), &second, Some(&second_admin));
     wait_connected(&alice, "alice on the second server");
     let bob = client_in(bob_dir.path(), &second, Some(&invite(&alice)));
-    let bob_id = set_before_his_key(&alice, &bob, Sound::Voice, loud);
+    let bob_id = set_before_his_key(&alice, &bob, loud);
     wait_for(&alice, "bob louder, his stream still muted", |s| {
         s.person(bob_id)
             .is_some_and(|p| p.playback.voice == loud && p.playback.share == muted)

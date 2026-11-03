@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use serde::de::DeserializeOwned;
 use tempfile::TempDir;
 use throcc_client_core::account::{self, SignInError};
-use throcc_client_core::call::Call;
+use throcc_client_core::call::{Call, CallEvent};
 use throcc_client_core::connection::{self, Connected};
 use throcc_client_core::control::Link;
 use throcc_client_core::keystore::Keystore;
@@ -309,6 +309,22 @@ pub async fn peer_tracks(viewer: &Call, peer: &Call) -> Tracks {
 
 pub async fn first_share(viewer: &Call, peer: &Call) -> Share {
     peer_tracks(viewer, peer).await.shares[0]
+}
+
+/// Waits for the next server event on `call` that `pick` accepts, skipping others.
+pub async fn server_event<T>(call: &mut Call, mut pick: impl FnMut(Event) -> Option<T>) -> T {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = call.events.recv().await.expect("event stream ended");
+            if let CallEvent::Server(event) = event
+                && let Some(found) = pick(event)
+            {
+                return found;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for a server event")
 }
 
 /// Subscribes `viewer` to `video` and tells the server it is watching.

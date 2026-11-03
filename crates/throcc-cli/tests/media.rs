@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use throcc_client_core::call::{Call, CallEvent};
+use throcc_client_core::call::Call;
 use throcc_client_core::media::engine::{Kind, Outgoing};
 use throcc_proto::frame::{Flags, Header, TAG_BYTES, VIDEO_CLOCK_HZ};
 use throcc_proto::ids::{Epoch, MediaId, UserId};
@@ -105,17 +105,11 @@ async fn watching_a_share_asks_its_sender_for_an_idr() {
     let video_id = first_share(&bob, &alice).await.video;
     let watching = Request::SetWatching(vec![video_id]);
     assert_eq!(bob.request(watching).await.unwrap(), Response::Ok);
-    let wanted = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(CallEvent::Server(Event::KeyframeWanted { media_id, kind })) =
-                alice.events.recv().await
-            {
-                return (media_id, kind);
-            }
-        }
+    let wanted = server_event(&mut alice, |e| match e {
+        Event::KeyframeWanted { media_id, kind } => Some((media_id, kind)),
+        _ => None,
     })
-    .await
-    .unwrap();
+    .await;
     assert_eq!(wanted, (video_id, throcc_proto::messages::Recovery::Idr));
 }
 
@@ -143,18 +137,12 @@ async fn the_room_learns_who_watches_a_share() {
 
 /// Waits for the next change in who watches `video`.
 async fn audience(call: &mut Call, video: MediaId) -> Vec<UserId> {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(CallEvent::Server(Event::AudiencesChanged(changed))) =
-                call.events.recv().await
-                && let Some(a) = changed.into_iter().find(|a| a.video == video)
-            {
-                return a.watchers;
-            }
-        }
+    server_event(call, |e| match e {
+        Event::AudiencesChanged(changed) => changed.into_iter().find(|a| a.video == video),
+        _ => None,
     })
     .await
-    .unwrap()
+    .watchers
 }
 
 #[tokio::test]
