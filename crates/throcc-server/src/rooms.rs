@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -7,9 +8,9 @@ use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
-    Audience, ErrorCode, Event, MAX_AVATAR_BYTES, MAX_NAME_CHARS, MAX_PASSWORD_CHARS, MediaState,
-    Placed, Presence, Recovery, Request, Response, Room, RoomPeer, ServerMessage, ServerProfile,
-    Share, SignedEncKey, Tracks, Welcome, valid_name, valid_password,
+    Audience, Audiences, ErrorCode, Event, MAX_AVATAR_BYTES, MAX_NAME_CHARS, MAX_PASSWORD_CHARS,
+    MediaState, Placed, Presence, Recovery, Request, Response, Room, RoomPeer, ServerMessage,
+    ServerProfile, Share, SignedEncKey, Tracks, Welcome, valid_name, valid_password,
 };
 use throcc_proto::permissions;
 use throcc_proto::transport::close;
@@ -207,6 +208,9 @@ struct Session {
     last_profile: Option<Instant>,
     /// Sender keys published for the room's current epoch, outside the request allowance.
     key_publishes: Option<(RoomId, Epoch, u32)>,
+    /// The `seq` of the last [`Audiences`] made for this connection. Counting per connection
+    /// keeps what changes in other rooms out of it.
+    audience_seq: Cell<u64>,
 }
 
 struct RoomEntry {
@@ -237,8 +241,8 @@ pub struct Hub {
     /// The room each user last moved into themselves, which a reconnect may return them to
     /// without its password.
     last_joined: HashMap<UserId, RoomId>,
-    /// The watchers of each watched share, by its video, as last announced to its room.
-    audiences: HashMap<MediaId, Vec<UserId>>,
+    /// Who receives each share of every room where anyone does, as last announced to it.
+    audiences: HashMap<RoomId, Vec<Audience>>,
     pub invite_runs: InviteRuns,
 }
 
@@ -316,6 +320,7 @@ impl Hub {
                 watching: Vec::new(),
                 last_profile: None,
                 key_publishes: None,
+                audience_seq: Cell::new(0),
             },
         );
         let placed = want_room
@@ -870,7 +875,7 @@ impl Hub {
             epoch: self.rooms.get(&room).map_or(Epoch(0), |r| r.epoch),
             tracks: session.tracks.clone(),
             peers: self.peers(room),
-            audiences: self.audiences_in(room),
+            audiences: self.audiences_in(room, session),
         }
     }
 
@@ -1407,33 +1412,24 @@ impl Hub {
         })
     }
 
-    /// Who watches each share in `room` that anyone watches.
-    fn audiences_in(&self, room: RoomId) -> Vec<Audience> {
-        let Some(entry) = self.rooms.get(&room) else {
-            return Vec::new();
-        };
-        entry
-            .members
-            .iter()
-            .filter_map(|m| self.sessions.get(m)?.tracks.as_ref())
-            .flat_map(|t| &t.shares)
-            .filter_map(|share| {
-                let watchers = self.audiences.get(&share.video)?.clone();
-                Some(Audience {
-                    video: share.video,
-                    watchers,
-                })
-            })
-            .collect()
+    /// Who receives each share in `room` now, under the next `seq` of `session`.
+    fn audiences_in(&self, room: RoomId, session: &Session) -> Audiences {
+        let seq = session.audience_seq.get() + 1;
+        session.audience_seq.set(seq);
+        Audiences {
+            seq,
+            shares: self.audiences.get(&room).cloned().unwrap_or_default(),
+        }
     }
 
     /// Recomputes who receives what and publishes it to the ingress loops. Tells each room
-    /// about every share whose watchers changed since it was last told.
+    /// whose audiences changed since it was last told who receives each of its shares.
     fn rebuild_routes(&mut self) {
         let mut table = ForwardingTable::default();
         let mut audiences = HashMap::new();
-        let mut changed: BTreeMap<RoomId, Vec<Audience>> = BTreeMap::new();
+        let mut changed = Vec::new();
         for (room, entry) in &self.rooms {
+            let mut room_audiences = Vec::new();
             let members: Vec<&Session> = entry
                 .members
                 .iter()
@@ -1450,36 +1446,52 @@ impl Hub {
                     .routes
                     .insert(tracks.mic, route(owner, TrackKind::Audio, hearing));
                 for share in &tracks.shares {
-                    let watchers = |id: MediaId| others().filter(move |m| m.watching.contains(&id));
-                    let video = watchers(share.video);
-                    let audio = watchers(share.audio).filter(|m| !m.media.deafened);
-                    let audience: Vec<UserId> = watchers(share.video).map(|m| m.row.id).collect();
+                    let sees = |m: &Session| m.watching.contains(&share.video);
+                    let hears =
+                        |m: &Session| m.watching.contains(&share.audio) && !m.media.deafened;
+                    let video = others().filter(|m| sees(m));
+                    let audio = others().filter(|m| hears(m));
+                    let receivers: Vec<UserId> = others()
+                        .filter(|m| sees(m) || hears(m))
+                        .map(|m| m.row.id)
+                        .collect();
                     table
                         .routes
                         .insert(share.video, route(owner, TrackKind::Video, video));
                     table
                         .routes
                         .insert(share.audio, route(owner, TrackKind::Audio, audio));
-                    let before = self
-                        .audiences
-                        .get(&share.video)
-                        .map_or(&[][..], Vec::as_slice);
-                    if audience != before {
-                        changed.entry(*room).or_default().push(Audience {
+                    if !receivers.is_empty() {
+                        room_audiences.push(Audience {
                             video: share.video,
-                            watchers: audience.clone(),
+                            watchers: receivers,
                         });
                     }
-                    if !audience.is_empty() {
-                        audiences.insert(share.video, audience);
-                    }
                 }
+            }
+            let before = self.audiences.get(room).map_or(&[][..], Vec::as_slice);
+            if room_audiences != before {
+                changed.push(*room);
+            }
+            if !room_audiences.is_empty() {
+                audiences.insert(*room, room_audiences);
             }
         }
         self.sfu.table.store(Arc::new(table));
         self.audiences = audiences;
-        for (room, audiences) in changed {
-            self.emit_room(room, Event::AudiencesChanged(audiences), None);
+        for room in changed {
+            let members = self
+                .rooms
+                .get(&room)
+                .map(|r| &r.members)
+                .into_iter()
+                .flatten();
+            for session in members.filter_map(|m| self.sessions.get(m)) {
+                send(
+                    session,
+                    Event::AudiencesChanged(self.audiences_in(room, session)),
+                );
+            }
         }
     }
 }
@@ -1584,7 +1596,7 @@ fn lobby() -> Placed {
         epoch: Epoch(0),
         tracks: None,
         peers: Vec::new(),
-        audiences: Vec::new(),
+        audiences: Audiences::default(),
     }
 }
 
