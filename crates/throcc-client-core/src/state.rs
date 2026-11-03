@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use serde::{Deserialize, Serialize};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
-use throcc_proto::limits::{MAX_ONLINE, MAX_ROOMS};
+use throcc_proto::limits::{MAX_ROOMS, MAX_SIGNED_IN};
 use throcc_proto::messages::{Codec, PublicKey, Room, ShareConfig, valid_name};
 
 pub(crate) const MIC_KBPS: u32 = 64;
@@ -71,9 +71,9 @@ impl State {
         }
     }
 
-    /// Shows `person` as `user`, unless that would show more than [`MAX_ONLINE`].
+    /// Shows `person` as `user`, unless that would show more than [`MAX_SIGNED_IN`].
     pub(crate) fn add_person(&mut self, user: UserId, person: Person) {
-        if self.people.len() < MAX_ONLINE || self.people.contains_key(&user) {
+        if self.people.len() < MAX_SIGNED_IN || self.people.contains_key(&user) {
             self.people.insert(user, person);
         }
     }
@@ -474,14 +474,14 @@ mod tests {
         }
         assert_eq!(state.rooms.len(), MAX_ROOMS);
 
-        for id in 0..MAX_ONLINE as u64 + 10 {
+        for id in 0..MAX_SIGNED_IN as u64 + 10 {
             state.add_person(UserId(id), named("p"));
         }
-        assert_eq!(state.people.len(), MAX_ONLINE);
+        assert_eq!(state.people.len(), MAX_SIGNED_IN);
         state.add_person(UserId(0), named("renamed"));
         assert_eq!(state.people[&UserId(0)].name, "renamed");
-        state.add_person(UserId(MAX_ONLINE as u64), named("over"));
-        assert!(state.person(UserId(MAX_ONLINE as u64)).is_none());
+        state.add_person(UserId(MAX_SIGNED_IN as u64), named("over"));
+        assert!(state.person(UserId(MAX_SIGNED_IN as u64)).is_none());
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::UserId;
-use throcc_proto::limits::MAX_ONLINE;
+use throcc_proto::limits::MAX_SIGNED_IN;
 use throcc_proto::messages::PublicKey;
 use tracing::warn;
 
@@ -35,7 +35,7 @@ impl Trust {
         self.presented.clear();
     }
 
-    /// Notes the identity keys `peers` present. True if any is new. Once [`MAX_ONLINE`] are
+    /// Notes the identity keys `peers` present. True if any is new. Once [`MAX_SIGNED_IN`] are
     /// noted, only those of `peers` and of people with a changed key stay.
     pub fn note(&mut self, peers: &[(UserId, PublicKey)]) -> bool {
         let new: Vec<(UserId, PublicKey)> = peers
@@ -47,7 +47,7 @@ impl Trust {
             return false;
         }
         let mut verified = self.verified.lock();
-        if self.presented.len() + new.len() > MAX_ONLINE {
+        if self.presented.len() + new.len() > MAX_SIGNED_IN {
             let here: HashSet<UserId> = peers.iter().map(|(user, _)| *user).collect();
             let server = &self.server;
             self.presented.retain(|user, _| {
@@ -243,13 +243,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut trust = verified_then_changed(dir.path());
         let room = throcc_proto::limits::MAX_ROOM_MEMBERS as u64;
-        for batch in 0..(MAX_ONLINE as u64 / room + 1) {
+        for batch in 0..(MAX_SIGNED_IN as u64 / room + 1) {
             let peers: Vec<(UserId, PublicKey)> = (0..room)
                 .map(|i| (UserId(1000 + batch * room + i), [7; 32]))
                 .collect();
             trust.note(&peers);
         }
         assert_eq!(trust.of(MARA), (false, Some(IMPOSTOR)));
-        assert!(trust.presented.len() <= MAX_ONLINE + room as usize);
+        assert!(trust.presented.len() <= MAX_SIGNED_IN + room as usize);
     }
 }

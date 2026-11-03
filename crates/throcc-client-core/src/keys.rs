@@ -7,7 +7,7 @@ use throcc_crypto::identity::{self, random};
 use throcc_crypto::media::TrackKey;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Epoch, MediaId, RoomId, UserId};
-use throcc_proto::limits::{MAX_ONLINE, MAX_ROOM_MEMBERS};
+use throcc_proto::limits::{MAX_ROOM_MEMBERS, MAX_SIGNED_IN};
 use throcc_proto::messages::{Peer, PublicKey, Request, SignedEncryptionKey, Tracks};
 use tracing::warn;
 use zeroize::Zeroizing;
@@ -158,7 +158,7 @@ impl KeyManager {
     /// shown in our room, so the current room state should be applied again.
     pub fn set_presence(&mut self, user: UserId, room: Option<RoomId>) -> bool {
         let before = match room {
-            Some(_) if self.present.len() >= MAX_ONLINE && !self.present.contains_key(&user) => {
+            Some(_) if self.present.len() >= MAX_SIGNED_IN && !self.present.contains_key(&user) => {
                 return false;
             }
             Some(room) => self.present.insert(user, room),

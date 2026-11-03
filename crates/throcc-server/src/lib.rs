@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use throcc_proto::Fingerprint;
 use throcc_proto::invite::InviteCode;
-use throcc_proto::limits::MAX_ONLINE;
+use throcc_proto::limits::MAX_SIGNED_IN;
 use throcc_proto::transport::{self, check_datagrams, close};
 use tokio::sync::Semaphore;
 use tracing::{debug, warn};
@@ -34,12 +34,12 @@ pub use crate::sfu::{AUDIO_BURST_PACKETS, AUDIO_PACKETS_PER_SECOND};
 pub use crate::tls::Congestion;
 
 pub const DATABASE_FILE: &str = "throcc.sqlite";
-/// Connections past their hello, signing in or signed in: everyone who may be online, and as
-/// many again signing in or replacing their connection.
+/// Connections past their hello, signing in or signed in: everyone who may be signed in,
+/// admins past the limit included, and every handshake that may be signing in.
 pub const CONNECTIONS: Caps = Caps {
     per_source: 32,
     per_network: 128,
-    total: 2 * MAX_ONLINE,
+    total: MAX_SIGNED_IN + HANDSHAKES.total,
 };
 /// Connections from their first packet until they have signed in. A network gets a 16th
 /// of them, so filling them takes hosts in 16 networks; a source gets as many as its

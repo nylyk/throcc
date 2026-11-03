@@ -13,6 +13,6 @@ The wire types that the server and clients share. It is plain data and pure func
 | `invite.rs` | Invite codes such as `K7Q-M2XPD` in Crockford base32 |
 | `fingerprint.rs` | Server and identity fingerprints (SHA-256 of an SPKI) |
 | `transport.rs` | QUIC settings both sides use, and the connection close codes |
-| `limits.rs` | The limits both sides hold to: 30 people and 5 screen shares in a room, 50 rooms and 250 people signed in on a server. The server enforces them; clients refuse a server that goes past them |
+| `limits.rs` | The limits both sides hold to: 30 people and 5 screen shares in a room, 50 rooms and 250 people signed in on a server, with room for 10 admins past that. The server enforces them; clients refuse a server that goes past them |
 
 Any change to `messages.rs` bumps `PROTOCOL`. New enum variants go last, because postcard encodes a variant by its index. The media header in `frame.rs` is security-critical, and changing its layout changes the protocol.

@@ -98,8 +98,8 @@ struct Enrollment<'a> {
 impl Enrollment<'_> {
     async fn run(&self, stream: &mut FrameStream, pake_a: &[u8]) -> Result<UserRow, AuthRefusal> {
         // Checked before the run counts or the invite is touched, so a full server spends
-        // neither. Someone may still sign in during the run; then the account is made and the
-        // sign-in refused.
+        // neither, for admin invites too. Someone may still sign in during the run; then the
+        // account is made and, unless it is an admin's, the sign-in refused.
         if self.shared.hub().is_full() {
             return Err(AuthRefusal::Enroll(AuthError::ServerFull));
         }

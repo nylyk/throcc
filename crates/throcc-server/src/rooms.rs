@@ -7,7 +7,9 @@ use throcc_crypto::identity::{self, random};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
 use throcc_proto::invite::InviteCode;
-use throcc_proto::limits::{MAX_ONLINE, MAX_ROOM_MEMBERS, MAX_ROOM_SHARES, MAX_ROOMS, MAX_WATCHED};
+use throcc_proto::limits::{
+    MAX_ONLINE, MAX_ROOM_MEMBERS, MAX_ROOM_SHARES, MAX_ROOMS, MAX_SIGNED_IN, MAX_WATCHED,
+};
 use throcc_proto::messages::{
     Audience, Audiences, AuthError, ErrorCode, Event, MAX_AVATAR_BYTES, MAX_NAME_CHARS,
     MAX_PASSWORD_CHARS, MediaState, Peer, Placement, Presence, Recovery, Request, Response, Room,
@@ -294,7 +296,8 @@ impl Hub {
     /// Registers a connection that has authenticated as `row`, and notes that its user was
     /// seen. A previous connection of the same user is kicked. Returns the connection id and
     /// the welcome snapshot, or why the user can't connect: they were removed after
-    /// authenticating, or [`MAX_ONLINE`] others are signed in.
+    /// authenticating, or [`MAX_ONLINE`] others are signed in and they aren't an admin, or
+    /// [`MAX_SIGNED_IN`] are.
     pub fn connect(
         &mut self,
         row: UserRow,
@@ -310,7 +313,9 @@ impl Hub {
             return Ok(Err(AuthError::UnknownKey));
         };
         self.db.mark_seen(user, unix_now())?;
-        if !self.sessions.contains_key(&user) && self.sessions.len() >= MAX_ONLINE {
+        let full =
+            self.sessions.len() >= MAX_SIGNED_IN || (row.role != Role::Admin && self.is_full());
+        if full && !self.sessions.contains_key(&user) {
             return Ok(Err(AuthError::ServerFull));
         }
         self.evict(user, "you signed in from somewhere else");
