@@ -26,4 +26,4 @@ COPY --from=build /src/target/release/throcc-server /throcc-server
 COPY --from=build --chown=65532:65532 /data /data
 VOLUME /data
 EXPOSE 8476/udp
-ENTRYPOINT ["/tini", "--", "/throcc-server","--data", "/data", "--listen", "[::]:8476"]
+ENTRYPOINT ["/tini", "--", "/throcc-server", "--data", "/data", "--listen", "[::]:8476"]
