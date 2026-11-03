@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -256,7 +256,7 @@ pub async fn recv(call: &mut Call, room: RoomId, options: RecvOptions<'_>) -> Re
         .map_or(0.0, |s| s.elapsed().as_secs_f64())
         .max(0.001);
     let stats = &call.engine.stats;
-    let count = |counter: &std::sync::atomic::AtomicU64| counter.load(Ordering::Relaxed);
+    let count = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
     println!(
         "RESULT role=receiver intact={intact} corrupt={corrupt} mbps={:.2} server_dropped_units={server_dropped} lost_datagrams={} decrypt_failures={} abandoned_units={} late_units={} duplicates={} too_old={} unknown_track={} malformed={} track_overflow={} audio_frames={audio_frames} audio_lost={} audio_server_dropped={audio_server_dropped}",
         bytes as f64 * 8.0 / secs / 1e6,
