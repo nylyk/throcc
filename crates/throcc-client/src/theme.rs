@@ -311,17 +311,21 @@ fn mixed(top: u32, share: f32, base: u32) -> Hsla {
 pub fn bg() -> Hsla {
     hex(palette().bg)
 }
-/// The sidebar, see-through when picked, over the blurred desktop on macOS.
+/// The sidebar, see-through when picked, over the blurred desktop on macOS and Linux.
 pub fn sidebar_glass() -> Hsla {
-    if translucent_sidebar() {
+    if SEES_DESKTOP && translucent_sidebar() {
         surface().opacity(0.9)
     } else {
         surface()
     }
 }
-/// What shows behind every view: nothing on macOS, where the window blurs the desktop.
+/// Whether the main window shows the desktop behind see-through views, blurred where the
+/// compositor supports it.
+pub const SEES_DESKTOP: bool = cfg!(any(target_os = "macos", target_os = "linux"));
+
+/// What shows behind every view: nothing where the window sees the desktop.
 pub fn window_bg() -> Hsla {
-    if cfg!(target_os = "macos") {
+    if SEES_DESKTOP {
         gpui::transparent_black()
     } else {
         bg()

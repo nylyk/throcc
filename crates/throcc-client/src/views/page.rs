@@ -66,7 +66,7 @@ pub fn frame(
     div().size_full().flex().child(sidebar).child(page)
 }
 
-/// A sidebar `width` wide, see-through to the blurred desktop on macOS.
+/// A sidebar `width` wide, see-through to the blurred desktop on macOS and Linux.
 pub fn sidebar_column(width: Pixels) -> Div {
     div()
         .relative()

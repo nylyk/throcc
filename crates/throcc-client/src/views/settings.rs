@@ -587,22 +587,24 @@ fn appearance(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                     .children(colors),
             )
         })
-        .child(
-            card()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(section("Sidebar"))
-                .child(switch_row(
-                    Switch::new("translucent-sidebar")
-                        .checked(theme::translucent_sidebar())
-                        .label("Translucent")
-                        .on_click(cx.listener(|app, on: &bool, _, cx| {
-                            app.use_translucent_sidebar(*on);
-                            cx.notify();
-                        })),
-                )),
-        )
+        .when(theme::SEES_DESKTOP, |page| {
+            page.child(
+                card()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(section("Sidebar"))
+                    .child(switch_row(
+                        Switch::new("translucent-sidebar")
+                            .checked(theme::translucent_sidebar())
+                            .label("Translucent")
+                            .on_click(cx.listener(|app, on: &bool, _, cx| {
+                                app.use_translucent_sidebar(*on);
+                                cx.notify();
+                            })),
+                    )),
+            )
+        })
         .into_any_element()
 }
 

@@ -359,6 +359,14 @@ pub const TRAFFIC_LIGHTS: Pixels = px(if cfg!(target_os = "macos") { 76. } else 
 /// `options` with the titlebar drawn by the app on macOS: the traffic lights sit in our own
 /// views at `lights`, and a `blurred` window shows the desktop behind see-through views.
 pub fn app_titlebar(options: WindowOptions, lights: Point<Pixels>, blurred: bool) -> WindowOptions {
+    let options = WindowOptions {
+        window_background: if blurred && theme::SEES_DESKTOP {
+            WindowBackgroundAppearance::Blurred
+        } else {
+            WindowBackgroundAppearance::Opaque
+        },
+        ..options
+    };
     if !cfg!(target_os = "macos") {
         return options;
     }
@@ -369,11 +377,6 @@ pub fn app_titlebar(options: WindowOptions, lights: Point<Pixels>, blurred: bool
             traffic_light_position: Some(lights),
         }),
         app_owns_titlebar_drag: true,
-        window_background: if blurred {
-            WindowBackgroundAppearance::Blurred
-        } else {
-            WindowBackgroundAppearance::Opaque
-        },
         ..options
     }
 }
