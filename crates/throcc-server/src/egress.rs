@@ -487,7 +487,7 @@ impl Queues {
             Some(id) => *id,
             None => {
                 let (id, mut unit) = self.waiting.pop_first()?;
-                while self.strays.front().is_some_and(|d| *d <= id) {
+                while self.strays.front().is_some_and(|stray| *stray <= id) {
                     self.strays.pop_front();
                 }
                 unit.started = true;
