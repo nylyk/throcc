@@ -14,7 +14,7 @@ use tempfile::TempDir;
 use throcc_client_core::account::{self, SignInError};
 use throcc_client_core::call::{Call, CallEvent};
 use throcc_client_core::connection::{self, Connected};
-use throcc_client_core::control::Link;
+use throcc_client_core::control::ControlLink;
 use throcc_client_core::keystore::Keystore;
 use throcc_client_core::media::engine::{Kind, Received};
 use throcc_crypto::identity::IdentityKey;
@@ -23,12 +23,12 @@ use throcc_proto::framing;
 use throcc_proto::ids::{MediaId, RoomId};
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
-    AuthResult, Codec, ErrorCode, Event, Hello, MediaState, PakeFinish, PakeReply, PakeStep,
-    Placed, Request, Response, ServerHello, Share, ShareConfig, Tracks, Welcome,
+    AuthResult, ClientHello, Codec, ErrorCode, Event, MediaState, PakeFinish, PakeReply, PakeStep,
+    Placement, Request, Response, ServerHello, ShareConfig, ShareTracks, Tracks, Welcome,
 };
 use throcc_server::database::Database;
 use throcc_server::identity::ServerIdentity;
-use throcc_server::{Config, DATABASE_FILE, Server, Shared, tls};
+use throcc_server::{Config, DATABASE_FILE, Server, ServerState, tls};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
@@ -36,7 +36,7 @@ pub struct TestServer {
     pub addr: String,
     /// An admin invite minted at start, as `throcc-server admin-invite` would.
     pub admin_invite: InviteCode,
-    pub shared: Arc<Shared>,
+    pub shared: Arc<ServerState>,
     pub dir: TempDir,
 }
 
@@ -158,7 +158,7 @@ impl Drop for ProcessLikeServer {
 
 pub struct TestClient {
     pub keystore: Keystore,
-    pub link: Link,
+    pub link: ControlLink,
     pub dir: TempDir,
 }
 
@@ -168,18 +168,19 @@ impl TestClient {
     }
 
     pub async fn set_room(&self, room: Option<RoomId>, password: Option<&str>) -> Response {
-        self.request(Request::SetRoom {
-            room,
-            password: password.map(str::to_owned),
+        let password = password.map(str::to_owned);
+        self.request(match room {
+            Some(room) => Request::JoinRoom { room, password },
+            None => Request::LeaveRoom,
         })
         .await
     }
 
     /// Moves to `room`, which must succeed.
-    pub async fn join(&self, room: Option<RoomId>) -> Placed {
+    pub async fn join(&self, room: Option<RoomId>) -> Placement {
         match self.set_room(room, None).await {
-            Response::Placed(placed) => placed,
-            other => panic!("expected Placed, got {other:?}"),
+            Response::Placement(placed) => placed,
+            other => panic!("expected Placement, got {other:?}"),
         }
     }
 
@@ -307,7 +308,7 @@ pub async fn peer_tracks(viewer: &Call, peer: &Call) -> Tracks {
     viewer.engine.keys().peer_tracks(peer.me()).unwrap().clone()
 }
 
-pub async fn first_share(viewer: &Call, peer: &Call) -> Share {
+pub async fn first_share(viewer: &Call, peer: &Call) -> ShareTracks {
     peer_tracks(viewer, peer).await.shares[0]
 }
 
@@ -332,7 +333,7 @@ pub async fn watch(viewer: &Call, video: MediaId, capacity: usize) -> mpsc::Rece
     let units = viewer.engine.subscribe(video, Kind::Video, capacity);
     assert_eq!(
         viewer
-            .request(Request::SetWatching(vec![video]))
+            .request(Request::SetWatched(vec![video]))
             .await
             .unwrap(),
         Response::Ok
@@ -525,7 +526,7 @@ pub async fn raw_enroll_start(
     let identity = IdentityKey::generate();
     let client_nonce = [7; 32];
     let (pake, pake_a) = ClientPake::start(&code.id, &code.secret);
-    let enroll = Hello::Enroll {
+    let enroll = ClientHello::Enroll {
         code_id: code.id.clone(),
         pubkey: identity.public(),
         client_nonce,

@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use throcc_crypto::hpke::EncKeyPair;
+use throcc_crypto::hpke::EncryptionKeyPair;
 use throcc_crypto::identity::{self, IdentityKey};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::UserId;
-use throcc_proto::messages::SignedEncKey;
+use throcc_proto::messages::SignedEncryptionKey;
 use tracing::warn;
 use zeroize::Zeroizing;
 
@@ -18,13 +18,13 @@ use crate::unix_now;
 const KEYCHAIN_SERVICE: &str = "throcc";
 const KEYCHAIN_IDENTITY: &str = "identity";
 const IDENTITY_FILE: &str = "identity_key";
-const ENC_KEY_FILE: &str = "enc_key";
-const ENC_KEY_LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const ENCRYPTION_KEY_FILE: &str = "encryption_key";
+const ENCRYPTION_KEY_LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// How long before it expires the encryption key is replaced.
-const ENC_KEY_RENEW_BEFORE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const ENCRYPTION_KEY_RENEW_BEFORE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// How far in the future a key's creation time may lie before the key is replaced, as one
 /// made under a clock running ahead would otherwise stay valid far too long.
-const ENC_KEY_CLOCK_SKEW: Duration = Duration::from_secs(24 * 60 * 60);
+const ENCRYPTION_KEY_CLOCK_SKEW: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The keychain has no identity key and there is no file holding one, yet servers are known,
 /// so the identity they know us by is gone, or hidden in a keychain that is locked or hasn't
@@ -51,8 +51,8 @@ pub struct Keystore {
     dir: PathBuf,
     cache: PathBuf,
     identity: IdentityKey,
-    enc_key: EncKeyPair,
-    enc_key_created: u64,
+    encryption_key: EncryptionKeyPair,
+    encryption_key_created: u64,
     pub known_servers: KnownServers,
 }
 
@@ -107,13 +107,14 @@ impl Keystore {
 
     fn assemble(dir: PathBuf, cache: PathBuf, identity: IdentityKey) -> Result<Self> {
         let known_servers = KnownServers::load(&dir)?;
-        let (enc_key, enc_key_created) = load_enc_key(&dir.join(ENC_KEY_FILE))?;
+        let (encryption_key, encryption_key_created) =
+            load_encryption_key(&dir.join(ENCRYPTION_KEY_FILE))?;
         Ok(Self {
             dir,
             cache,
             identity,
-            enc_key,
-            enc_key_created,
+            encryption_key,
+            encryption_key_created,
             known_servers,
         })
     }
@@ -122,37 +123,39 @@ impl Keystore {
         &self.identity
     }
 
-    pub fn enc_key(&self) -> &EncKeyPair {
-        &self.enc_key
+    pub fn encryption_key(&self) -> &EncryptionKeyPair {
+        &self.encryption_key
     }
 
     /// A copy of the encryption key, for a key manager to hold.
-    pub fn enc_key_pair(&self) -> Result<EncKeyPair> {
-        Ok(EncKeyPair::from_secret(&self.enc_key.secret())?)
+    pub fn encryption_key_pair(&self) -> Result<EncryptionKeyPair> {
+        Ok(EncryptionKeyPair::from_secret(
+            &self.encryption_key.secret(),
+        )?)
     }
 
     /// Replaces the encryption key when it expires within a week. True if it was replaced.
-    pub fn renew_enc_key_if_due(&mut self) -> Result<bool> {
-        if !renewal_due(self.enc_key_created, unix_now()?) {
+    pub fn renew_encryption_key_if_due(&mut self) -> Result<bool> {
+        if !renewal_due(self.encryption_key_created, unix_now()?) {
             return Ok(false);
         }
-        self.renew_enc_key()?;
+        self.renew_encryption_key()?;
         Ok(true)
     }
 
     /// Replaces the encryption key, so nothing wrapped to the old one opens any more.
-    pub fn renew_enc_key(&mut self) -> Result<()> {
-        (self.enc_key, self.enc_key_created) =
-            new_enc_key(&self.dir.join(ENC_KEY_FILE), unix_now()?)?;
+    pub fn renew_encryption_key(&mut self) -> Result<()> {
+        (self.encryption_key, self.encryption_key_created) =
+            new_encryption_key(&self.dir.join(ENCRYPTION_KEY_FILE), unix_now()?)?;
         Ok(())
     }
 
     /// The encryption key, signed for one server and user until it expires.
-    pub fn signed_enc_key(&self, server: &Fingerprint, user: UserId) -> SignedEncKey {
-        let key = self.enc_key.public();
-        let not_after = self.enc_key_created + ENC_KEY_LIFETIME.as_secs();
-        let message = identity::enc_key_message(&server.0, user, not_after, &key);
-        SignedEncKey {
+    pub fn signed_encryption_key(&self, server: &Fingerprint, user: UserId) -> SignedEncryptionKey {
+        let key = self.encryption_key.public();
+        let not_after = self.encryption_key_created + ENCRYPTION_KEY_LIFETIME.as_secs();
+        let message = identity::encryption_key_message(&server.0, user, not_after, &key);
+        SignedEncryptionKey {
             key,
             not_after,
             sig: self.identity.sign(&message),
@@ -185,13 +188,13 @@ fn project_dirs() -> Result<directories::ProjectDirs> {
 }
 
 fn renewal_due(created: u64, now: u64) -> bool {
-    created > now + ENC_KEY_CLOCK_SKEW.as_secs()
-        || now.saturating_sub(created) + ENC_KEY_RENEW_BEFORE.as_secs()
-            >= ENC_KEY_LIFETIME.as_secs()
+    created > now + ENCRYPTION_KEY_CLOCK_SKEW.as_secs()
+        || now.saturating_sub(created) + ENCRYPTION_KEY_RENEW_BEFORE.as_secs()
+            >= ENCRYPTION_KEY_LIFETIME.as_secs()
 }
 
 /// Loads the encryption key, replacing it when it expires within a week.
-fn load_enc_key(path: &Path) -> Result<(EncKeyPair, u64)> {
+fn load_encryption_key(path: &Path) -> Result<(EncryptionKeyPair, u64)> {
     let now = unix_now()?;
     if let Ok(bytes) = fs::read(path).map(Zeroizing::new)
         && let Some((secret, created)) = bytes.split_first_chunk::<32>()
@@ -199,15 +202,15 @@ fn load_enc_key(path: &Path) -> Result<(EncKeyPair, u64)> {
         && !renewal_due(u64::from_be_bytes(created), now)
     {
         return Ok((
-            EncKeyPair::from_secret(secret)?,
+            EncryptionKeyPair::from_secret(secret)?,
             u64::from_be_bytes(created),
         ));
     }
-    new_enc_key(path, now)
+    new_encryption_key(path, now)
 }
 
-fn new_enc_key(path: &Path, now: u64) -> Result<(EncKeyPair, u64)> {
-    let key = EncKeyPair::generate();
+fn new_encryption_key(path: &Path, now: u64) -> Result<(EncryptionKeyPair, u64)> {
+    let key = EncryptionKeyPair::generate();
     let mut bytes = Zeroizing::new(key.secret().to_vec());
     bytes.extend_from_slice(&now.to_be_bytes());
     replace_file(path, &bytes)?;
@@ -304,7 +307,7 @@ fn first_keychain_identity(
     // go only once the new identity is in the keychain, so a refused or interrupted write
     // never leaves the old identity coming back to an empty server list.
     let mut known = KnownServers::load(dir)?;
-    new_enc_key(&dir.join(ENC_KEY_FILE), unix_now()?)?;
+    new_encryption_key(&dir.join(ENCRYPTION_KEY_FILE), unix_now()?)?;
     keychain.write(found.key.seed().as_slice())?;
     known.forget_all()?;
     Ok(found)
@@ -423,8 +426,8 @@ mod tests {
         known
     }
 
-    fn enc_key_file(dir: &Path) -> Vec<u8> {
-        fs::read(dir.join(ENC_KEY_FILE)).unwrap()
+    fn encryption_key_file(dir: &Path) -> Vec<u8> {
+        fs::read(dir.join(ENCRYPTION_KEY_FILE)).unwrap()
     }
 
     #[test]
@@ -471,11 +474,11 @@ mod tests {
     }
 
     #[test]
-    fn starting_over_forgets_the_servers_and_the_enc_key_only_for_a_new_identity() {
+    fn starting_over_forgets_the_servers_and_the_encryption_key_only_for_a_new_identity() {
         let dir = tempfile::tempdir().unwrap();
         knowing_a_server(dir.path());
-        load_enc_key(&dir.path().join(ENC_KEY_FILE)).unwrap();
-        let old_enc_key = enc_key_file(dir.path());
+        load_encryption_key(&dir.path().join(ENCRYPTION_KEY_FILE)).unwrap();
+        let old_encryption_key = encryption_key_file(dir.path());
 
         let old = IdentityKey::generate();
         let entry = FakeEntry::default();
@@ -484,7 +487,7 @@ mod tests {
         assert_eq!(found.key.public(), old.public());
         assert!(!found.new);
         assert!(knows_servers(dir.path()).unwrap());
-        assert_eq!(enc_key_file(dir.path()), old_enc_key);
+        assert_eq!(encryption_key_file(dir.path()), old_encryption_key);
 
         let entry = FakeEntry::default();
         let found = identity_in(&entry, dir.path(), WhenMissing::StartOver).unwrap();
@@ -492,7 +495,7 @@ mod tests {
         assert_ne!(found.key.public(), old.public());
         assert_eq!(entry.held().unwrap(), found.key.seed().as_slice());
         assert!(!knows_servers(dir.path()).unwrap());
-        assert_ne!(enc_key_file(dir.path()), old_enc_key);
+        assert_ne!(encryption_key_file(dir.path()), old_encryption_key);
     }
 
     #[test]
@@ -511,8 +514,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         knowing_a_server(dir.path());
         let kept = file_identity(dir.path()).unwrap();
-        load_enc_key(&dir.path().join(ENC_KEY_FILE)).unwrap();
-        let old_enc_key = enc_key_file(dir.path());
+        load_encryption_key(&dir.path().join(ENCRYPTION_KEY_FILE)).unwrap();
+        let old_encryption_key = encryption_key_file(dir.path());
 
         let entry = FakeEntry::default();
         let found = identity_in(&entry, dir.path(), WhenMissing::StartOver).unwrap();
@@ -520,7 +523,7 @@ mod tests {
         assert!(!found.new);
         assert_eq!(entry.held().unwrap(), kept.seed().as_slice());
         assert!(knows_servers(dir.path()).unwrap());
-        assert_eq!(enc_key_file(dir.path()), old_enc_key);
+        assert_eq!(encryption_key_file(dir.path()), old_encryption_key);
         assert_eq!(file_identity(dir.path()).unwrap().public(), kept.public());
     }
 
@@ -532,8 +535,8 @@ mod tests {
             if when_missing == WhenMissing::StartOver {
                 knowing_a_server(dir.path());
             }
-            load_enc_key(&dir.path().join(ENC_KEY_FILE)).unwrap();
-            let old_enc_key = enc_key_file(dir.path());
+            load_encryption_key(&dir.path().join(ENCRYPTION_KEY_FILE)).unwrap();
+            let old_encryption_key = encryption_key_file(dir.path());
             let entry = FakeEntry::hiding(old.seed().as_slice());
             let found = identity_in(&entry, dir.path(), when_missing).unwrap();
             assert_eq!(found.key.public(), old.public());
@@ -544,7 +547,7 @@ mod tests {
                 knows_servers(dir.path()).unwrap(),
                 when_missing == WhenMissing::StartOver
             );
-            assert_eq!(enc_key_file(dir.path()), old_enc_key);
+            assert_eq!(encryption_key_file(dir.path()), old_encryption_key);
         }
     }
 
@@ -566,44 +569,50 @@ mod tests {
     }
 
     #[test]
-    fn enc_key_persists_and_is_signed() {
+    fn encryption_key_persists_and_is_signed() {
         let dir = tempfile::tempdir().unwrap();
         let store = Keystore::open_in(dir.path()).unwrap();
         let server = Fingerprint([3; 32]);
-        let signed = store.signed_enc_key(&server, UserId(9));
+        let signed = store.signed_encryption_key(&server, UserId(9));
         assert_eq!(
-            Keystore::open_in(dir.path()).unwrap().enc_key().public(),
+            Keystore::open_in(dir.path())
+                .unwrap()
+                .encryption_key()
+                .public(),
             signed.key
         );
         let message =
-            identity::enc_key_message(&server.0, UserId(9), signed.not_after, &signed.key);
+            identity::encryption_key_message(&server.0, UserId(9), signed.not_after, &signed.key);
         assert!(identity::verify(&store.identity().public(), &message, &signed.sig).is_ok());
     }
 
     #[test]
-    fn an_enc_key_near_expiry_is_renewed_on_open_and_while_running() {
+    fn an_encryption_key_near_expiry_is_renewed_on_open_and_while_running() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Keystore::open_in(dir.path()).unwrap();
-        let first = store.enc_key().public();
-        assert!(!store.renew_enc_key_if_due().unwrap());
-        assert_eq!(store.enc_key().public(), first);
+        let first = store.encryption_key().public();
+        assert!(!store.renew_encryption_key_if_due().unwrap());
+        assert_eq!(store.encryption_key().public(), first);
 
         let now = unix_now().unwrap();
-        store.enc_key_created = now - 24 * 24 * 60 * 60;
-        assert!(store.renew_enc_key_if_due().unwrap());
-        let second = store.enc_key().public();
+        store.encryption_key_created = now - 24 * 24 * 60 * 60;
+        assert!(store.renew_encryption_key_if_due().unwrap());
+        let second = store.encryption_key().public();
         assert_ne!(second, first);
-        let signed = store.signed_enc_key(&Fingerprint([3; 32]), UserId(9));
-        assert!(signed.not_after >= now + ENC_KEY_LIFETIME.as_secs());
+        let signed = store.signed_encryption_key(&Fingerprint([3; 32]), UserId(9));
+        assert!(signed.not_after >= now + ENCRYPTION_KEY_LIFETIME.as_secs());
         assert_eq!(
-            Keystore::open_in(dir.path()).unwrap().enc_key().public(),
+            Keystore::open_in(dir.path())
+                .unwrap()
+                .encryption_key()
+                .public(),
             second
         );
 
-        let mut old = Zeroizing::new(EncKeyPair::generate().secret().to_vec());
+        let mut old = Zeroizing::new(EncryptionKeyPair::generate().secret().to_vec());
         old.extend_from_slice(&(now - 24 * 24 * 60 * 60).to_be_bytes());
-        replace_file(&dir.path().join(ENC_KEY_FILE), &old).unwrap();
+        replace_file(&dir.path().join(ENCRYPTION_KEY_FILE), &old).unwrap();
         let reopened = Keystore::open_in(dir.path()).unwrap();
-        assert!(!renewal_due(reopened.enc_key_created, now));
+        assert!(!renewal_due(reopened.encryption_key_created, now));
     }
 }

@@ -6,23 +6,23 @@ use serde::de::DeserializeOwned;
 use throcc_crypto::identity::random;
 use throcc_proto::framing::{self, FrameError, LEN_BYTES};
 use throcc_proto::messages::{
-    AuthError, AuthResult, ClientMessage, ErrorCode, Event, Hello, PROTOCOL, PakeStep, Request,
-    Response, ServerHello, ServerMessage,
+    AuthError, AuthResult, ClientHello, ClientMessage, ErrorCode, Event, PROTOCOL, PakeStep,
+    Request, Response, ServerHello, ServerMessage,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{Semaphore, mpsc};
 use tracing::{debug, info, warn};
 
-use crate::Shared;
-use crate::auth::{self, Refused};
+use crate::ServerState;
+use crate::auth::{self, AuthRefusal};
 use crate::egress;
 use crate::limits::{Pass, SourceKey};
-use crate::rooms::{Handled, Link, Outgoing, PasswordDone, PasswordWork};
+use crate::rooms::{ConnectionHandle, Handled, Outbound, PasswordDone, PasswordWork};
 
 /// How long a connection may wait for a handshake slot, and then how long it has to send
-/// its `Hello`.
+/// its `ClientHello`.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
-/// Longest a sign-in or enrollment may take after Hello, PAKE included.
+/// Longest a sign-in or enrollment may take after ClientHello, PAKE included.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(40);
 pub const HANDSHAKE_FRAME_BYTES: usize = 4096;
 const EVENT_QUEUE: usize = 1024;
@@ -85,7 +85,7 @@ pub async fn write_frame<T: Serialize>(
 
 /// Serves one connection. Everything before sign-in is logged as counts, since one source
 /// can fail sign-ins as fast as it can connect.
-pub async fn run(shared: Arc<Shared>, connection: quinn::Connection, unauthenticated: Pass) {
+pub async fn run(shared: Arc<ServerState>, connection: quinn::Connection, unauthenticated: Pass) {
     let peer = connection.remote_address();
     match serve(&shared, &connection, unauthenticated).await {
         Ok(()) => debug!(%peer, "session ended"),
@@ -103,7 +103,7 @@ pub async fn run(shared: Arc<Shared>, connection: quinn::Connection, unauthentic
 
 /// Signs a connection in and serves it. Errors are returned only before sign-in.
 async fn serve(
-    shared: &Shared,
+    shared: &ServerState,
     connection: &quinn::Connection,
     unauthenticated: Pass,
 ) -> Result<(), ReadError> {
@@ -160,23 +160,23 @@ async fn serve(
 
     let user = authenticated.row.id;
     let (outgoing, outgoing_rx) = mpsc::channel(EVENT_QUEUE);
-    let link = Link {
+    let handle = ConnectionHandle {
         outgoing: outgoing.clone(),
         connection: connection.clone(),
         egress: egress::spawn(connection.clone(), outgoing.clone()),
     };
     let connected = shared
         .hub()
-        .connect(authenticated.row, link, authenticated.want_room);
+        .connect(authenticated.row, handle, authenticated.want_room);
     let (conn_id, welcome) = match connected {
         Ok(Some(connected)) => connected,
         Ok(None) => {
-            refuse(connection, stream, Refused::Hello(AuthError::UnknownKey)).await;
+            refuse(connection, stream, AuthRefusal::Auth(AuthError::UnknownKey)).await;
             return Ok(());
         }
         Err(e) => {
             warn!("registering a connection: {e:#}");
-            refuse(connection, stream, Refused::Internal).await;
+            refuse(connection, stream, AuthRefusal::Internal).await;
             return Ok(());
         }
     };
@@ -219,10 +219,10 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// Opens the control stream, sends `ServerHello` and reads the client's `Hello`.
+/// Opens the control stream, sends `ServerHello` and reads the client's `ClientHello`.
 async fn greet(
     connection: &quinn::Connection,
-) -> Result<(FrameStream, [u8; 32], Hello), ReadError> {
+) -> Result<(FrameStream, [u8; 32], ClientHello), ReadError> {
     let (send, recv) = connection.open_bi().await.map_err(|_| ReadError::Closed)?;
     let mut stream = FrameStream { send, recv };
     let server_nonce: [u8; 32] = random();
@@ -240,15 +240,15 @@ async fn greet(
 }
 
 async fn read_loop(
-    shared: &Shared,
+    shared: &ServerState,
     user: throcc_proto::ids::UserId,
     conn_id: u64,
     recv: &mut quinn::RecvStream,
-    outgoing: &mpsc::Sender<Outgoing>,
+    outgoing: &mpsc::Sender<Outbound>,
 ) -> Result<(), ReadError> {
     let pictures = Arc::new(Semaphore::new(QUEUED_PICTURE_BYTES));
     loop {
-        let ClientMessage::Request { id, req } = read_frame(recv).await?;
+        let ClientMessage::Request { id, request: req } = read_frame(recv).await?;
         debug!(user = user.0, id, kind = request_kind(&req), "request");
         let handled = shared.hub().handle(user, conn_id, req);
         let res = match handled {
@@ -267,9 +267,9 @@ async fn read_loop(
                 let Ok(queued) = pictures.clone().acquire_many_owned(cost).await else {
                     return Err(ReadError::Closed);
                 };
-                Outgoing::Budgeted(ServerMessage::Response { id, res }, queued)
+                Outbound::Budgeted(ServerMessage::Response { id, response: res }, queued)
             }
-            _ => Outgoing::Message(ServerMessage::Response { id, res }),
+            _ => Outbound::Message(ServerMessage::Response { id, response: res }),
         };
         if outgoing.send(response).await.is_err() {
             return Err(ReadError::Closed);
@@ -279,7 +279,7 @@ async fn read_loop(
 
 /// Runs Argon2 on the blocking pool, so neither the hub lock nor an async worker waits
 /// on it, and only a few at a time, since each run takes 19 MiB.
-async fn run_password_work(shared: &Shared, work: PasswordWork) -> Option<PasswordDone> {
+async fn run_password_work(shared: &ServerState, work: PasswordWork) -> Option<PasswordDone> {
     let _turn = shared.password_work.acquire().await.ok()?;
     match tokio::task::spawn_blocking(move || work.run()).await {
         Ok(done) => Some(done),
@@ -294,11 +294,12 @@ async fn run_password_work(shared: &Shared, work: PasswordWork) -> Option<Passwo
 /// gets the request itself.
 fn request_kind(req: &Request) -> &'static str {
     match req {
-        Request::SetRoom { .. } => "SetRoom",
+        Request::JoinRoom { .. } => "JoinRoom",
+        Request::LeaveRoom => "LeaveRoom",
         Request::SetProfile { .. } => "SetProfile",
-        Request::SetAvatar(_) => "SetAvatar",
-        Request::GetAvatar(_) => "GetAvatar",
-        Request::SetEncKey(_) => "SetEncKey",
+        Request::UploadAvatar(_) => "UploadAvatar",
+        Request::FetchAvatar(_) => "FetchAvatar",
+        Request::SetEncryptionKey(_) => "SetEncryptionKey",
         Request::SetMedia(_) => "SetMedia",
         Request::CreateRoom { .. } => "CreateRoom",
         Request::RenameRoom { .. } => "RenameRoom",
@@ -308,9 +309,9 @@ fn request_kind(req: &Request) -> &'static str {
         Request::ListUsers => "ListUsers",
         Request::SetRole { .. } => "SetRole",
         Request::RemoveUser { .. } => "RemoveUser",
-        Request::SetWatching(_) => "SetWatching",
+        Request::SetWatched(_) => "SetWatched",
         Request::RequestKeyframe { .. } => "RequestKeyframe",
-        Request::PublishKey { .. } => "PublishKey",
+        Request::PublishSenderKey { .. } => "PublishSenderKey",
         Request::SetServerName(_) => "SetServerName",
         Request::SetServerAvatar(_) => "SetServerAvatar",
         Request::KickFromRoom { .. } => "KickFromRoom",
@@ -319,15 +320,15 @@ fn request_kind(req: &Request) -> &'static str {
 
 async fn write_loop(
     mut send: quinn::SendStream,
-    mut outgoing: mpsc::Receiver<Outgoing>,
+    mut outgoing: mpsc::Receiver<Outbound>,
     connection: quinn::Connection,
 ) {
     while let Some(next) = outgoing.recv().await {
         let (message, budget) = match next {
-            Outgoing::Message(message) => (message, None),
-            Outgoing::Budgeted(message, budget) => (message, Some(budget)),
-            Outgoing::Kick { reason, code } => {
-                let kicked = ServerMessage::Event(Event::Kicked {
+            Outbound::Message(message) => (message, None),
+            Outbound::Budgeted(message, budget) => (message, Some(budget)),
+            Outbound::Kick { reason, code } => {
+                let kicked = ServerMessage::Event(Event::RemovedFromServer {
                     reason: reason.clone(),
                 });
                 if write_frame(&mut send, &kicked).await.is_ok() && send.finish().is_ok() {
@@ -345,11 +346,11 @@ async fn write_loop(
 }
 
 /// Sends a refusal and lets the client close first, so the refusal isn't lost to our close.
-async fn refuse(connection: &quinn::Connection, mut stream: FrameStream, refused: Refused) {
+async fn refuse(connection: &quinn::Connection, mut stream: FrameStream, refused: AuthRefusal) {
     let written = match refused {
-        Refused::Hello(e) => send_within(&mut stream.send, &AuthResult::Err(e)).await,
-        Refused::Enroll(e) => send_within(&mut stream.send, &PakeStep::Err(e)).await,
-        Refused::Internal => {
+        AuthRefusal::Auth(e) => send_within(&mut stream.send, &AuthResult::Err(e)).await,
+        AuthRefusal::Enroll(e) => send_within(&mut stream.send, &PakeStep::Err(e)).await,
+        AuthRefusal::Internal => {
             connection.close(close::SERVER_BUSY.into(), b"internal server error");
             return;
         }

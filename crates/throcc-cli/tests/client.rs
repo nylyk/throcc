@@ -5,9 +5,9 @@ use std::time::{Duration, Instant};
 
 use throcc_client_core::account;
 use throcc_client_core::call::{Call, CallEvent};
-use throcc_client_core::client::{Client, ClientApi, ClientOptions, Command, Event};
+use throcc_client_core::client::{Client, ClientApi, ClientOptions, UiCommand, UiEvent};
 use throcc_client_core::keystore::Keystore;
-use throcc_client_core::state::{ConnectionStatus, KeyWarning, Playback, Sound, State};
+use throcc_client_core::state::{ConnectionStatus, KeyWarning, Sound, SoundLevel, State};
 use throcc_client_core::verified::VerifiedStore;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{RoomId, UserId};
@@ -114,8 +114,8 @@ fn verify_in_a_room(alice_dir: &Path, bob_dir: &Path, address: &str, admin: &Inv
     let room = create_room(&alice);
     let bob = client_in(bob_dir, address, Some(&invite(&alice)));
     let bob_id = bob.state().me.unwrap();
-    alice.command(Command::Join(Some(room)));
-    bob.command(Command::Join(Some(room)));
+    alice.command(UiCommand::Join(Some(room)));
+    bob.command(UiCommand::Join(Some(room)));
     let key = key_of(&alice, bob_id);
     alice.command(verify(bob_id, key));
     wait_for(&alice, "bob verified", |s| {
@@ -132,8 +132,8 @@ fn key_of(viewer: &Client, user: UserId) -> PublicKey {
     viewer.state().person(user).unwrap().identity_key.unwrap()
 }
 
-fn verify(user: UserId, key: PublicKey) -> Command {
-    Command::SetVerified {
+fn verify(user: UserId, key: PublicKey) -> UiCommand {
+    UiCommand::SetVerified {
         user,
         key: Fingerprint(key),
         verified: true,
@@ -149,9 +149,9 @@ fn wait_connected(client: &Client, what: &str) {
 /// Sends `command`, then waits for the first event that `pick` accepts.
 fn command_then<T>(
     client: &Client,
-    command: Command,
+    command: UiCommand,
     what: &str,
-    mut pick: impl FnMut(Event) -> Option<T>,
+    mut pick: impl FnMut(UiEvent) -> Option<T>,
 ) -> T {
     let mut events = client.events();
     client.command(command);
@@ -168,14 +168,14 @@ fn command_then<T>(
 }
 
 fn invite(client: &Client) -> InviteCode {
-    command_then(client, Command::CreateInvite, "no invite", |e| match e {
-        Event::Invite { code, .. } => Some(code.parse().unwrap()),
+    command_then(client, UiCommand::CreateInvite, "no invite", |e| match e {
+        UiEvent::Invite { code, .. } => Some(code.parse().unwrap()),
         _ => None,
     })
 }
 
 fn create_room(client: &Client) -> RoomId {
-    client.command(Command::CreateRoom("General".into(), None));
+    client.command(UiCommand::CreateRoom("General".into(), None));
     wait_for(client, "the room", |s| !s.rooms.is_empty());
     client.state().rooms[0].id
 }
@@ -191,17 +191,17 @@ fn mic_and_deafen_set_outside_a_room_carry_into_it() {
     wait_connected(&bob, "bob connected");
     let bob_id = bob.state().me.unwrap();
 
-    bob.command(Command::SetDeafened(true));
+    bob.command(UiCommand::SetDeafened(true));
     wait_for(&bob, "bob deafened in the lobby", |s| s.deafened && !s.mic);
-    bob.command(Command::Join(Some(room)));
+    bob.command(UiCommand::Join(Some(room)));
     wait_for(&alice, "bob in the room, deafened", |s| {
         s.person(bob_id)
             .is_some_and(|p| p.room == Some(room) && p.deafened && !p.mic)
     });
 
-    bob.command(Command::Join(None));
-    bob.command(Command::SetDeafened(false));
-    bob.command(Command::Join(Some(room)));
+    bob.command(UiCommand::Join(None));
+    bob.command(UiCommand::SetDeafened(false));
+    bob.command(UiCommand::Join(Some(room)));
     wait_for(&alice, "bob back in the room, hearing and talking", |s| {
         s.person(bob_id)
             .is_some_and(|p| p.room == Some(room) && !p.deafened && p.mic)
@@ -217,8 +217,8 @@ fn two_clients_see_each_others_presence_media_and_safety_number() {
 
     let code = invite(&alice);
     let (bob, _b) = client(&address, &code);
-    alice.command(Command::Join(Some(room)));
-    bob.command(Command::Join(Some(room)));
+    alice.command(UiCommand::Join(Some(room)));
+    bob.command(UiCommand::Join(Some(room)));
     let bob_id = bob.state().me.unwrap();
     wait_for(&alice, "bob in the room", |s| {
         s.person(bob_id).is_some_and(|p| p.room == Some(room))
@@ -227,13 +227,13 @@ fn two_clients_see_each_others_presence_media_and_safety_number() {
     wait_for(&alice, "bob's mic on", |s| {
         s.person(bob_id).is_some_and(|p| p.mic)
     });
-    bob.command(Command::SetMic(false));
+    bob.command(UiCommand::SetMic(false));
     wait_for(&alice, "bob's mic off", |s| {
         s.person(bob_id).is_some_and(|p| !p.mic)
     });
     wait_for(&bob, "bob's own state", |s| !s.mic);
 
-    bob.command(Command::SetDeafened(true));
+    bob.command(UiCommand::SetDeafened(true));
     wait_for(&alice, "bob deafened and muted", |s| {
         s.person(bob_id).is_some_and(|p| p.deafened && !p.mic)
     });
@@ -244,7 +244,7 @@ fn two_clients_see_each_others_presence_media_and_safety_number() {
         alice.safety_number(&key_of(&alice, bob_id))
     );
 
-    bob.command(Command::Disconnect);
+    bob.command(UiCommand::Disconnect);
     wait_for(&alice, "bob gone", |s| s.person(bob_id).is_none());
 }
 
@@ -254,15 +254,15 @@ fn a_picture_chosen_in_the_lobby_reaches_others_and_survives_a_rename() {
     let (alice, alice_dir) = client(&address, &admin_invite);
     wait_connected(&alice, "connected");
     let picture: Vec<u8> = (0..2000u32).map(|i| (i * 7) as u8).collect();
-    alice.command(Command::SetProfile {
+    alice.command(UiCommand::SetProfile {
         name: None,
         picture: Some(Some(picture.clone())),
     });
     let room = create_room(&alice);
     let code = invite(&alice);
     let (bob, _b) = client(&address, &code);
-    alice.command(Command::Join(Some(room)));
-    bob.command(Command::Join(Some(room)));
+    alice.command(UiCommand::Join(Some(room)));
+    bob.command(UiCommand::Join(Some(room)));
     let alice_id = alice.state().me.unwrap();
     wait_for(&bob, "alice in the room", |s| s.person(alice_id).is_some());
 
@@ -276,11 +276,11 @@ fn a_picture_chosen_in_the_lobby_reaches_others_and_survives_a_rename() {
     // The server takes one profile change per session every 10 s, so rename in a new one.
     drop(alice);
     let alice = client_in(alice_dir.path(), &address, None);
-    alice.command(Command::Join(Some(room)));
+    alice.command(UiCommand::Join(Some(room)));
     wait_for(&alice, "alice back in the room", |s| {
         s.person(alice_id).is_some_and(|p| p.avatar == Some(hash))
     });
-    alice.command(Command::SetProfile {
+    alice.command(UiCommand::SetProfile {
         name: Some("Alice".into()),
         picture: None,
     });
@@ -296,7 +296,7 @@ fn a_share_started_mid_call_shows_and_stays_while_the_mic_changes() {
     let (alice, _a) = client(&address, &admin_invite);
     wait_connected(&alice, "connected");
     let room = create_room(&alice);
-    alice.command(Command::Join(Some(room)));
+    alice.command(UiCommand::Join(Some(room)));
     wait_for(&alice, "alice in the room", |s| s.current.is_some());
 
     let runtime = Runtime::new().unwrap();
@@ -324,7 +324,7 @@ fn a_share_started_mid_call_shows_and_stays_while_the_mic_changes() {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         assert!(Instant::now() < deadline, "bob's mic never came on");
-        let Ok(Event::State(state)) = events.try_recv() else {
+        let Ok(UiEvent::State(state)) = events.try_recv() else {
             std::thread::sleep(Duration::from_millis(10));
             continue;
         };
@@ -343,12 +343,12 @@ fn a_request_too_large_to_send_fails_alone() {
     let (address, admin_invite, _server) = server();
     let (alice, _a) = client(&address, &admin_invite);
     wait_connected(&alice, "connected");
-    let command = Command::SetServerProfile {
+    let command = UiCommand::SetServerProfile {
         name: None,
         picture: Some(Some(vec![0; 2 << 20])),
     };
     command_then(&alice, command, "no refusal", |e| match e {
-        Event::ServerProfileRefused(_) => Some(()),
+        UiEvent::ServerProfileRefused(_) => Some(()),
         _ => None,
     });
     invite(&alice);
@@ -363,7 +363,7 @@ fn a_dropped_client_leaves_at_once() {
     let code = invite(&alice);
     let (bob, _b) = client(&address, &code);
     let bob_id = bob.state().me.unwrap();
-    bob.command(Command::Join(Some(room)));
+    bob.command(UiCommand::Join(Some(room)));
     wait_for(&alice, "bob in the room", |s| {
         s.person(bob_id).is_some_and(|p| p.room == Some(room))
     });
@@ -381,14 +381,14 @@ fn the_profile_follows_us_to_the_next_server() {
     let alice = client_in(dir.path(), &first, Some(&first_invite));
     wait_connected(&alice, "connected");
     let picture: Vec<u8> = (0..2000u32).map(|i| (i * 3) as u8).collect();
-    alice.command(Command::SetProfile {
+    alice.command(UiCommand::SetProfile {
         name: Some("Ilse".into()),
         picture: Some(Some(picture.clone())),
     });
     wait_for(&alice, "the profile kept", |s| {
         s.profile_name.as_deref() == Some("Ilse") && s.profile_picture.is_some()
     });
-    alice.command(Command::Disconnect);
+    alice.command(UiCommand::Disconnect);
 
     let (second, second_invite, _second) = server();
     let alice = client_in(dir.path(), &second, Some(&second_invite));
@@ -397,8 +397,8 @@ fn the_profile_follows_us_to_the_next_server() {
     let room = create_room(&alice);
     let code = invite(&alice);
     let (bob, _b) = client(&second, &code);
-    alice.command(Command::Join(Some(room)));
-    bob.command(Command::Join(Some(room)));
+    alice.command(UiCommand::Join(Some(room)));
+    bob.command(UiCommand::Join(Some(room)));
     let alice_id = alice.state().me.unwrap();
     wait_for(&bob, "alice's profile on the second server", |s| {
         s.person(alice_id)
@@ -414,7 +414,7 @@ fn only_admins_name_the_server_and_everyone_sees_it() {
     let (address, admin_invite, _server) = server();
     let (alice, _a) = client(&address, &admin_invite);
     wait_connected(&alice, "connected");
-    alice.command(Command::SetServerProfile {
+    alice.command(UiCommand::SetServerProfile {
         name: Some(Some("  Moss Co-op ".into())),
         picture: None,
     });
@@ -427,7 +427,7 @@ fn only_admins_name_the_server_and_everyone_sees_it() {
     assert_eq!(bob.state().server.clone().unwrap().title(), "Moss Co-op");
 
     let picture: Vec<u8> = (0..1500u32).map(|i| (i * 3) as u8).collect();
-    alice.command(Command::SetServerProfile {
+    alice.command(UiCommand::SetServerProfile {
         name: None,
         picture: Some(Some(picture.clone())),
     });
@@ -439,16 +439,16 @@ fn only_admins_name_the_server_and_everyone_sees_it() {
     assert_eq!(&*bob.avatar(hash).unwrap(), picture.as_slice());
     assert_eq!(bob.state().server.clone().unwrap().title(), "Moss Co-op");
 
-    let rename = Command::SetServerProfile {
+    let rename = UiCommand::SetServerProfile {
         name: Some(Some("Bob's".into())),
         picture: None,
     };
     command_then(&bob, rename, "bob's rename wasn't refused", |e| {
-        matches!(e, Event::ServerProfileRefused(_)).then_some(())
+        matches!(e, UiEvent::ServerProfileRefused(_)).then_some(())
     });
     assert_eq!(alice.state().server.clone().unwrap().title(), "Moss Co-op");
 
-    alice.command(Command::SetServerProfile {
+    alice.command(UiCommand::SetServerProfile {
         name: Some(None),
         picture: None,
     });
@@ -459,7 +459,7 @@ fn only_admins_name_the_server_and_everyone_sees_it() {
     });
 
     let other: Vec<u8> = (0..900u32).map(|i| (i * 5) as u8).collect();
-    alice.command(Command::SetServerProfile {
+    alice.command(UiCommand::SetServerProfile {
         name: Some(Some("Fern".into())),
         picture: Some(Some(other)),
     });
@@ -479,8 +479,8 @@ fn only_the_compared_key_is_verified_and_it_stays_verified_in_the_next_session()
     let code = invite(&alice);
     let bob_dir = tempfile::tempdir().unwrap();
     let bob = client_in(bob_dir.path(), &address, Some(&code));
-    alice.command(Command::Join(Some(room)));
-    bob.command(Command::Join(Some(room)));
+    alice.command(UiCommand::Join(Some(room)));
+    bob.command(UiCommand::Join(Some(room)));
     let alice_id = alice.state().me.unwrap();
     let presented = key_of(&bob, alice_id);
 
@@ -497,7 +497,7 @@ fn only_the_compared_key_is_verified_and_it_stays_verified_in_the_next_session()
     wait_for(&bob, "alice verified", |s| {
         s.person(alice_id).is_some_and(|p| p.verified)
     });
-    let unverify = Command::SetVerified {
+    let unverify = UiCommand::SetVerified {
         user: alice_id,
         key: Fingerprint(compared),
         verified: false,
@@ -514,14 +514,14 @@ fn only_the_compared_key_is_verified_and_it_stays_verified_in_the_next_session()
             .is_some_and(|p| !p.verified && p.identity_key.is_none()),
         "verified before alice presented her key"
     );
-    bob.command(Command::Join(Some(room)));
+    bob.command(UiCommand::Join(Some(room)));
     wait_for(&bob, "alice still verified", |s| {
         s.person(alice_id).is_some_and(|p| p.verified)
     });
 }
 
-fn refused(event: Event) -> Option<()> {
-    matches!(event, Event::Notice(n) if n.contains("before you confirmed")).then_some(())
+fn refused(event: UiEvent) -> Option<()> {
+    matches!(event, UiEvent::Notice(n) if n.contains("before you confirmed")).then_some(())
 }
 
 #[test]
@@ -536,8 +536,8 @@ fn a_verified_key_is_verified_on_every_server_it_shows_up_on() {
     let room = create_room(&alice);
     let bob = client_in(bob_dir.path(), &second, Some(&invite(&alice)));
     let bob_id = bob.state().me.unwrap();
-    alice.command(Command::Join(Some(room)));
-    bob.command(Command::Join(Some(room)));
+    alice.command(UiCommand::Join(Some(room)));
+    bob.command(UiCommand::Join(Some(room)));
     wait_for(&alice, "bob verified on the second server", |s| {
         s.person(bob_id).is_some_and(|p| p.verified) && s.key_warnings.is_empty()
     });
@@ -550,7 +550,7 @@ fn a_verified_key_is_verified_on_every_server_it_shows_up_on() {
 /// A room, and another one to keep someone out of it, both made by `admin`.
 fn room_and_elsewhere(admin: &Client) -> (RoomId, RoomId) {
     let room = create_room(admin);
-    admin.command(Command::CreateRoom("Elsewhere".into(), None));
+    admin.command(UiCommand::CreateRoom("Elsewhere".into(), None));
     wait_for(admin, "the other room", |s| s.rooms.len() == 2);
     let elsewhere = admin
         .state()
@@ -564,16 +564,16 @@ fn room_and_elsewhere(admin: &Client) -> (RoomId, RoomId) {
 
 /// Has `alice`, the admin, set `bob`'s voice playback while he is in another room, so before
 /// he presents his key, then brings him into her room until she holds his key.
-fn set_before_his_key(alice: &Client, bob: &Client, voice: Playback) -> UserId {
+fn set_before_his_key(alice: &Client, bob: &Client, voice: SoundLevel) -> UserId {
     let (room, elsewhere) = room_and_elsewhere(alice);
     let bob_id = bob.state().me.unwrap();
-    bob.command(Command::Join(Some(elsewhere)));
+    bob.command(UiCommand::Join(Some(elsewhere)));
     wait_for(alice, "bob in the other room", |s| {
         s.person(bob_id).is_some_and(|p| p.identity_key.is_none())
     });
-    alice.command(Command::SetPlayback(bob_id, Sound::Voice, voice));
-    alice.command(Command::Join(Some(room)));
-    bob.command(Command::Join(Some(room)));
+    alice.command(UiCommand::SetSoundLevel(bob_id, Sound::Voice, voice));
+    alice.command(UiCommand::Join(Some(room)));
+    bob.command(UiCommand::Join(Some(room)));
     key_of(alice, bob_id);
     bob_id
 }
@@ -581,15 +581,15 @@ fn set_before_his_key(alice: &Client, bob: &Client, voice: Playback) -> UserId {
 #[test]
 fn playback_follows_the_identity_key_to_every_server() {
     let (alice_dir, bob_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let quiet = Playback {
+    let quiet = SoundLevel {
         volume: 0.25,
         muted: false,
     };
-    let loud = Playback {
+    let loud = SoundLevel {
         volume: 2.0,
         muted: false,
     };
-    let muted = Playback {
+    let muted = SoundLevel {
         volume: 1.0,
         muted: true,
     };
@@ -599,7 +599,7 @@ fn playback_follows_the_identity_key_to_every_server() {
         wait_connected(&alice, "alice connected");
         let bob = client_in(bob_dir.path(), &first, Some(&invite(&alice)));
         let bob_id = set_before_his_key(&alice, &bob, quiet);
-        alice.command(Command::SetPlayback(bob_id, Sound::Share, muted));
+        alice.command(UiCommand::SetSoundLevel(bob_id, Sound::Share, muted));
         wait_for(&alice, "bob quiet and his stream muted", |s| {
             s.person(bob_id)
                 .is_some_and(|p| p.playback.voice == quiet && p.playback.share == muted)
@@ -638,7 +638,7 @@ fn a_new_key_for_a_verified_persons_user_id_is_warned_of_and_still_hears_us() {
     let alice = client_in(alice_dir.path(), &address, Some(&rebuilt.admin_invite()));
     wait_connected(&alice, "alice on the rebuilt server");
     let room = create_room(&alice);
-    alice.command(Command::CreateRoom("Elsewhere".into(), None));
+    alice.command(UiCommand::CreateRoom("Elsewhere".into(), None));
     wait_for(&alice, "the other room", |s| s.rooms.len() == 2);
     let elsewhere = alice
         .state()
@@ -647,7 +647,7 @@ fn a_new_key_for_a_verified_persons_user_id_is_warned_of_and_still_hears_us() {
         .find(|r| r.id != room)
         .unwrap()
         .id;
-    alice.command(Command::Join(Some(room)));
+    alice.command(UiCommand::Join(Some(room)));
     wait_for(&alice, "alice in the room", |s| s.current.is_some());
     let alice_id = alice.state().me.unwrap();
     let code = invite(&alice);
@@ -686,7 +686,7 @@ fn a_new_key_for_a_verified_persons_user_id_is_warned_of_and_still_hears_us() {
         s.key_warnings == [warning.clone()]
     });
 
-    alice.command(Command::DismissKeyChange {
+    alice.command(UiCommand::DismissKeyChange {
         user: bob_id,
         shown: alice
             .state()
@@ -711,7 +711,7 @@ fn people_not_verified_are_shown_so_and_still_hear_us() {
     let (alice, _a) = client(&address, &admin_invite);
     wait_connected(&alice, "connected");
     let room = create_room(&alice);
-    alice.command(Command::Join(Some(room)));
+    alice.command(UiCommand::Join(Some(room)));
     wait_for(&alice, "alice in the room", |s| s.current.is_some());
     let alice_id = alice.state().me.unwrap();
     let code = invite(&alice);
@@ -739,7 +739,7 @@ fn an_epoch_floor_outlives_a_restart_and_refuses_a_replayed_sender_key() {
     let (alice, _a) = client(&address, &admin_invite);
     wait_connected(&alice, "connected");
     let room = create_room(&alice);
-    alice.command(Command::Join(Some(room)));
+    alice.command(UiCommand::Join(Some(room)));
     wait_for(&alice, "alice in the room", |s| s.current.is_some());
     let alice_id = alice.state().me.unwrap();
     let code = invite(&alice);
@@ -758,7 +758,7 @@ fn an_epoch_floor_outlives_a_restart_and_refuses_a_replayed_sender_key() {
     let (epoch, wrapped) = runtime.block_on(async {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if let Some(CallEvent::Server(ServerEvent::SenderKey {
+                if let Some(CallEvent::Server(ServerEvent::SenderKeyPublished {
                     from,
                     epoch,
                     wrapped,
@@ -812,19 +812,19 @@ fn enrolling_again_takes_a_new_encryption_key_and_drops_that_accounts_floors() {
     let first = ProcessLikeServer::start(first_dir.path(), "127.0.0.1:0".parse().unwrap());
     let (addr, address) = (first.addr, first.addr.to_string());
     let alice_dir = tempfile::tempdir().unwrap();
-    let enc_key = || {
+    let encryption_key = || {
         Keystore::open_in(alice_dir.path())
             .unwrap()
-            .enc_key()
+            .encryption_key()
             .public()
     };
-    let before = enc_key();
+    let before = encryption_key();
     let alice = client_in(alice_dir.path(), &address, Some(&first.admin_invite()));
     wait_connected(&alice, "alice connected");
-    let first_key = enc_key();
+    let first_key = encryption_key();
     assert_ne!(first_key, before, "enrolled with the old encryption key");
     let room = create_room(&alice);
-    alice.command(Command::Join(Some(room)));
+    alice.command(UiCommand::Join(Some(room)));
     wait_for(&alice, "alice in the room", |s| s.current.is_some());
     drop(alice);
     first.stop();
@@ -844,7 +844,7 @@ fn enrolling_again_takes_a_new_encryption_key_and_drops_that_accounts_floors() {
         let link = account::enroll(&mut keystore, &address, &rebuilt.admin_invite())
             .await
             .unwrap();
-        assert_ne!(keystore.enc_key().public(), first_key);
+        assert_ne!(keystore.encryption_key().public(), first_key);
         let call = Call::start(link, &keystore).unwrap();
         let created = call
             .request(Request::CreateRoom {
@@ -869,7 +869,7 @@ fn a_removed_member_stops_reconnecting() {
     let code = invite(&alice);
     let (bob, _b) = client(&address, &code);
     let bob_id = bob.state().me.unwrap();
-    alice.command(Command::RemoveUser {
+    alice.command(UiCommand::RemoveUser {
         user: bob_id,
         cascade: false,
     });

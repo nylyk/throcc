@@ -2,7 +2,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use throcc_proto::framing;
-use throcc_proto::messages::{ClientMessage, Hello, PakeFinish, ServerMessage};
+use throcc_proto::messages::{ClientHello, ClientMessage, PakeFinish, ServerMessage};
 
 fuzz_target!(|data: &[u8]| {
     let mut rest = data;
@@ -15,7 +15,7 @@ fuzz_target!(|data: &[u8]| {
             );
         }
         let _ = framing::decode::<ServerMessage>(body);
-        let _ = framing::decode::<Hello>(body);
+        let _ = framing::decode::<ClientHello>(body);
         let _ = framing::decode::<PakeFinish>(body);
         rest = tail;
     }

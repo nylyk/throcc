@@ -11,7 +11,7 @@ use throcc_proto::framing;
 use throcc_proto::ids::Role;
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
-    AuthError, ErrorCode, Event, Hello, PROTOCOL, Request, Response, ServerHello,
+    AuthError, ClientHello, ErrorCode, Event, PROTOCOL, Request, Response, ServerHello,
 };
 use throcc_proto::transport;
 use throcc_server::{Congestion, HANDSHAKES, UNAUTHENTICATED, tls};
@@ -34,7 +34,7 @@ fn wrong_secret(code: &InviteCode) -> InviteCode {
 async fn burned(minter: &mut TestClient) -> String {
     minter
         .event(|e| match e {
-            Event::InviteBurned { code_id } => Some(code_id.clone()),
+            Event::InviteSpent { code_id } => Some(code_id.clone()),
             _ => None,
         })
         .await
@@ -276,7 +276,7 @@ async fn removal_closes_the_connection_and_cascades() {
         })
         .await;
     assert_eq!(res, Response::Ok);
-    bob.event(|e| matches!(e, Event::Kicked { .. }).then_some(()))
+    bob.event(|e| matches!(e, Event::RemovedFromServer { .. }).then_some(()))
         .await;
     tokio::time::timeout(
         Duration::from_secs(5),
@@ -397,7 +397,7 @@ async fn a_run_whose_client_stops_reading_still_burns_the_invite() {
     let stuck = connect_with_transport(&server.addr, small_window_transport(window)).await;
     let (mut send, _recv) = stuck.connection.accept_bi().await.unwrap();
     let (_, pake_a) = ClientPake::start(&code.id, &code.secret);
-    let enroll = Hello::Enroll {
+    let enroll = ClientHello::Enroll {
         code_id: code.id.clone(),
         pubkey: IdentityKey::generate().public(),
         client_nonce: [7; 32],

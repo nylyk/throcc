@@ -7,14 +7,14 @@ use tracing::warn;
 
 use crate::people::People;
 use crate::servers::Hex;
-use crate::state::{MAX_VOLUME, PersonPlayback, Playback, Sound};
+use crate::state::{MAX_VOLUME, Playback, Sound, SoundLevel};
 
 /// How loud each person's voice and share audio play, by identity key, on every server.
 /// Changes reach the file on [`SavedPlayback::save`] and on drop, not at every step of a
 /// dragged slider.
 pub struct SavedPlayback {
     dir: PathBuf,
-    people: BTreeMap<PublicKey, PersonPlayback>,
+    people: BTreeMap<PublicKey, Playback>,
     unsaved: BTreeSet<PublicKey>,
 }
 
@@ -43,14 +43,14 @@ impl SavedPlayback {
         Ok(saved)
     }
 
-    pub fn person(&self, key: &PublicKey) -> PersonPlayback {
+    pub fn person(&self, key: &PublicKey) -> Playback {
         self.people.get(key).copied().unwrap_or_default()
     }
 
-    pub fn set(&mut self, key: &PublicKey, sound: Sound, playback: Playback) {
+    pub fn set(&mut self, key: &PublicKey, sound: Sound, level: SoundLevel) {
         let mut person = self.person(key);
-        *person.get_mut(sound) = playback;
-        if person == PersonPlayback::default() {
+        *person.get_mut(sound) = level;
+        if person == Playback::default() {
             self.people.remove(key);
         } else {
             self.people.insert(*key, person);
@@ -95,11 +95,11 @@ mod tests {
     #[test]
     fn saved_playback_loads_back_by_identity_key() {
         let dir = tempfile::tempdir().unwrap();
-        let quiet = Playback {
+        let quiet = SoundLevel {
             volume: 0.35,
             muted: false,
         };
-        let muted = Playback {
+        let muted = SoundLevel {
             volume: 1.5,
             muted: true,
         };
@@ -108,18 +108,18 @@ mod tests {
         saved.set(&MARA, Sound::Share, muted);
         assert_eq!(
             SavedPlayback::load(dir.path()).unwrap().person(&MARA),
-            PersonPlayback::default(),
+            Playback::default(),
             "nothing is written before a save"
         );
         saved.save().unwrap();
 
         let saved = SavedPlayback::load(dir.path()).unwrap();
-        let expected = PersonPlayback {
+        let expected = Playback {
             voice: quiet,
             share: muted,
         };
         assert_eq!(saved.person(&MARA), expected);
-        assert_eq!(saved.person(&TEO), PersonPlayback::default());
+        assert_eq!(saved.person(&TEO), Playback::default());
     }
 
     #[test]
@@ -130,7 +130,7 @@ mod tests {
         let user = throcc_proto::ids::UserId(4);
         verified.verify(&server, user, &MARA, "Mara").unwrap();
         let mut saved = SavedPlayback::load(dir.path()).unwrap();
-        let quiet = Playback {
+        let quiet = SoundLevel {
             volume: 0.3,
             muted: false,
         };
@@ -150,7 +150,7 @@ mod tests {
         let config = dir.path().join("config");
         std::fs::write(&config, b"not a directory yet").unwrap();
         let mut saved = SavedPlayback::empty(&config);
-        let quiet = Playback {
+        let quiet = SoundLevel {
             volume: 0.3,
             muted: false,
         };
@@ -167,13 +167,13 @@ mod tests {
     fn back_to_default_forgets_the_person() {
         let dir = tempfile::tempdir().unwrap();
         let mut saved = SavedPlayback::load(dir.path()).unwrap();
-        let quiet = Playback {
+        let quiet = SoundLevel {
             volume: 0.5,
             muted: false,
         };
         saved.set(&MARA, Sound::Voice, quiet);
         saved.save().unwrap();
-        saved.set(&MARA, Sound::Voice, Playback::default());
+        saved.set(&MARA, Sound::Voice, SoundLevel::default());
         assert!(saved.people.is_empty());
         drop(saved);
         let saved = SavedPlayback::load(dir.path()).unwrap();

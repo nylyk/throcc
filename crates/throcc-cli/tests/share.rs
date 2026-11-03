@@ -15,7 +15,7 @@ use throcc_client_core::media::share::{self, ShareSender};
 use throcc_client_core::media::share_audio::audio_to_video;
 use throcc_client_core::media::video::decode::{Decoder, MAX_SIDE, MaxSize};
 use throcc_proto::frame::{Flags, VIDEO_CLOCK_HZ};
-use throcc_proto::messages::{Codec, Event, Request, Response, Share, ShareConfig};
+use throcc_proto::messages::{Codec, Event, Request, Response, ShareConfig, ShareTracks};
 use tokio::sync::{Mutex, mpsc};
 
 use common::*;
@@ -39,7 +39,7 @@ async fn share_pattern(
     bob: &Call,
     wanted: ShareConfig,
     epoch: Instant,
-) -> Option<(Arc<ShareSender>, Share, Arc<Mutex<Vec<Instant>>>)> {
+) -> Option<(Arc<ShareSender>, ShareTracks, Arc<Mutex<Vec<Instant>>>)> {
     let tracks = first_share(bob, alice).await;
     let capture = Box::new(TestPattern::new(CaptureConfig::for_share(&wanted), epoch));
     let sender = match ShareSender::start(alice.engine.clone(), tracks, wanted, capture) {
@@ -64,7 +64,7 @@ async fn share_pattern(
     let (forward, log) = (sender.clone(), requests.clone());
     tokio::spawn(async move {
         while let Some(event) = events.recv().await {
-            if let CallEvent::Server(Event::KeyframeWanted { kind, .. }) = event {
+            if let CallEvent::Server(Event::KeyframeRequested { kind, .. }) = event {
                 log.lock().await.push(Instant::now());
                 forward.recover(kind);
             }
@@ -191,7 +191,7 @@ async fn share_audio_and_video_arrive_on_one_clock() {
     assert!(sender.config.audio, "the test pattern captures audio");
     let mut audio = bob.engine.subscribe(tracks.audio, Kind::Audio, 512);
     let mut video = bob.engine.subscribe(tracks.video, Kind::Video, 512);
-    let watching = Request::SetWatching(vec![tracks.video, tracks.audio]);
+    let watching = Request::SetWatched(vec![tracks.video, tracks.audio]);
     assert_eq!(bob.request(watching).await.unwrap(), Response::Ok);
 
     let now_on_video_clock =

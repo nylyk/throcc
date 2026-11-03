@@ -3,12 +3,12 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{MediaId, RoomId, UserId};
-use throcc_proto::messages::{Event, Placed, Request, Response, Welcome};
+use throcc_proto::messages::{Event, Placement, Request, Response, Welcome};
 use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::connection::Connected;
-use crate::control::{self, Link, LinkError, Requester};
+use crate::control::{self, ControlLink, LinkError, Requester};
 use crate::floors::EpochFloors;
 use crate::keys::KeyNotice;
 use crate::keystore::Keystore;
@@ -37,25 +37,29 @@ pub struct Call {
 }
 
 impl Call {
-    pub fn start(link: Link, keystore: &Keystore) -> Result<Self> {
+    pub fn start(link: ControlLink, keystore: &Keystore) -> Result<Self> {
         Self::start_after(link, keystore, None)
     }
 
     /// Starts the call that replaces `previous` after a reconnect, keeping the epoch floors
     /// it raised even where they never reached the file.
-    pub fn restart(link: Link, keystore: &Keystore, previous: &Call) -> Result<Self> {
+    pub fn restart(link: ControlLink, keystore: &Keystore, previous: &Call) -> Result<Self> {
         Self::start_after(link, keystore, Some(previous))
     }
 
-    fn start_after(link: Link, keystore: &Keystore, previous: Option<&Call>) -> Result<Self> {
-        let Link {
+    fn start_after(
+        link: ControlLink,
+        keystore: &Keystore,
+        previous: Option<&Call>,
+    ) -> Result<Self> {
+        let ControlLink {
             welcome,
             connected,
             requester,
             events: mut server_events,
         } = link;
         let connection = connected.connection.clone();
-        let enc = keystore.enc_key_pair()?;
+        let enc = keystore.encryption_key_pair()?;
         let floors = match previous {
             Some(previous) => previous.floors.clone(),
             None => EpochFloors::load(keystore.dir(), &connected.fingerprint)?,
@@ -69,11 +73,11 @@ impl Call {
         );
         let engine = Arc::new(engine);
 
-        for p in &welcome.presence {
+        for p in &welcome.online {
             engine.set_presence(p.user, p.room);
         }
-        let placed_notices = match welcome.placed.room {
-            Some(_) => engine.placed(&welcome.placed),
+        let placed_notices = match welcome.placement.room {
+            Some(_) => engine.placed(&welcome.placement),
             None => Vec::new(),
         };
 
@@ -143,9 +147,13 @@ impl Call {
         &self,
         room: Option<RoomId>,
         password: Option<String>,
-    ) -> Result<(Placed, Vec<KeyNotice>)> {
-        match self.request(Request::SetRoom { room, password }).await? {
-            Response::Placed(placed) => {
+    ) -> Result<(Placement, Vec<KeyNotice>)> {
+        let request = match room {
+            Some(room) => Request::JoinRoom { room, password },
+            None => Request::LeaveRoom,
+        };
+        match self.request(request).await? {
+            Response::Placement(placed) => {
                 let notices = self.engine.placed(&placed);
                 Ok((placed, notices))
             }

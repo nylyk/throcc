@@ -5,7 +5,7 @@ use throcc_proto::messages::Request;
 use tracing::warn;
 
 use crate::connection::{self, ConnectError};
-use crate::control::{self, Link, LinkError, LoginError, Requester};
+use crate::control::{self, ControlLink, LinkError, LoginError, Requester};
 use crate::floors::EpochFloors;
 use crate::keystore::{IdentityMissing, Keystore};
 
@@ -20,7 +20,7 @@ pub enum SignInError {
     #[error(transparent)]
     Link(#[from] LinkError),
     #[error("the server refused the encryption key: {0}")]
-    EncKey(String),
+    EncryptionKey(String),
     #[error(transparent)]
     Store(#[from] anyhow::Error),
 }
@@ -47,7 +47,7 @@ pub async fn sign_in(
     keystore: &Keystore,
     address: &str,
     want_room: Option<RoomId>,
-) -> Result<Link, SignInError> {
+) -> Result<ControlLink, SignInError> {
     let pin = keystore
         .known_servers
         .get(address)
@@ -55,7 +55,7 @@ pub async fn sign_in(
     let connected = connection::connect(address, Some(pin)).await?;
     let link = control::login(connected, keystore.identity(), want_room).await?;
     let server = &link.connected.fingerprint;
-    publish_enc_key(keystore, &link.requester, server, link.welcome.me).await?;
+    publish_encryption_key(keystore, &link.requester, server, link.welcome.me).await?;
     Ok(link)
 }
 
@@ -67,8 +67,8 @@ pub async fn enroll(
     keystore: &mut Keystore,
     address: &str,
     code: &InviteCode,
-) -> Result<Link, SignInError> {
-    keystore.renew_enc_key()?;
+) -> Result<ControlLink, SignInError> {
+    keystore.renew_encryption_key()?;
     let connected = connection::connect(address, None).await?;
     let link = control::enroll(connected, keystore.identity(), code).await?;
     let server = &link.connected.fingerprint;
@@ -79,18 +79,18 @@ pub async fn enroll(
     if let Err(e) = EpochFloors::forget(keystore.dir(), server, link.welcome.me) {
         warn!("dropping the epoch floors of an earlier account: {e:#}");
     }
-    publish_enc_key(keystore, &link.requester, server, link.welcome.me).await?;
+    publish_encryption_key(keystore, &link.requester, server, link.welcome.me).await?;
     Ok(link)
 }
 
 /// Gives `server` our encryption key, signed for it and for us as `me`.
-pub(crate) async fn publish_enc_key(
+pub(crate) async fn publish_encryption_key(
     keystore: &Keystore,
     requester: &Requester,
     server: &Fingerprint,
     me: UserId,
 ) -> Result<(), SignInError> {
-    let signed = keystore.signed_enc_key(server, me);
-    let response = requester.request(Request::SetEncKey(signed)).await?;
-    control::expect_ok(response).map_err(SignInError::EncKey)
+    let signed = keystore.signed_encryption_key(server, me);
+    let response = requester.request(Request::SetEncryptionKey(signed)).await?;
+    control::expect_ok(response).map_err(SignInError::EncryptionKey)
 }

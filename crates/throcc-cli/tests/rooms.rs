@@ -5,12 +5,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use throcc_crypto::identity::enc_key_message;
+use throcc_crypto::identity::encryption_key_message;
 use throcc_proto::framing;
 use throcc_proto::ids::{Epoch, Hash, Role, RoomId, UserId};
 use throcc_proto::messages::{
     ClientMessage, Codec, ErrorCode, Event, MAX_AVATAR_BYTES, MediaState, Presence, Request,
-    Response, ServerMessage, SignedEncKey, Welcome,
+    Response, ServerMessage, SignedEncryptionKey, Welcome,
 };
 use throcc_server::rooms::{Handled, MAX_ROOMS, PasswordWork};
 use throcc_server::unix_now;
@@ -23,7 +23,7 @@ struct View(BTreeMap<UserId, Option<RoomId>>);
 
 impl View {
     fn from_welcome(welcome: &Welcome) -> Self {
-        Self(welcome.presence.iter().map(|p| (p.user, p.room)).collect())
+        Self(welcome.online.iter().map(|p| (p.user, p.room)).collect())
     }
 
     fn apply(&mut self, event: &Event) {
@@ -31,7 +31,7 @@ impl View {
             Event::PresenceChanged(Presence { user, room, .. }) => {
                 self.0.insert(*user, *room);
             }
-            Event::PresenceEnded(user) => {
+            Event::WentOffline(user) => {
                 self.0.remove(user);
             }
             _ => {}
@@ -93,7 +93,7 @@ async fn three_clients_see_consistent_presence() {
     assert!(carol_placed.epoch > bob_placed.epoch);
     let bob_state = bob
         .event(|e| match e {
-            Event::RoomState { room, epoch, peers } if *room == general => {
+            Event::PeersChanged { room, epoch, peers } if *room == general => {
                 Some((*epoch, peers.len()))
             }
             _ => None,
@@ -116,9 +116,9 @@ async fn three_clients_see_consistent_presence() {
     carol.disconnect();
     for (client, view) in [&mut alice, &mut bob].into_iter().zip(views.iter_mut()) {
         client
-            .event(|e| matches!(e, Event::PresenceEnded(u) if *u == carol_id).then_some(()))
+            .event(|e| matches!(e, Event::WentOffline(u) if *u == carol_id).then_some(()))
             .await;
-        view.apply(&Event::PresenceEnded(carol_id));
+        view.apply(&Event::WentOffline(carol_id));
     }
     let expected = View(BTreeMap::from([(bob_id, Some(gaming))]));
     assert_eq!(views[0], expected);
@@ -128,7 +128,7 @@ async fn three_clients_see_consistent_presence() {
         alice.request(Request::DeleteRoom(gaming)).await,
         Response::Ok
     );
-    bob.event(|e| matches!(e, Event::PresenceEnded(u) if *u == bob_id).then_some(()))
+    bob.event(|e| matches!(e, Event::WentOffline(u) if *u == bob_id).then_some(()))
         .await;
     bob.event(|e| matches!(e, Event::RoomDeleted(r) if *r == gaming).then_some(()))
         .await;
@@ -148,7 +148,7 @@ async fn a_locked_room_needs_its_password_from_members_on_every_join() {
     assert_error(&bob.request(lock("mine")).await, ErrorCode::Forbidden);
     assert_eq!(alice.request(lock("hunter2")).await, Response::Ok);
     bob.event(|e| {
-        matches!(e, Event::RoomLocked { room, locked: true } if *room == general).then_some(())
+        matches!(e, Event::RoomLockChanged { room, locked: true } if *room == general).then_some(())
     })
     .await;
     assert_error(
@@ -160,18 +160,18 @@ async fn a_locked_room_needs_its_password_from_members_on_every_join() {
         ErrorCode::WrongPassword,
     );
     let placed = bob.set_room(Some(general), Some("hunter2")).await;
-    assert!(matches!(placed, Response::Placed(p) if p.room == Some(general)));
+    assert!(matches!(placed, Response::Placement(p) if p.room == Some(general)));
     let placed = alice.set_room(Some(general), None).await;
-    assert!(matches!(placed, Response::Placed(p) if p.room == Some(general)));
+    assert!(matches!(placed, Response::Placement(p) if p.room == Some(general)));
 
     bob.reconnect(&server.addr, Some(general)).await;
     let welcome = &bob.link.welcome;
-    assert_eq!(welcome.placed.room, Some(general));
+    assert_eq!(welcome.placement.room, Some(general));
     assert!(welcome.rooms.iter().any(|r| r.id == general && r.locked));
 
     bob.join(None).await;
     bob.reconnect(&server.addr, Some(general)).await;
-    assert_eq!(bob.link.welcome.placed.room, None);
+    assert_eq!(bob.link.welcome.placement.room, None);
 }
 
 #[tokio::test]
@@ -191,7 +191,7 @@ async fn a_room_created_with_a_password_is_locked_from_the_start() {
         ErrorCode::WrongPassword,
     );
     let placed = bob.set_room(Some(private), Some("hunter2")).await;
-    assert!(matches!(placed, Response::Placed(p) if p.room == Some(private)));
+    assert!(matches!(placed, Response::Placement(p) if p.room == Some(private)));
 
     bob.reconnect(&server.addr, None).await;
     let rooms = &bob.link.welcome.rooms;
@@ -209,8 +209,8 @@ async fn a_password_checked_outside_the_hub_is_checked_again_before_it_counts() 
         room: general,
         password: password.map(str::to_owned),
     };
-    let join = |password: &str| Request::SetRoom {
-        room: Some(general),
+    let join = |password: &str| Request::JoinRoom {
+        room: general,
         password: Some(password.to_owned()),
     };
     // Bob's request up to its password work, then the rest, as his session would run them.
@@ -234,7 +234,7 @@ async fn a_password_checked_outside_the_hub_is_checked_again_before_it_counts() 
 
     let joining = start(join("hunter3"));
     assert_eq!(alice.request(lock(None)).await, Response::Ok);
-    assert!(matches!(finish(joining), Response::Placed(p) if p.room == Some(general)));
+    assert!(matches!(finish(joining), Response::Placement(p) if p.room == Some(general)));
     bob.join(None).await;
 
     assert_eq!(alice.request(lock(Some("hunter4"))).await, Response::Ok);
@@ -296,7 +296,7 @@ async fn reconnect_returns_to_the_wanted_room_with_fresh_tracks() {
     let first = bob.join(Some(general)).await;
 
     bob.reconnect(&server.addr, Some(general)).await;
-    let placed = bob.link.welcome.placed;
+    let placed = bob.link.welcome.placement;
     assert_eq!(placed.room, Some(general));
     assert!(placed.epoch > first.epoch);
     let (old, new) = (first.tracks.unwrap(), placed.tracks.unwrap());
@@ -315,7 +315,7 @@ async fn profile_changes_are_rate_limited_and_avatars_capped() {
     let second = alice.request(profile("Alicia")).await;
     assert_error(&second, ErrorCode::RateLimited);
     let big = alice
-        .request(Request::SetAvatar(vec![0; MAX_AVATAR_BYTES + 1]))
+        .request(Request::UploadAvatar(vec![0; MAX_AVATAR_BYTES + 1]))
         .await;
     assert_error(&big, ErrorCode::TooLarge);
     let empty_name = alice.request(profile("   ")).await;
@@ -332,7 +332,7 @@ async fn media_ids_never_repeat_across_a_restart() {
     let _second = first.restart(|_| {});
 
     alice.reconnect(&addr, Some(general)).await;
-    let placed = &alice.link.welcome.placed;
+    let placed = &alice.link.welcome.placement;
     let after = placed.tracks.as_ref().unwrap();
     assert!(
         after.mic > before.shares[0].audio,
@@ -369,7 +369,7 @@ async fn killed_connection_retracts_presence_within_the_idle_timeout() {
     let started = Instant::now();
     tokio::time::timeout(IDLE_TIMEOUT * 3, async {
         loop {
-            if let Some(Event::PresenceEnded(user)) = alice.link.events.recv().await
+            if let Some(Event::WentOffline(user)) = alice.link.events.recv().await
                 && user == bob_id
             {
                 return;
@@ -413,7 +413,9 @@ async fn picture_fetches_have_their_own_rate_limit() {
     let fetches: Vec<_> = (0..4000)
         .map(|_| {
             let requester = alice.link.requester.clone();
-            tokio::spawn(async move { requester.request(Request::GetAvatar(Hash([0; 32]))).await })
+            tokio::spawn(
+                async move { requester.request(Request::FetchAvatar(Hash([0; 32]))).await },
+            )
         })
         .collect();
     let mut limited = 0;
@@ -503,7 +505,7 @@ async fn picture_uploads_are_rate_limited() {
     let mut uploaded = 0;
     let last = loop {
         let picture = vec![uploaded as u8; MAX_AVATAR_BYTES];
-        match alice.request(Request::SetAvatar(picture)).await {
+        match alice.request(Request::UploadAvatar(picture)).await {
             Response::AvatarHash(_) if uploaded < 100 => uploaded += 1,
             other => break other,
         }
@@ -518,14 +520,19 @@ async fn an_expired_encryption_key_cannot_enter_a_room() {
     let mut alice = admin(&server).await;
     let general = create_room(&mut alice, "General").await;
     let me = alice.link.welcome.me;
-    let expired = SignedEncKey {
+    let expired = SignedEncryptionKey {
         key: [1; 32],
         not_after: unix_now() - 1,
         sig: [2; 64],
     };
-    server.shared.hub().db.set_enc_key(me, &expired).unwrap();
+    server
+        .shared
+        .hub()
+        .db
+        .set_encryption_key(me, &expired)
+        .unwrap();
     alice.reconnect(&server.addr, Some(general)).await;
-    assert_eq!(alice.link.welcome.placed.room, None);
+    assert_eq!(alice.link.welcome.placement.room, None);
 }
 
 #[tokio::test]
@@ -565,7 +572,7 @@ async fn a_leave_that_cannot_bump_the_epoch_still_ends_presence() {
         .await;
 
     alice.disconnect();
-    bob.event(|e| matches!(e, Event::PresenceEnded(u) if *u == alice_id).then_some(()))
+    bob.event(|e| matches!(e, Event::WentOffline(u) if *u == alice_id).then_some(()))
         .await;
 }
 
@@ -617,7 +624,7 @@ async fn members_leave_on_their_own_but_the_only_admin_cannot() {
     invite(&bob).await;
 
     bob.link.requester.request(leave(bob_id)).await.ok();
-    bob.event(|e| matches!(e, Event::Kicked { .. }).then_some(()))
+    bob.event(|e| matches!(e, Event::RemovedFromServer { .. }).then_some(()))
         .await;
     let Response::Users(users) = alice.request(Request::ListUsers).await else {
         panic!("no user list");
@@ -641,7 +648,7 @@ async fn a_member_who_stops_reading_pictures_stops_being_read() {
     let server = start_server();
     let alice = admin(&server).await;
     let picture: Vec<u8> = (0..MAX_AVATAR_BYTES).map(|i| (i % 251) as u8).collect();
-    let Response::AvatarHash(hash) = alice.request(Request::SetAvatar(picture)).await else {
+    let Response::AvatarHash(hash) = alice.request(Request::UploadAvatar(picture)).await else {
         panic!("upload refused");
     };
     let code = invite(&alice).await;
@@ -649,10 +656,10 @@ async fn a_member_who_stops_reading_pictures_stops_being_read() {
     let bob_id = bob.welcome.me;
 
     let requests = (0..FETCHES)
-        .map(|_| Request::GetAvatar(hash))
+        .map(|_| Request::FetchAvatar(hash))
         .chain([Request::CreateInvite]);
     for (id, req) in (0..).zip(requests) {
-        let message = ClientMessage::Request { id, req };
+        let message = ClientMessage::Request { id, request: req };
         bob.send
             .write_all(&framing::encode(&message).unwrap())
             .await
@@ -674,10 +681,10 @@ async fn a_member_who_stops_reading_pictures_stops_being_read() {
     loop {
         match read_message(&mut bob.recv).await {
             ServerMessage::Response {
-                res: Response::Avatar(_),
+                response: Response::Avatar(_),
                 ..
             } => pictures += 1,
-            ServerMessage::Response { id, res } if id == FETCHES => {
+            ServerMessage::Response { id, response: res } if id == FETCHES => {
                 assert!(matches!(res, Response::Invite { .. }), "{res:?}");
                 break;
             }
@@ -733,11 +740,11 @@ async fn managers_kick_lower_ranks_out_of_rooms() {
 }
 
 /// `client`'s encryption key replaced by `key`, signed for the server it is connected to.
-fn signed_key(client: &TestClient, key: [u8; 32]) -> SignedEncKey {
+fn signed_key(client: &TestClient, key: [u8; 32]) -> SignedEncryptionKey {
     let server = client.link.connected.fingerprint;
     let not_after = unix_now() + 24 * 60 * 60;
-    let message = enc_key_message(&server.0, client.link.welcome.me, not_after, &key);
-    SignedEncKey {
+    let message = encryption_key_message(&server.0, client.link.welcome.me, not_after, &key);
+    SignedEncryptionKey {
         key,
         not_after,
         sig: client.keystore.identity().sign(&message),
@@ -752,22 +759,22 @@ async fn only_a_new_encryption_key_rekeys_the_room_and_new_keys_are_rate_limited
     let epoch = alice.join(Some(general)).await.epoch;
     let current = alice
         .keystore
-        .signed_enc_key(&alice.link.connected.fingerprint, alice.link.welcome.me);
+        .signed_encryption_key(&alice.link.connected.fingerprint, alice.link.welcome.me);
     for _ in 0..10 {
         assert_eq!(
-            alice.request(Request::SetEncKey(current)).await,
+            alice.request(Request::SetEncryptionKey(current)).await,
             Response::Ok
         );
     }
     assert_eq!(alice.join(Some(general)).await.epoch, epoch);
 
     for (i, key) in [[1; 32], [2; 32], [3; 32]].into_iter().enumerate() {
-        let set = Request::SetEncKey(signed_key(&alice, key));
+        let set = Request::SetEncryptionKey(signed_key(&alice, key));
         assert_eq!(alice.request(set).await, Response::Ok);
         let rekeyed = Epoch(epoch.0 + 1 + i as u32);
         assert_eq!(alice.join(Some(general)).await.epoch, rekeyed);
     }
-    let fourth = Request::SetEncKey(signed_key(&alice, [4; 32]));
+    let fourth = Request::SetEncryptionKey(signed_key(&alice, [4; 32]));
     assert_error(&alice.request(fourth).await, ErrorCode::RateLimited);
 }
 
@@ -781,7 +788,7 @@ async fn hopping_between_rooms_is_rate_limited_but_a_reconnect_returns_to_the_la
     let refused = loop {
         let room = if hops % 2 == 0 { one } else { two };
         match alice.set_room(Some(room), None).await {
-            Response::Placed(_) if hops < 100 => (hops, last) = (hops + 1, Some(room)),
+            Response::Placement(_) if hops < 100 => (hops, last) = (hops + 1, Some(room)),
             other => break other,
         }
     };
@@ -789,7 +796,7 @@ async fn hopping_between_rooms_is_rate_limited_but_a_reconnect_returns_to_the_la
     assert_eq!(hops, 5);
     for _ in 0..3 {
         alice.reconnect(&server.addr, last).await;
-        assert_eq!(alice.link.welcome.placed.room, last);
+        assert_eq!(alice.link.welcome.placement.room, last);
     }
     // Last, since moving to the lobby changes the room a reconnect returns to.
     assert_eq!(alice.join(None).await.room, None);
@@ -803,10 +810,10 @@ async fn reconnects_return_to_the_room_left_only_so_often() {
     alice.join(Some(general)).await;
     for _ in 0..10 {
         alice.reconnect(&server.addr, Some(general)).await;
-        assert_eq!(alice.link.welcome.placed.room, Some(general));
+        assert_eq!(alice.link.welcome.placement.room, Some(general));
     }
     alice.reconnect(&server.addr, Some(general)).await;
-    assert_eq!(alice.link.welcome.placed.room, None);
+    assert_eq!(alice.link.welcome.placement.room, None);
 }
 
 #[tokio::test]
@@ -829,7 +836,7 @@ async fn a_reconnect_lands_in_the_lobby_once_the_room_left_is_locked_or_deleted(
         };
         assert_eq!(alice.request(change).await, Response::Ok);
         bob.reconnect(&server.addr, Some(room)).await;
-        assert_eq!(bob.link.welcome.placed.room, None, "{room:?}");
+        assert_eq!(bob.link.welcome.placement.room, None, "{room:?}");
     }
 }
 
@@ -840,14 +847,14 @@ async fn a_reconnect_does_not_return_to_a_locked_room_one_was_kicked_from() {
     let mut bob = invited(&server, &alice).await;
     let private = create_locked_room(&alice, &mut bob).await;
     let joined = bob.set_room(Some(private), Some("hunter2")).await;
-    assert!(matches!(joined, Response::Placed(_)), "{joined:?}");
+    assert!(matches!(joined, Response::Placement(_)), "{joined:?}");
     let kick = Request::KickFromRoom {
         user: bob.link.welcome.me,
         room: private,
     };
     assert_eq!(alice.request(kick).await, Response::Ok);
     bob.reconnect(&server.addr, Some(private)).await;
-    assert_eq!(bob.link.welcome.placed.room, None);
+    assert_eq!(bob.link.welcome.placement.room, None);
 }
 
 /// Sends requests until the server refuses one, leaving `client` no allowance.
@@ -874,7 +881,7 @@ async fn sender_keys_for_the_current_epoch_need_no_request_allowance() {
     let epoch = bob.join(Some(general)).await.epoch;
     use_up_requests(&bob).await;
 
-    let publish = || Request::PublishKey {
+    let publish = || Request::PublishSenderKey {
         epoch,
         wrapped: vec![(alice.link.welcome.me, vec![7; 32])],
     };
@@ -901,7 +908,7 @@ async fn sender_keys_for_the_current_epoch_need_no_request_allowance() {
     assert!(refused, "a third publish was never limited");
     let from = alice
         .event(|e| match e {
-            Event::SenderKey { from, .. } => Some(*from),
+            Event::SenderKeyPublished { from, .. } => Some(*from),
             _ => None,
         })
         .await;
@@ -927,7 +934,7 @@ async fn wrong_room_passwords_make_that_guesser_wait() {
         "{waiting:?}"
     );
     let placed = carol.set_room(Some(private), Some("hunter2")).await;
-    assert!(matches!(placed, Response::Placed(p) if p.room == Some(private)));
+    assert!(matches!(placed, Response::Placement(p) if p.room == Some(private)));
 }
 
 #[tokio::test]
@@ -946,7 +953,7 @@ async fn joins_waiting_for_the_password_workers_all_finish() {
         erin.set_room(Some(private), Some("guess")),
     );
     for placed in [b, c, d] {
-        assert!(matches!(placed, Response::Placed(p) if p.room == Some(private)));
+        assert!(matches!(placed, Response::Placement(p) if p.room == Some(private)));
     }
     assert_error(&e, ErrorCode::WrongPassword);
 }
@@ -1013,7 +1020,7 @@ async fn a_demoted_manager_needs_the_password_to_return_to_a_locked_room() {
 
     assert_eq!(alice.request(set_role(Role::User)).await, Response::Ok);
     bob.reconnect(&server.addr, Some(private)).await;
-    assert_eq!(bob.link.welcome.placed.room, None);
+    assert_eq!(bob.link.welcome.placement.room, None);
 }
 
 #[tokio::test]

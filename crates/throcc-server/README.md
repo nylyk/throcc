@@ -20,7 +20,7 @@ The server: sign-in, rooms and presence, the key relay, and an SFU that forwards
 | `limits.rs` | Token buckets, per-source connection caps, the new-connection rate and the enrollment limiter, which counts failed runs per source, network and region |
 | `refusals.rs` | Counts of connections refused or failed before sign-in, logged every 10 s instead of one line each |
 | `sfu.rs` | Ingress: the per-connection rate limits, the per-track audio allowance, the ownership check, the forwarding table and keyframe-request merging |
-| `egress.rs` | One task per receiver: audio first, a turn per track, then video in whole units within a 150 ms budget; link stats |
+| `egress.rs` | One task per receiver: audio first, a turn per track, then video in whole units within a 150 ms budget; receive stats |
 | `database.rs` | The SQLite schema, its migrations and every query. WAL with `synchronous=FULL`, so a commit survives a power loss and a room's epoch never rolls back |
 
 ## Admin invites

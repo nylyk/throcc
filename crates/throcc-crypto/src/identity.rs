@@ -60,18 +60,18 @@ pub fn auth_message(
 
 /// What an identity key signs to vouch for an X25519 encryption key: bound to one server
 /// (by its SPKI hash), one user and an expiry.
-pub fn enc_key_message(
+pub fn encryption_key_message(
     server: &[u8; 32],
     user: UserId,
     not_after: u64,
-    enc_key: &PublicKey,
+    encryption_key: &PublicKey,
 ) -> Vec<u8> {
     [
         b"throcc/enc-key/1".as_slice(),
         server,
         &user.0.to_be_bytes(),
         &not_after.to_be_bytes(),
-        enc_key,
+        encryption_key,
     ]
     .concat()
 }
@@ -121,8 +121,8 @@ mod tests {
 
     /// The signed encryption key is part of the protocol: peers and the server verify these exact bytes.
     #[test]
-    fn enc_key_message_and_its_signature_are_pinned() {
-        let message = enc_key_message(
+    fn encryption_key_message_and_its_signature_are_pinned() {
+        let message = encryption_key_message(
             &[1; 32],
             UserId(0x0102_0304_0506_0708),
             0x1122_3344_5566_7788,

@@ -135,7 +135,7 @@ pub async fn send(call: &mut Call, room: RoomId, options: SendOptions) -> Result
                 next_audio += AUDIO_FRAME;
             }
             event = call.events.recv() => match event {
-                Some(CallEvent::Server(Event::KeyframeWanted { media_id: wanted, .. })) if wanted == media_id => {
+                Some(CallEvent::Server(Event::KeyframeRequested { media_id: wanted, .. })) if wanted == media_id => {
                     let now = Instant::now();
                     if let Some(last) = last_keyframe {
                         let gap = now.duration_since(last);
@@ -179,7 +179,7 @@ pub async fn recv(call: &mut Call, room: RoomId, options: RecvOptions<'_>) -> Re
         idle,
     } = options;
     call.join(Some(room), None).await?;
-    let mut presence: Vec<Presence> = call.welcome.presence.clone();
+    let mut presence: Vec<Presence> = call.welcome.online.clone();
     let sender = loop {
         if let Some(user) = find_user(&presence, from) {
             break user;
@@ -220,7 +220,7 @@ pub async fn recv(call: &mut Call, room: RoomId, options: RecvOptions<'_>) -> Re
                 }
             }
             event = call.events.recv() => match event {
-                Some(CallEvent::Server(Event::RoomState { .. })) => {
+                Some(CallEvent::Server(Event::PeersChanged { .. })) => {
                     if let Some(current) = peer_tracks(call, sender)
                         && track.pick(current) != media_id
                     {
@@ -234,7 +234,7 @@ pub async fn recv(call: &mut Call, room: RoomId, options: RecvOptions<'_>) -> Re
                         println!("the sender rejoined; now receiving track {}", media_id.0);
                     }
                 }
-                Some(CallEvent::Server(Event::LinkStats { tracks })) => {
+                Some(CallEvent::Server(Event::ReceiveStats { tracks })) => {
                     for t in tracks {
                         if t.media_id == media_id {
                             server_dropped += u64::from(t.dropped_units);
@@ -284,7 +284,7 @@ async fn subscribe(
     let media_id = track.pick(tracks);
     let units = call.engine.subscribe(media_id, track.kind(), QUEUE_UNITS);
     if let Track::Video = track {
-        let watching = call.request(Request::SetWatching(vec![media_id])).await?;
+        let watching = call.request(Request::SetWatched(vec![media_id])).await?;
         control::expect_ok(watching).map_err(anyhow::Error::msg)?;
     }
     let audio = with_audio.then(|| call.engine.subscribe(tracks.0, Kind::Audio, QUEUE_UNITS));

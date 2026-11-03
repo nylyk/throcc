@@ -11,7 +11,7 @@ use gpui_component::button::Button;
 use gpui_component::input::Input;
 use gpui_component::slider::Slider;
 use gpui_component::switch::Switch;
-use throcc_client_core::client::Command;
+use throcc_client_core::client::UiCommand;
 use throcc_client_core::keystore::StartedOver;
 use throcc_client_core::state::{FRAME_RATES, Resolution};
 use throcc_proto::Fingerprint;
@@ -106,7 +106,7 @@ fn actions(cancel: &'static str, cx: &mut Context<ThroccApp>) -> Div {
 /// `button`, which sends the command `command` makes and closes the dialog.
 fn sends(
     button: Button,
-    command: impl Fn(&ThroccApp) -> Command + 'static,
+    command: impl Fn(&ThroccApp) -> UiCommand + 'static,
     cx: &mut Context<ThroccApp>,
 ) -> Button {
     button.on_click(cx.listener(move |app, _, _, cx| {
@@ -165,7 +165,7 @@ fn delete_room(app: &mut ThroccApp, room: RoomId, cx: &mut Context<ThroccApp>) -
         }))
         .child(actions("Cancel", cx).child(sends(
             danger("delete-room", "Delete"),
-            move |_| Command::DeleteRoom(room),
+            move |_| UiCommand::DeleteRoom(room),
             cx,
         )))
         .into_any_element()
@@ -186,7 +186,7 @@ fn edit_room(app: &mut ThroccApp, room: RoomId, cx: &mut Context<ThroccApp>) -> 
                     .children(locked.then(|| {
                         sends(
                             secondary("unlock-room", "Remove"),
-                            move |_| Command::SetRoomPassword(room, None),
+                            move |_| UiCommand::SetRoomPassword(room, None),
                             cx,
                         )
                     })),
@@ -325,7 +325,7 @@ fn share(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         )
         .child(actions("Cancel", cx).child(sends(
             primary("start-share", "Start Sharing"),
-            |app| Command::StartShare(app.share_choice.config(Codec::Av1, app.share_audio)),
+            |app| UiCommand::StartShare(app.share_choice.config(Codec::Av1, app.share_audio)),
             cx,
         )))
         .into_any_element()
@@ -532,7 +532,7 @@ fn profile(
     .disabled(key_changed || shown_key.is_none() || shown_key != presented)
     .on_click(cx.listener(move |app, _, _, cx| {
         if let Some(key) = shown_key {
-            app.command(Command::SetVerified {
+            app.command(UiCommand::SetVerified {
                 user,
                 key,
                 verified: !verified,
@@ -575,7 +575,7 @@ fn profile(
             secondary("dismiss-key-change", "Dismiss Warning")
                 .disabled(key_changed || shown_key != presented)
                 .on_click(cx.listener(move |app, _, _, cx| {
-                    app.command(Command::DismissKeyChange {
+                    app.command(UiCommand::DismissKeyChange {
                         user,
                         shown: shown_key,
                     });
@@ -672,7 +672,7 @@ fn remove(user: UserId, name: &str, cascade: bool, cx: &mut Context<ThroccApp>) 
         )
         .child(actions("Cancel", cx).child(sends(
             danger("confirm-remove", "Remove"),
-            move |_| Command::RemoveUser { user, cascade },
+            move |_| UiCommand::RemoveUser { user, cascade },
             cx,
         )))
         .into_any_element()
@@ -717,7 +717,7 @@ fn leave_server(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         ))
         .child(actions("Cancel", cx).child(sends(
             danger("confirm-leave", "Leave"),
-            |_| Command::LeaveServer,
+            |_| UiCommand::LeaveServer,
             cx,
         )))
         .into_any_element()

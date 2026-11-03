@@ -24,12 +24,12 @@ pub enum HpkeError {
 }
 
 /// An X25519 encryption key pair, signed by the identity key and rotated every 30 days.
-pub struct EncKeyPair {
+pub struct EncryptionKeyPair {
     private: Private,
     public: Public,
 }
 
-impl EncKeyPair {
+impl EncryptionKeyPair {
     pub fn generate() -> Self {
         let (private, public) = X25519HkdfSha256::gen_keypair();
         Self { private, public }
@@ -81,7 +81,7 @@ impl WrapContext {
 
 /// Wraps `secret` to `recipient` in HPKE auth mode, which proves the sender's key.
 pub fn wrap(
-    sender: &EncKeyPair,
+    sender: &EncryptionKeyPair,
     recipient: &PublicKey,
     context: &WrapContext,
     secret: &[u8; 32],
@@ -102,7 +102,7 @@ pub fn wrap(
 }
 
 pub fn unwrap(
-    recipient: &EncKeyPair,
+    recipient: &EncryptionKeyPair,
     sender: &PublicKey,
     context: &WrapContext,
     wrapped: &[u8],
@@ -147,9 +147,9 @@ mod tests {
 
     #[test]
     fn unwrap_needs_the_right_sender_recipient_context_and_bytes() {
-        let alice = EncKeyPair::generate();
-        let bob = EncKeyPair::generate();
-        let mallory = EncKeyPair::generate();
+        let alice = EncryptionKeyPair::generate();
+        let bob = EncryptionKeyPair::generate();
+        let mallory = EncryptionKeyPair::generate();
         let wrapped = wrap(&alice, &bob.public(), &context(5), &[9; 32]).unwrap();
         assert_eq!(
             *unwrap(&bob, &alice.public(), &context(5), &wrapped).unwrap(),
@@ -175,17 +175,19 @@ mod tests {
 
     #[test]
     fn secret_round_trips() {
-        let key = EncKeyPair::generate();
+        let key = EncryptionKeyPair::generate();
         assert_eq!(
-            EncKeyPair::from_secret(&key.secret()).unwrap().public(),
+            EncryptionKeyPair::from_secret(&key.secret())
+                .unwrap()
+                .public(),
             key.public()
         );
     }
 
     #[test]
     fn a_pinned_wrap_still_opens() {
-        let alice = EncKeyPair::from_secret(&[0x11; 32]).unwrap();
-        let bob = EncKeyPair::from_secret(&[0x22; 32]).unwrap();
+        let alice = EncryptionKeyPair::from_secret(&[0x11; 32]).unwrap();
+        let bob = EncryptionKeyPair::from_secret(&[0x22; 32]).unwrap();
         let hex = "80ac5e1aa2cda2bed51f33b7446b353d4cb0b6bd8d7537da971b4b67d992b713\
                    fcab8196c40683d7d08362c585979811dfc9290a0f8a71aa6fe9b22301683036\
                    10149bb547bfdf9146ef5540a2ec4490";

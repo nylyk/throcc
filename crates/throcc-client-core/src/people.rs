@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::json_file;
 use crate::servers::Hex;
-use crate::state::PersonPlayback;
+use crate::state::Playback;
 use crate::verified::VerifiedRecords;
 
 pub(crate) const FILE: &str = "people.json";
@@ -17,7 +17,7 @@ pub(crate) const FILE: &str = "people.json";
 pub(crate) struct People {
     #[serde(flatten)]
     pub verified: VerifiedRecords,
-    pub playback: BTreeMap<Hex, PersonPlayback>,
+    pub playback: BTreeMap<Hex, Playback>,
 }
 
 impl json_file::Format for People {}

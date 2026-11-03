@@ -37,15 +37,15 @@ pub(crate) struct VerifiedKeys {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct VerifiedRecords {
-    verified: BTreeMap<Hex, Verified>,
+    verified: BTreeMap<Hex, VerifiedEntry>,
     /// Pairs seen under a verified key that later showed another, unverified key. Each is
     /// one of a verified key's `seen` pairs, so they are bounded alike.
-    changed: Vec<Changed>,
+    changed: Vec<KeyChange>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
-struct Verified {
+struct VerifiedEntry {
     /// The name they were shown with when verified, to tell them apart in the list.
     name: String,
     seen: BTreeSet<SeenAs>,
@@ -58,7 +58,7 @@ struct SeenAs {
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
-struct Changed {
+struct KeyChange {
     #[serde(flatten)]
     at: SeenAs,
     /// The key shown there last that wasn't the verified one.
@@ -160,7 +160,7 @@ impl VerifiedKeys {
         }
         self.change(|records| {
             records.forget_change(at);
-            records.changed.push(Changed { at, now: Hex(*key) });
+            records.changed.push(KeyChange { at, now: Hex(*key) });
         })
     }
 

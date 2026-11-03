@@ -11,7 +11,7 @@ use gpui_component::select::{Select, SelectEvent, SelectState};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::switch::Switch;
 use gpui_component::{Disableable, IndexPath};
-use throcc_client_core::client::Command;
+use throcc_client_core::client::UiCommand;
 use throcc_client_core::media::audio::{
     DEFAULT_GATE_DBFS, NoiseSuppressionLevel, Transmit, VoiceSettings,
 };
@@ -63,7 +63,7 @@ fn gate_dbfs(transmit: Transmit) -> f32 {
 
 fn set_voice(app: &mut ThroccApp, change: impl FnOnce(&mut VoiceSettings)) {
     change(&mut app.voice);
-    app.command(Command::Voice(app.voice));
+    app.command(UiCommand::Voice(app.voice));
 }
 
 fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
@@ -156,7 +156,7 @@ impl AudioControls {
                 } else {
                     app.output_device = device;
                 }
-                app.command(Command::Devices {
+                app.command(UiCommand::Devices {
                     input: app.input_device.clone(),
                     output: app.output_device.clone(),
                 });
@@ -442,7 +442,7 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 )
                 .on_click(cx.listener(|app, _, _, cx| {
                     app.mic_test = !app.mic_test;
-                    app.command(Command::MicTest(app.mic_test));
+                    app.command(UiCommand::MicTest(app.mic_test));
                     cx.notify();
                 })),
             ),

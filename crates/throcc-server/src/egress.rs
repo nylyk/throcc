@@ -9,7 +9,7 @@ use throcc_proto::messages::{Event, ServerMessage, TrackStats};
 use tokio::sync::mpsc;
 
 use crate::lock;
-use crate::rooms::Outgoing;
+use crate::rooms::Outbound;
 
 /// Queued video beyond this is dropped, in whole units that haven't started sending.
 pub const VIDEO_BUDGET: Duration = Duration::from_millis(150);
@@ -533,7 +533,7 @@ fn remember(history: &mut BTreeMap<u32, Fate>, first_seq: u32, fate: Fate) {
 }
 
 /// Starts the egress task for one receiver and returns the handle ingress offers packets to.
-pub fn spawn(connection: quinn::Connection, control: mpsc::Sender<Outgoing>) -> EgressHandle {
+pub fn spawn(connection: quinn::Connection, control: mpsc::Sender<Outbound>) -> EgressHandle {
     let (inbox, mut rx) = mpsc::channel(INBOX);
     let handle = EgressHandle {
         inbox,
@@ -574,9 +574,9 @@ pub fn spawn(connection: quinn::Connection, control: mpsc::Sender<Outgoing>) -> 
                 if let Ok(permit) = control.try_reserve() {
                     let tracks = queues.take_stats();
                     if !tracks.is_empty() {
-                        permit.send(Outgoing::Message(ServerMessage::Event(Event::LinkStats {
-                            tracks,
-                        })));
+                        permit.send(Outbound::Message(ServerMessage::Event(
+                            Event::ReceiveStats { tracks },
+                        )));
                     }
                 }
             }

@@ -5,7 +5,7 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
 use throcc_proto::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
-use throcc_proto::messages::{PublicKey, ServerProfile, SignedEncKey, User};
+use throcc_proto::messages::{PublicKey, ServerProfile, SignedEncryptionKey, User};
 
 use crate::files;
 
@@ -13,9 +13,9 @@ const SCHEMA_V1: &str = "
 CREATE TABLE users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pubkey BLOB NOT NULL UNIQUE,
-    enc_key BLOB,
-    enc_key_sig BLOB,
-    enc_key_not_after INTEGER,
+    encryption_key BLOB,
+    encryption_key_sig BLOB,
+    encryption_key_not_after INTEGER,
     name TEXT NOT NULL,
     avatar_hash BLOB,
     role INTEGER NOT NULL,
@@ -87,7 +87,7 @@ pub struct RoomRow {
 pub struct UserRow {
     pub id: UserId,
     pub pubkey: PublicKey,
-    pub enc_key: Option<SignedEncKey>,
+    pub encryption_key: Option<SignedEncryptionKey>,
     pub name: String,
     pub avatar: Option<Hash>,
     pub role: Role,
@@ -316,13 +316,17 @@ impl Database {
         Ok(self.user(UserId(id as u64))?.map(enrolled))
     }
 
-    pub fn set_enc_key(&self, user: UserId, enc_key: &SignedEncKey) -> Result<()> {
+    pub fn set_encryption_key(
+        &self,
+        user: UserId,
+        encryption_key: &SignedEncryptionKey,
+    ) -> Result<()> {
         self.conn.execute(
-            "UPDATE users SET enc_key = ?1, enc_key_sig = ?2, enc_key_not_after = ?3 WHERE id = ?4",
+            "UPDATE users SET encryption_key = ?1, encryption_key_sig = ?2, encryption_key_not_after = ?3 WHERE id = ?4",
             params![
-                enc_key.key.as_slice(),
-                enc_key.sig.as_slice(),
-                enc_key.not_after as i64,
+                encryption_key.key.as_slice(),
+                encryption_key.sig.as_slice(),
+                encryption_key.not_after as i64,
                 user.0 as i64
             ],
         )?;
@@ -593,15 +597,15 @@ fn check_private_files(database: &Path) -> Result<()> {
     Ok(())
 }
 
-const USER_SELECT: &str = "SELECT id, pubkey, enc_key, enc_key_sig, enc_key_not_after, name, avatar_hash, role, invited_by, created_at FROM users";
+const USER_SELECT: &str = "SELECT id, pubkey, encryption_key, encryption_key_sig, encryption_key_not_after, name, avatar_hash, role, invited_by, created_at FROM users";
 
 fn user_row(r: &rusqlite::Row) -> rusqlite::Result<UserRow> {
-    let enc_key: Option<Vec<u8>> = r.get(2)?;
-    let enc_key_sig: Option<Vec<u8>> = r.get(3)?;
+    let encryption_key: Option<Vec<u8>> = r.get(2)?;
+    let encryption_key_sig: Option<Vec<u8>> = r.get(3)?;
     let not_after: Option<i64> = r.get(4)?;
-    let enc_key = match (enc_key, enc_key_sig, not_after) {
+    let encryption_key = match (encryption_key, encryption_key_sig, not_after) {
         (Some(key), Some(sig), Some(not_after)) => match (key.try_into(), sig.try_into()) {
-            (Ok(key), Ok(sig)) => Some(SignedEncKey {
+            (Ok(key), Ok(sig)) => Some(SignedEncryptionKey {
                 key,
                 not_after: not_after as u64,
                 sig,
@@ -613,7 +617,7 @@ fn user_row(r: &rusqlite::Row) -> rusqlite::Result<UserRow> {
     Ok(UserRow {
         id: UserId(r.get::<_, i64>(0)? as u64),
         pubkey: fixed(r.get::<_, Vec<u8>>(1)?)?,
-        enc_key,
+        encryption_key,
         name: r.get(5)?,
         avatar: hash_column(r.get(6)?),
         role: Role::from_rank(r.get(7)?).unwrap_or(Role::User),

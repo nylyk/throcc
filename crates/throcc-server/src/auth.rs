@@ -5,13 +5,15 @@ use throcc_crypto::identity::{self, random};
 use throcc_crypto::pake::{ServerPake, Transcript};
 use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::invite::{self, ID_CHARS, SECRET_CHARS};
-use throcc_proto::messages::{AuthError, Event, Hello, PakeFinish, PakeReply, PakeStep, PublicKey};
+use throcc_proto::messages::{
+    AuthError, ClientHello, Event, PakeFinish, PakeReply, PakeStep, PublicKey,
+};
 use tracing::{debug, info, warn};
 
 use crate::database::{Enrolled, InviteRow, UserRow};
 use crate::limits::SourceKey;
 use crate::session::{FrameStream, read_handshake, write_frame};
-use crate::{Shared, unix_now};
+use crate::{ServerState, unix_now};
 
 pub const INVITE_TRIES: u32 = 3;
 const PAKE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -21,8 +23,8 @@ const EXPORTER_LABEL: &[u8] = b"throcc/exporter/1";
 
 /// A refusal, tagged with the message type the client is waiting for.
 #[derive(Debug)]
-pub enum Refused {
-    Hello(AuthError),
+pub enum AuthRefusal {
+    Auth(AuthError),
     Enroll(AuthError),
     /// A failure on the server's side. The connection is closed without an answer.
     Internal,
@@ -34,15 +36,15 @@ pub struct Authenticated {
 }
 
 pub async fn authenticate(
-    shared: &Shared,
+    shared: &ServerState,
     connection: &quinn::Connection,
     stream: &mut FrameStream,
     server_nonce: &[u8; 32],
-    hello: Hello,
-) -> Result<Authenticated, Refused> {
-    let exporter = exporter(connection).map_err(Refused::Hello)?;
+    hello: ClientHello,
+) -> Result<Authenticated, AuthRefusal> {
+    let exporter = exporter(connection).map_err(AuthRefusal::Auth)?;
     match hello {
-        Hello::Auth {
+        ClientHello::Auth {
             pubkey,
             client_nonce,
             want_room,
@@ -50,16 +52,16 @@ pub async fn authenticate(
         } => {
             let message = identity::auth_message(server_nonce, &client_nonce, &exporter);
             identity::verify(&pubkey, &message, &signature)
-                .map_err(|_| Refused::Hello(AuthError::BadSignature))?;
+                .map_err(|_| AuthRefusal::Auth(AuthError::BadSignature))?;
             let row = shared
                 .hub()
                 .db
                 .user_by_pubkey(&pubkey)
                 .map_err(internal)?
-                .ok_or(Refused::Hello(AuthError::UnknownKey))?;
+                .ok_or(AuthRefusal::Auth(AuthError::UnknownKey))?;
             Ok(Authenticated { row, want_room })
         }
-        Hello::Enroll {
+        ClientHello::Enroll {
             code_id,
             pubkey,
             client_nonce,
@@ -84,7 +86,7 @@ pub async fn authenticate(
 }
 
 struct Enrollment<'a> {
-    shared: &'a Shared,
+    shared: &'a ServerState,
     source: SourceKey,
     code_id: String,
     pubkey: PublicKey,
@@ -94,14 +96,14 @@ struct Enrollment<'a> {
 }
 
 impl Enrollment<'_> {
-    async fn run(&self, stream: &mut FrameStream, pake_a: &[u8]) -> Result<UserRow, Refused> {
+    async fn run(&self, stream: &mut FrameStream, pake_a: &[u8]) -> Result<UserRow, AuthRefusal> {
         // A run counts against its source from the start, so parallel runs can't outpace the limit.
         if !self.shared.limiter().begin(self.source, Instant::now()) {
             debug!(source = ?self.source, "enrollment rate-limited");
             self.shared
                 .refusals
                 .count("enrollment refused: too many from its source or network");
-            return Err(Refused::Enroll(AuthError::RateLimited));
+            return Err(AuthRefusal::Enroll(AuthError::RateLimited));
         }
         let now = unix_now();
         let invite = self.claim_try(now)?;
@@ -117,7 +119,7 @@ impl Enrollment<'_> {
 
         let exchanged = self.exchange(stream, &secret, pake_a).await.is_some();
         if !exchanged || invite.is_none() {
-            return Err(Refused::Hello(AuthError::BadInvite));
+            return Err(AuthRefusal::Auth(AuthError::BadInvite));
         }
         let enrolled = {
             let mut hub = self.shared.hub();
@@ -140,7 +142,7 @@ impl Enrollment<'_> {
             }
             Ok(None) => {
                 info!(code_id = %self.code_id, "invite was used up during the run");
-                Err(Refused::Hello(AuthError::BadInvite))
+                Err(AuthRefusal::Auth(AuthError::BadInvite))
             }
             Err(e) => Err(internal(e)),
         }
@@ -148,7 +150,7 @@ impl Enrollment<'_> {
 
     /// Looks up the invite and uses up one of its tries before any PAKE message is sent,
     /// so a run that is dropped halfway still costs a try.
-    fn claim_try(&self, now: u64) -> Result<Option<InviteRow>, Refused> {
+    fn claim_try(&self, now: u64) -> Result<Option<InviteRow>, AuthRefusal> {
         let mut hub = self.shared.hub();
         let invite = if self.code_id.len() == ID_CHARS {
             hub.db
@@ -208,7 +210,7 @@ impl Enrollment<'_> {
 /// One PAKE run of a live invite, from its claimed try until it ends or is dropped. The last
 /// run of an invite that has used up its tries burns it.
 struct InviteRun<'a> {
-    shared: &'a Shared,
+    shared: &'a ServerState,
     code_id: &'a str,
     minted_by: Option<UserId>,
 }
@@ -233,7 +235,7 @@ impl Drop for InviteRun<'_> {
         if let Some(minter) = self.minted_by {
             hub.emit_to(
                 minter,
-                Event::InviteBurned {
+                Event::InviteSpent {
                     code_id: self.code_id.to_owned(),
                 },
             );
@@ -241,9 +243,9 @@ impl Drop for InviteRun<'_> {
     }
 }
 
-fn internal(e: anyhow::Error) -> Refused {
+fn internal(e: anyhow::Error) -> AuthRefusal {
     warn!("authentication failed on the server: {e:#}");
-    Refused::Internal
+    AuthRefusal::Internal
 }
 
 fn exporter(connection: &quinn::Connection) -> Result<[u8; 32], AuthError> {

@@ -4,12 +4,12 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use throcc_crypto::hpke::EncKeyPair;
+use throcc_crypto::hpke::EncryptionKeyPair;
 use throcc_crypto::media::{MediaError, TrackKey};
 use throcc_proto::Fingerprint;
 use throcc_proto::frame::{Flags, HEADER_BYTES, Header, TAG_BYTES};
 use throcc_proto::ids::{Epoch, MediaId, RoomId, UserId};
-use throcc_proto::messages::{Event, Placed, Recovery, Request};
+use throcc_proto::messages::{Event, Placement, Recovery, Request};
 use tokio::sync::mpsc;
 use tracing::warn;
 
@@ -147,7 +147,7 @@ impl MediaEngine {
     pub fn start(
         connection: quinn::Connection,
         me: UserId,
-        enc: EncKeyPair,
+        enc: EncryptionKeyPair,
         server: Fingerprint,
         floors: EpochFloors,
     ) -> (
@@ -203,8 +203,8 @@ impl MediaEngine {
         lock(&self.keys)
     }
 
-    /// Applies our placement after `SetRoom`.
-    pub fn placed(&self, placed: &Placed) -> Vec<KeyNotice> {
+    /// Applies our placement after `JoinRoom` or `LeaveRoom`.
+    pub fn placed(&self, placed: &Placement) -> Vec<KeyNotice> {
         let (room_changed, (requests, notices)) = {
             let mut keys = self.keys();
             let room_changed = keys.room() != placed.room;
@@ -227,10 +227,10 @@ impl MediaEngine {
     /// Applies a control event that concerns media. Returns key warnings for the user.
     pub fn event(&self, event: &Event) -> Vec<KeyNotice> {
         match event {
-            Event::RoomState { room, epoch, peers } => {
-                self.rekey(|keys, now| keys.room_state(*room, *epoch, peers, now))
+            Event::PeersChanged { room, epoch, peers } => {
+                self.rekey(|keys, now| keys.peers_changed(*room, *epoch, peers, now))
             }
-            Event::SenderKey {
+            Event::SenderKeyPublished {
                 from,
                 epoch,
                 wrapped,
@@ -244,7 +244,7 @@ impl MediaEngine {
                 Vec::new()
             }
             Event::PresenceChanged(p) => self.set_presence(p.user, p.room),
-            Event::PresenceEnded(user) => self.set_presence(*user, None),
+            Event::WentOffline(user) => self.set_presence(*user, None),
             _ => Vec::new(),
         }
     }

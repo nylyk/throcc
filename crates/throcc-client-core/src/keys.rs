@@ -2,12 +2,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use throcc_crypto::hpke::{self, EncKeyPair, WrapContext};
+use throcc_crypto::hpke::{self, EncryptionKeyPair, WrapContext};
 use throcc_crypto::identity::{self, random};
 use throcc_crypto::media::TrackKey;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Epoch, MediaId, RoomId, UserId};
-use throcc_proto::messages::{PublicKey, Request, RoomPeer, SignedEncKey, Tracks};
+use throcc_proto::messages::{Peer, PublicKey, Request, SignedEncryptionKey, Tracks};
 use tracing::warn;
 use zeroize::Zeroizing;
 
@@ -17,7 +17,7 @@ use crate::state::MAX_PEOPLE;
 /// How long a sender's previous epoch key stays usable after it moves on.
 const OLD_KEY_GRACE: Duration = Duration::from_secs(2);
 /// How long our encryption key still unwraps secrets after a renewal replaced it.
-const RETIRED_ENC_KEPT: Duration = OLD_KEY_GRACE.saturating_mul(5);
+const RETIRED_ENCRYPTION_KEPT: Duration = OLD_KEY_GRACE.saturating_mul(5);
 const MAX_EARLY: usize = 64;
 /// The most peers a room state may list: far above the rooms of about 20 this is built
 /// for, and low enough that verifying and wrapping to all of them stays cheap.
@@ -30,7 +30,7 @@ const WRAPPED_BYTES: usize = 32 + 32 + 16;
 pub enum KeyNotice {
     /// A user's encryption key isn't validly signed for this server, or has expired.
     /// They are left out.
-    BadEncKey { user: UserId },
+    BadEncryptionKey { user: UserId },
     /// The room state gave two tracks the same media id. Nobody gets our key until a
     /// valid one arrives.
     ClashingTracks,
@@ -53,9 +53,9 @@ pub enum KeyError {
     Unwrap(#[from] hpke::HpkeError),
 }
 
-struct Peer {
+struct KeyPeer {
     identity_key: PublicKey,
-    enc_key: PublicKey,
+    encryption_key: PublicKey,
     tracks: Tracks,
 }
 
@@ -70,14 +70,14 @@ struct Received {
 /// to verify. Holds keys only in memory.
 pub struct KeyManager {
     me: UserId,
-    enc: EncKeyPair,
+    encryption: EncryptionKeyPair,
     /// Our encryption key before the last renewal, until the time it is dropped.
-    retired_enc: Option<(EncKeyPair, Instant)>,
+    retired_encryption: Option<(EncryptionKeyPair, Instant)>,
     server: Fingerprint,
     /// The room each user's presence shows them in.
     present: HashMap<UserId, RoomId>,
     /// The peers of the room state last applied, as the server sent them.
-    room_peers: Vec<RoomPeer>,
+    room_peers: Vec<Peer>,
     room: Option<RoomId>,
     epoch: Epoch,
     epoch_since: Instant,
@@ -87,7 +87,7 @@ pub struct KeyManager {
     /// to.
     floor: Option<Epoch>,
     my_tracks: Option<Tracks>,
-    peers: BTreeMap<UserId, Peer>,
+    peers: BTreeMap<UserId, KeyPeer>,
     owners: HashMap<MediaId, UserId>,
     my_secret: Option<Zeroizing<[u8; 32]>>,
     /// Who our current secret was wrapped to, by the encryption key it was wrapped to. Any
@@ -98,7 +98,7 @@ pub struct KeyManager {
     unwrappable: HashMap<UserId, PublicKey>,
     /// Whether each peer of the room state last applied signed its encryption key, for the
     /// keys it presented, so a presence change doesn't verify everyone again.
-    checked_signatures: HashMap<UserId, (PublicKey, SignedEncKey, bool)>,
+    checked_signatures: HashMap<UserId, (PublicKey, SignedEncryptionKey, bool)>,
     #[cfg(test)]
     signature_checks: usize,
     send_keys: HashMap<MediaId, Arc<TrackKey>>,
@@ -107,16 +107,21 @@ pub struct KeyManager {
     /// Sender keys that arrived before the room state they belong to.
     early: HashMap<(UserId, Epoch), (Instant, Vec<u8>)>,
     /// The newest room state for a room we haven't been placed in yet.
-    stashed: Option<(RoomId, Epoch, Vec<RoomPeer>)>,
+    stashed: Option<(RoomId, Epoch, Vec<Peer>)>,
     generation: u64,
 }
 
 impl KeyManager {
-    pub fn new(me: UserId, enc: EncKeyPair, server: Fingerprint, floors: EpochFloors) -> Self {
+    pub fn new(
+        me: UserId,
+        encryption: EncryptionKeyPair,
+        server: Fingerprint,
+        floors: EpochFloors,
+    ) -> Self {
         Self {
             me,
-            enc,
-            retired_enc: None,
+            encryption,
+            retired_encryption: None,
             server,
             present: HashMap::new(),
             room_peers: Vec::new(),
@@ -170,11 +175,11 @@ impl KeyManager {
             return (None, Vec::new());
         };
         let peers = self.room_peers.clone();
-        self.room_state(room, self.epoch, &peers, now)
+        self.peers_changed(room, self.epoch, &peers, now)
     }
 
     /// The peers our key is wrapped to, as the server described them.
-    pub fn trusted_room_peers(&self) -> Vec<RoomPeer> {
+    pub fn trusted_room_peers(&self) -> Vec<Peer> {
         self.room_peers
             .iter()
             .filter(|p| self.peers.contains_key(&p.user))
@@ -184,9 +189,9 @@ impl KeyManager {
 
     /// Switches to a renewed encryption key, keeping the old one for a short while to
     /// unwrap secrets that peers sealed to it before they learn the new one.
-    pub fn replace_enc(&mut self, enc: EncKeyPair, now: Instant) {
-        let retired = std::mem::replace(&mut self.enc, enc);
-        self.retired_enc = Some((retired, now + RETIRED_ENC_KEPT));
+    pub fn replace_encryption(&mut self, encryption: EncryptionKeyPair, now: Instant) {
+        let retired = std::mem::replace(&mut self.encryption, encryption);
+        self.retired_encryption = Some((retired, now + RETIRED_ENCRYPTION_KEPT));
     }
 
     /// Changes whenever a receive key may have become available.
@@ -194,13 +199,14 @@ impl KeyManager {
         self.generation
     }
 
-    /// Applies our placement after `SetRoom`. Returns the `PublishKey` requests to send.
+    /// Applies our placement after `JoinRoom` or `LeaveRoom`. Returns the `PublishSenderKey`
+    /// requests to send.
     pub fn placed(
         &mut self,
         room: Option<RoomId>,
         epoch: Epoch,
         tracks: Option<Tracks>,
-        peers: &[RoomPeer],
+        peers: &[Peer],
         now: Instant,
     ) -> (Vec<Request>, Vec<KeyNotice>) {
         if room.is_some() && room == self.room && epoch < self.epoch {
@@ -233,31 +239,31 @@ impl KeyManager {
             self.stashed = None;
             return (Vec::new(), notices);
         };
-        let (first, more) = self.room_state(room, epoch, peers, now);
+        let (first, more) = self.peers_changed(room, epoch, peers, now);
         notices.extend(more);
         let mut requests: Vec<Request> = first.into_iter().collect();
         if let Some((stashed_room, stashed_epoch, stashed_peers)) = self.stashed.take()
             && stashed_room == room
             && stashed_epoch > epoch
         {
-            let (later, more) = self.room_state(room, stashed_epoch, &stashed_peers, now);
+            let (later, more) = self.peers_changed(room, stashed_epoch, &stashed_peers, now);
             requests.extend(later);
             notices.extend(more);
         }
         (requests, notices)
     }
 
-    /// Applies a `RoomState`. Our secret is replaced whenever the epoch moves or the set of
+    /// Applies a `PeersChanged`. Our secret is replaced whenever the epoch moves or the set of
     /// trusted peers and their keys differs from the one it was wrapped to, so a peer added,
     /// removed or presenting other keys without an epoch bump never holds a secret from
     /// before or after its membership. A peer whose identity key changed counts as departed,
     /// so the secrets its old key holder sent expire. A state that reuses a media id trusts
     /// nobody.
-    pub fn room_state(
+    pub fn peers_changed(
         &mut self,
         room: RoomId,
         epoch: Epoch,
-        peers: &[RoomPeer],
+        peers: &[Peer],
         now: Instant,
     ) -> (Option<Request>, Vec<KeyNotice>) {
         if Some(room) != self.room {
@@ -314,8 +320,11 @@ impl KeyManager {
             .flat_map(|(user, peer)| track_ids(&peer.tracks).map(|id| (id, *user)))
             .collect();
 
-        let peer_set: BTreeSet<(UserId, PublicKey)> =
-            self.peers.iter().map(|(u, p)| (*u, p.enc_key)).collect();
+        let peer_set: BTreeSet<(UserId, PublicKey)> = self
+            .peers
+            .iter()
+            .map(|(u, p)| (*u, p.encryption_key))
+            .collect();
         if epoch != self.epoch || self.my_secret.is_none() || peer_set != self.wrapped_to {
             self.start_epoch(epoch, now);
         }
@@ -323,7 +332,7 @@ impl KeyManager {
         notices.extend(
             unwrappable
                 .into_iter()
-                .map(|user| KeyNotice::BadEncKey { user }),
+                .map(|user| KeyNotice::BadEncryptionKey { user }),
         );
         for ((from, early_epoch), (arrived, wrapped)) in std::mem::take(&mut self.early) {
             if now.duration_since(arrived) < OLD_KEY_GRACE {
@@ -336,7 +345,7 @@ impl KeyManager {
     }
 
     /// True when a user or a media id appears twice, counting our own tracks.
-    fn clashing_tracks(&self, peers: &[RoomPeer]) -> bool {
+    fn clashing_tracks(&self, peers: &[Peer]) -> bool {
         let mut users = HashSet::new();
         let mut ids = HashSet::new();
         let others = peers.iter().filter(|p| p.user != self.me);
@@ -351,8 +360,8 @@ impl KeyManager {
     fn trusted_peers(
         &mut self,
         room: RoomId,
-        peers: &[RoomPeer],
-    ) -> (BTreeMap<UserId, Peer>, Vec<KeyNotice>) {
+        peers: &[Peer],
+    ) -> (BTreeMap<UserId, KeyPeer>, Vec<KeyNotice>) {
         let listed: HashSet<UserId> = peers.iter().map(|p| p.user).collect();
         self.checked_signatures
             .retain(|user, _| listed.contains(user));
@@ -360,12 +369,12 @@ impl KeyManager {
         let mut notices = Vec::new();
         let mut trusted = BTreeMap::new();
         let unix_now = crate::unix_now().unwrap_or(0);
-        let shown = |p: &&RoomPeer| p.user != self.me && self.present.get(&p.user) == Some(&room);
-        let shown: Vec<&RoomPeer> = peers.iter().filter(shown).collect();
+        let shown = |p: &&Peer| p.user != self.me && self.present.get(&p.user) == Some(&room);
+        let shown: Vec<&Peer> = peers.iter().filter(shown).collect();
         for peer in shown {
-            let signed = &peer.enc_key;
+            let signed = &peer.encryption_key;
             if signed.not_after <= unix_now || !self.signed_by_identity(peer) {
-                notices.push(KeyNotice::BadEncKey { user: peer.user });
+                notices.push(KeyNotice::BadEncryptionKey { user: peer.user });
                 continue;
             }
             if self.unwrappable.get(&peer.user) == Some(&signed.key) {
@@ -373,9 +382,9 @@ impl KeyManager {
             }
             trusted.insert(
                 peer.user,
-                Peer {
+                KeyPeer {
                     identity_key: peer.identity_key,
-                    enc_key: signed.key,
+                    encryption_key: signed.key,
                     tracks: peer.tracks.clone(),
                 },
             );
@@ -384,10 +393,10 @@ impl KeyManager {
     }
 
     /// Whether `peer`'s encryption key is signed by its identity key, for this server and user.
-    fn signed_by_identity(&mut self, peer: &RoomPeer) -> bool {
-        let presented = (peer.identity_key, peer.enc_key);
-        if let Some((identity_key, enc_key, holds)) = self.checked_signatures.get(&peer.user)
-            && (*identity_key, *enc_key) == presented
+    fn signed_by_identity(&mut self, peer: &Peer) -> bool {
+        let presented = (peer.identity_key, peer.encryption_key);
+        if let Some((identity_key, encryption_key, holds)) = self.checked_signatures.get(&peer.user)
+            && (*identity_key, *encryption_key) == presented
         {
             return *holds;
         }
@@ -395,12 +404,16 @@ impl KeyManager {
         {
             self.signature_checks += 1;
         }
-        let signed = &peer.enc_key;
-        let message =
-            identity::enc_key_message(&self.server.0, peer.user, signed.not_after, &signed.key);
+        let signed = &peer.encryption_key;
+        let message = identity::encryption_key_message(
+            &self.server.0,
+            peer.user,
+            signed.not_after,
+            &signed.key,
+        );
         let holds = identity::verify(&peer.identity_key, &message, &signed.sig).is_ok();
         self.checked_signatures
-            .insert(peer.user, (peer.identity_key, peer.enc_key, holds));
+            .insert(peer.user, (peer.identity_key, peer.encryption_key, holds));
         holds
     }
 
@@ -449,23 +462,23 @@ impl KeyManager {
         let mut wrapped = Vec::new();
         let mut refused = Vec::new();
         for (user, peer) in &self.peers {
-            if self.wrapped_to.contains(&(*user, peer.enc_key)) {
+            if self.wrapped_to.contains(&(*user, peer.encryption_key)) {
                 continue;
             }
             let context = self.context(room, self.epoch, self.me, *user);
-            match hpke::wrap(&self.enc, &peer.enc_key, &context, secret) {
+            match hpke::wrap(&self.encryption, &peer.encryption_key, &context, secret) {
                 Ok(blob) => wrapped.push((*user, blob)),
                 Err(e) => {
                     warn!(
                         user = user.0,
                         "could not wrap a sender key; leaving them out: {e}"
                     );
-                    refused.push((*user, peer.enc_key));
+                    refused.push((*user, peer.encryption_key));
                 }
             }
         }
-        for (user, enc_key) in &refused {
-            self.unwrappable.insert(*user, *enc_key);
+        for (user, encryption_key) in &refused {
+            self.unwrappable.insert(*user, *encryption_key);
             self.peers.remove(user);
             self.owners.retain(|_, owner| owner != user);
         }
@@ -473,9 +486,9 @@ impl KeyManager {
         self.wrapped_to.extend(
             wrapped
                 .iter()
-                .filter_map(|(user, _)| Some((*user, peers.get(user)?.enc_key))),
+                .filter_map(|(user, _)| Some((*user, peers.get(user)?.encryption_key))),
         );
-        let request = (!wrapped.is_empty()).then_some(Request::PublishKey {
+        let request = (!wrapped.is_empty()).then_some(Request::PublishSenderKey {
             epoch: self.epoch,
             wrapped,
         });
@@ -527,16 +540,18 @@ impl KeyManager {
         } else {
             None
         };
-        let enc_key = self
+        let encryption_key = self
             .peers
             .get(&from)
-            .map(|p| p.enc_key)
+            .map(|p| p.encryption_key)
             .ok_or(KeyError::Stale)?;
         let context = self.context(room, epoch, from, self.me);
         let secret =
-            hpke::unwrap(&self.enc, &enc_key, &context, &wrapped).or_else(|e| {
-                match &self.retired_enc {
-                    Some((retired, _)) => hpke::unwrap(retired, &enc_key, &context, &wrapped),
+            hpke::unwrap(&self.encryption, &encryption_key, &context, &wrapped).or_else(|e| {
+                match &self.retired_encryption {
+                    Some((retired, _)) => {
+                        hpke::unwrap(retired, &encryption_key, &context, &wrapped)
+                    }
                     None => Err(e),
                 }
             })?;
@@ -595,11 +610,11 @@ impl KeyManager {
     /// Zeroizes keys whose grace period has ended, and drops stale early keys.
     pub fn tick(&mut self, now: Instant) {
         if self
-            .retired_enc
+            .retired_encryption
             .as_ref()
             .is_some_and(|(_, until)| *until <= now)
         {
-            self.retired_enc = None;
+            self.retired_encryption = None;
         }
         self.received
             .retain(|_, r| r.retire_at.is_none_or(|at| at > now));
@@ -619,7 +634,7 @@ fn track_ids(tracks: &Tracks) -> impl Iterator<Item = MediaId> + '_ {
 pub(crate) mod tests {
     use throcc_crypto::identity::IdentityKey;
     use throcc_proto::frame::{Flags, Header};
-    use throcc_proto::messages::Share;
+    use throcc_proto::messages::ShareTracks;
 
     use super::*;
 
@@ -630,21 +645,21 @@ pub(crate) mod tests {
         pub(crate) id: UserId,
         identity: IdentityKey,
         pub(crate) keys: KeyManager,
-        enc_public: PublicKey,
+        encryption_public: PublicKey,
         pub(crate) tracks: Tracks,
     }
 
     pub(crate) fn member(id: u64) -> Member {
-        let enc = EncKeyPair::generate();
+        let enc = EncryptionKeyPair::generate();
         let first = id as u32 * 10;
         Member {
             id: UserId(id),
             identity: IdentityKey::generate(),
-            enc_public: enc.public(),
+            encryption_public: enc.public(),
             keys: KeyManager::new(UserId(id), enc, SERVER, EpochFloors::default()),
             tracks: Tracks {
                 mic: MediaId(first),
-                shares: vec![Share {
+                shares: vec![ShareTracks {
                     video: MediaId(first + 1),
                     audio: MediaId(first + 2),
                 }],
@@ -656,27 +671,28 @@ pub(crate) mod tests {
         crate::unix_now().unwrap()
     }
 
-    fn signed(m: &Member, not_after: u64) -> SignedEncKey {
-        let message = identity::enc_key_message(&SERVER.0, m.id, not_after, &m.enc_public);
-        SignedEncKey {
-            key: m.enc_public,
+    fn signed(m: &Member, not_after: u64) -> SignedEncryptionKey {
+        let message =
+            identity::encryption_key_message(&SERVER.0, m.id, not_after, &m.encryption_public);
+        SignedEncryptionKey {
+            key: m.encryption_public,
             not_after,
             sig: m.identity.sign(&message),
         }
     }
 
-    fn peer(m: &Member) -> RoomPeer {
-        RoomPeer {
+    fn peer(m: &Member) -> Peer {
+        Peer {
             user: m.id,
             tracks: m.tracks.clone(),
             share: None,
             identity_key: m.identity.public(),
-            enc_key: signed(m, unix_now() + 3600),
+            encryption_key: signed(m, unix_now() + 3600),
         }
     }
 
     /// Shows every one of `peers` in the room, as their presence would.
-    fn show(keys: &mut KeyManager, peers: &[RoomPeer]) {
+    fn show(keys: &mut KeyManager, peers: &[Peer]) {
         for p in peers {
             keys.set_presence(p.user, Some(ROOM));
         }
@@ -686,19 +702,14 @@ pub(crate) mod tests {
 
     /// Delivers a room state to every member and all resulting sender keys. Returns the
     /// keys sent, by sender.
-    fn deliver(
-        members: &mut [&mut Member],
-        epoch: u32,
-        peers: &[RoomPeer],
-        now: Instant,
-    ) -> Published {
+    fn deliver(members: &mut [&mut Member], epoch: u32, peers: &[Peer], now: Instant) -> Published {
         let mut published = Vec::new();
         for m in members.iter_mut() {
             show(&mut m.keys, peers);
             let tracks = Some(m.tracks.clone());
             let requests = if m.keys.room() == Some(ROOM) {
                 m.keys
-                    .room_state(ROOM, Epoch(epoch), peers, now)
+                    .peers_changed(ROOM, Epoch(epoch), peers, now)
                     .0
                     .into_iter()
                     .collect()
@@ -708,7 +719,7 @@ pub(crate) mod tests {
                     .0
             };
             for request in requests {
-                if let Request::PublishKey { epoch, wrapped } = request {
+                if let Request::PublishSenderKey { epoch, wrapped } = request {
                     published.push((m.id, epoch, wrapped));
                 }
             }
@@ -724,7 +735,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn rekey(members: &mut [&mut Member], epoch: u32, now: Instant) -> Published {
-        let peers: Vec<RoomPeer> = members.iter().map(|m| peer(m)).collect();
+        let peers: Vec<Peer> = members.iter().map(|m| peer(m)).collect();
         deliver(members, epoch, &peers, now)
     }
 
@@ -762,12 +773,12 @@ pub(crate) mod tests {
             .is_some_and(|key| key.open(&mut sealed).is_ok())
     }
 
-    /// Places `m` in `room` at `epoch` with `peers`, as a `SetRoom` reply would.
+    /// Places `m` in `room` at `epoch` with `peers`, as a `JoinRoom` reply would.
     fn place(
         m: &mut Member,
         room: Option<RoomId>,
         epoch: u32,
-        peers: &[RoomPeer],
+        peers: &[Peer],
         now: Instant,
     ) -> Vec<KeyNotice> {
         show(&mut m.keys, peers);
@@ -788,7 +799,7 @@ pub(crate) mod tests {
         let mut moved_c = peer(&c);
         moved_c.tracks.mic = a.tracks.mic;
         let peers = [moved_a, peer(&b), moved_c];
-        let (request, _) = b.keys.room_state(ROOM, Epoch(1), &peers, now);
+        let (request, _) = b.keys.peers_changed(ROOM, Epoch(1), &peers, now);
         assert_eq!(request, None, "the trusted set didn't change");
         assert_eq!(b.keys.owner(a.tracks.mic), Some(c.id));
         assert!(
@@ -824,7 +835,7 @@ pub(crate) mod tests {
         rekey(&mut [&mut a, &mut b], 9, now);
         let peers = [peer(&a), peer(&b)];
         let reconnect = |b: &mut Member, floors: EpochFloors| {
-            let enc = EncKeyPair::from_secret(&b.keys.enc.secret()).unwrap();
+            let enc = EncryptionKeyPair::from_secret(&b.keys.encryption.secret()).unwrap();
             b.keys = KeyManager::new(b.id, enc, SERVER, floors);
             place(b, Some(ROOM), 5, &peers, now);
             b.keys.sender_key(a.id, recorded.0, &recorded.1, now)
@@ -864,7 +875,7 @@ pub(crate) mod tests {
         let recorded = blob(&rekey(&mut [&mut a, &mut b], 9, now), a.id, b.id);
         let datagram = mic_datagram(&a);
 
-        let enc = EncKeyPair::from_secret(&b.keys.enc.secret()).unwrap();
+        let enc = EncryptionKeyPair::from_secret(&b.keys.encryption.secret()).unwrap();
         b.keys = KeyManager::new(b.id, enc, SERVER, b.keys.floors.clone());
         let peers = [peer(&a), peer(&b)];
         place(&mut b, Some(ROOM), 10, &peers, now);
@@ -927,7 +938,7 @@ pub(crate) mod tests {
     fn a_peer_whose_key_cannot_be_wrapped_to_is_left_out_without_re_keying() {
         let now = Instant::now();
         let (mut a, mut b, mut m) = (member(1), member(2), member(3));
-        m.enc_public = [0; 32];
+        m.encryption_public = [0; 32];
         let peers = [peer(&a), peer(&b), peer(&m)];
         deliver(&mut [&mut a, &mut b], 1, &peers, now);
         let first = a.keys.send_key(a.tracks.mic).unwrap().1;
@@ -935,9 +946,9 @@ pub(crate) mod tests {
 
         for _ in 0..3 {
             show(&mut a.keys, &peers);
-            let (request, notices) = a.keys.room_state(ROOM, Epoch(1), &peers, now);
+            let (request, notices) = a.keys.peers_changed(ROOM, Epoch(1), &peers, now);
             assert_eq!(request, None);
-            assert!(!notices.contains(&KeyNotice::BadEncKey { user: m.id }));
+            assert!(!notices.contains(&KeyNotice::BadEncryptionKey { user: m.id }));
         }
         let still = a.keys.send_key(a.tracks.mic).unwrap().1;
         assert!(Arc::ptr_eq(&first, &still), "the secret was replaced");
@@ -949,18 +960,18 @@ pub(crate) mod tests {
 
     /// `newcomer` joins `present` at `epoch`, with events in the server's order: the
     /// members already there get the room state, then everyone gets the newcomer's
-    /// presence. Returns the `PublishKey`s sent, in order, by sender. None are delivered.
+    /// presence. Returns the `PublishSenderKey`s sent, in order, by sender. None are delivered.
     pub(crate) fn join_in_server_order(
         present: &mut [&mut Member],
         newcomer: &mut Member,
         epoch: u32,
         now: Instant,
     ) -> Vec<(UserId, Request)> {
-        let mut peers: Vec<RoomPeer> = present.iter().map(|m| peer(m)).collect();
+        let mut peers: Vec<Peer> = present.iter().map(|m| peer(m)).collect();
         peers.push(peer(newcomer));
         let mut published = Vec::new();
         for m in present.iter_mut() {
-            let (request, _) = m.keys.room_state(ROOM, Epoch(epoch), &peers, now);
+            let (request, _) = m.keys.peers_changed(ROOM, Epoch(epoch), &peers, now);
             published.extend(request.map(|r| (m.id, r)));
             assert!(m.keys.set_presence(newcomer.id, Some(ROOM)));
             let (request, _) = m.keys.reapply_room_state(now);
@@ -975,10 +986,10 @@ pub(crate) mod tests {
         published
     }
 
-    /// The secret `from` wrapped for `to` in a `PublishKey`.
+    /// The secret `from` wrapped for `to` in a `PublishSenderKey`.
     pub(crate) fn wrapped_for(request: &Request, to: UserId) -> Option<(Epoch, Vec<u8>)> {
         match request {
-            Request::PublishKey { epoch, wrapped } => wrapped
+            Request::PublishSenderKey { epoch, wrapped } => wrapped
                 .iter()
                 .find(|(user, _)| *user == to)
                 .map(|(_, blob)| (*epoch, blob.clone())),
@@ -1095,7 +1106,7 @@ pub(crate) mod tests {
         show(&mut a.keys, &peers);
         let tracks = Some(a.tracks.clone());
         let (requests, _) = a.keys.placed(Some(ROOM), Epoch(1), tracks, &peers, now);
-        let Some(Request::PublishKey { wrapped, .. }) = requests.into_iter().next() else {
+        let Some(Request::PublishSenderKey { wrapped, .. }) = requests.into_iter().next() else {
             panic!()
         };
         rekey(&mut [&mut a, &mut b], 2, now);
@@ -1107,25 +1118,25 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn substituted_or_expired_enc_keys_are_rejected() {
+    fn substituted_or_expired_encryption_keys_are_rejected() {
         let now = Instant::now();
         let (mut a, b, c) = (member(1), member(2), member(3));
         let mut forged = peer(&b);
-        forged.enc_key.key = EncKeyPair::generate().public();
+        forged.encryption_key.key = EncryptionKeyPair::generate().public();
         let mut expired = peer(&c);
-        expired.enc_key = signed(&c, unix_now() - 1);
+        expired.encryption_key = signed(&c, unix_now() - 1);
         let peers = vec![peer(&a), forged, expired];
         show(&mut a.keys, &peers);
         let tracks = Some(a.tracks.clone());
         let (requests, notices) = a.keys.placed(Some(ROOM), Epoch(1), tracks, &peers, now);
-        assert!(notices.contains(&KeyNotice::BadEncKey { user: b.id }));
-        assert!(notices.contains(&KeyNotice::BadEncKey { user: c.id }));
+        assert!(notices.contains(&KeyNotice::BadEncryptionKey { user: b.id }));
+        assert!(notices.contains(&KeyNotice::BadEncryptionKey { user: c.id }));
         assert!(requests.is_empty());
         assert!(a.keys.trusted_room_peers().is_empty());
     }
 
     #[test]
-    fn a_new_identity_key_that_signed_its_enc_key_gets_a_fresh_secret() {
+    fn a_new_identity_key_that_signed_its_encryption_key_gets_a_fresh_secret() {
         let now = Instant::now();
         let (mut a, mut b) = (member(1), member(2));
         rekey(&mut [&mut a, &mut b], 1, now);
@@ -1136,7 +1147,7 @@ pub(crate) mod tests {
         let mut newcomer = member(2);
         newcomer.tracks = b.tracks.clone();
         let peers = vec![peer(&a), peer(&newcomer)];
-        let (request, notices) = a.keys.room_state(ROOM, Epoch(1), &peers, now);
+        let (request, notices) = a.keys.peers_changed(ROOM, Epoch(1), &peers, now);
         assert_eq!(notices, []);
         assert_eq!(wrapped_to(request.as_ref()), [b.id]);
         let after = a.keys.send_key(a.tracks.mic).unwrap().1;
@@ -1152,15 +1163,17 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_identity_key_that_did_not_sign_the_enc_key_is_left_out() {
+    fn an_identity_key_that_did_not_sign_the_encryption_key_is_left_out() {
         let now = Instant::now();
         let (mut a, mut b) = (member(1), member(2));
         rekey(&mut [&mut a, &mut b], 1, now);
         let mut swapped = peer(&b);
         swapped.identity_key = IdentityKey::generate().public();
-        let (request, notices) = a.keys.room_state(ROOM, Epoch(2), &[peer(&a), swapped], now);
+        let (request, notices) = a
+            .keys
+            .peers_changed(ROOM, Epoch(2), &[peer(&a), swapped], now);
         assert_eq!(request, None);
-        assert_eq!(notices, [KeyNotice::BadEncKey { user: b.id }]);
+        assert_eq!(notices, [KeyNotice::BadEncryptionKey { user: b.id }]);
         assert!(a.keys.trusted_room_peers().is_empty());
     }
 
@@ -1173,7 +1186,7 @@ pub(crate) mod tests {
         show(&mut b.keys, &peers);
         let tracks = Some(a.tracks.clone());
         let (requests, _) = a.keys.placed(Some(ROOM), Epoch(1), tracks, &peers, now);
-        let Some(Request::PublishKey { epoch, wrapped }) = requests.into_iter().next() else {
+        let Some(Request::PublishSenderKey { epoch, wrapped }) = requests.into_iter().next() else {
             panic!()
         };
         b.keys.sender_key(a.id, epoch, &wrapped[0].1, now).unwrap();
@@ -1184,12 +1197,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn room_state_before_placed_is_kept_and_a_stale_placed_is_ignored() {
+    fn peers_before_placement_are_kept_and_a_stale_placement_is_ignored() {
         let now = Instant::now();
         let (mut a, b) = (member(1), member(2));
         let peers = vec![peer(&a), peer(&b)];
         show(&mut a.keys, &peers);
-        a.keys.room_state(ROOM, Epoch(3), &peers, now);
+        a.keys.peers_changed(ROOM, Epoch(3), &peers, now);
         let tracks = Some(a.tracks.clone());
         a.keys
             .placed(Some(ROOM), Epoch(2), tracks.clone(), &peers, now);
@@ -1202,7 +1215,9 @@ pub(crate) mod tests {
 
     fn wrapped_to(request: Option<&Request>) -> Vec<UserId> {
         match request {
-            Some(Request::PublishKey { wrapped, .. }) => wrapped.iter().map(|(u, _)| *u).collect(),
+            Some(Request::PublishSenderKey { wrapped, .. }) => {
+                wrapped.iter().map(|(u, _)| *u).collect()
+            }
             _ => Vec::new(),
         }
     }
@@ -1245,7 +1260,7 @@ pub(crate) mod tests {
             forged.tracks.shares[0].video = stolen;
             let peers = vec![peer(&a), peer(&b), forged];
             show(&mut a.keys, &peers);
-            let (request, notices) = a.keys.room_state(ROOM, Epoch(2), &peers, now);
+            let (request, notices) = a.keys.peers_changed(ROOM, Epoch(2), &peers, now);
             assert_eq!(request, None);
             assert_eq!(notices, [KeyNotice::ClashingTracks]);
             assert_eq!(a.keys.owner(b.tracks.mic), None);
@@ -1254,7 +1269,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn invented_peer(id: u64) -> RoomPeer {
+    fn invented_peer(id: u64) -> Peer {
         peer(&member(id))
     }
 
@@ -1272,7 +1287,7 @@ pub(crate) mod tests {
         let crowd = invented_peer(99);
         peers.push(crowd.clone());
         show(&mut a.keys, &peers);
-        let (request, notices) = a.keys.room_state(ROOM, Epoch(2), &peers, now);
+        let (request, notices) = a.keys.peers_changed(ROOM, Epoch(2), &peers, now);
         assert_eq!(request, None);
         assert_eq!(notices, [KeyNotice::TooManyPeers]);
         assert!(a.keys.trusted_room_peers().is_empty());
@@ -1297,18 +1312,18 @@ pub(crate) mod tests {
         assert_eq!(a.keys.trusted_room_peers().len(), 2);
 
         let mut forged = peer(&b);
-        forged.enc_key.key = EncKeyPair::generate().public();
+        forged.encryption_key.key = EncryptionKeyPair::generate().public();
         // The keys signed before: signing them again in the next second would change their
         // expiry, and so give them a new signature to check.
         let peers = vec![peers[0].clone(), forged, peers[2].clone()];
-        let (request, notices) = a.keys.room_state(ROOM, Epoch(1), &peers, now);
+        let (request, notices) = a.keys.peers_changed(ROOM, Epoch(1), &peers, now);
         assert_eq!(wrapped_to(request.as_ref()), [c.id]);
-        assert!(notices.contains(&KeyNotice::BadEncKey { user: b.id }));
+        assert!(notices.contains(&KeyNotice::BadEncryptionKey { user: b.id }));
         assert_eq!(a.keys.signature_checks, 3);
     }
 
     #[test]
-    fn a_secret_wrapped_to_the_retired_enc_key_still_unwraps() {
+    fn a_secret_wrapped_to_the_retired_encryption_key_still_unwraps() {
         let now = Instant::now();
         let (mut a, mut b) = (member(1), member(2));
         let peers = vec![peer(&a), peer(&b)];
@@ -1318,22 +1333,24 @@ pub(crate) mod tests {
         a.keys.placed(Some(ROOM), Epoch(1), tracks, &peers, now);
         let tracks = Some(b.tracks.clone());
         let (requests, _) = b.keys.placed(Some(ROOM), Epoch(1), tracks, &peers, now);
-        let Some(Request::PublishKey { epoch, wrapped }) = requests.into_iter().next() else {
+        let Some(Request::PublishSenderKey { epoch, wrapped }) = requests.into_iter().next() else {
             panic!()
         };
-        a.keys.replace_enc(EncKeyPair::generate(), now);
+        a.keys
+            .replace_encryption(EncryptionKeyPair::generate(), now);
         a.keys.sender_key(b.id, epoch, &wrapped[0].1, now).unwrap();
         assert!(can_read(&mut a, &b, 1));
     }
 
     #[test]
-    fn the_retired_enc_key_is_dropped_after_a_while() {
+    fn the_retired_encryption_key_is_dropped_after_a_while() {
         let now = Instant::now();
         let mut a = member(1);
-        a.keys.replace_enc(EncKeyPair::generate(), now);
+        a.keys
+            .replace_encryption(EncryptionKeyPair::generate(), now);
         a.keys.tick(now + OLD_KEY_GRACE);
-        assert!(a.keys.retired_enc.is_some());
-        a.keys.tick(now + RETIRED_ENC_KEPT);
-        assert!(a.keys.retired_enc.is_none());
+        assert!(a.keys.retired_encryption.is_some());
+        a.keys.tick(now + RETIRED_ENCRYPTION_KEPT);
+        assert!(a.keys.retired_encryption.is_none());
     }
 }

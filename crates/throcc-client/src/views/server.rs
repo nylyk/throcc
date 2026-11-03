@@ -4,7 +4,7 @@ use gpui::{
 };
 use gpui_component::Disableable;
 use gpui_component::input::Input;
-use throcc_client_core::client::Command;
+use throcc_client_core::client::UiCommand;
 use throcc_proto::ids::Role;
 use throcc_proto::{Fingerprint, permissions};
 
@@ -206,7 +206,7 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                             "Create Code"
                         },
                     )
-                    .on_click(cx.listener(|app, _, _, _| app.command(Command::CreateInvite))),
+                    .on_click(cx.listener(|app, _, _, _| app.command(UiCommand::CreateInvite))),
                 ),
         );
     let mut page = div().flex().flex_col().gap_6().child(invite_card);
@@ -273,7 +273,9 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                                             }),
                                         user.role,
                                         cx,
-                                        move |app, role, _| app.command(Command::SetRole(id, role)),
+                                        move |app, role, _| {
+                                            app.command(UiCommand::SetRole(id, role))
+                                        },
                                     )
                                     .into_any_element()
                                 } else {

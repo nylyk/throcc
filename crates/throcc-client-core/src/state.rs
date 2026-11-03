@@ -153,7 +153,7 @@ pub struct Person {
     /// How many people in our room watch their share.
     pub audience: usize,
     pub speaking: bool,
-    pub playback: PersonPlayback,
+    pub playback: Playback,
     /// Whether the user verified the identity key they presented this session.
     pub verified: bool,
     /// The identity key they presented this session, in a room with us. None until then,
@@ -162,7 +162,7 @@ pub struct Person {
     pub role: Role,
 }
 
-/// Which of someone's sounds a [`Playback`] is for.
+/// Which of someone's sounds a [`SoundLevel`] is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Sound {
     Voice,
@@ -175,20 +175,20 @@ impl Sound {
 
 /// How loud one person's voice and share audio play.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct PersonPlayback {
-    pub voice: Playback,
-    pub share: Playback,
+pub struct Playback {
+    pub voice: SoundLevel,
+    pub share: SoundLevel,
 }
 
-impl PersonPlayback {
-    pub fn get(&self, sound: Sound) -> Playback {
+impl Playback {
+    pub fn get(&self, sound: Sound) -> SoundLevel {
         match sound {
             Sound::Voice => self.voice,
             Sound::Share => self.share,
         }
     }
 
-    pub fn get_mut(&mut self, sound: Sound) -> &mut Playback {
+    pub fn get_mut(&mut self, sound: Sound) -> &mut SoundLevel {
         match sound {
             Sound::Voice => &mut self.voice,
             Sound::Share => &mut self.share,
@@ -201,13 +201,13 @@ pub const MAX_VOLUME: f32 = 4.0;
 
 /// How loud one of someone's sounds plays on this machine. It is never sent.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Playback {
+pub struct SoundLevel {
     /// From 0 to [`MAX_VOLUME`], where 1 plays the sound as it arrives.
     pub volume: f32,
     pub muted: bool,
 }
 
-impl Default for Playback {
+impl Default for SoundLevel {
     fn default() -> Self {
         Self {
             volume: 1.0,
@@ -216,7 +216,7 @@ impl Default for Playback {
     }
 }
 
-impl Playback {
+impl SoundLevel {
     /// What the mix multiplies the sound by.
     pub fn gain(self) -> f32 {
         if self.muted { 0.0 } else { self.volume }
@@ -439,7 +439,7 @@ mod tests {
             sharing: None,
             audience: 0,
             speaking: false,
-            playback: PersonPlayback::default(),
+            playback: Playback::default(),
             verified: false,
             identity_key: None,
             role: Role::User,

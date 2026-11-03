@@ -62,7 +62,7 @@ pub struct ServerHello {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Hello {
+pub enum ClientHello {
     Auth {
         pubkey: PublicKey,
         client_nonce: [u8; 32],
@@ -84,7 +84,7 @@ pub struct PakeReply {
     pub confirm_b: [u8; 32],
 }
 
-/// The server's answer to `Hello::Enroll`: the PAKE reply, or a refusal before any PAKE.
+/// The server's answer to `ClientHello::Enroll`: the PAKE reply, or a refusal before any PAKE.
 pub type PakeStep = Result<PakeReply, AuthError>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,8 +105,8 @@ pub struct Welcome {
     pub me: UserId,
     pub role: Role,
     pub rooms: Vec<Room>,
-    pub presence: Vec<Presence>,
-    pub placed: Placed,
+    pub online: Vec<Presence>,
+    pub placement: Placement,
     pub server: ServerProfile,
 }
 
@@ -135,36 +135,38 @@ pub enum AuthError {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientMessage {
-    Request { id: u32, req: Request },
+    Request { id: u32, request: Request },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ServerMessage {
-    Response { id: u32, res: Response },
+    Response { id: u32, response: Response },
     Event(Event),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Request {
     /// Moves us to `room`. A locked room needs its `password` unless we manage rooms.
-    SetRoom {
-        room: Option<RoomId>,
+    JoinRoom {
+        room: RoomId,
         password: Option<String>,
     },
+    /// Moves us out of our room, into the lobby.
+    LeaveRoom,
     SetProfile {
         name: String,
         avatar: Option<Hash>,
     },
-    SetAvatar(Vec<u8>),
-    GetAvatar(Hash),
-    SetEncKey(SignedEncKey),
+    UploadAvatar(Vec<u8>),
+    FetchAvatar(Hash),
+    SetEncryptionKey(SignedEncryptionKey),
     SetMedia(MediaState),
-    SetWatching(Vec<MediaId>),
+    SetWatched(Vec<MediaId>),
     RequestKeyframe {
         media_id: MediaId,
         kind: Recovery,
     },
-    PublishKey {
+    PublishSenderKey {
         epoch: Epoch,
         wrapped: Vec<(UserId, Vec<u8>)>,
     },
@@ -206,7 +208,7 @@ pub enum Request {
 pub enum Response {
     Ok,
     Err { code: ErrorCode, message: String },
-    Placed(Placed),
+    Placement(Placement),
     Invite { code: String, expires: u64 },
     Users(Vec<User>),
     AvatarHash(Hash),
@@ -228,32 +230,32 @@ pub enum ErrorCode {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Event {
     PresenceChanged(Presence),
-    PresenceEnded(UserId),
+    WentOffline(UserId),
     RoomCreated(Room),
     RoomRenamed {
         room: RoomId,
         name: String,
     },
     RoomDeleted(RoomId),
-    RoomLocked {
+    RoomLockChanged {
         room: RoomId,
         locked: bool,
     },
-    RoomState {
+    PeersChanged {
         room: RoomId,
         epoch: Epoch,
-        peers: Vec<RoomPeer>,
+        peers: Vec<Peer>,
     },
-    SenderKey {
+    SenderKeyPublished {
         from: UserId,
         epoch: Epoch,
         wrapped: Vec<u8>,
     },
-    KeyframeWanted {
+    KeyframeRequested {
         media_id: MediaId,
         kind: Recovery,
     },
-    LinkStats {
+    ReceiveStats {
         tracks: Vec<TrackStats>,
     },
     UserAdded(User),
@@ -262,10 +264,10 @@ pub enum Event {
         role: Role,
     },
     UserRemoved(UserId),
-    InviteBurned {
+    InviteSpent {
         code_id: String,
     },
-    Kicked {
+    RemovedFromServer {
         reason: String,
     },
     ServerProfileChanged(ServerProfile),
@@ -297,11 +299,11 @@ pub struct User {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Placed {
+pub struct Placement {
     pub room: Option<RoomId>,
     pub epoch: Epoch,
     pub tracks: Option<Tracks>,
-    pub peers: Vec<RoomPeer>,
+    pub peers: Vec<Peer>,
     pub audiences: Audiences,
 }
 
@@ -319,7 +321,7 @@ pub struct Audiences {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Audience {
     pub video: MediaId,
-    pub watchers: Vec<UserId>,
+    pub receivers: Vec<UserId>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -355,7 +357,7 @@ pub enum Recovery {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Share {
+pub struct ShareTracks {
     pub video: MediaId,
     pub audio: MediaId,
 }
@@ -364,7 +366,7 @@ pub struct Share {
 pub struct Tracks {
     pub mic: MediaId,
     /// One share today; a list so a second monitor is additive.
-    pub shares: Vec<Share>,
+    pub shares: Vec<ShareTracks>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -380,18 +382,18 @@ pub struct Presence {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RoomPeer {
+pub struct Peer {
     pub user: UserId,
     pub tracks: Tracks,
     pub share: Option<ShareConfig>,
     pub identity_key: PublicKey,
-    pub enc_key: SignedEncKey,
+    pub encryption_key: SignedEncryptionKey,
 }
 
 /// An X25519 encryption key, signed by its owner's identity key for one server and user,
 /// valid until `not_after` (unix seconds).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SignedEncKey {
+pub struct SignedEncryptionKey {
     pub key: PublicKey,
     pub not_after: u64,
     #[serde(with = "sig")]

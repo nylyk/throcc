@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use throcc_crypto::identity::random;
 use throcc_proto::ids::{Hash, MediaId, RoomId, UserId};
 use throcc_proto::messages::{
-    Audiences, AuthError, ErrorCode, Event as ServerEvent, MediaState, Placed, Presence, PublicKey,
-    Recovery, Request, Response, RoomPeer, Share, ShareConfig, Tracks, User, Welcome,
+    Audiences, AuthError, ErrorCode, Event as ServerEvent, MediaState, Peer, Placement, Presence,
+    PublicKey, Recovery, Request, Response, ShareConfig, ShareTracks, Tracks, User, Welcome,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{Semaphore, broadcast, mpsc, watch};
@@ -17,7 +17,7 @@ use tracing::{info, warn};
 use crate::account::{self, SignInError};
 use crate::avatars;
 use crate::call::{Call, CallEvent};
-use crate::client::{ClientOptions, Command, Event};
+use crate::client::{ClientOptions, UiCommand, UiEvent};
 use crate::control::{self, LoginError};
 use crate::keys::{KeyNotice, MAX_ROOM_PEERS};
 use crate::keystore::Keystore;
@@ -31,9 +31,9 @@ use crate::playback::SavedPlayback;
 use crate::profile::Profile;
 use crate::server_look::ServerLook;
 use crate::state::{
-    ConnectionStatus, CurrentRoom, Health, KeyWarning, MIC_KBPS, Person, PersonPlayback, Playback,
-    SHARE_AUDIO_DETAIL, SHARE_AUDIO_KBPS, SentTrack, ServerView, Sound, State, TrackHealth,
-    VOICE_DETAIL, person_name, room_name, share_detail, shown_name,
+    ConnectionStatus, CurrentRoom, Health, KeyWarning, MIC_KBPS, Person, Playback,
+    SHARE_AUDIO_DETAIL, SHARE_AUDIO_KBPS, SentTrack, ServerView, Sound, SoundLevel, State,
+    TrackHealth, VOICE_DETAIL, person_name, room_name, share_detail, shown_name,
 };
 use crate::trust::Trust;
 use crate::verified::VerifiedStore;
@@ -65,7 +65,7 @@ const AVATARS_KEPT: usize = 256;
 /// What the client and its session task share.
 pub(crate) struct Shared {
     pub state: Mutex<Arc<State>>,
-    pub events: broadcast::Sender<Event>,
+    pub events: broadcast::Sender<UiEvent>,
     pub pictures: Mutex<HashMap<UserId, Picture>>,
     /// Our own user and the preview demand of our running share.
     pub preview: Mutex<Option<(UserId, Arc<PreviewDemand>)>>,
@@ -124,7 +124,7 @@ impl Shared {
         avatars.insert(hash, slot);
         drop(avatars);
         if ready {
-            self.emit(Event::AvatarReady(hash));
+            self.emit(UiEvent::AvatarReady(hash));
         }
     }
 
@@ -159,16 +159,16 @@ impl Shared {
         change(&mut state);
         if state != **guard {
             *guard = Arc::new(state);
-            self.events.send(Event::State(guard.clone())).ok();
+            self.events.send(UiEvent::State(guard.clone())).ok();
         }
     }
 
-    pub fn emit(&self, event: Event) {
+    pub fn emit(&self, event: UiEvent) {
         self.events.send(event).ok();
     }
 
     pub fn notice(&self, text: impl Into<String>) {
-        self.emit(Event::Notice(text.into()));
+        self.emit(UiEvent::Notice(text.into()));
     }
 }
 
@@ -252,7 +252,7 @@ pub(crate) struct Session {
     /// The share the server last took from us. A share-start refusal leaves it in place.
     server_share: Option<ShareConfig>,
     /// The peers our key is wrapped to, whose tracks we follow.
-    peers: BTreeMap<UserId, RoomPeer>,
+    peers: BTreeMap<UserId, Peer>,
     trust: Trust,
     watching: Vec<UserId>,
     /// Who watches each watched share in our room, by its video.
@@ -269,7 +269,7 @@ pub(crate) struct Session {
     saved_playback: SavedPlayback,
     /// Each sound set for people who presented no identity key yet, saved under the key
     /// once they do.
-    unkeyed_playback: HashMap<(UserId, Sound), Playback>,
+    unkeyed_playback: HashMap<(UserId, Sound), SoundLevel>,
     server_look: ServerLook,
     avatar_fetches: Arc<Semaphore>,
     #[cfg(feature = "ffmpeg")]
@@ -443,10 +443,14 @@ impl Session {
     /// Gives this server our profile, unless it has it already.
     async fn push_profile(&mut self) {
         let avatar = match self.profile.picture.clone() {
-            Some(bytes) => match self.call.request(Request::SetAvatar(bytes.to_vec())).await {
+            Some(bytes) => match self
+                .call
+                .request(Request::UploadAvatar(bytes.to_vec()))
+                .await
+            {
                 Ok(Response::AvatarHash(hash)) => Some(hash),
                 other => {
-                    self.shared.emit(Event::ProfileRefused(refusal(other)));
+                    self.shared.emit(UiEvent::ProfileRefused(refusal(other)));
                     return;
                 }
             },
@@ -460,7 +464,7 @@ impl Session {
         self.pending_avatar = None;
         let known = self.my_person();
         if known.is_some_and(|me| me.name == name && me.avatar == avatar) {
-            self.shared.emit(Event::ProfileSaved);
+            self.shared.emit(UiEvent::ProfileSaved);
         } else {
             self.save_profile(name, avatar).await;
         }
@@ -536,14 +540,14 @@ impl Session {
         }
     }
 
-    pub async fn run(mut self, commands: mpsc::Receiver<Command>) {
+    pub async fn run(mut self, commands: mpsc::Receiver<UiCommand>) {
         self.run_until_done(commands).await;
         if let Err(e) = self.call.floors.save() {
             warn!("saving epoch floors: {e:#}");
         }
     }
 
-    async fn run_until_done(&mut self, mut commands: mpsc::Receiver<Command>) {
+    async fn run_until_done(&mut self, mut commands: mpsc::Receiver<UiCommand>) {
         if self.profile != Profile::default() {
             self.push_profile().await;
         }
@@ -553,7 +557,7 @@ impl Session {
         loop {
             tokio::select! {
                 command = commands.recv() => {
-                    let command = command.unwrap_or(Command::Disconnect);
+                    let command = command.unwrap_or(UiCommand::Disconnect);
                     if self.command(command).await.is_break() {
                         return;
                     }
@@ -584,7 +588,7 @@ impl Session {
                         warn!("saving playback: {e:#}");
                     }
                 }
-                _ = renewal.tick() => self.renew_enc_key().await,
+                _ = renewal.tick() => self.renew_encryption_key().await,
                 Some(_) = self.call.recovery.recv() => self.recover_share(Recovery::Idr),
                 Some(started) = self.share_starts.next() => self.share_started(started).await,
             }
@@ -625,14 +629,17 @@ impl Session {
         self.call.close().await;
         self.shared
             .update(|s| s.connection = ConnectionStatus::Disconnected);
-        self.shared.emit(Event::LeftServer);
+        self.shared.emit(UiEvent::LeftServer);
         true
     }
 
     /// Reconnects with backoff, into the room last asked for, or else the same room.
     /// Returns the other commands that arrived meanwhile, or `None` if told to stop or the
     /// server won't take us back.
-    async fn reconnect(&mut self, commands: &mut mpsc::Receiver<Command>) -> Option<Vec<Command>> {
+    async fn reconnect(
+        &mut self,
+        commands: &mut mpsc::Receiver<UiCommand>,
+    ) -> Option<Vec<UiCommand>> {
         let reason = self
             .call
             .connection
@@ -657,13 +664,13 @@ impl Session {
                 tokio::select! {
                     _ = &mut wait => break,
                     command = commands.recv() => match command {
-                        None | Some(Command::Disconnect) => {
+                        None | Some(UiCommand::Disconnect) => {
                             self.shared.update(|s| s.connection = ConnectionStatus::Disconnected);
                             return None;
                         }
-                        Some(Command::Join(room)) => want_room = room,
+                        Some(UiCommand::Join(room)) => want_room = room,
                         // Asked again on the next render once connected.
-                        Some(Command::FetchAvatar(hash)) => self.shared.forget_avatar(hash),
+                        Some(UiCommand::FetchAvatar(hash)) => self.shared.forget_avatar(hash),
                         Some(command) => {
                             queued.retain(|older| !supersedes(&command, older));
                             if queued.len() < MAX_QUEUED_WHILE_RECONNECTING {
@@ -678,7 +685,7 @@ impl Session {
                 }
             }
             backoff = (backoff * 2).min(MAX_BACKOFF);
-            if let Err(e) = self.keystore.renew_enc_key_if_due() {
+            if let Err(e) = self.keystore.renew_encryption_key_if_due() {
                 warn!("renewing the encryption key: {e:#}");
             }
             let link = match account::sign_in(&self.keystore, &self.address, want_room).await {
@@ -718,7 +725,7 @@ impl Session {
                     let wanted = want_room.map(|room| (room, self.room_name(room)));
                     self.apply_welcome(&welcome);
                     if let Some((room, name)) = wanted
-                        && welcome.placed.room != Some(room)
+                        && welcome.placement.room != Some(room)
                     {
                         self.shared.notice(format!(
                             "Reconnected, but not back into {name}; you're in the lobby."
@@ -746,7 +753,7 @@ impl Session {
 
     /// Leaves our room here after the server took us out of it.
     fn put_out_of_room(&mut self) {
-        self.call.engine.placed(&Placed {
+        self.call.engine.placed(&Placement {
             room: None,
             epoch: throcc_proto::ids::Epoch(0),
             tracks: None,
@@ -781,8 +788,8 @@ impl Session {
         self.remember_server(welcome.server.name.clone(), welcome.server.avatar);
         let address = self.address.clone();
         let media = self.media;
-        let playbacks: Vec<PersonPlayback> = welcome
-            .presence
+        let playbacks: Vec<Playback> = welcome
+            .online
             .iter()
             .map(|p| self.playback_of(p.user))
             .collect();
@@ -803,18 +810,18 @@ impl Session {
                 s.add_room(room.into());
             }
             s.people.clear();
-            for (p, playback) in welcome.presence.iter().zip(playbacks) {
+            for (p, playback) in welcome.online.iter().zip(playbacks) {
                 s.add_person(p.user, person(p, playback));
             }
             s.current = None;
         });
         self.refresh_trust();
-        if welcome.placed.room.is_some() {
-            self.after_join(&welcome.placed);
+        if welcome.placement.room.is_some() {
+            self.after_join(&welcome.placement);
         }
     }
 
-    async fn joined(&mut self, placed: &Placed, notices: Vec<KeyNotice>) {
+    async fn joined(&mut self, placed: &Placement, notices: Vec<KeyNotice>) {
         self.after_join(placed);
         self.cue(if placed.room.is_some() {
             Cue::Join
@@ -825,7 +832,7 @@ impl Session {
         self.push_media().await;
     }
 
-    fn after_join(&mut self, placed: &Placed) {
+    fn after_join(&mut self, placed: &Placement) {
         // The floor of a new placement is what a replaying server wants lost, so it isn't
         // left to the next health tick.
         if let Err(e) = self.call.floors.save() {
@@ -856,8 +863,7 @@ impl Session {
     /// left. True when they changed.
     fn sync_peers(&mut self) -> bool {
         let trusted = self.call.engine.keys().trusted_room_peers();
-        let current: BTreeMap<UserId, RoomPeer> =
-            trusted.into_iter().map(|p| (p.user, p)).collect();
+        let current: BTreeMap<UserId, Peer> = trusted.into_iter().map(|p| (p.user, p)).collect();
         let changed = current != self.peers;
         self.note_identities(&current);
         self.play_as_kept(current.keys().copied());
@@ -901,7 +907,7 @@ impl Session {
 
     /// Notes the identity keys `peers` present, saves playback set before under them, then
     /// shows who is verified and whose verified key changed.
-    fn note_identities(&mut self, peers: &BTreeMap<UserId, RoomPeer>) {
+    fn note_identities(&mut self, peers: &BTreeMap<UserId, Peer>) {
         let presented: Vec<(UserId, PublicKey)> = peers
             .iter()
             .map(|(user, peer)| (*user, peer.identity_key))
@@ -921,14 +927,12 @@ impl Session {
 
     /// How `user` plays: each sound as set before they presented an identity key, else as
     /// saved for the key they presented.
-    fn playback_of(&self, user: UserId) -> PersonPlayback {
+    fn playback_of(&self, user: UserId) -> Playback {
         let mut playback = self
             .trust
             .of(user)
             .1
-            .map_or_else(PersonPlayback::default, |key| {
-                self.saved_playback.person(&key)
-            });
+            .map_or_else(Playback::default, |key| self.saved_playback.person(&key));
         for sound in Sound::ALL {
             if let Some(set) = self.unkeyed_playback.get(&(user, sound)) {
                 *playback.get_mut(sound) = *set;
@@ -939,7 +943,7 @@ impl Session {
 
     /// Plays each of `users` as [`Self::playback_of`] says, and shows it.
     fn play_as_kept(&mut self, users: impl IntoIterator<Item = UserId>) {
-        let kept: Vec<(UserId, PersonPlayback)> = users
+        let kept: Vec<(UserId, Playback)> = users
             .into_iter()
             .map(|user| (user, self.playback_of(user)))
             .collect();
@@ -1051,7 +1055,7 @@ impl Session {
     fn audience_of(&self, user: UserId) -> usize {
         self.tracks_of(user)
             .and_then(|t| t.shares.first())
-            .and_then(|share| watchers_of(&self.audiences, share.video))
+            .and_then(|share| receivers_of(&self.audiences, share.video))
             .map_or(0, <[UserId]>::len)
     }
 
@@ -1074,7 +1078,7 @@ impl Session {
             .and_then(|t| t.shares.first())
             .map(|share| share.video);
         let before = ours
-            .and_then(|video| watchers_of(&self.audiences, video))
+            .and_then(|video| receivers_of(&self.audiences, video))
             .unwrap_or_default()
             .to_vec();
         if !self.take_newer(audiences) {
@@ -1087,7 +1091,7 @@ impl Session {
                 .into_iter()
                 .filter(|user| state.person(*user).is_some_and(|p| p.room == room))
                 .collect();
-            let after = watchers_of(&self.audiences, video).unwrap_or_default();
+            let after = receivers_of(&self.audiences, video).unwrap_or_default();
             if let Some(cue) = audience_cue(&still_here, after)
                 && self
                     .last_audience_cue
@@ -1100,19 +1104,19 @@ impl Session {
         self.show_shares();
     }
 
-    async fn command(&mut self, command: Command) -> ControlFlow<()> {
+    async fn command(&mut self, command: UiCommand) -> ControlFlow<()> {
         match command {
-            Command::Join(room) => match self.call.join(room, None).await {
+            UiCommand::Join(room) => match self.call.join(room, None).await {
                 Ok((placed, notices)) => self.joined(&placed, notices).await,
                 Err(e) => self.shared.notice(format!("Couldn't join: {e}")),
             },
-            Command::JoinWithPassword(room, password) => {
+            UiCommand::JoinWithPassword(room, password) => {
                 match self.call.join(Some(room), Some(password)).await {
                     Ok((placed, notices)) => self.joined(&placed, notices).await,
-                    Err(e) => self.shared.emit(Event::PasswordRefused(e.to_string())),
+                    Err(e) => self.shared.emit(UiEvent::PasswordRefused(e.to_string())),
                 }
             }
-            Command::SetMic(on) => {
+            UiCommand::SetMic(on) => {
                 if let Some(cue) = mic_cue(&self.media, on) {
                     self.cue(cue);
                 }
@@ -1122,44 +1126,44 @@ impl Session {
                 }
                 self.push_media().await;
             }
-            Command::SetDeafened(deafened) => {
+            UiCommand::SetDeafened(deafened) => {
                 if deafened != self.media.deafened {
                     self.cue(if deafened { Cue::Deafen } else { Cue::Undeafen });
                 }
                 set_deafened(&mut self.media, &mut self.mic_before_deafen, deafened);
                 self.push_media().await;
             }
-            Command::StartShare(config) => self.start_share(config),
-            Command::StopShare => self.end_share().await,
-            Command::Watch(user) => {
+            UiCommand::StartShare(config) => self.start_share(config),
+            UiCommand::StopShare => self.end_share().await,
+            UiCommand::Watch(user) => {
                 if !self.watching.contains(&user) {
                     self.watching.push(user);
                     self.stream_cue(user, Cue::StreamJoin);
                 }
                 self.push_watching().await;
             }
-            Command::Unwatch(user) => {
+            UiCommand::Unwatch(user) => {
                 if self.watching.contains(&user) {
                     self.watching.retain(|u| *u != user);
                     self.stream_cue(user, Cue::StreamLeave);
                 }
                 self.push_watching().await;
             }
-            Command::SetPlayback(user, sound, playback) => {
-                self.voice(gain_command(user, sound, playback));
+            UiCommand::SetSoundLevel(user, sound, level) => {
+                self.voice(gain_command(user, sound, level));
                 match self.trust.of(user).1 {
-                    Some(key) => self.saved_playback.set(&key, sound, playback),
+                    Some(key) => self.saved_playback.set(&key, sound, level),
                     None => {
-                        self.unkeyed_playback.insert((user, sound), playback);
+                        self.unkeyed_playback.insert((user, sound), level);
                     }
                 }
                 self.shared.update(|s| {
                     if let Some(p) = s.people.get_mut(&user) {
-                        *p.playback.get_mut(sound) = playback;
+                        *p.playback.get_mut(sound) = level;
                     }
                 });
             }
-            Command::SetProfile { name, picture } => {
+            UiCommand::SetProfile { name, picture } => {
                 self.change_profile(|p| {
                     if let Some(name) = name {
                         p.name = Some(name);
@@ -1170,52 +1174,52 @@ impl Session {
                 });
                 self.push_profile().await;
             }
-            Command::FetchAvatar(hash) => self.fetch_avatar(hash),
-            Command::SetServerProfile { name, picture } => {
+            UiCommand::FetchAvatar(hash) => self.fetch_avatar(hash),
+            UiCommand::SetServerProfile { name, picture } => {
                 let response = self.set_server_profile(name, picture).await;
                 self.shared.emit(match response {
-                    Ok(Response::Ok) => Event::ServerProfileSaved,
-                    other => Event::ServerProfileRefused(refusal(other)),
+                    Ok(Response::Ok) => UiEvent::ServerProfileSaved,
+                    other => UiEvent::ServerProfileRefused(refusal(other)),
                 });
             }
-            Command::CreateRoom(name, password) => {
+            UiCommand::CreateRoom(name, password) => {
                 self.simple(Request::CreateRoom { name, password }).await
             }
-            Command::RenameRoom(room, name) => {
+            UiCommand::RenameRoom(room, name) => {
                 self.simple(Request::RenameRoom { room, name }).await
             }
-            Command::SetRoomPassword(room, password) => {
+            UiCommand::SetRoomPassword(room, password) => {
                 self.simple(Request::SetRoomPassword { room, password })
                     .await
             }
-            Command::DeleteRoom(room) => self.simple(Request::DeleteRoom(room)).await,
-            Command::KickFromRoom { user, room } => {
+            UiCommand::DeleteRoom(room) => self.simple(Request::DeleteRoom(room)).await,
+            UiCommand::KickFromRoom { user, room } => {
                 self.simple(Request::KickFromRoom { user, room }).await
             }
-            Command::CreateInvite => match self.call.request(Request::CreateInvite).await {
+            UiCommand::CreateInvite => match self.call.request(Request::CreateInvite).await {
                 Ok(Response::Invite { code, expires }) => {
-                    self.shared.emit(Event::Invite { code, expires })
+                    self.shared.emit(UiEvent::Invite { code, expires })
                 }
                 other => self.refused(other),
             },
-            Command::ListUsers => match self.call.request(Request::ListUsers).await {
-                Ok(Response::Users(users)) => self.shared.emit(Event::Users(shown_users(users))),
+            UiCommand::ListUsers => match self.call.request(Request::ListUsers).await {
+                Ok(Response::Users(users)) => self.shared.emit(UiEvent::Users(shown_users(users))),
                 other => self.refused(other),
             },
-            Command::SetRole(user, role) => {
+            UiCommand::SetRole(user, role) => {
                 self.simple(Request::SetRole { user, role }).await;
                 self.list_users().await;
             }
-            Command::RemoveUser { user, cascade } => {
+            UiCommand::RemoveUser { user, cascade } => {
                 self.simple(Request::RemoveUser { user, cascade }).await;
                 self.list_users().await;
             }
-            Command::SetVerified {
+            UiCommand::SetVerified {
                 user,
                 key,
                 verified,
             } => self.set_verified(user, &key.0, verified),
-            Command::DismissKeyChange { user, shown } => {
+            UiCommand::DismissKeyChange { user, shown } => {
                 let shown = shown.map(|key| key.0);
                 match self.trust.dismiss_change(user, shown.as_ref()) {
                     Ok(false) => {
@@ -1231,28 +1235,28 @@ impl Session {
                     dismissed => self.after_trust_change(dismissed.map(drop)),
                 }
             }
-            Command::VerifiedChanged => self.refresh_trust(),
-            Command::Voice(settings) => {
+            UiCommand::VerifiedChanged => self.refresh_trust(),
+            UiCommand::Voice(settings) => {
                 self.options.voice = settings;
                 self.voice(VoiceCommand::Settings(settings));
             }
-            Command::Devices { input, output } => {
+            UiCommand::Devices { input, output } => {
                 self.options.input_device = input;
                 self.options.output_device = output;
                 self.start_voice();
             }
-            Command::MicTest(on) => {
+            UiCommand::MicTest(on) => {
                 self.mic_test = on;
                 self.voice(VoiceCommand::Loopback(on));
             }
-            Command::PushToTalk(down) => self.voice(VoiceCommand::PushToTalk(down)),
-            Command::PlayCue(cue) => self.cue(cue),
-            Command::LeaveServer => {
+            UiCommand::PushToTalk(down) => self.voice(VoiceCommand::PushToTalk(down)),
+            UiCommand::PlayCue(cue) => self.cue(cue),
+            UiCommand::LeaveServer => {
                 if self.leave_server().await {
                     return ControlFlow::Break(());
                 }
             }
-            Command::Disconnect => {
+            UiCommand::Disconnect => {
                 self.call.close().await;
                 self.shared
                     .update(|s| s.connection = ConnectionStatus::Disconnected);
@@ -1264,7 +1268,7 @@ impl Session {
 
     async fn list_users(&mut self) {
         if let Ok(Response::Users(users)) = self.call.request(Request::ListUsers).await {
-            self.shared.emit(Event::Users(shown_users(users)));
+            self.shared.emit(UiEvent::Users(shown_users(users)));
         }
     }
 
@@ -1282,7 +1286,7 @@ impl Session {
         let Some(me) = self.my_person() else { return };
         self.pending_avatar = None;
         if me.avatar == avatar {
-            self.shared.emit(Event::ProfileSaved);
+            self.shared.emit(UiEvent::ProfileSaved);
         } else {
             self.save_profile(me.name, avatar).await;
         }
@@ -1294,8 +1298,8 @@ impl Session {
             .request(Request::SetProfile { name, avatar })
             .await
         {
-            Ok(Response::Ok) => self.shared.emit(Event::ProfileSaved),
-            other => self.shared.emit(Event::ProfileRefused(refusal(other))),
+            Ok(Response::Ok) => self.shared.emit(UiEvent::ProfileSaved),
+            other => self.shared.emit(UiEvent::ProfileRefused(refusal(other))),
         }
     }
 
@@ -1318,7 +1322,7 @@ impl Session {
             let Ok(_turn) = fetches.acquire().await else {
                 return;
             };
-            let slot = match requester.request(Request::GetAvatar(hash)).await {
+            let slot = match requester.request(Request::FetchAvatar(hash)).await {
                 Ok(Response::Avatar(bytes)) if avatars::matches(&bytes, hash) => {
                     let bytes: Arc<[u8]> = bytes.into();
                     let kept = bytes.clone();
@@ -1372,7 +1376,7 @@ impl Session {
     ) -> anyhow::Result<Response> {
         if let Some(picture) = picture {
             let avatar = match picture {
-                Some(bytes) => match self.call.request(Request::SetAvatar(bytes)).await? {
+                Some(bytes) => match self.call.request(Request::UploadAvatar(bytes)).await? {
                     Response::AvatarHash(hash) => Some(hash),
                     other => return Ok(other),
                 },
@@ -1451,13 +1455,13 @@ impl Session {
                 c.watching = watching;
             }
         });
-        self.simple(Request::SetWatching(ids)).await;
+        self.simple(Request::SetWatched(ids)).await;
         self.sync_watching();
     }
 
     /// Keeps one decoder per watched share, following track and codec changes.
     fn sync_watching(&mut self) {
-        let wanted: HashMap<UserId, (Share, ShareConfig)> = self
+        let wanted: HashMap<UserId, (ShareTracks, ShareConfig)> = self
             .watching
             .iter()
             .filter_map(|user| {
@@ -1700,8 +1704,8 @@ impl Session {
     }
 
     /// Replaces our encryption key once it nears expiry, and gives the server the new one.
-    async fn renew_enc_key(&mut self) {
-        match self.keystore.renew_enc_key_if_due() {
+    async fn renew_encryption_key(&mut self) {
+        match self.keystore.renew_encryption_key_if_due() {
             Ok(true) => {}
             Ok(false) => return,
             Err(e) => {
@@ -1709,16 +1713,20 @@ impl Session {
                 return;
             }
         }
-        let enc = match self.keystore.enc_key_pair() {
+        let enc = match self.keystore.encryption_key_pair() {
             Ok(enc) => enc,
             Err(e) => {
                 warn!("the renewed encryption key is unusable: {e:#}");
                 return;
             }
         };
-        self.call.engine.keys().replace_enc(enc, Instant::now());
+        self.call
+            .engine
+            .keys()
+            .replace_encryption(enc, Instant::now());
         let (server, me) = (self.call.server(), self.call.me());
-        let published = account::publish_enc_key(&self.keystore, &self.call.requester, &server, me);
+        let published =
+            account::publish_encryption_key(&self.keystore, &self.call.requester, &server, me);
         match published.await {
             Ok(()) => info!("renewed the encryption key"),
             Err(e) => {
@@ -1733,7 +1741,7 @@ impl Session {
     fn notices(&self, notices: Vec<KeyNotice>) {
         for notice in notices {
             match notice {
-                KeyNotice::BadEncKey { user } => {
+                KeyNotice::BadEncryptionKey { user } => {
                     self.shared.notice(format!(
                         "User {}'s encryption key failed its check; they can't hear you.",
                         user.0
@@ -1794,7 +1802,7 @@ impl Session {
                 self.refresh_trust();
                 self.follow_room().await;
             }
-            ServerEvent::PresenceEnded(user) => {
+            ServerEvent::WentOffline(user) => {
                 self.room_cue(user, None);
                 self.shared.update(|s| {
                     s.people.remove(&user);
@@ -1802,7 +1810,7 @@ impl Session {
                 self.follow_room().await;
             }
             ServerEvent::RoomCreated(room) => self.shared.update(|s| s.add_room((&room).into())),
-            ServerEvent::RoomLocked { room, locked } => self.shared.update(|s| {
+            ServerEvent::RoomLockChanged { room, locked } => self.shared.update(|s| {
                 if let Some(r) = s.room_mut(room) {
                     r.locked = locked;
                 }
@@ -1819,13 +1827,13 @@ impl Session {
                 }
                 self.shared.update(|s| s.rooms.retain(|r| r.id != room));
             }
-            ServerEvent::RoomState { room, .. } => {
+            ServerEvent::PeersChanged { room, .. } => {
                 if Some(room) == self.room {
                     self.follow_room().await;
                 }
             }
             ServerEvent::AudiencesChanged(changed) => self.audiences_changed(changed),
-            ServerEvent::LinkStats { tracks } => {
+            ServerEvent::ReceiveStats { tracks } => {
                 for t in &tracks {
                     self.dropped_for_you = self.dropped_for_you.saturating_add(t.dropped_units);
                     if let Some(watched) = self.tracks.get_mut(&t.media_id)
@@ -1840,10 +1848,12 @@ impl Session {
                     self.shared.update(|s| s.role = Some(role));
                 }
             }
-            ServerEvent::InviteBurned { code_id } => self.shared.notice(format!(
+            ServerEvent::InviteSpent { code_id } => self.shared.notice(format!(
                 "Invite {code_id}-… was used up by three wrong tries and no longer works."
             )),
-            ServerEvent::Kicked { reason } => self.shared.emit(Event::Kicked(reason)),
+            ServerEvent::RemovedFromServer { reason } => {
+                self.shared.emit(UiEvent::RemovedFromServer(reason))
+            }
             ServerEvent::KickedFromRoom { by, room } if self.room == Some(room) => {
                 self.put_out_of_room();
                 let state = self.shared.state();
@@ -1853,7 +1863,7 @@ impl Session {
             }
             ServerEvent::KickedFromRoom { .. } => {}
             ServerEvent::UserAdded(_) | ServerEvent::UserRemoved(_) => self.list_users().await,
-            ServerEvent::KeyframeWanted { media_id, kind } => {
+            ServerEvent::KeyframeRequested { media_id, kind } => {
                 if self
                     .my_tracks
                     .as_ref()
@@ -1863,7 +1873,7 @@ impl Session {
                     self.recover_share(kind);
                 }
             }
-            ServerEvent::SenderKey { .. } => {}
+            ServerEvent::SenderKeyPublished { .. } => {}
         }
     }
 
@@ -2013,7 +2023,7 @@ fn shown_users(users: Vec<User>) -> Vec<User> {
 }
 
 /// `p` as a person, playing as `playback` says.
-fn person(p: &Presence, playback: PersonPlayback) -> Person {
+fn person(p: &Presence, playback: Playback) -> Person {
     Person {
         name: person_name(p.user, &p.name),
         avatar: p.avatar,
@@ -2115,25 +2125,27 @@ fn set_deafened(media: &mut MediaState, mic_before: &mut bool, deafened: bool) {
     media.deafened = deafened;
 }
 
-fn gain_command(user: UserId, sound: Sound, playback: Playback) -> VoiceCommand {
+fn gain_command(user: UserId, sound: Sound, level: SoundLevel) -> VoiceCommand {
     match sound {
-        Sound::Voice => VoiceCommand::Volume(user, playback.gain()),
-        Sound::Share => VoiceCommand::ShareVolume(user, playback.gain()),
+        Sound::Voice => VoiceCommand::Volume(user, level.gain()),
+        Sound::Share => VoiceCommand::ShareVolume(user, level.gain()),
     }
 }
 
 /// Whether `newer` sets the same thing as `older`, so only `newer` needs replaying.
-fn supersedes(newer: &Command, older: &Command) -> bool {
+fn supersedes(newer: &UiCommand, older: &UiCommand) -> bool {
     use std::mem::discriminant;
     match (newer, older) {
-        (Command::SetPlayback(a, sa, _), Command::SetPlayback(b, sb, _)) => a == b && sa == sb,
+        (UiCommand::SetSoundLevel(a, sa, _), UiCommand::SetSoundLevel(b, sb, _)) => {
+            a == b && sa == sb
+        }
         (
-            Command::SetMic(_)
-            | Command::SetDeafened(_)
-            | Command::PushToTalk(_)
-            | Command::MicTest(_)
-            | Command::Voice(_)
-            | Command::Devices { .. },
+            UiCommand::SetMic(_)
+            | UiCommand::SetDeafened(_)
+            | UiCommand::PushToTalk(_)
+            | UiCommand::MicTest(_)
+            | UiCommand::Voice(_)
+            | UiCommand::Devices { .. },
             _,
         ) => discriminant(newer) == discriminant(older),
         _ => false,
@@ -2155,18 +2167,18 @@ fn newer_audiences(held: &Audiences, mut new: Audiences) -> Option<Audiences> {
     }
     new.shares.truncate(MAX_ROOM_PEERS);
     for audience in &mut new.shares {
-        audience.watchers.truncate(MAX_ROOM_PEERS);
+        audience.receivers.truncate(MAX_ROOM_PEERS);
     }
     Some(new)
 }
 
 /// Who receives the share sent on `video`, if anyone does.
-fn watchers_of(audiences: &Audiences, video: MediaId) -> Option<&[UserId]> {
+fn receivers_of(audiences: &Audiences, video: MediaId) -> Option<&[UserId]> {
     audiences
         .shares
         .iter()
         .find(|a| a.video == video)
-        .map(|a| a.watchers.as_slice())
+        .map(|a| a.receivers.as_slice())
 }
 
 #[cfg(test)]
@@ -2273,22 +2285,25 @@ mod tests {
 
     #[test]
     fn only_the_latest_setting_is_replayed() {
-        use crate::client::Command;
+        use crate::client::UiCommand;
         assert!(supersedes(
-            &Command::PushToTalk(false),
-            &Command::PushToTalk(true)
+            &UiCommand::PushToTalk(false),
+            &UiCommand::PushToTalk(true)
         ));
-        assert!(supersedes(&Command::SetMic(false), &Command::SetMic(true)));
+        assert!(supersedes(
+            &UiCommand::SetMic(false),
+            &UiCommand::SetMic(true)
+        ));
         assert!(!supersedes(
-            &Command::SetMic(false),
-            &Command::SetDeafened(true)
+            &UiCommand::SetMic(false),
+            &UiCommand::SetDeafened(true)
         ));
         let volume = |user, sound, v| {
-            let playback = Playback {
+            let level = SoundLevel {
                 volume: v,
                 muted: false,
             };
-            Command::SetPlayback(UserId(user), sound, playback)
+            UiCommand::SetSoundLevel(UserId(user), sound, level)
         };
         assert!(supersedes(
             &volume(1, Sound::Voice, 0.5),
@@ -2303,19 +2318,19 @@ mod tests {
             &volume(1, Sound::Voice, 1.0)
         ));
         assert!(!supersedes(
-            &Command::Watch(UserId(1)),
-            &Command::Watch(UserId(2))
+            &UiCommand::Watch(UserId(1)),
+            &UiCommand::Watch(UserId(2))
         ));
     }
 
     #[test]
     fn only_audiences_as_new_as_held_are_taken_and_within_a_room() {
-        let audiences = |seq, shares: usize, watchers: u64| Audiences {
+        let audiences = |seq, shares: usize, receivers: u64| Audiences {
             seq,
             shares: (0..shares as u32)
                 .map(|video| throcc_proto::messages::Audience {
                     video: MediaId(video),
-                    watchers: (0..watchers).map(UserId).collect(),
+                    receivers: (0..receivers).map(UserId).collect(),
                 })
                 .collect(),
         };
@@ -2330,7 +2345,7 @@ mod tests {
         assert!(
             huge.shares
                 .iter()
-                .all(|a| a.watchers.len() == MAX_ROOM_PEERS)
+                .all(|a| a.receivers.len() == MAX_ROOM_PEERS)
         );
     }
 

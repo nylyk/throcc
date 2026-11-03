@@ -21,8 +21,8 @@ use crate::media::video::Picture;
 use crate::media::video::frame::VideoFrame;
 use crate::session::{AvatarSlot, Session, Shared};
 use crate::state::{
-    ConnectionStatus, CurrentRoom, Health, KeyWarning, MIC_KBPS, Person, PersonPlayback, Playback,
-    RoomView, SHARE_AUDIO_DETAIL, SHARE_AUDIO_KBPS, SentTrack, ServerView, Sound, State,
+    ConnectionStatus, CurrentRoom, Health, KeyWarning, MIC_KBPS, Person, Playback, RoomView,
+    SHARE_AUDIO_DETAIL, SHARE_AUDIO_KBPS, SentTrack, ServerView, Sound, SoundLevel, State,
     TrackHealth, VOICE_DETAIL, share_detail,
 };
 use crate::verified::VerifiedStore;
@@ -38,7 +38,7 @@ pub struct ClientOptions {
 
 /// What the UI asks the core to do. The core's own type, never `throcc-proto`'s.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Command {
+pub enum UiCommand {
     Join(Option<RoomId>),
     JoinWithPassword(RoomId, String),
     SetMic(bool),
@@ -47,14 +47,14 @@ pub enum Command {
     StopShare,
     Watch(UserId),
     Unwatch(UserId),
-    SetPlayback(UserId, Sound, Playback),
+    SetSoundLevel(UserId, Sound, SoundLevel),
     /// Changes our name and picture (at most 64 KiB, `Some(None)` clears it) in one save.
     /// A `None` field keeps what we have.
     SetProfile {
         name: Option<String>,
         picture: Option<Option<Vec<u8>>>,
     },
-    /// Names the server and sets its picture like [`Command::SetProfile`]. Admins only.
+    /// Names the server and sets its picture like [`UiCommand::SetProfile`]. Admins only.
     SetServerProfile {
         name: Option<Option<String>>,
         picture: Option<Option<Vec<u8>>>,
@@ -113,7 +113,7 @@ pub enum Command {
 
 /// What the core tells the UI.
 #[derive(Clone, Debug)]
-pub enum Event {
+pub enum UiEvent {
     State(Arc<State>),
     Invite {
         code: String,
@@ -121,7 +121,7 @@ pub enum Event {
     },
     Users(Vec<User>),
     Notice(String),
-    Kicked(String),
+    RemovedFromServer(String),
     /// A profile picture asked for with [`ClientApi::avatar`] has arrived.
     AvatarReady(Hash),
     /// The server took our new name or picture.
@@ -140,8 +140,8 @@ pub enum Event {
 
 /// The UI's view of a client. Implemented by the real client and by [`MockClient`].
 pub trait ClientApi: Send + Sync {
-    fn command(&self, command: Command);
-    fn events(&self) -> broadcast::Receiver<Event>;
+    fn command(&self, command: UiCommand);
+    fn events(&self) -> broadcast::Receiver<UiEvent>;
     fn state(&self) -> Arc<State>;
     /// The 60-digit safety number with whoever holds the identity key `key`.
     fn safety_number(&self, key: &PublicKey) -> String;
@@ -163,7 +163,7 @@ const CLOSE_WAIT: Duration = Duration::from_secs(2);
 /// A live client: tokio runs on its own threads, and a session task keeps [`State`]
 /// current, drives media and reconnects with the room it was in.
 pub struct Client {
-    commands: mpsc::Sender<Command>,
+    commands: mpsc::Sender<UiCommand>,
     shared: Arc<Shared>,
     identity: PublicKey,
     runtime: Option<tokio::runtime::Runtime>,
@@ -185,7 +185,7 @@ impl Client {
             .enable_all()
             .build()
             .map_err(|e| SignInError::Store(e.into()))?;
-        keystore.renew_enc_key_if_due()?;
+        keystore.renew_encryption_key_if_due()?;
         let link = runtime.block_on(async {
             match invite {
                 Some(code) => account::enroll(&mut keystore, address, code).await,
@@ -240,13 +240,13 @@ impl Drop for Client {
 }
 
 impl ClientApi for Client {
-    fn command(&self, command: Command) {
+    fn command(&self, command: UiCommand) {
         if self.commands.try_send(command).is_err() {
             self.shared.notice("busy; try again");
         }
     }
 
-    fn events(&self) -> broadcast::Receiver<Event> {
+    fn events(&self) -> broadcast::Receiver<UiEvent> {
         self.shared.events.subscribe()
     }
 
@@ -268,7 +268,12 @@ impl ClientApi for Client {
 
     fn avatar(&self, hash: Hash) -> Option<Arc<[u8]>> {
         let (bytes, fetch) = self.shared.avatar(hash);
-        if fetch && self.commands.try_send(Command::FetchAvatar(hash)).is_err() {
+        if fetch
+            && self
+                .commands
+                .try_send(UiCommand::FetchAvatar(hash))
+                .is_err()
+        {
             self.shared.forget_avatar(hash);
         }
         bytes
@@ -336,10 +341,10 @@ impl MockClient {
 }
 
 impl ClientApi for MockClient {
-    fn command(&self, command: Command) {
+    fn command(&self, command: UiCommand) {
         let me = self.me();
         match command {
-            Command::Join(room) => self.update(|s| {
+            UiCommand::Join(room) => self.update(|s| {
                 let (mic, deafened) = (s.mic, s.deafened);
                 if let Some(person) = s.people.get_mut(&me) {
                     person.room = room;
@@ -353,32 +358,32 @@ impl ClientApi for MockClient {
                     watching: vec![],
                 });
             }),
-            Command::JoinWithPassword(room, _) => self.command(Command::Join(Some(room))),
-            Command::SetMic(on) => self.update(|s| {
+            UiCommand::JoinWithPassword(room, _) => self.command(UiCommand::Join(Some(room))),
+            UiCommand::SetMic(on) => self.update(|s| {
                 s.mic = on;
                 if let Some(p) = s.people.get_mut(&me) {
                     p.mic = on;
                 }
             }),
-            Command::SetDeafened(on) => self.update(|s| {
+            UiCommand::SetDeafened(on) => self.update(|s| {
                 s.deafened = on;
                 if let Some(p) = s.people.get_mut(&me) {
                     p.deafened = on;
                 }
             }),
-            Command::StartShare(config) => self.update(|s| {
+            UiCommand::StartShare(config) => self.update(|s| {
                 set_mine(s, me, |c, p| {
                     c.sharing = Some(config);
                     p.sharing = Some(config);
                 })
             }),
-            Command::StopShare => self.update(|s| {
+            UiCommand::StopShare => self.update(|s| {
                 set_mine(s, me, |c, p| {
                     c.sharing = None;
                     p.sharing = None;
                 })
             }),
-            Command::Watch(user) => self.update(|s| {
+            UiCommand::Watch(user) => self.update(|s| {
                 if let Some(c) = s.current.as_mut()
                     && !c.watching.contains(&user)
                 {
@@ -388,7 +393,7 @@ impl ClientApi for MockClient {
                     }
                 }
             }),
-            Command::Unwatch(user) => self.update(|s| {
+            UiCommand::Unwatch(user) => self.update(|s| {
                 if let Some(c) = s.current.as_mut()
                     && c.watching.contains(&user)
                 {
@@ -398,12 +403,12 @@ impl ClientApi for MockClient {
                     }
                 }
             }),
-            Command::SetPlayback(user, sound, playback) => self.update(|s| {
+            UiCommand::SetSoundLevel(user, sound, level) => self.update(|s| {
                 if let Some(p) = s.people.get_mut(&user) {
-                    *p.playback.get_mut(sound) = playback;
+                    *p.playback.get_mut(sound) = level;
                 }
             }),
-            Command::SetProfile { name, picture } => {
+            UiCommand::SetProfile { name, picture } => {
                 let hash = picture.map(|p| p.map(|bytes| self.keep_avatar(bytes)));
                 self.update(|s| {
                     if let Some(name) = name {
@@ -419,9 +424,9 @@ impl ClientApi for MockClient {
                         s.profile_picture = hash;
                     }
                 });
-                self.shared.emit(Event::ProfileSaved);
+                self.shared.emit(UiEvent::ProfileSaved);
             }
-            Command::SetServerProfile { name, picture } => {
+            UiCommand::SetServerProfile { name, picture } => {
                 let hash = picture.map(|p| p.map(|bytes| self.keep_avatar(bytes)));
                 self.update(|s| {
                     if let Some(server) = s.server.as_mut() {
@@ -433,10 +438,10 @@ impl ClientApi for MockClient {
                         }
                     }
                 });
-                self.shared.emit(Event::ServerProfileSaved);
+                self.shared.emit(UiEvent::ServerProfileSaved);
             }
-            Command::FetchAvatar(_) => {}
-            Command::CreateRoom(name, password) => self.update(|s| {
+            UiCommand::FetchAvatar(_) => {}
+            UiCommand::CreateRoom(name, password) => self.update(|s| {
                 let id = RoomId(s.rooms.iter().map(|r| r.id.0).max().unwrap_or(0) + 1);
                 s.rooms.push(RoomView {
                     id,
@@ -444,23 +449,23 @@ impl ClientApi for MockClient {
                     locked: password.is_some(),
                 });
             }),
-            Command::RenameRoom(room, name) => self.update(|s| {
+            UiCommand::RenameRoom(room, name) => self.update(|s| {
                 if let Some(r) = s.room_mut(room) {
                     r.name = name;
                 }
             }),
-            Command::SetRoomPassword(room, password) => self.update(|s| {
+            UiCommand::SetRoomPassword(room, password) => self.update(|s| {
                 if let Some(r) = s.room_mut(room) {
                     r.locked = password.is_some();
                 }
             }),
-            Command::KickFromRoom { user, room } => self.update(|s| {
+            UiCommand::KickFromRoom { user, room } => self.update(|s| {
                 if let Some(p) = s.people.get_mut(&user).filter(|p| p.room == Some(room)) {
                     p.room = None;
                     p.sharing = None;
                 }
             }),
-            Command::DeleteRoom(room) => self.update(|s| {
+            UiCommand::DeleteRoom(room) => self.update(|s| {
                 s.rooms.retain(|r| r.id != room);
                 for p in s.people.values_mut().filter(|p| p.room == Some(room)) {
                     p.room = None;
@@ -469,14 +474,14 @@ impl ClientApi for MockClient {
                     s.current = None;
                 }
             }),
-            Command::CreateInvite => self.shared.emit(Event::Invite {
+            UiCommand::CreateInvite => self.shared.emit(UiEvent::Invite {
                 code: "K7Q-M2XPD".into(),
                 expires: 0,
             }),
-            Command::ListUsers | Command::SetRole(..) | Command::RemoveUser { .. } => {
-                self.shared.emit(Event::Users(sample_users()));
+            UiCommand::ListUsers | UiCommand::SetRole(..) | UiCommand::RemoveUser { .. } => {
+                self.shared.emit(UiEvent::Users(sample_users()));
             }
-            Command::SetVerified {
+            UiCommand::SetVerified {
                 user,
                 key,
                 verified,
@@ -500,12 +505,12 @@ impl ClientApi for MockClient {
                     s.key_warnings.retain(|w| w.verified != key);
                 }
             }),
-            Command::DismissKeyChange { user, shown } => self.update(|s| {
+            UiCommand::DismissKeyChange { user, shown } => self.update(|s| {
                 if s.person(user).and_then(|p| p.identity_key).map(Fingerprint) == shown {
                     s.key_warnings.retain(|w| w.user != user);
                 }
             }),
-            Command::VerifiedChanged => {
+            UiCommand::VerifiedChanged => {
                 let state = self.state();
                 let keys = self.verified.lock();
                 let verified: HashSet<PublicKey> = state
@@ -523,20 +528,22 @@ impl ClientApi for MockClient {
                     }
                 });
             }
-            Command::PushToTalk(down) => self.update(|s| set_mine(s, me, |_, p| p.speaking = down)),
-            Command::Voice(_)
-            | Command::Devices { .. }
-            | Command::MicTest(_)
-            | Command::PlayCue(_) => {}
-            Command::LeaveServer => {
-                self.update(|s| s.connection = ConnectionStatus::Disconnected);
-                self.shared.emit(Event::LeftServer);
+            UiCommand::PushToTalk(down) => {
+                self.update(|s| set_mine(s, me, |_, p| p.speaking = down))
             }
-            Command::Disconnect => self.update(|s| s.connection = ConnectionStatus::Disconnected),
+            UiCommand::Voice(_)
+            | UiCommand::Devices { .. }
+            | UiCommand::MicTest(_)
+            | UiCommand::PlayCue(_) => {}
+            UiCommand::LeaveServer => {
+                self.update(|s| s.connection = ConnectionStatus::Disconnected);
+                self.shared.emit(UiEvent::LeftServer);
+            }
+            UiCommand::Disconnect => self.update(|s| s.connection = ConnectionStatus::Disconnected),
         }
     }
 
-    fn events(&self) -> broadcast::Receiver<Event> {
+    fn events(&self) -> broadcast::Receiver<UiEvent> {
         self.shared.events.subscribe()
     }
 
@@ -578,7 +585,7 @@ fn person(name: &str, room: Option<u64>) -> Person {
         sharing: None,
         audience: 0,
         speaking: false,
-        playback: PersonPlayback::default(),
+        playback: Playback::default(),
         verified: false,
         identity_key: None,
         role: Role::User,
@@ -754,14 +761,14 @@ mod tests {
     fn mock_reacts_to_commands() {
         let client = MockClient::default();
         let mut events = client.events();
-        client.command(Command::Join(Some(RoomId(1))));
-        let Ok(Event::State(state)) = events.try_recv() else {
+        client.command(UiCommand::Join(Some(RoomId(1))));
+        let Ok(UiEvent::State(state)) = events.try_recv() else {
             panic!("no state")
         };
         assert_eq!(state.current.as_ref().map(|c| c.room), Some(RoomId(1)));
-        client.command(Command::SetMic(false));
+        client.command(UiCommand::SetMic(false));
         assert!(!client.state().mic);
-        client.command(Command::Watch(UserId(4)));
+        client.command(UiCommand::Watch(UserId(4)));
         assert_eq!(
             client.state().current.as_ref().map(|c| c.watching.clone()),
             Some(vec![UserId(4)])

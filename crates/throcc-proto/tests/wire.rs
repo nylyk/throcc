@@ -22,7 +22,7 @@ fn pinned<T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::f
 #[test]
 fn control_messages_encode_to_pinned_bytes() {
     pinned(
-        Hello::Auth {
+        ClientHello::Auth {
             pubkey: [1; 32],
             client_nonce: [2; 32],
             want_room: Some(RoomId(3)),
@@ -33,17 +33,24 @@ fn control_messages_encode_to_pinned_bytes() {
     pinned(
         ClientMessage::Request {
             id: 7,
-            req: Request::SetRoom {
-                room: Some(RoomId(3)),
+            request: Request::JoinRoom {
+                room: RoomId(3),
                 password: Some("pw".into()),
             },
         },
-        "000700010301027077",
+        "0007000301027077",
+    );
+    pinned(
+        ClientMessage::Request {
+            id: 8,
+            request: Request::LeaveRoom,
+        },
+        "000801",
     );
     pinned(
         ClientMessage::Request {
             id: 300,
-            req: Request::SetMedia(MediaState {
+            request: Request::SetMedia(MediaState {
                 mic: true,
                 deafened: false,
                 share: Some(ShareConfig {
@@ -56,32 +63,32 @@ fn control_messages_encode_to_pinned_bytes() {
                 }),
             }),
         },
-        "00ac020501000101c03e038014a00b3c",
+        "00ac020601000101c03e038014a00b3c",
     );
     pinned(
         ClientMessage::Request {
             id: 1,
-            req: Request::RequestKeyframe {
+            request: Request::RequestKeyframe {
                 media_id: MediaId(5),
                 kind: Recovery::Idr,
             },
         },
-        "0001070501",
+        "0001080501",
     );
     pinned(
         ClientMessage::Request {
             id: 1,
-            req: Request::KickFromRoom {
+            request: Request::KickFromRoom {
                 user: UserId(2),
                 room: RoomId(3),
             },
         },
-        "0001130203",
+        "0001140203",
     );
     pinned(
         ServerMessage::Response {
             id: 9,
-            res: Response::Err {
+            response: Response::Err {
                 code: ErrorCode::WrongPassword,
                 message: "no".into(),
             },
@@ -110,21 +117,21 @@ fn control_messages_encode_to_pinned_bytes() {
     );
     pinned(AuthResult::Err(AuthError::RateLimited), "0105");
     pinned(
-        Event::RoomState {
+        Event::PeersChanged {
             room: RoomId(1),
             epoch: Epoch(2),
-            peers: vec![RoomPeer {
+            peers: vec![Peer {
                 user: UserId(3),
                 tracks: Tracks {
                     mic: MediaId(4),
-                    shares: vec![Share {
+                    shares: vec![ShareTracks {
                         video: MediaId(5),
                         audio: MediaId(6),
                     }],
                 },
                 share: None,
                 identity_key: [7; 32],
-                enc_key: SignedEncKey {
+                encryption_key: SignedEncryptionKey {
                     key: [8; 32],
                     not_after: 1_700_000_000,
                     sig: [9; 64],

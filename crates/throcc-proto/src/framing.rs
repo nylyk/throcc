@@ -79,7 +79,7 @@ mod tests {
     fn refuses_to_encode_oversized_frames() {
         let message = ClientMessage::Request {
             id: 1,
-            req: Request::SetAvatar(vec![0; MAX_FRAME_BYTES]),
+            request: Request::UploadAvatar(vec![0; MAX_FRAME_BYTES]),
         };
         assert!(matches!(encode(&message), Err(FrameError::TooLarge(_))));
     }
@@ -88,7 +88,7 @@ mod tests {
     fn rejects_trailing_bytes() {
         let mut frame = encode(&ClientMessage::Request {
             id: 1,
-            req: Request::ListUsers,
+            request: Request::ListUsers,
         })
         .unwrap();
         frame.push(0);
@@ -115,7 +115,7 @@ mod tests {
         fn watching_round_trips(id in any::<u32>(), ids in proptest::collection::vec(any::<u32>(), 0..16)) {
             let message = ClientMessage::Request {
                 id,
-                req: Request::SetWatching(ids.into_iter().map(MediaId).collect()),
+                request: Request::SetWatched(ids.into_iter().map(MediaId).collect()),
             };
             let frame = encode(&message).unwrap();
             let (body, rest) = split(&frame).unwrap().unwrap();

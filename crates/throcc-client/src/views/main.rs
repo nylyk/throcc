@@ -11,7 +11,7 @@ use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, Sizable, Size};
-use throcc_client_core::client::Command;
+use throcc_client_core::client::UiCommand;
 use throcc_client_core::state::{Person, State, share_label};
 use throcc_proto::ids::{RoomId, UserId};
 
@@ -310,9 +310,9 @@ fn sidebar(
                     .child(
                         toggle_icon("profile-mic", "mic", "mic-off", !mic, "Mute")
                             .tooltip_with_action("Mute", &ToggleMic, None)
-                            .on_click(
-                                cx.listener(move |app, _, _, _| app.command(Command::SetMic(!mic))),
-                            ),
+                            .on_click(cx.listener(move |app, _, _, _| {
+                                app.command(UiCommand::SetMic(!mic))
+                            })),
                     )
                     .child(
                         toggle_icon(
@@ -324,7 +324,7 @@ fn sidebar(
                         )
                         .tooltip_with_action("Deafen", &ToggleDeafen, None)
                         .on_click(cx.listener(move |app, _, _, _| {
-                            app.command(Command::SetDeafened(!deafened))
+                            app.command(UiCommand::SetDeafened(!deafened))
                         })),
                     ),
             ),
@@ -354,7 +354,7 @@ fn with_room_menu(
                         .icon(icon("phone-off"))
                         .on_click(move |_, _, cx| {
                             leave
-                                .update(cx, |app, _| app.command(Command::Join(None)))
+                                .update(cx, |app, _| app.command(UiCommand::Join(None)))
                                 .ok();
                         }),
                 )
@@ -577,7 +577,7 @@ fn room(
                 .px_0()
                 .on_click(cx.listener(move |app, _, _, cx| {
                     if sharing {
-                        app.command(Command::StopShare);
+                        app.command(UiCommand::StopShare);
                         cx.notify();
                     } else {
                         app.set_dialog(Some(Dialog::Share), cx);
@@ -593,7 +593,7 @@ fn room(
                 .w(theme::TOUCH)
                 .h(theme::TOUCH)
                 .px_0()
-                .on_click(cx.listener(|app, _, _, _| app.command(Command::Join(None)))),
+                .on_click(cx.listener(|app, _, _, _| app.command(UiCommand::Join(None)))),
         );
 
     let focus = app

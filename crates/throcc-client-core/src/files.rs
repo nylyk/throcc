@@ -62,7 +62,7 @@ mod tests {
     #[test]
     fn a_replaced_file_is_private_and_leaves_nothing_behind() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("enc_key");
+        let path = dir.path().join("encryption_key");
         fs::write(&path, b"old").unwrap();
         replace_file(&path, b"new").unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"new");

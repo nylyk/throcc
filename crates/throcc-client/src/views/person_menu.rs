@@ -4,13 +4,13 @@ use gpui::{
 };
 use gpui_component::Icon;
 use gpui_component::slider::Slider;
-use throcc_client_core::client::Command;
+use throcc_client_core::client::UiCommand;
 use throcc_client_core::state::{Person, Sound};
 use throcc_proto::ids::UserId;
 use throcc_proto::permissions;
 
 use super::common::{CONTROLS_LINGER, Typeset, gain_to_loudness, icon, mono, section, toggle_icon};
-use crate::app::{Dialog, PlaybackControl, Screen, SettingsPage, ThroccApp};
+use crate::app::{Dialog, Screen, SettingsPage, SoundLevelControl, ThroccApp};
 use crate::theme;
 
 /// The person menu at the pointer, over a backdrop that closes it, if it is open in `window`.
@@ -124,12 +124,12 @@ pub fn render(
 fn playback(
     label: &'static str,
     sound: Sound,
-    control: &PlaybackControl,
+    control: &SoundLevelControl,
     icons: (&'static str, &'static str),
     cx: &mut Context<ThroccApp>,
 ) -> Div {
-    let muted = control.playback.muted;
-    let percent = gain_to_loudness(control.playback.volume) * 100.;
+    let muted = control.level.muted;
+    let percent = gain_to_loudness(control.level.volume) * 100.;
     let toggle_id = match sound {
         Sound::Voice => "person-menu-voice-mute",
         Sound::Share => "person-menu-share-mute",
@@ -249,7 +249,7 @@ fn moderation(
                     cx.listener(move |app, _, _, cx| {
                         app.close_person_menu(cx);
                         if let Some(room) = kick_room {
-                            app.command(Command::KickFromRoom { user, room });
+                            app.command(UiCommand::KickFromRoom { user, room });
                         }
                     }),
                 )

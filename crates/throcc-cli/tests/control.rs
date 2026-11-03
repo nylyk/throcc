@@ -8,7 +8,7 @@ use throcc_crypto::identity::IdentityKey;
 use throcc_proto::framing;
 use throcc_proto::ids::{Epoch, Hash, Role, UserId};
 use throcc_proto::messages::{
-    AuthResult, Hello, PROTOCOL, Placed, Request, Response, ServerHello, ServerMessage,
+    AuthResult, ClientHello, PROTOCOL, Placement, Request, Response, ServerHello, ServerMessage,
     ServerProfile, Welcome,
 };
 use throcc_proto::transport::{IDLE_TIMEOUT, close};
@@ -30,11 +30,12 @@ async fn concurrent_requests_match_by_id() {
             tasks.spawn(async move {
                 let bytes = vec![who, i];
                 let Response::AvatarHash(hash) =
-                    client.request(Request::SetAvatar(bytes.clone())).await
+                    client.request(Request::UploadAvatar(bytes.clone())).await
                 else {
                     panic!("expected a hash");
                 };
-                let Response::Avatar(back) = client.request(Request::GetAvatar(hash)).await else {
+                let Response::Avatar(back) = client.request(Request::FetchAvatar(hash)).await
+                else {
                     panic!("expected an avatar");
                 };
                 assert_eq!(back, bytes);
@@ -44,7 +45,7 @@ async fn concurrent_requests_match_by_id() {
     while let Some(result) = tasks.join_next().await {
         result.unwrap();
     }
-    let missing = alice.request(Request::GetAvatar(Hash([0; 32]))).await;
+    let missing = alice.request(Request::FetchAvatar(Hash([0; 32]))).await;
     assert!(matches!(missing, Response::Err { .. }));
 }
 
@@ -83,13 +84,13 @@ async fn unknown_reply_id_closes_the_connection() {
         send.write_all(&framing::encode(&hello).unwrap())
             .await
             .unwrap();
-        let _: Hello = read_message(&mut recv).await;
+        let _: ClientHello = read_message(&mut recv).await;
         let welcome = Welcome {
             me: UserId(1),
             role: Role::User,
             rooms: vec![],
-            presence: vec![],
-            placed: Placed {
+            online: vec![],
+            placement: Placement {
                 room: None,
                 epoch: Epoch(0),
                 tracks: None,
@@ -103,7 +104,7 @@ async fn unknown_reply_id_closes_the_connection() {
             .unwrap();
         let stray = ServerMessage::Response {
             id: 999,
-            res: Response::Ok,
+            response: Response::Ok,
         };
         send.write_all(&framing::encode(&stray).unwrap())
             .await

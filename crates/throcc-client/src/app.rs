@@ -13,7 +13,9 @@ use gpui_component::slider::{SliderEvent, SliderState};
 use gpui_component::{Root, WindowExt};
 use throcc_client_core::account::SignInError;
 use throcc_client_core::avatars;
-use throcc_client_core::client::{Client, ClientApi, ClientOptions, Command, Event, MockClient};
+use throcc_client_core::client::{
+    Client, ClientApi, ClientOptions, MockClient, UiCommand, UiEvent,
+};
 use throcc_client_core::keystore::{self, Keystore, StartedOver};
 use throcc_client_core::media::audio::{Transmit, VoiceSettings};
 use throcc_client_core::media::cues::Cue;
@@ -21,7 +23,7 @@ use throcc_client_core::media::devices;
 use throcc_client_core::server_look::ServerLook;
 use throcc_client_core::settings::Settings;
 use throcc_client_core::state::{
-    ConnectionStatus, MAX_VOLUME, Playback, ServerView, ShareChoice, Sound, State,
+    ConnectionStatus, MAX_VOLUME, ServerView, ShareChoice, Sound, SoundLevel, State,
 };
 use throcc_client_core::verified::VerifiedStore;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
@@ -194,12 +196,12 @@ pub struct PersonMenu {
     /// The window the menu opened in, the only one that shows it.
     pub window: gpui::AnyWindowHandle,
     pub position: gpui::Point<gpui::Pixels>,
-    pub voice: PlaybackControl,
-    pub share: PlaybackControl,
+    pub voice: SoundLevelControl,
+    pub share: SoundLevelControl,
 }
 
 impl PersonMenu {
-    fn control_mut(&mut self, sound: Sound) -> &mut PlaybackControl {
+    fn control_mut(&mut self, sound: Sound) -> &mut SoundLevelControl {
         match sound {
             Sound::Voice => &mut self.voice,
             Sound::Share => &mut self.share,
@@ -208,8 +210,8 @@ impl PersonMenu {
 }
 
 /// One of someone's sounds as the person menu last set it, with its volume slider.
-pub struct PlaybackControl {
-    pub playback: Playback,
+pub struct SoundLevelControl {
+    pub level: SoundLevel,
     pub slider: Entity<SliderState>,
     _changes: Subscription,
 }
@@ -663,7 +665,7 @@ impl ThroccApp {
         }
     }
 
-    pub fn command(&self, command: Command) {
+    pub fn command(&self, command: UiCommand) {
         if let Some(client) = &self.client {
             client.command(command);
         }
@@ -698,9 +700,9 @@ impl ThroccApp {
         }));
     }
 
-    fn on_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_event(&mut self, event: UiEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
-            Event::State(state) => {
+            UiEvent::State(state) => {
                 self.state = state;
                 if let Some(Dialog::RoomPassword { room, .. }) = self.dialog
                     && self.state.current.as_ref().is_some_and(|c| c.room == room)
@@ -719,35 +721,37 @@ impl ThroccApp {
                     self.exit_fullscreen(window, cx);
                 }
             }
-            Event::Invite { code, .. } => self.invite = Some(code),
-            Event::Users(users) => self.users = users,
-            Event::Notice(text) => window.push_notification(Notification::new().message(text), cx),
-            Event::Kicked(reason) => {
+            UiEvent::Invite { code, .. } => self.invite = Some(code),
+            UiEvent::Users(users) => self.users = users,
+            UiEvent::Notice(text) => {
+                window.push_notification(Notification::new().message(text), cx)
+            }
+            UiEvent::RemovedFromServer(reason) => {
                 self.end_session(window, cx);
                 self.join_error = Some(reason);
             }
-            Event::AvatarReady(_) => {}
-            Event::ProfileSaved => {
+            UiEvent::AvatarReady(_) => {}
+            UiEvent::ProfileSaved => {
                 self.profile_form.edit = None;
                 self.profile_form.status = Some(SaveStatus::Saved);
             }
-            Event::ProfileRefused(reason) => {
+            UiEvent::ProfileRefused(reason) => {
                 self.profile_form.edit = None;
                 self.profile_form.status = Some(SaveStatus::Failed(reason));
             }
-            Event::ServerProfileSaved => {
+            UiEvent::ServerProfileSaved => {
                 self.server_form.edit = None;
                 self.server_form.status = Some(SaveStatus::Saved);
             }
-            Event::ServerProfileRefused(reason) => {
+            UiEvent::ServerProfileRefused(reason) => {
                 self.server_form.status = Some(SaveStatus::Failed(reason))
             }
-            Event::PasswordRefused(reason) => {
+            UiEvent::PasswordRefused(reason) => {
                 if let Some(Dialog::RoomPassword { error, .. }) = &mut self.dialog {
                     *error = Some(reason);
                 }
             }
-            Event::LeftServer => self.end_session(window, cx),
+            UiEvent::LeftServer => self.end_session(window, cx),
         }
         self.follow_presented_key();
         cx.notify();
@@ -844,7 +848,7 @@ impl ThroccApp {
             tracing::warn!("could not save who is verified: {e:#}");
             self.verified_problem = Some(format!("Couldn't save who you verified: {e}"));
         }
-        self.command(Command::VerifiedChanged);
+        self.command(UiCommand::VerifiedChanged);
     }
 
     /// Makes the sidebar see-through or solid and keeps the choice for next time.
@@ -923,24 +927,24 @@ impl ThroccApp {
             user,
             window: window.window_handle(),
             position,
-            voice: Self::playback_control(Sound::Voice, playback.voice, cx),
-            share: Self::playback_control(Sound::Share, playback.share, cx),
+            voice: Self::sound_level_control(Sound::Voice, playback.voice, cx),
+            share: Self::sound_level_control(Sound::Share, playback.share, cx),
         });
         cx.notify();
     }
 
-    fn playback_control(
+    fn sound_level_control(
         sound: Sound,
-        playback: Playback,
+        level: SoundLevel,
         cx: &mut Context<Self>,
-    ) -> PlaybackControl {
-        let slider = cx.new(|_| volume_slider(playback.volume));
+    ) -> SoundLevelControl {
+        let slider = cx.new(|_| volume_slider(level.volume));
         let changes = cx.subscribe(&slider, move |app, _, event: &SliderEvent, cx| {
             let volume = slider_gain(event);
             app.change_playback(sound, |p| p.volume = volume, cx);
         });
-        PlaybackControl {
-            playback,
+        SoundLevelControl {
+            level,
             slider,
             _changes: changes,
         }
@@ -950,7 +954,7 @@ impl ThroccApp {
     pub fn change_playback(
         &mut self,
         sound: Sound,
-        change: impl FnOnce(&mut Playback),
+        change: impl FnOnce(&mut SoundLevel),
         cx: &mut Context<Self>,
     ) {
         let Some(menu) = &mut self.person_menu else {
@@ -958,8 +962,8 @@ impl ThroccApp {
         };
         let user = menu.user;
         let control = menu.control_mut(sound);
-        change(&mut control.playback);
-        let command = Command::SetPlayback(user, sound, control.playback);
+        change(&mut control.level);
+        let command = UiCommand::SetSoundLevel(user, sound, control.level);
         self.command(command);
         cx.notify();
     }
@@ -1112,7 +1116,7 @@ impl ThroccApp {
         } else if Some(user) == self.state.me {
             self.preview_self = true;
         } else {
-            self.command(Command::Watch(user));
+            self.command(UiCommand::Watch(user));
         }
         cx.notify();
     }
@@ -1125,7 +1129,7 @@ impl ThroccApp {
         if Some(user) == self.state.me {
             self.preview_self = false;
         } else {
-            self.command(Command::Unwatch(user));
+            self.command(UiCommand::Unwatch(user));
         }
         cx.notify();
     }
@@ -1232,7 +1236,7 @@ impl ThroccApp {
             self.set_dialog(Some(Dialog::RoomPassword { room, error: None }), cx);
             return;
         }
-        self.command(Command::Join(Some(room)));
+        self.command(UiCommand::Join(Some(room)));
     }
 
     pub fn join_with_password(&mut self, cx: &mut Context<Self>) {
@@ -1240,7 +1244,7 @@ impl ThroccApp {
             return;
         };
         if let Ok(Some(password)) = typed_password(&self.room_password, cx) {
-            self.command(Command::JoinWithPassword(room, password));
+            self.command(UiCommand::JoinWithPassword(room, password));
         }
     }
 
@@ -1294,7 +1298,7 @@ impl ThroccApp {
         let Some((Some(name), password)) = self.room_fields(cx) else {
             return;
         };
-        self.command(Command::CreateRoom(name, password));
+        self.command(UiCommand::CreateRoom(name, password));
         self.set_dialog(None, cx);
     }
 
@@ -1309,10 +1313,10 @@ impl ThroccApp {
         if let Some(name) =
             name.filter(|name| self.state.room(room).is_none_or(|r| r.name != *name))
         {
-            self.command(Command::RenameRoom(room, name));
+            self.command(UiCommand::RenameRoom(room, name));
         }
         if password.is_some() {
-            self.command(Command::SetRoomPassword(room, password));
+            self.command(UiCommand::SetRoomPassword(room, password));
         }
         self.set_dialog(None, cx);
     }
@@ -1358,7 +1362,7 @@ impl ThroccApp {
         }
         self.profile_form.outdate_pick();
         self.profile_form.status = Some(status);
-        self.command(Command::SetProfile { name, picture });
+        self.command(UiCommand::SetProfile { name, picture });
         cx.notify();
     }
 
@@ -1386,7 +1390,7 @@ impl ThroccApp {
         }
         self.server_form.outdate_pick();
         self.server_form.status = Some(SaveStatus::Saving);
-        self.command(Command::SetServerProfile { name, picture });
+        self.command(UiCommand::SetServerProfile { name, picture });
         cx.notify();
     }
 
@@ -1418,7 +1422,7 @@ impl ThroccApp {
             Screen::Server(ServerPage::Members)
                 if self.state.role.is_some_and(permissions::can_list_users) =>
             {
-                self.command(Command::ListUsers);
+                self.command(UiCommand::ListUsers);
             }
             _ => {}
         }
@@ -1674,7 +1678,7 @@ impl ThroccApp {
 
     /// Disconnects from the server, keeping our membership.
     fn disconnect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.command(Command::Disconnect);
+        self.command(UiCommand::Disconnect);
         self.end_session(window, cx);
     }
 
@@ -1746,16 +1750,16 @@ impl ThroccApp {
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         let room = RoomId(1);
         let joined = |app: &mut Self| {
-            app.command(Command::Join(Some(room)));
-            app.command(Command::SetMic(true));
-            app.command(Command::Watch(UserId(4)));
+            app.command(UiCommand::Join(Some(room)));
+            app.command(UiCommand::SetMic(true));
+            app.command(UiCommand::Watch(UserId(4)));
         };
         let offline = |app: &mut Self| {
             app.client = None;
             app.screen = Screen::Join;
         };
         let with_picture = |app: &mut Self| {
-            app.command(Command::SetProfile {
+            app.command(UiCommand::SetProfile {
                 name: None,
                 picture: Some(Some(crate::avatar::sample())),
             });
@@ -1806,13 +1810,13 @@ impl ThroccApp {
             "room" => joined(self),
             "unwatched" => {
                 joined(self);
-                self.command(Command::Unwatch(UserId(4)));
+                self.command(UiCommand::Unwatch(UserId(4)));
             }
-            "alone" => self.command(Command::Join(Some(RoomId(3)))),
+            "alone" => self.command(UiCommand::Join(Some(RoomId(3)))),
             "emptylobby" => {
                 if let Some(client) = &self.client {
                     for room in client.state().rooms.iter() {
-                        self.command(Command::DeleteRoom(room.id));
+                        self.command(UiCommand::DeleteRoom(room.id));
                     }
                 }
             }
@@ -1900,11 +1904,11 @@ impl ThroccApp {
             }
             "members" => {
                 self.screen = Screen::Server(ServerPage::Members);
-                self.command(Command::CreateInvite);
+                self.command(UiCommand::CreateInvite);
             }
             "invites" => {
                 self.screen = Screen::Server(ServerPage::Members);
-                self.command(Command::CreateInvite);
+                self.command(UiCommand::CreateInvite);
                 after_a_moment(cx, |app, _| {
                     Arc::make_mut(&mut app.state).role = Some(Role::User)
                 });
@@ -1961,7 +1965,7 @@ impl ThroccApp {
                             if let Some(down) =
                                 app.push_to_talk.as_ref().and_then(|(key, _)| key.poll())
                             {
-                                app.command(Command::PushToTalk(down));
+                                app.command(UiCommand::PushToTalk(down));
                             }
                         });
                         if alive.is_err() {
@@ -1999,13 +2003,13 @@ impl ThroccApp {
         {
             tracing::warn!("could not save the cue volume: {e:#}");
         }
-        self.command(Command::PlayCue(Cue::Join));
+        self.command(UiCommand::PlayCue(Cue::Join));
     }
 
     pub fn stop_mic_test(&mut self) {
         if self.mic_test {
             self.mic_test = false;
-            self.command(Command::MicTest(false));
+            self.command(UiCommand::MicTest(false));
         }
     }
 
@@ -2015,11 +2019,11 @@ impl ThroccApp {
     }
 
     fn toggle_mic(&mut self, _: &ToggleMic, _: &mut Window, _: &mut Context<Self>) {
-        self.command(Command::SetMic(!self.state.mic));
+        self.command(UiCommand::SetMic(!self.state.mic));
     }
 
     fn toggle_deafen(&mut self, _: &ToggleDeafen, _: &mut Window, _: &mut Context<Self>) {
-        self.command(Command::SetDeafened(!self.state.deafened));
+        self.command(UiCommand::SetDeafened(!self.state.deafened));
     }
 
     fn close_dialog(&mut self, _: &CloseDialog, window: &mut Window, cx: &mut Context<Self>) {
@@ -2074,12 +2078,12 @@ impl Render for ThroccApp {
                     && !event.is_held
                     && app.push_to_talk_ready(window)
                 {
-                    app.command(Command::PushToTalk(true));
+                    app.command(UiCommand::PushToTalk(true));
                 }
             }))
             .on_key_up(cx.listener(|app, event: &gpui::KeyUpEvent, window, _| {
                 if event.keystroke.key == "space" && app.push_to_talk_ready(window) {
-                    app.command(Command::PushToTalk(false));
+                    app.command(UiCommand::PushToTalk(false));
                 }
             }))
             .size_full()

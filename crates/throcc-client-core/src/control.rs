@@ -10,8 +10,8 @@ use throcc_proto::framing::{self, FrameError, LEN_BYTES};
 use throcc_proto::ids::RoomId;
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
-    AuthError, AuthResult, ClientMessage, Event, Hello, PROTOCOL, PakeFinish, PakeStep, Request,
-    Response, ServerHello, ServerMessage, Welcome,
+    AuthError, AuthResult, ClientHello, ClientMessage, Event, PROTOCOL, PakeFinish, PakeStep,
+    Request, Response, ServerHello, ServerMessage, Welcome,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{mpsc, oneshot};
@@ -54,7 +54,7 @@ pub enum LinkError {
 }
 
 /// An authenticated control stream.
-pub struct Link {
+pub struct ControlLink {
     pub welcome: Welcome,
     pub connected: Connected,
     pub requester: Requester,
@@ -66,11 +66,11 @@ pub async fn login(
     connected: Connected,
     identity: &IdentityKey,
     want_room: Option<RoomId>,
-) -> Result<Link, LoginError> {
+) -> Result<ControlLink, LoginError> {
     let (mut send, recv, hello) = greet(&connected).await?;
     let client_nonce: [u8; 32] = random();
     let message = identity::auth_message(&hello.nonce, &client_nonce, &connected.exporter);
-    let auth = Hello::Auth {
+    let auth = ClientHello::Auth {
         pubkey: identity.public(),
         client_nonce,
         want_room,
@@ -85,12 +85,12 @@ pub async fn enroll(
     connected: Connected,
     identity: &IdentityKey,
     code: &InviteCode,
-) -> Result<Link, LoginError> {
+) -> Result<ControlLink, LoginError> {
     let (mut send, mut recv, hello) = greet(&connected).await?;
     let client_nonce: [u8; 32] = random();
     let pubkey = identity.public();
     let (pake, pake_a) = ClientPake::start(&code.id, &code.secret);
-    let enroll = Hello::Enroll {
+    let enroll = ClientHello::Enroll {
         code_id: code.id.clone(),
         pubkey,
         client_nonce,
@@ -151,7 +151,7 @@ async fn finish_login(
     connected: Connected,
     send: quinn::SendStream,
     mut recv: quinn::RecvStream,
-) -> Result<Link, LoginError> {
+) -> Result<ControlLink, LoginError> {
     let result: AuthResult = read(&mut recv).await?;
     let welcome = match result {
         AuthResult::Ok(welcome) => *welcome,
@@ -161,7 +161,7 @@ async fn finish_login(
         }
     };
     let (requester, events) = spawn_link(connected.connection.clone(), send, recv);
-    Ok(Link {
+    Ok(ControlLink {
         welcome,
         connected,
         requester,
@@ -256,7 +256,7 @@ pub fn refusal(response: Response) -> String {
     let kind = match response {
         Response::Err { message, .. } => return message,
         Response::Ok => "Ok",
-        Response::Placed(_) => "Placed",
+        Response::Placement(_) => "Placement",
         Response::Invite { .. } => "Invite",
         Response::Users(_) => "Users",
         Response::AvatarHash(_) => "AvatarHash",
@@ -283,7 +283,7 @@ impl Requester {
                 .close(close::PROTOCOL_ERROR.into(), b"request ids exhausted");
         }
         let id = registered?;
-        let frame = match framing::encode(&ClientMessage::Request { id, req }) {
+        let frame = match framing::encode(&ClientMessage::Request { id, request: req }) {
             Ok(frame) => frame,
             Err(e) => {
                 lock(&self.pending).waiting.remove(&id);
@@ -336,7 +336,7 @@ fn spawn_link(
                 }
             };
             match message {
-                ServerMessage::Response { id, res } => {
+                ServerMessage::Response { id, response: res } => {
                     let waiter = lock(&reader_pending).waiting.remove(&id);
                     match waiter {
                         Some(waiter) => {

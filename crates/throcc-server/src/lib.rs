@@ -79,7 +79,7 @@ impl Config {
 }
 
 /// State shared by every connection.
-pub struct Shared {
+pub struct ServerState {
     pub fingerprint: Fingerprint,
     pub sfu: Arc<Sfu>,
     hub: Mutex<Hub>,
@@ -92,7 +92,7 @@ pub struct Shared {
     password_work: Semaphore,
 }
 
-impl Shared {
+impl ServerState {
     /// Locks the hub. Never hold the guard across an `.await`.
     pub fn hub(&self) -> MutexGuard<'_, Hub> {
         lock(&self.hub)
@@ -105,7 +105,7 @@ impl Shared {
 
 pub struct Server {
     endpoint: quinn::Endpoint,
-    shared: Arc<Shared>,
+    shared: Arc<ServerState>,
 }
 
 impl Server {
@@ -127,7 +127,7 @@ impl Server {
         )?;
         let endpoint = quinn::Endpoint::server(server_config, config.listen)
             .with_context(|| format!("binding {}", config.listen))?;
-        let shared = Arc::new(Shared {
+        let shared = Arc::new(ServerState {
             fingerprint: identity.fingerprint,
             sfu,
             hub: Mutex::new(hub),
@@ -150,7 +150,7 @@ impl Server {
         self.shared.fingerprint
     }
 
-    pub fn shared(&self) -> Arc<Shared> {
+    pub fn shared(&self) -> Arc<ServerState> {
         self.shared.clone()
     }
 
@@ -279,7 +279,7 @@ fn not_the_servers_user(file: &Path, owner: u32, data_dir: &Path) -> anyhow::Err
     )
 }
 
-async fn handle(shared: Arc<Shared>, connection: quinn::Connection, unauthenticated: Pass) {
+async fn handle(shared: Arc<ServerState>, connection: quinn::Connection, unauthenticated: Pass) {
     let peer = connection.remote_address();
     if let Err(e) = check_datagrams(connection.max_datagram_size()) {
         debug!(%peer, "refusing connection: {e}");

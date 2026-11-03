@@ -6,7 +6,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use throcc_proto::messages::{Recovery, Share, ShareConfig};
+use throcc_proto::messages::{Recovery, ShareConfig, ShareTracks};
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 
@@ -142,7 +142,7 @@ impl ShareSender {
     /// Encodes and sends what `capture` delivers, opened with [`CaptureConfig::for_share`].
     pub fn start(
         engine: Arc<MediaEngine>,
-        tracks: Share,
+        tracks: ShareTracks,
         wanted: ShareConfig,
         mut capture: Box<dyn Capture>,
     ) -> Result<Self, ShareError> {
@@ -246,7 +246,7 @@ struct Sending {
     encoder: Encoder,
     audio_encoder: Option<ShareAudioEncoder>,
     engine: Arc<MediaEngine>,
-    tracks: Share,
+    tracks: ShareTracks,
     frame: VideoFrame,
     /// Whether `frame` holds a captured picture that has not been sent yet.
     unsent: bool,

@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use throcc_client_core::account;
 use throcc_client_core::call::Call;
-use throcc_client_core::control::{Link, Requester};
+use throcc_client_core::control::{ControlLink, Requester};
 use throcc_client_core::keystore::{IdentityMissing, Keystore, StartedOver};
 use throcc_proto::ids::RoomId;
 use throcc_proto::invite::InviteCode;
@@ -166,7 +166,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Connect { address } => {
             let link = sign_in(&keystore, &address).await?;
-            print_rooms(&link.welcome.rooms, &link.welcome.presence);
+            print_rooms(&link.welcome.rooms, &link.welcome.online);
             interactive(link).await?;
         }
         Command::Rooms { address } => one_shot(&keystore, &address, "rooms").await?,
@@ -258,9 +258,7 @@ fn voice_call(
     input: Option<String>,
     output: Option<String>,
 ) -> Result<()> {
-    use throcc_client_core::client::{
-        Client, ClientApi, ClientOptions, Command as ClientCommand, Event as ClientEvent,
-    };
+    use throcc_client_core::client::{Client, ClientApi, ClientOptions, UiCommand, UiEvent};
     use throcc_client_core::verified::VerifiedStore;
     let options = ClientOptions {
         audio,
@@ -277,13 +275,13 @@ fn voice_call(
     let rooms = state.rooms.iter().map(|r| (r.id, r.name.as_str()));
     let room = find_room(rooms, room)?;
     let mut events = client.events();
-    client.command(ClientCommand::Join(Some(room)));
-    client.command(ClientCommand::SetMic(!muted));
+    client.command(UiCommand::Join(Some(room)));
+    client.command(UiCommand::SetMic(!muted));
     println!("in the call; press Ctrl-C to leave");
     let mut speaking = std::collections::BTreeSet::new();
     loop {
         match events.blocking_recv() {
-            Ok(ClientEvent::State(state)) => {
+            Ok(UiEvent::State(state)) => {
                 let now: std::collections::BTreeSet<String> = state
                     .people
                     .values()
@@ -296,8 +294,8 @@ fn voice_call(
                     speaking = now;
                 }
             }
-            Ok(ClientEvent::Notice(notice)) => println!("* {}", shown(&notice)),
-            Ok(ClientEvent::Kicked(reason)) => bail!("disconnected: {reason}"),
+            Ok(UiEvent::Notice(notice)) => println!("* {}", shown(&notice)),
+            Ok(UiEvent::RemovedFromServer(reason)) => bail!("disconnected: {reason}"),
             Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
             Err(_) => return Ok(()),
         }
@@ -368,7 +366,7 @@ fn given_code(arg: Option<String>, env: Option<String>) -> Option<String> {
     }
 }
 
-async fn sign_in(keystore: &Keystore, address: &str) -> Result<Link> {
+async fn sign_in(keystore: &Keystore, address: &str) -> Result<ControlLink> {
     let link = account::sign_in(keystore, address, None)
         .await
         .inspect_err(|e| {
@@ -395,13 +393,13 @@ async fn one_shot(keystore: &Keystore, address: &str, command: &str) -> Result<(
     result
 }
 
-async fn interactive(mut link: Link) -> Result<()> {
+async fn interactive(mut link: ControlLink) -> Result<()> {
     let result = read_commands(&mut link).await;
     link.connected.close().await;
     result
 }
 
-async fn read_commands(link: &mut Link) -> Result<()> {
+async fn read_commands(link: &mut ControlLink) -> Result<()> {
     println!(
         "commands: rooms, join <room>, leave, invite, users, create-room <name>, name <name>, quit"
     );
@@ -422,7 +420,7 @@ async fn read_commands(link: &mut Link) -> Result<()> {
                 let Some(event) = event else { bail!("disconnected") };
                 print_event(&event);
                 follow(&mut link.welcome, &event);
-                if let Event::Kicked { .. } = event {
+                if let Event::RemovedFromServer { .. } = event {
                     return Ok(());
                 }
             }
@@ -434,17 +432,14 @@ async fn run_command(requester: &Requester, welcome: &Welcome, line: &str) -> Re
     let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
     let request = match word {
         "rooms" => {
-            print_rooms(&welcome.rooms, &welcome.presence);
+            print_rooms(&welcome.rooms, &welcome.online);
             return Ok(());
         }
-        "join" => Request::SetRoom {
-            room: Some(find_room(room_names(&welcome.rooms), rest)?),
+        "join" => Request::JoinRoom {
+            room: find_room(room_names(&welcome.rooms), rest)?,
             password: None,
         },
-        "leave" => Request::SetRoom {
-            room: None,
-            password: None,
-        },
+        "leave" => Request::LeaveRoom,
         "invite" => Request::CreateInvite,
         "users" => Request::ListUsers,
         "create-room" => Request::CreateRoom {
@@ -460,7 +455,7 @@ async fn run_command(requester: &Requester, welcome: &Welcome, line: &str) -> Re
     match requester.request(request).await? {
         Response::Ok => println!("ok"),
         Response::Err { code, message } => bail!("{message} ({code:?})"),
-        Response::Placed(placed) => match placed.room {
+        Response::Placement(placed) => match placed.room {
             Some(room) => println!(
                 "in room {} at epoch {}, {} peers, mic track {}",
                 room.0,
@@ -533,19 +528,19 @@ fn print_rooms(rooms: &[Room], presence: &[Presence]) {
 fn follow(welcome: &mut Welcome, event: &Event) {
     match event {
         Event::PresenceChanged(p) => {
-            match welcome.presence.iter_mut().find(|old| old.user == p.user) {
+            match welcome.online.iter_mut().find(|old| old.user == p.user) {
                 Some(old) => *old = p.clone(),
-                None => welcome.presence.push(p.clone()),
+                None => welcome.online.push(p.clone()),
             }
         }
-        Event::PresenceEnded(user) => welcome.presence.retain(|p| p.user != *user),
+        Event::WentOffline(user) => welcome.online.retain(|p| p.user != *user),
         Event::RoomCreated(room) => welcome.rooms.push(room.clone()),
         Event::RoomRenamed { room, name } => {
             if let Some(r) = welcome.rooms.iter_mut().find(|r| r.id == *room) {
                 r.name = name.clone();
             }
         }
-        Event::RoomLocked { room, locked } => {
+        Event::RoomLockChanged { room, locked } => {
             if let Some(r) = welcome.rooms.iter_mut().find(|r| r.id == *room) {
                 r.locked = *locked;
             }
@@ -565,7 +560,7 @@ fn print_event(event: &Event) {
             p.deafened,
             p.sharing
         ),
-        Event::PresenceEnded(user) => println!("* user {} left", user.0),
+        Event::WentOffline(user) => println!("* user {} left", user.0),
         Event::RoomCreated(room) => {
             println!("* room {} created: {}", room.id.0, shown(&room.name))
         }
@@ -573,8 +568,8 @@ fn print_event(event: &Event) {
             println!("* room {} renamed to {}", room.0, shown(name))
         }
         Event::RoomDeleted(room) => println!("* room {} deleted", room.0),
-        Event::RoomLocked { room, locked } => println!("* room {} locked: {locked}", room.0),
-        Event::RoomState { room, epoch, peers } => {
+        Event::RoomLockChanged { room, locked } => println!("* room {} locked: {locked}", room.0),
+        Event::PeersChanged { room, epoch, peers } => {
             println!(
                 "* room {} is at epoch {} with {} peers",
                 room.0,
@@ -582,13 +577,13 @@ fn print_event(event: &Event) {
                 peers.len()
             )
         }
-        Event::InviteBurned { code_id } => {
+        Event::InviteSpent { code_id } => {
             println!(
                 "* invite {}-… was burned after 3 wrong tries",
                 shown(code_id)
             )
         }
-        Event::Kicked { reason } => println!("* disconnected: {}", shown(reason)),
+        Event::RemovedFromServer { reason } => println!("* disconnected: {}", shown(reason)),
         other => println!("* {other:?}"),
     }
 }
@@ -673,15 +668,15 @@ fn moves_terminal(c: char) -> bool {
 mod tests {
     use super::*;
     use throcc_proto::ids::{Epoch, Role, UserId};
-    use throcc_proto::messages::{Placed, ServerProfile};
+    use throcc_proto::messages::{Placement, ServerProfile};
 
     fn welcome() -> Welcome {
         Welcome {
             me: UserId(1),
             role: Role::Admin,
             rooms: vec![],
-            presence: vec![],
-            placed: Placed {
+            online: vec![],
+            placement: Placement {
                 room: None,
                 epoch: Epoch(0),
                 tracks: None,
@@ -781,9 +776,9 @@ mod tests {
             &mut welcome,
             &Event::PresenceChanged(presence(2, Some(RoomId(3)))),
         );
-        assert_eq!(welcome.presence, [presence(2, Some(RoomId(3)))]);
+        assert_eq!(welcome.online, [presence(2, Some(RoomId(3)))]);
 
-        follow(&mut welcome, &Event::PresenceEnded(UserId(2)));
-        assert!(welcome.presence.is_empty());
+        follow(&mut welcome, &Event::WentOffline(UserId(2)));
+        assert!(welcome.online.is_empty());
     }
 }

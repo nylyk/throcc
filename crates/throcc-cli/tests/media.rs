@@ -103,10 +103,10 @@ async fn watching_a_share_asks_its_sender_for_an_idr() {
     let server = start_server();
     let (mut alice, bob, _) = room_with_two(&server).await;
     let video_id = first_share(&bob, &alice).await.video;
-    let watching = Request::SetWatching(vec![video_id]);
+    let watching = Request::SetWatched(vec![video_id]);
     assert_eq!(bob.request(watching).await.unwrap(), Response::Ok);
     let wanted = server_event(&mut alice, |e| match e {
-        Event::KeyframeWanted { media_id, kind } => Some((media_id, kind)),
+        Event::KeyframeRequested { media_id, kind } => Some((media_id, kind)),
         _ => None,
     })
     .await;
@@ -118,7 +118,7 @@ async fn the_room_learns_who_watches_a_share() {
     let server = start_server();
     let (mut alice, bob, room) = room_with_two(&server).await;
     let video = first_share(&bob, &alice).await.video;
-    let watching = Request::SetWatching(vec![video]);
+    let watching = Request::SetWatched(vec![video]);
     assert_eq!(bob.request(watching).await.unwrap(), Response::Ok);
     assert_eq!(audience(&mut alice, video).await, vec![bob.me()]);
 
@@ -127,7 +127,7 @@ async fn the_room_learns_who_watches_a_share() {
     let (placed, _) = carol.join(Some(room), None).await.unwrap();
     let expected = Audience {
         video,
-        watchers: vec![bob.me()],
+        receivers: vec![bob.me()],
     };
     assert_eq!(placed.audiences.shares, vec![expected]);
 
@@ -140,7 +140,7 @@ async fn hearing_a_share_counts_as_watching_it() {
     let server = start_server();
     let (mut alice, bob, _) = room_with_two(&server).await;
     let share = first_share(&bob, &alice).await;
-    let listening = Request::SetWatching(vec![share.audio]);
+    let listening = Request::SetWatched(vec![share.audio]);
     assert_eq!(bob.request(listening).await.unwrap(), Response::Ok);
     assert_eq!(audience(&mut alice, share.video).await, vec![bob.me()]);
 
@@ -168,7 +168,7 @@ async fn nobody_outside_the_room_learns_who_watches() {
     let mut dave = Call::start(dave.link, &dave.keystore).unwrap();
 
     let video = first_share(&bob, &alice).await.video;
-    let watching = Request::SetWatching(vec![video]);
+    let watching = Request::SetWatched(vec![video]);
     assert_eq!(bob.request(watching).await.unwrap(), Response::Ok);
     assert_eq!(audience(&mut alice, video).await, vec![bob.me()]);
 
@@ -206,7 +206,7 @@ async fn audience(call: &mut Call, video: MediaId) -> Vec<UserId> {
                 .shares
                 .into_iter()
                 .find(|a| a.video == video)
-                .map_or_else(Vec::new, |a| a.watchers),
+                .map_or_else(Vec::new, |a| a.receivers),
         ),
         _ => None,
     })
@@ -367,7 +367,7 @@ async fn a_member_flooding_their_mic_is_held_to_its_allowance_and_stays_connecte
     // The server reports link stats every 2 s, so a second more without one means it is done.
     let quiet = Duration::from_secs(3);
     while let Ok(Some(event)) = tokio::time::timeout(quiet, bob.link.events.recv()).await {
-        if let Event::LinkStats { tracks } = event {
+        if let Event::ReceiveStats { tracks } = event {
             forwarded += tracks
                 .iter()
                 .filter(|t| t.media_id == mic)

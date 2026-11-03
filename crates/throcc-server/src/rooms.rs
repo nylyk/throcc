@@ -9,8 +9,8 @@ use throcc_proto::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
     Audience, Audiences, ErrorCode, Event, MAX_AVATAR_BYTES, MAX_NAME_CHARS, MAX_PASSWORD_CHARS,
-    MediaState, Placed, Presence, Recovery, Request, Response, Room, RoomPeer, ServerMessage,
-    ServerProfile, Share, SignedEncKey, Tracks, Welcome, valid_name, valid_password,
+    MediaState, Peer, Placement, Presence, Recovery, Request, Response, Room, ServerMessage,
+    ServerProfile, ShareTracks, SignedEncryptionKey, Tracks, Welcome, valid_name, valid_password,
 };
 use throcc_proto::permissions;
 use throcc_proto::transport::close;
@@ -29,9 +29,9 @@ const INVITE_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 const PROFILE_INTERVAL: Duration = Duration::from_secs(10);
 const TRACKS_PER_MEMBERSHIP: u32 = 3;
 const MINT_ATTEMPTS: usize = 64;
-const MAX_WATCHING: usize = 16;
+const MAX_WATCHED: usize = 16;
 /// Clients rotate encryption keys every 30 days; a day of slack covers clock skew.
-const MAX_ENC_KEY_LIFETIME: Duration = Duration::from_secs(31 * 24 * 60 * 60);
+const MAX_ENCRYPTION_KEY_LIFETIME: Duration = Duration::from_secs(31 * 24 * 60 * 60);
 const MAX_WRAPPED_BYTES: usize = 256;
 /// Welcome lists every room, and must stay under the frame cap.
 pub const MAX_ROOMS: usize = 500;
@@ -61,8 +61,8 @@ const ROOM_CHANGES_PER_SECOND: f64 = 0.5;
 const REJOIN_BURST: f64 = 10.0;
 const REJOINS_PER_SECOND: f64 = 0.1;
 /// A new encryption key re-keys the user's room. Clients replace theirs once a month.
-const ENC_KEY_CHANGE_BURST: f64 = 3.0;
-const ENC_KEY_CHANGES_PER_SECOND: f64 = 1.0 / 60.0;
+const ENCRYPTION_KEY_CHANGE_BURST: f64 = 3.0;
+const ENCRYPTION_KEY_CHANGES_PER_SECOND: f64 = 1.0 / 60.0;
 /// Starting or changing a share sends the room's state to every member. Stopping is free.
 const SHARE_CHANGE_BURST: f64 = 5.0;
 const SHARE_CHANGES_PER_SECOND: f64 = 1.0;
@@ -160,11 +160,11 @@ pub enum PasswordDone {
 }
 
 /// What the session writer sends next.
-pub enum Outgoing {
+pub enum Outbound {
     Message(ServerMessage),
     /// A message that keeps its share of the connection's queue budget until it is written.
     Budgeted(ServerMessage, OwnedSemaphorePermit),
-    /// Sends `Kicked`, finishes the stream once the client has read it, then closes.
+    /// Sends `RemovedFromServer`, finishes the stream once the client has read it, then closes.
     Kick {
         reason: String,
         code: u32,
@@ -172,15 +172,15 @@ pub enum Outgoing {
 }
 
 /// What the hub needs to reach one live connection.
-pub struct Link {
-    pub outgoing: mpsc::Sender<Outgoing>,
+pub struct ConnectionHandle {
+    pub outgoing: mpsc::Sender<Outbound>,
     pub connection: quinn::Connection,
     pub egress: EgressHandle,
 }
 
-impl Link {
+impl ConnectionHandle {
     fn kick(&self, reason: &str, code: u32) {
-        let kick = Outgoing::Kick {
+        let kick = Outbound::Kick {
             reason: reason.to_owned(),
             code,
         };
@@ -199,7 +199,7 @@ impl Link {
 
 struct Session {
     conn_id: u64,
-    link: Link,
+    handle: ConnectionHandle,
     row: UserRow,
     room: Option<RoomId>,
     tracks: Option<Tracks>,
@@ -236,7 +236,7 @@ pub struct Hub {
     guesses: room_password::Guesses,
     room_changes: Buckets<UserId>,
     rejoins: Buckets<UserId>,
-    enc_key_changes: Buckets<UserId>,
+    encryption_key_changes: Buckets<UserId>,
     share_changes: Buckets<UserId>,
     /// The room each user last moved into themselves, which a reconnect may return them to
     /// without its password.
@@ -279,7 +279,10 @@ impl Hub {
             guesses: room_password::Guesses::default(),
             room_changes: Buckets::new(ROOM_CHANGE_BURST, ROOM_CHANGES_PER_SECOND),
             rejoins: Buckets::new(REJOIN_BURST, REJOINS_PER_SECOND),
-            enc_key_changes: Buckets::new(ENC_KEY_CHANGE_BURST, ENC_KEY_CHANGES_PER_SECOND),
+            encryption_key_changes: Buckets::new(
+                ENCRYPTION_KEY_CHANGE_BURST,
+                ENCRYPTION_KEY_CHANGES_PER_SECOND,
+            ),
             share_changes: Buckets::new(SHARE_CHANGE_BURST, SHARE_CHANGES_PER_SECOND),
             last_joined: HashMap::new(),
             audiences: HashMap::new(),
@@ -293,7 +296,7 @@ impl Hub {
     pub fn connect(
         &mut self,
         row: UserRow,
-        link: Link,
+        handle: ConnectionHandle,
         want_room: Option<RoomId>,
     ) -> anyhow::Result<Option<(u64, Welcome)>> {
         let user = row.id;
@@ -312,7 +315,7 @@ impl Hub {
             user,
             Session {
                 conn_id,
-                link,
+                handle,
                 row,
                 room: None,
                 tracks: None,
@@ -335,8 +338,8 @@ impl Hub {
             me: user,
             role,
             rooms: self.room_list(),
-            presence: self.sessions.values().filter_map(presence).collect(),
-            placed,
+            online: self.sessions.values().filter_map(presence).collect(),
+            placement: placed,
             server,
         };
         Ok(Some((conn_id, welcome)))
@@ -394,12 +397,12 @@ impl Hub {
     ) -> Result<Handled, Refusal> {
         self.require_current(user, conn_id)?;
         let free = match &request {
-            Request::PublishKey { epoch, .. } => self.free_key_publish(user, *epoch),
+            Request::PublishSenderKey { epoch, .. } => self.free_key_publish(user, *epoch),
             _ => false,
         };
         let cheap = matches!(
             request,
-            Request::RequestKeyframe { .. } | Request::GetAvatar(_)
+            Request::RequestKeyframe { .. } | Request::FetchAvatar(_)
         );
         let bucket = if cheap {
             &mut self.cheap_requests
@@ -413,7 +416,8 @@ impl Hub {
             ));
         }
         let outcome = match request {
-            Request::SetRoom { room, password } => return self.join(user, room, password),
+            Request::JoinRoom { room, password } => return self.join(user, Some(room), password),
+            Request::LeaveRoom => return self.join(user, None, None),
             Request::CreateRoom { name, password } => {
                 return self.create_room(user, name, password);
             }
@@ -421,9 +425,11 @@ impl Hub {
                 return self.set_room_password(user, room, password);
             }
             Request::SetProfile { name, avatar } => self.set_profile(user, name, avatar),
-            Request::SetAvatar(bytes) => self.set_avatar(user, bytes),
-            Request::GetAvatar(hash) => self.get_avatar(hash),
-            Request::SetEncKey(enc_key) => self.set_enc_key(user, enc_key),
+            Request::UploadAvatar(bytes) => self.set_avatar(user, bytes),
+            Request::FetchAvatar(hash) => self.get_avatar(hash),
+            Request::SetEncryptionKey(encryption_key) => {
+                self.set_encryption_key(user, encryption_key)
+            }
             Request::SetMedia(media) => self.set_media(user, media),
             Request::RenameRoom { room, name } => self.rename_room(user, room, name),
             Request::DeleteRoom(room) => self.delete_room(user, room),
@@ -434,11 +440,11 @@ impl Hub {
                 user: target,
                 cascade,
             } => self.remove_user(user, target, cascade),
-            Request::SetWatching(ids) => self.set_watching(user, ids),
+            Request::SetWatched(ids) => self.set_watched(user, ids),
             Request::RequestKeyframe { media_id, kind } => {
                 self.request_keyframe(user, media_id, kind)
             }
-            Request::PublishKey { epoch, wrapped } => self.publish_key(user, epoch, wrapped),
+            Request::PublishSenderKey { epoch, wrapped } => self.publish_key(user, epoch, wrapped),
             Request::SetServerName(name) => self.set_server_name(user, name),
             Request::SetServerAvatar(avatar) => self.set_server_avatar(user, avatar),
             Request::KickFromRoom { user: target, room } => self.kick_from_room(user, target, room),
@@ -494,7 +500,7 @@ impl Hub {
     fn evict(&mut self, user: UserId, reason: &str) {
         self.leave_room(user);
         if let Some(session) = self.sessions.remove(&user) {
-            session.link.kick(reason, close::REMOVED);
+            session.handle.kick(reason, close::REMOVED);
         }
     }
 
@@ -587,7 +593,7 @@ impl Hub {
             .collect()
     }
 
-    fn peers(&self, room: RoomId) -> Vec<RoomPeer> {
+    fn peers(&self, room: RoomId) -> Vec<Peer> {
         let Some(entry) = self.rooms.get(&room) else {
             return Vec::new();
         };
@@ -619,11 +625,11 @@ impl Hub {
         Ok(())
     }
 
-    fn broadcast_room_state(&self, room: RoomId, except: Option<UserId>) {
+    fn broadcast_peers(&self, room: RoomId, except: Option<UserId>) {
         let Some(entry) = self.rooms.get(&room) else {
             return;
         };
-        let event = Event::RoomState {
+        let event = Event::PeersChanged {
             room,
             epoch: entry.epoch,
             peers: self.peers(room),
@@ -728,7 +734,7 @@ impl Hub {
             Some(room) => self.last_joined.insert(user, room),
             None => self.last_joined.remove(&user),
         };
-        Ok(Response::Placed(placed))
+        Ok(Response::Placement(placed))
     }
 
     /// Whether moving `user` to `target` enters a room they aren't in, which counts against
@@ -754,7 +760,7 @@ impl Hub {
     /// Puts a reconnecting `user` back into `room`. Returning to the room they last joined
     /// takes from an allowance of its own, so a flapping link never strands them in the
     /// lobby after hopping between rooms. Any other room counts as a room change.
-    fn rejoin(&mut self, user: UserId, room: RoomId) -> Option<Placed> {
+    fn rejoin(&mut self, user: UserId, room: RoomId) -> Option<Placement> {
         let returning = self.last_joined.get(&user) == Some(&room);
         let now = Instant::now();
         if !self.rejoin_allowance(returning).holds(user, 1.0, now) {
@@ -786,7 +792,7 @@ impl Hub {
     }
 
     /// Moves `user` to `target` in one step. On failure the user stays where they were.
-    fn place(&mut self, user: UserId, target: Option<RoomId>) -> Result<Placed, Refusal> {
+    fn place(&mut self, user: UserId, target: Option<RoomId>) -> Result<Placement, Refusal> {
         let session = self.session(user)?;
         let current = session.room;
         if current == target {
@@ -795,7 +801,11 @@ impl Hub {
         if let Some(room) = target {
             self.room_entry(room)?;
             let now = unix_now();
-            if session.row.enc_key.is_none_or(|key| key.not_after <= now) {
+            if session
+                .row
+                .encryption_key
+                .is_none_or(|key| key.not_after <= now)
+            {
                 return Err(Refusal::new(
                     ErrorCode::Invalid,
                     "set an encryption key before joining a room",
@@ -815,14 +825,14 @@ impl Hub {
         self.set_membership(user, target, tracks);
 
         if let Some(old) = current {
-            self.broadcast_room_state(old, None);
+            self.broadcast_peers(old, None);
         }
         if let Some(new) = target {
-            self.broadcast_room_state(new, Some(user));
+            self.broadcast_peers(new, Some(user));
         }
         match self.sessions.get(&user).and_then(presence) {
             Some(p) => self.emit_all(Event::PresenceChanged(p)),
-            None => self.emit_all(Event::PresenceEnded(user)),
+            None => self.emit_all(Event::WentOffline(user)),
         }
         self.rebuild_routes();
         Ok(self.placed(user))
@@ -844,8 +854,8 @@ impl Hub {
             entry.members.remove(&user);
         }
         self.set_membership(user, None, None);
-        self.broadcast_room_state(room, None);
-        self.emit_all(Event::PresenceEnded(user));
+        self.broadcast_peers(room, None);
+        self.emit_all(Event::WentOffline(user));
         self.rebuild_routes();
     }
 
@@ -863,14 +873,14 @@ impl Hub {
         }
     }
 
-    fn placed(&self, user: UserId) -> Placed {
+    fn placed(&self, user: UserId) -> Placement {
         let Some(session) = self.sessions.get(&user) else {
             return lobby();
         };
         let Some(room) = session.room else {
             return lobby();
         };
-        Placed {
+        Placement {
             room: Some(room),
             epoch: self.rooms.get(&room).map_or(Epoch(0), |r| r.epoch),
             tracks: session.tracks.clone(),
@@ -891,7 +901,7 @@ impl Hub {
             .0;
         Ok(Tracks {
             mic: MediaId(first),
-            shares: vec![Share {
+            shares: vec![ShareTracks {
                 video: MediaId(first + 1),
                 audio: MediaId(first + 2),
             }],
@@ -984,44 +994,50 @@ impl Hub {
 
     /// Stores a user's encryption key. Only a new key re-keys their room; the same key again,
     /// which clients send at every sign-in, changes nothing.
-    fn set_enc_key(&mut self, user: UserId, enc_key: SignedEncKey) -> Outcome {
+    fn set_encryption_key(&mut self, user: UserId, encryption_key: SignedEncryptionKey) -> Outcome {
         let session = self.session(user)?;
         let now = unix_now();
-        if enc_key.not_after <= now || enc_key.not_after > now + MAX_ENC_KEY_LIFETIME.as_secs() {
+        if encryption_key.not_after <= now
+            || encryption_key.not_after > now + MAX_ENCRYPTION_KEY_LIFETIME.as_secs()
+        {
             return Err(Refusal::new(
                 ErrorCode::Invalid,
                 "the encryption key's expiry is out of range",
             ));
         }
-        let stored = session.row.enc_key;
-        if stored == Some(enc_key) {
+        let stored = session.row.encryption_key;
+        if stored == Some(encryption_key) {
             return Ok(Response::Ok);
         }
-        let message =
-            identity::enc_key_message(&self.fingerprint.0, user, enc_key.not_after, &enc_key.key);
-        identity::verify(&session.row.pubkey, &message, &enc_key.sig).map_err(|_| {
+        let message = identity::encryption_key_message(
+            &self.fingerprint.0,
+            user,
+            encryption_key.not_after,
+            &encryption_key.key,
+        );
+        identity::verify(&session.row.pubkey, &message, &encryption_key.sig).map_err(|_| {
             Refusal::new(
                 ErrorCode::Invalid,
                 "the encryption key's signature is wrong",
             )
         })?;
-        if stored.is_some() && !self.enc_key_changes.take(user, 1.0, Instant::now()) {
+        if stored.is_some() && !self.encryption_key_changes.take(user, 1.0, Instant::now()) {
             return Err(Refusal::new(
                 ErrorCode::RateLimited,
                 "the encryption key changes too often",
             ));
         }
         self.db
-            .set_enc_key(user, &enc_key)
+            .set_encryption_key(user, &encryption_key)
             .map_err(Refusal::internal)?;
         let session = self.session_mut(user)?;
-        session.row.enc_key = Some(enc_key);
+        session.row.encryption_key = Some(encryption_key);
         if let Some(room) = session.room {
             // The same key with a new expiry needs no new sender keys; peers only learn it.
-            if stored.is_none_or(|stored| stored.key != enc_key.key) {
+            if stored.is_none_or(|stored| stored.key != encryption_key.key) {
                 self.bump_epochs(&[room])?;
             }
-            self.broadcast_room_state(room, None);
+            self.broadcast_peers(room, None);
         }
         Ok(Response::Ok)
     }
@@ -1041,7 +1057,7 @@ impl Hub {
         };
         self.session_mut(user)?.media = applied;
         if applied.share != stored.share {
-            self.broadcast_room_state(room, None);
+            self.broadcast_peers(room, None);
         }
         if applied.deafened != stored.deafened {
             self.rebuild_routes();
@@ -1153,7 +1169,7 @@ impl Hub {
         let members = &entry.members;
         self.last_joined
             .retain(|user, joined| *joined != room || members.contains(user));
-        self.emit_all(Event::RoomLocked { room, locked });
+        self.emit_all(Event::RoomLockChanged { room, locked });
         Ok(Response::Ok)
     }
 
@@ -1295,8 +1311,8 @@ impl Hub {
         Ok(Response::Ok)
     }
 
-    fn set_watching(&mut self, user: UserId, ids: Vec<MediaId>) -> Outcome {
-        if ids.len() > MAX_WATCHING {
+    fn set_watched(&mut self, user: UserId, ids: Vec<MediaId>) -> Outcome {
+        if ids.len() > MAX_WATCHED {
             return Err(Refusal::new(
                 ErrorCode::TooLarge,
                 "watching too many tracks",
@@ -1324,7 +1340,7 @@ impl Hub {
             if let Some((owner, TrackKind::Video)) = self.share_track(id)
                 && let Some(kind) = self.keyframes.request(id, Recovery::Idr, now)
             {
-                self.emit_to(owner, Event::KeyframeWanted { media_id: id, kind });
+                self.emit_to(owner, Event::KeyframeRequested { media_id: id, kind });
             }
         }
         Ok(Response::Ok)
@@ -1341,7 +1357,7 @@ impl Hub {
             return Err(Refusal::new(ErrorCode::Invalid, "not a video track"));
         };
         if let Some(kind) = self.keyframes.request(media_id, kind, Instant::now()) {
-            self.emit_to(owner, Event::KeyframeWanted { media_id, kind });
+            self.emit_to(owner, Event::KeyframeRequested { media_id, kind });
         }
         Ok(Response::Ok)
     }
@@ -1350,7 +1366,9 @@ impl Hub {
     pub fn flush_keyframes(&mut self) {
         for (media_id, kind) in self.keyframes.due(Instant::now()) {
             match self.share_track(media_id) {
-                Some((owner, _)) => self.emit_to(owner, Event::KeyframeWanted { media_id, kind }),
+                Some((owner, _)) => {
+                    self.emit_to(owner, Event::KeyframeRequested { media_id, kind })
+                }
                 None => self.keyframes.forget(media_id),
             }
         }
@@ -1384,7 +1402,7 @@ impl Hub {
         for (to, wrapped) in wrapped {
             self.emit_to(
                 to,
-                Event::SenderKey {
+                Event::SenderKeyPublished {
                     from: user,
                     epoch,
                     wrapped,
@@ -1464,7 +1482,7 @@ impl Hub {
                     if !receivers.is_empty() {
                         room_audiences.push(Audience {
                             video: share.video,
-                            watchers: receivers,
+                            receivers,
                         });
                     }
                 }
@@ -1545,11 +1563,11 @@ pub fn mint_invite(
 }
 
 fn send(session: &Session, event: Event) {
-    let message = Outgoing::Message(ServerMessage::Event(event));
-    if session.link.outgoing.try_send(message).is_err() {
+    let message = Outbound::Message(ServerMessage::Event(event));
+    if session.handle.outgoing.try_send(message).is_err() {
         warn!(user = session.row.id.0, "control queue full; closing");
         session
-            .link
+            .handle
             .connection
             .close(close::PROTOCOL_ERROR.into(), b"control queue full");
     }
@@ -1563,7 +1581,7 @@ fn route<'a>(
     Route {
         owner,
         kind,
-        subscribers: subscribers.map(|m| m.link.egress.clone()).collect(),
+        subscribers: subscribers.map(|m| m.handle.egress.clone()).collect(),
     }
 }
 
@@ -1580,18 +1598,18 @@ fn presence(session: &Session) -> Option<Presence> {
     })
 }
 
-fn peer(session: &Session) -> Option<RoomPeer> {
-    Some(RoomPeer {
+fn peer(session: &Session) -> Option<Peer> {
+    Some(Peer {
         user: session.row.id,
         tracks: session.tracks.clone()?,
         share: session.media.share,
         identity_key: session.row.pubkey,
-        enc_key: session.row.enc_key?,
+        encryption_key: session.row.encryption_key?,
     })
 }
 
-fn lobby() -> Placed {
-    Placed {
+fn lobby() -> Placement {
+    Placement {
         room: None,
         epoch: Epoch(0),
         tracks: None,
