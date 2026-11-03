@@ -274,8 +274,8 @@ pub enum Event {
         by: UserId,
         room: RoomId,
     },
-    /// The audiences in our room that changed together.
-    AudiencesChanged(Vec<Audience>),
+    /// Who receives each share in our room now.
+    AudiencesChanged(Audiences),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,11 +302,20 @@ pub struct Placed {
     pub epoch: Epoch,
     pub tracks: Option<Tracks>,
     pub peers: Vec<RoomPeer>,
-    /// Who watches each share in the room; shares nobody watches are left out.
-    pub audiences: Vec<Audience>,
+    pub audiences: Audiences,
 }
 
-/// The room members who watch the share sent on `video`.
+/// Who receives each share in a room. Each one replaces the last; `seq` grows with every one
+/// the server makes for a connection, so a client keeps the newest whatever order they reach
+/// it in.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Audiences {
+    pub seq: u64,
+    /// Shares nobody receives are left out.
+    pub shares: Vec<Audience>,
+}
+
+/// The room members who receive the picture or the sound of the share sent on `video`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Audience {
     pub video: MediaId,
