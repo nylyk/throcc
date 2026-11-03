@@ -59,10 +59,9 @@ jobs:
           # Updated in place, never deleted, so a failed run keeps the release and its tag. --clobber
           # deletes each old asset before uploading the new one, so a failed upload can leave the
           # package missing, or not matching its .sha256, until the next run.
-          # The tag moves so it and the source archives point at the commit built.
+          # The tag stays on its first commit: git pull rejects a moved tag in clones that prune tags.
           if gh release view nightly >/dev/null 2>&1; then
             gh release upload nightly "${files[@]}" --clobber
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/nightly" -f sha="$GITHUB_SHA" -F force=true >/dev/null
             gh release edit nightly --notes "$notes"
           else
             gh release create nightly --prerelease --title "Nightly" --target "$GITHUB_SHA" --notes "$notes" "${files[@]}"
