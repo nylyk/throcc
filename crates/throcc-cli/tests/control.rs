@@ -94,7 +94,7 @@ async fn unknown_reply_id_closes_the_connection() {
                 epoch: Epoch(0),
                 tracks: None,
                 peers: vec![],
-                audiences: Vec::new(),
+                audiences: Default::default(),
             },
             server: ServerProfile::default(),
         };

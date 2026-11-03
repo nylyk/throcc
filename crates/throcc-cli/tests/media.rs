@@ -129,20 +129,88 @@ async fn the_room_learns_who_watches_a_share() {
         video,
         watchers: vec![bob.me()],
     };
-    assert_eq!(placed.audiences, vec![expected]);
+    assert_eq!(placed.audiences.shares, vec![expected]);
 
     bob.join(None, None).await.unwrap();
     assert_eq!(audience(&mut alice, video).await, vec![]);
 }
 
-/// Waits for the next change in who watches `video`.
+#[tokio::test]
+async fn hearing_a_share_counts_as_watching_it() {
+    let server = start_server();
+    let (mut alice, bob, _) = room_with_two(&server).await;
+    let share = first_share(&bob, &alice).await;
+    let listening = Request::SetWatching(vec![share.audio]);
+    assert_eq!(bob.request(listening).await.unwrap(), Response::Ok);
+    assert_eq!(audience(&mut alice, share.video).await, vec![bob.me()]);
+
+    let deafened = MediaState {
+        deafened: true,
+        ..MediaState::default()
+    };
+    assert_eq!(
+        bob.request(Request::SetMedia(deafened)).await.unwrap(),
+        Response::Ok
+    );
+    assert_eq!(audience(&mut alice, share.video).await, vec![]);
+}
+
+#[tokio::test]
+async fn nobody_outside_the_room_learns_who_watches() {
+    let server = start_server();
+    let (mut alice, bob, _) = room_with_two(&server).await;
+    let mut carol = enroll(&server, &mint_admin_invite(server.dir.path())).await;
+    let elsewhere = create_room(&mut carol, "Elsewhere").await;
+    let mut carol = Call::start(carol.link, &carol.keystore).unwrap();
+    let (placed, _) = carol.join(Some(elsewhere), None).await.unwrap();
+    let carol_seq = placed.audiences.seq;
+    let dave = enroll(&server, &mint_admin_invite(server.dir.path())).await;
+    let mut dave = Call::start(dave.link, &dave.keystore).unwrap();
+
+    let video = first_share(&bob, &alice).await.video;
+    let watching = Request::SetWatching(vec![video]);
+    assert_eq!(bob.request(watching).await.unwrap(), Response::Ok);
+    assert_eq!(audience(&mut alice, video).await, vec![bob.me()]);
+
+    // Everyone hears of bob's mic after the audience changed, so whoever hears of it first
+    // was never told who watches.
+    let talking = MediaState {
+        mic: true,
+        ..MediaState::default()
+    };
+    assert_eq!(
+        bob.request(Request::SetMedia(talking)).await.unwrap(),
+        Response::Ok
+    );
+    for outsider in [&mut carol, &mut dave] {
+        server_event(outsider, |e| match e {
+            Event::AudiencesChanged(_) => panic!("an outsider learned who watches"),
+            Event::PresenceChanged(p) if p.user == bob.me() => Some(()),
+            _ => None,
+        })
+        .await;
+    }
+    let (placed, _) = carol.join(Some(elsewhere), None).await.unwrap();
+    assert_eq!(
+        placed.audiences.seq,
+        carol_seq + 1,
+        "carol's seq counted changes in another room"
+    );
+}
+
+/// Waits for the next audiences in our room, and returns who receives `video`.
 async fn audience(call: &mut Call, video: MediaId) -> Vec<UserId> {
     server_event(call, |e| match e {
-        Event::AudiencesChanged(changed) => changed.into_iter().find(|a| a.video == video),
+        Event::AudiencesChanged(audiences) => Some(
+            audiences
+                .shares
+                .into_iter()
+                .find(|a| a.video == video)
+                .map_or_else(Vec::new, |a| a.watchers),
+        ),
         _ => None,
     })
     .await
-    .watchers
 }
 
 #[tokio::test]

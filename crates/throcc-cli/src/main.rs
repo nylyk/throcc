@@ -686,7 +686,7 @@ mod tests {
                 epoch: Epoch(0),
                 tracks: None,
                 peers: vec![],
-                audiences: Vec::new(),
+                audiences: Default::default(),
             },
             server: ServerProfile::default(),
         }
