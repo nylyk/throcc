@@ -98,6 +98,29 @@ async fn an_admin_invite_minted_while_the_server_runs_enrolls_another_admin() {
 }
 
 #[tokio::test]
+async fn a_name_the_server_would_refuse_spends_nothing_of_the_invite() {
+    let server = start_server();
+    let alice = admin(&server).await;
+    let code = invite(&alice).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut keystore = throcc_client_core::keystore::Keystore::open_in(dir.path()).unwrap();
+    let err = account::enroll(&mut keystore, &server.addr, &code, "   ")
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(
+            err,
+            SignInError::Login(LoginError::Refused(AuthError::BadName))
+        ),
+        "{err}"
+    );
+    assert_eq!(failures(&server, &code), Some(0));
+    let bob = try_enroll_at(&server.addr, &code).await.unwrap();
+    assert_eq!(bob.link.welcome.profile.name, "Ilse");
+}
+
+#[tokio::test]
 async fn an_admin_invite_promotes_a_member_who_redeems_it() {
     let server = start_server();
     let mut alice = admin(&server).await;
@@ -105,7 +128,7 @@ async fn an_admin_invite_promotes_a_member_who_redeems_it() {
     let bob_id = bob.link.welcome.me;
 
     let minted = throcc_server::admin_invite(server.dir.path()).unwrap();
-    let link = account::enroll(&mut bob.keystore, &server.addr, &minted.code)
+    let link = account::enroll(&mut bob.keystore, &server.addr, &minted.code, "Ilse")
         .await
         .unwrap();
     assert_eq!(link.welcome.me, bob_id);
@@ -402,6 +425,7 @@ async fn a_run_whose_client_stops_reading_still_burns_the_invite() {
         pubkey: IdentityKey::generate().public(),
         client_nonce: [7; 32],
         pake_a,
+        name: "Ilse".into(),
     };
     send.write_all(&framing::encode(&enroll).unwrap())
         .await

@@ -250,7 +250,7 @@ impl Database {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Consumes the invite and adds its user, in one transaction. Returns `None`, changing
+    /// Consumes the invite and adds its user, named `name`, in one transaction. Returns `None`, changing
     /// nothing, when the invite is gone or expired. An invite without a minter, from
     /// `throcc-server admin-invite`, enrolls an admin, and promotes an existing key to admin
     /// so an owner who was demoted can recover; any other invite leaves an existing key's
@@ -259,6 +259,7 @@ impl Database {
         &mut self,
         pubkey: &PublicKey,
         code_id: &str,
+        name: &str,
         now: u64,
     ) -> Result<Option<Enrolled>> {
         let tx = self.write()?;
@@ -302,15 +303,10 @@ impl Database {
             }
             None => {
                 tx.execute(
-                    "INSERT INTO users (pubkey, name, role, invited_by, created_at, last_seen) VALUES (?1, '', ?2, ?3, ?4, ?4)",
-                    params![pubkey.as_slice(), role.rank(), minted_by, now as i64],
+                    "INSERT INTO users (pubkey, name, role, invited_by, created_at, last_seen) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                    params![pubkey.as_slice(), name, role.rank(), minted_by, now as i64],
                 )?;
-                let id = tx.last_insert_rowid();
-                tx.execute(
-                    "UPDATE users SET name = ?1 WHERE id = ?2",
-                    params![format!("user{id}"), id],
-                )?;
-                (id, Enrolled::Added)
+                (tx.last_insert_rowid(), Enrolled::Added)
             }
         };
         tx.commit()?;
@@ -697,7 +693,7 @@ mod tests {
     fn enroll(db: &mut Database, key: u8, by: Option<UserId>) -> UserId {
         let code = format!("C{key:02}");
         db.insert_invite(&invite(&code, by, 1000, 0)).unwrap();
-        db.enroll(&[key; 32], &code, 100)
+        db.enroll(&[key; 32], &code, "Ilse", 100)
             .unwrap()
             .unwrap()
             .into_row()
@@ -847,7 +843,10 @@ mod tests {
         let mut server = Database::open(&path).unwrap();
         let side = Database::open_existing(&path).unwrap();
         assert!(side.insert_invite(&invite("ADM", None, 1000, 0)).unwrap());
-        let user = server.enroll(&[1; 32], "ADM", 100).unwrap().unwrap();
+        let user = server
+            .enroll(&[1; 32], "ADM", "Ilse", 100)
+            .unwrap()
+            .unwrap();
         assert!(matches!(user, Enrolled::Added(row) if row.role == Role::Admin));
         assert!(server.allocate_media_ids(1).unwrap().is_some());
     }
@@ -889,10 +888,13 @@ mod tests {
         let root = enroll(&mut db, 1, None);
         assert_eq!(db.user(root).unwrap().unwrap().role, Role::Admin);
         let first = enroll(&mut db, 2, Some(root));
+        assert_eq!(db.user(first).unwrap().unwrap().name, "Ilse");
         db.set_role(first, Role::Manager).unwrap();
+        db.set_profile(first, "Moss", None).unwrap();
         let again = enroll(&mut db, 2, Some(root));
         assert_eq!(again, first);
-        assert_eq!(db.user(first).unwrap().unwrap().role, Role::Manager);
+        let row = db.user(first).unwrap().unwrap();
+        assert_eq!((row.role, row.name.as_str()), (Role::Manager, "Moss"));
     }
 
     #[test]
@@ -902,7 +904,7 @@ mod tests {
         let member = enroll(&mut db, 2, Some(root));
         let mut redeem = |code: &str, by: Option<UserId>| {
             db.insert_invite(&invite(code, by, 1000, 0)).unwrap();
-            db.enroll(&[2; 32], code, 100).unwrap().unwrap()
+            db.enroll(&[2; 32], code, "Ilse", 100).unwrap().unwrap()
         };
 
         let returning = redeem("USR", Some(root));
@@ -920,9 +922,9 @@ mod tests {
     fn used_or_expired_invites_do_not_enroll() {
         let mut db = Database::open_in_memory().unwrap();
         enroll(&mut db, 1, None);
-        assert_eq!(db.enroll(&[9; 32], "C01", 100).unwrap(), None);
+        assert_eq!(db.enroll(&[9; 32], "C01", "Ilse", 100).unwrap(), None);
         db.insert_invite(&invite("OLD", None, 50, 0)).unwrap();
-        assert_eq!(db.enroll(&[2; 32], "OLD", 100).unwrap(), None);
+        assert_eq!(db.enroll(&[2; 32], "OLD", "Ilse", 100).unwrap(), None);
     }
 
     #[test]

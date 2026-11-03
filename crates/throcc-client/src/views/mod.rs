@@ -4,6 +4,7 @@ pub mod dialogs;
 pub mod join;
 pub mod main;
 pub mod mascot;
+pub mod onboarding;
 pub mod overlay;
 pub mod page;
 pub mod person_menu;

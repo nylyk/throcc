@@ -19,6 +19,7 @@ use crate::media::audio::VoiceSettings;
 use crate::media::cues::Cue;
 use crate::media::video::Picture;
 use crate::media::video::frame::VideoFrame;
+use crate::profile::Profile;
 use crate::session::{AvatarSlot, Session, Shared};
 use crate::state::{
     ConnectionStatus, CurrentRoom, Health, KeyWarning, MIC_KBPS, Person, Playback, RoomView,
@@ -48,13 +49,10 @@ pub enum UiCommand {
     Watch(UserId),
     Unwatch(UserId),
     SetSoundLevel(UserId, Sound, SoundLevel),
-    /// Changes our name and picture (at most 64 KiB, `Some(None)` clears it) in one save.
-    /// A `None` field keeps what we have.
-    SetProfile {
-        name: Option<String>,
-        picture: Option<Option<Vec<u8>>>,
-    },
-    /// Names the server and sets its picture like [`UiCommand::SetProfile`]. Admins only.
+    /// Gives the server our changed profile, its picture at most 64 KiB.
+    SetProfile(Profile),
+    /// Names the server and sets its picture (at most 64 KiB, `Some(None)` clears it) in one
+    /// save. A `None` field keeps what it has. Admins only.
     SetServerProfile {
         name: Option<Option<String>>,
         picture: Option<Option<Vec<u8>>>,
@@ -171,11 +169,13 @@ pub struct Client {
 }
 
 impl Client {
-    /// Signs in, or enrolls with `invite`, and blocks until the server has answered.
+    /// Signs in, or enrolls with `invite`, and blocks until the server has answered. The
+    /// server gets `profile` unless it has it already.
     pub fn connect(
         address: &str,
         mut keystore: Keystore,
         invite: Option<&InviteCode>,
+        profile: Profile,
         options: ClientOptions,
         verified: VerifiedStore,
     ) -> Result<Self, SignInError> {
@@ -188,7 +188,7 @@ impl Client {
         keystore.renew_encryption_key_if_due()?;
         let link = runtime.block_on(async {
             match invite {
-                Some(code) => account::enroll(&mut keystore, address, code).await,
+                Some(code) => account::enroll(&mut keystore, address, code, &profile.name).await,
                 None => account::sign_in(&keystore, address, None).await,
             }
         })?;
@@ -208,6 +208,7 @@ impl Client {
                 shared.clone(),
                 keystore,
                 address.to_owned(),
+                profile,
                 options,
                 call,
                 verified,
@@ -408,20 +409,14 @@ impl ClientApi for MockClient {
                     *p.playback.get_mut(sound) = level;
                 }
             }),
-            UiCommand::SetProfile { name, picture } => {
-                let hash = picture.map(|p| p.map(|bytes| self.keep_avatar(bytes)));
+            UiCommand::SetProfile(profile) => {
+                let hash = profile
+                    .picture
+                    .map(|bytes| self.keep_avatar(bytes.to_vec()));
                 self.update(|s| {
-                    if let Some(name) = name {
-                        if let Some(p) = s.people.get_mut(&me) {
-                            p.name = name.clone();
-                        }
-                        s.profile_name = Some(name);
-                    }
-                    if let Some(hash) = hash {
-                        if let Some(p) = s.people.get_mut(&me) {
-                            p.avatar = hash;
-                        }
-                        s.profile_picture = hash;
+                    if let Some(p) = s.people.get_mut(&me) {
+                        p.name = profile.name;
+                        p.avatar = hash;
                     }
                 });
                 self.shared.emit(UiEvent::ProfileSaved);
@@ -708,8 +703,6 @@ fn sample_state() -> State {
                 dropped: None,
             }],
         },
-        profile_name: Some("Felix".into()),
-        profile_picture: None,
     }
 }
 

@@ -220,7 +220,7 @@ pub async fn enroll_at(addr: &str, code: &InviteCode) -> TestClient {
 pub async fn try_enroll_at(addr: &str, code: &InviteCode) -> Result<TestClient, SignInError> {
     let dir = tempfile::tempdir().unwrap();
     let mut keystore = Keystore::open_in(dir.path()).unwrap();
-    let link = account::enroll(&mut keystore, addr, code).await?;
+    let link = account::enroll(&mut keystore, addr, code, "Ilse").await?;
     Ok(TestClient {
         keystore,
         link,
@@ -531,6 +531,7 @@ pub async fn raw_enroll_start(
         pubkey: identity.public(),
         client_nonce,
         pake_a: pake_a.clone(),
+        name: "Ilse".into(),
     };
     send.write_all(&framing::encode(&enroll).unwrap())
         .await

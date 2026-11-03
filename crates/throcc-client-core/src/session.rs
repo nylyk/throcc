@@ -9,7 +9,8 @@ use throcc_proto::ids::{Hash, MediaId, RoomId, UserId};
 use throcc_proto::limits::{MAX_ROOM_MEMBERS, MAX_ROOM_SHARES};
 use throcc_proto::messages::{
     Audiences, AuthError, ErrorCode, Event as ServerEvent, MediaState, Peer, Placement, Presence,
-    PublicKey, Recovery, Request, Response, ShareConfig, ShareTracks, Tracks, User, Welcome,
+    PublicKey, Recovery, Request, Response, ShareConfig, ShareTracks, Tracks, User, UserProfile,
+    Welcome,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{Semaphore, broadcast, mpsc, watch};
@@ -264,9 +265,9 @@ pub(crate) struct Session {
     mic_test: bool,
     /// Whether the mic was on when we deafened, so undeafening restores it.
     mic_before_deafen: bool,
-    /// A picture to put on our profile once the server tells us our name.
-    pending_avatar: Option<Option<Hash>>,
     profile: Profile,
+    /// Our profile as the server has it.
+    server_profile: UserProfile,
     saved_playback: SavedPlayback,
     /// Each sound set for people who presented no identity key yet, saved under the key
     /// once they do.
@@ -359,15 +360,12 @@ impl Session {
         shared: Arc<Shared>,
         keystore: Keystore,
         address: String,
+        profile: Profile,
         options: ClientOptions,
         call: Call,
         verified: VerifiedStore,
     ) -> Self {
         let server = call.server();
-        let profile = Profile::load(keystore.dir()).unwrap_or_else(|e| {
-            warn!("no saved profile: {e:#}");
-            Profile::default()
-        });
         let saved_playback = SavedPlayback::load(keystore.dir()).unwrap_or_else(|e| {
             warn!("no saved playback: {e:#}");
             SavedPlayback::empty(keystore.dir())
@@ -397,7 +395,7 @@ impl Session {
             watched_shares: HashMap::new(),
             mic_test: false,
             mic_before_deafen: false,
-            pending_avatar: None,
+            server_profile: call.welcome.profile.clone(),
             profile,
             saved_playback,
             unkeyed_playback: HashMap::new(),
@@ -411,64 +409,44 @@ impl Session {
             last: LastCounts::default(),
             call,
         };
-        session.show_profile();
         session.start_voice();
         let welcome = session.call.welcome.clone();
         session.apply_welcome(&welcome);
         session
     }
 
-    fn show_profile(&self) {
-        let picture = self.profile.picture.clone().map(|bytes| {
-            let hash = Hash::of(&bytes);
-            self.shared.set_avatar(hash, AvatarSlot::Ready(bytes));
-            hash
-        });
-        let name = self.profile.name.clone();
-        self.shared.update(|s| {
-            s.profile_name = name;
-            s.profile_picture = picture;
-        });
-    }
-
-    fn change_profile(&mut self, change: impl FnOnce(&mut Profile)) {
-        change(&mut self.profile);
-        if let Err(e) = self.profile.save(self.keystore.dir()) {
-            warn!("saving the profile: {e:#}");
-            self.shared
-                .notice(format!("Couldn't keep your profile: {e}"));
+    /// Gives the server our profile, uploading the picture only if the server lacks it, and
+    /// returns why the server refused it if it did.
+    async fn push_profile(&mut self) -> Result<(), String> {
+        let wanted = UserProfile {
+            name: self.profile.name.clone(),
+            avatar: self.profile.avatar(),
+        };
+        if wanted == self.server_profile {
+            return Ok(());
         }
-        self.show_profile();
-    }
-
-    /// Gives this server our profile, unless it has it already.
-    async fn push_profile(&mut self) {
-        let avatar = match self.profile.picture.clone() {
-            Some(bytes) => match self
+        if let Some(bytes) = &self.profile.picture
+            && wanted.avatar != self.server_profile.avatar
+        {
+            match self
                 .call
                 .request(Request::UploadAvatar(bytes.to_vec()))
                 .await
             {
-                Ok(Response::AvatarHash(hash)) => Some(hash),
-                other => {
-                    self.shared.emit(UiEvent::ProfileRefused(refusal(other)));
-                    return;
-                }
-            },
-            None => None,
+                Ok(Response::AvatarHash(hash)) if Some(hash) == wanted.avatar => {}
+                other => return Err(refusal(other)),
+            }
+        }
+        let request = Request::SetProfile {
+            name: wanted.name.clone(),
+            avatar: wanted.avatar,
         };
-        let Some(name) = self.profile.name.clone() else {
-            self.pending_avatar = Some(avatar);
-            self.shared.emit(UiEvent::ProfileSaved);
-            self.apply_pending_avatar().await;
-            return;
-        };
-        self.pending_avatar = None;
-        let known = self.my_person();
-        if known.is_some_and(|me| me.name == name && me.avatar == avatar) {
-            self.shared.emit(UiEvent::ProfileSaved);
-        } else {
-            self.save_profile(name, avatar).await;
+        match self.call.request(request).await {
+            Ok(Response::Ok) => {
+                self.server_profile = wanted;
+                Ok(())
+            }
+            other => Err(refusal(other)),
         }
     }
 
@@ -550,8 +528,9 @@ impl Session {
     }
 
     async fn run_until_done(&mut self, mut commands: mpsc::Receiver<UiCommand>) {
-        if self.profile != Profile::default() {
-            self.push_profile().await;
+        if let Err(reason) = self.push_profile().await {
+            self.shared
+                .notice(format!("This server refused your profile: {reason}"));
         }
         let mut levels = tokio::time::interval(LEVELS_EVERY);
         let mut health = tokio::time::interval(HEALTH_EVERY);
@@ -797,6 +776,7 @@ impl Session {
         // A new connection counts audiences afresh.
         self.audiences = Audiences::default();
         let fingerprint = self.call.server();
+        self.server_profile = welcome.profile.clone();
         self.remember_server(welcome.server.name.clone(), welcome.server.avatar);
         let address = self.address.clone();
         let media = self.media;
@@ -1175,16 +1155,13 @@ impl Session {
                     }
                 });
             }
-            UiCommand::SetProfile { name, picture } => {
-                self.change_profile(|p| {
-                    if let Some(name) = name {
-                        p.name = Some(name);
-                    }
-                    if let Some(picture) = picture {
-                        p.picture = picture.map(Arc::from);
-                    }
-                });
-                self.push_profile().await;
+            UiCommand::SetProfile(profile) => {
+                self.profile = profile;
+                let event = match self.push_profile().await {
+                    Ok(()) => UiEvent::ProfileSaved,
+                    Err(reason) => UiEvent::ProfileRefused(reason),
+                };
+                self.shared.emit(event);
             }
             UiCommand::FetchAvatar(hash) => self.fetch_avatar(hash),
             UiCommand::SetServerProfile { name, picture } => {
@@ -1281,37 +1258,6 @@ impl Session {
     async fn list_users(&mut self) {
         if let Ok(Response::Users(users)) = self.call.request(Request::ListUsers).await {
             self.shared.emit(UiEvent::Users(shown_users(users)));
-        }
-    }
-
-    fn my_person(&self) -> Option<Person> {
-        let state = self.shared.state();
-        state.person(state.me?).cloned()
-    }
-
-    /// Sets the chosen picture on our profile once we know our own name, which arrives
-    /// with our presence when we join a room.
-    async fn apply_pending_avatar(&mut self) {
-        let Some(avatar) = self.pending_avatar else {
-            return;
-        };
-        let Some(me) = self.my_person() else { return };
-        self.pending_avatar = None;
-        if me.avatar == avatar {
-            self.shared.emit(UiEvent::ProfileSaved);
-        } else {
-            self.save_profile(me.name, avatar).await;
-        }
-    }
-
-    async fn save_profile(&mut self, name: String, avatar: Option<Hash>) {
-        match self
-            .call
-            .request(Request::SetProfile { name, avatar })
-            .await
-        {
-            Ok(Response::Ok) => self.shared.emit(UiEvent::ProfileSaved),
-            other => self.shared.emit(UiEvent::ProfileRefused(refusal(other))),
         }
     }
 
@@ -1789,10 +1735,7 @@ impl Session {
     async fn event(&mut self, event: CallEvent) {
         match event {
             CallEvent::Key(notice) => self.notices(vec![notice]),
-            CallEvent::Server(event) => {
-                self.server_event(event).await;
-                self.apply_pending_avatar().await;
-            }
+            CallEvent::Server(event) => self.server_event(event).await,
         }
     }
 
@@ -2172,7 +2115,8 @@ fn supersedes(newer: &UiCommand, older: &UiCommand) -> bool {
             | UiCommand::PushToTalk(_)
             | UiCommand::MicTest(_)
             | UiCommand::Voice(_)
-            | UiCommand::Devices { .. },
+            | UiCommand::Devices { .. }
+            | UiCommand::SetProfile(_),
             _,
         ) => discriminant(newer) == discriminant(older),
         _ => false,
@@ -2296,7 +2240,12 @@ mod tests {
     fn pictures_nothing_shown_uses_are_dropped_once_many_are_kept() {
         let shown = Hash::of(b"shown");
         let shared = Shared::new(State {
-            profile_picture: Some(shown),
+            server: Some(ServerView {
+                address: "voice.example.net".into(),
+                fingerprint: throcc_proto::Fingerprint([0x2c; 32]),
+                name: None,
+                avatar: Some(shown),
+            }),
             ..State::default()
         });
         let ready = || AvatarSlot::Ready(Arc::from(&b"png"[..]));

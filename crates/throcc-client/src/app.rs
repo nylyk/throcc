@@ -124,6 +124,8 @@ pub enum PictureFor {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
+    /// Asks for the name, and optionally a picture, that every server will know us by.
+    Onboarding,
     Join,
     Main,
     Settings(SettingsPage),
@@ -448,6 +450,9 @@ pub struct ThroccApp {
     join_attempt: u64,
     pub join_error: Option<String>,
     pub start_over: StartOver,
+    /// Our name and picture as kept on this computer, `None` until onboarding keeps them.
+    pub profile: Option<Profile>,
+    profile_avatar: Option<Hash>,
     pub profile_form: PictureForm,
     pub known_servers: Vec<(String, Fingerprint)>,
     pub verified: VerifiedStore,
@@ -603,6 +608,8 @@ impl ThroccApp {
             join_attempt: 0,
             join_error: None,
             start_over: StartOver::NotStarted,
+            profile: None,
+            profile_avatar: None,
             profile_form: PictureForm::default(),
             known_servers,
             verified,
@@ -641,7 +648,21 @@ impl ThroccApp {
         };
         window.focus(&app.root_focus, cx);
         if mock {
+            let profile = Profile {
+                name: "Felix".into(),
+                picture: None,
+            };
+            app.set_profile(profile, cx);
             app.attach(Arc::new(MockClient::new(app.verified.clone())), window, cx);
+        } else {
+            match keystore::config_dir().and_then(|dir| Profile::load(&dir)) {
+                Ok(Some(profile)) => app.set_profile(profile, cx),
+                Ok(None) => app.screen = Screen::Onboarding,
+                Err(e) => {
+                    tracing::warn!("no saved profile: {e:#}");
+                    app.screen = Screen::Onboarding;
+                }
+            }
         }
         app
     }
@@ -730,14 +751,13 @@ impl ThroccApp {
                 self.join_error = Some(reason);
             }
             UiEvent::AvatarReady(_) => {}
-            UiEvent::ProfileSaved => {
-                self.profile_form.edit = None;
-                self.profile_form.status = Some(SaveStatus::Saved);
+            UiEvent::ProfileSaved if self.profile_form.saving() => {
+                self.profile_form.status = Some(SaveStatus::Saved)
             }
-            UiEvent::ProfileRefused(reason) => {
-                self.profile_form.edit = None;
-                self.profile_form.status = Some(SaveStatus::Failed(reason));
+            UiEvent::ProfileRefused(reason) if self.profile_form.saving() => {
+                self.profile_form.status = Some(SaveStatus::Failed(reason))
             }
+            UiEvent::ProfileSaved | UiEvent::ProfileRefused(_) => {}
             UiEvent::ServerProfileSaved => {
                 self.server_form.edit = None;
                 self.server_form.status = Some(SaveStatus::Saved);
@@ -776,12 +796,12 @@ impl ThroccApp {
         let person = me.and_then(|m| self.state.person(m));
         let name = person
             .map(|p| p.name.clone())
-            .or_else(|| self.state.profile_name.clone())
+            .or_else(|| self.profile.as_ref().map(|p| p.name.clone()))
             .unwrap_or_else(|| "You".into());
         let avatar = person.and_then(|p| p.avatar);
         let picture = self
             .picture(avatar, cx)
-            .or_else(|| self.picture(self.state.profile_picture, cx));
+            .or_else(|| self.picture(self.profile_avatar, cx));
         (name, me.map_or(0, |m| m.0), picture)
     }
 
@@ -807,7 +827,9 @@ impl ThroccApp {
         }
         if self.pictures.len() >= PICTURES_KEPT {
             let in_use = self.state.avatars_in_use();
-            self.pictures.retain(|hash, _| in_use.contains(hash));
+            let own = self.profile_avatar;
+            self.pictures
+                .retain(|hash, _| in_use.contains(hash) || own == Some(*hash));
         }
         self.pictures.insert(hash, None);
         cx.spawn(async move |this, cx| {
@@ -1328,88 +1350,80 @@ impl ThroccApp {
         self.set_dialog(None, cx);
     }
 
-    /// The name Save on the profile page would give us, if it differs from the kept one,
-    /// and why the server would refuse it if it would.
-    fn profile_name_change(&self, cx: &App) -> Result<Option<String>, &'static str> {
-        let typed = typed_name(&self.name, cx)?;
-        Ok(typed.filter(|typed| self.state.profile_name.as_deref() != Some(typed.as_str())))
+    /// The profile Save on the profile page, or Continue on the onboarding screen, would keep:
+    /// the typed name, if the server would take it, with the unsaved picture or the kept one.
+    fn edited_profile(&self, cx: &App) -> Option<Profile> {
+        let name = typed_name(&self.name, cx).ok()??;
+        let picture = match &self.profile_form.edit {
+            Some(edit) => edit.bytes.clone().map(Arc::from),
+            None => self.profile.as_ref().and_then(|p| p.picture.clone()),
+        };
+        Some(Profile { name, picture })
     }
 
     /// Whether Save on the profile page has something to save that the server would take.
     pub fn profile_changed(&self, cx: &App) -> bool {
-        self.profile_name_change(cx)
-            .is_ok_and(|name| name.is_some() || self.profile_form.edit.is_some())
+        self.edited_profile(cx)
+            .is_some_and(|edited| self.profile.as_ref() != Some(&edited))
     }
 
     pub fn save_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Ok(name) = self.profile_name_change(cx) else {
+        let Some(profile) = self
+            .edited_profile(cx)
+            .filter(|edited| self.profile.as_ref() != Some(edited))
+        else {
             return;
         };
-        let picture = self.profile_form.change();
-        if name.is_none() && picture.is_none() {
+        if !self.keep_profile(profile.clone(), window, cx) {
             return;
         }
-        self.profile_form.outdate_pick();
         if self.client.is_some() {
             self.profile_form.status = Some(SaveStatus::Saving);
-            self.command(UiCommand::SetProfile { name, picture });
+            self.command(UiCommand::SetProfile(profile));
         } else {
-            self.keep_profile(name, picture, window, cx);
+            self.profile_form.status = Some(SaveStatus::Saved);
         }
         cx.notify();
     }
 
-    /// Changes the profile kept on this computer, for while no server session runs.
+    /// Keeps the onboarding screen's profile and moves on to joining a server.
+    pub fn finish_onboarding(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(profile) = self.edited_profile(cx) else {
+            return;
+        };
+        if self.keep_profile(profile, window, cx) {
+            self.show_screen(Screen::Join, window, cx);
+        }
+    }
+
+    /// Keeps `profile` on this computer and shows it as ours. False, after telling the user,
+    /// if it couldn't be kept.
     fn keep_profile(
         &mut self,
-        name: Option<String>,
-        picture: Option<Option<Vec<u8>>>,
+        profile: Profile,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let kept = self.kept_profile().and_then(|mut profile| {
-            if let Some(name) = name {
-                profile.name = Some(name);
-            }
-            if let Some(picture) = picture {
-                profile.picture = picture.map(Arc::from);
-            }
-            if !self.mock {
-                profile.save(&keystore::config_dir()?)?;
-            }
-            Ok(profile)
-        });
-        match kept {
-            Ok(profile) => {
-                self.show_profile(profile, cx);
-                self.profile_form.edit = None;
-                self.profile_form.status = Some(SaveStatus::Saved);
-            }
-            Err(e) => {
-                tracing::warn!("saving the profile: {e:#}");
-                let notice = format!("Couldn't keep your profile: {e}");
-                window.push_notification(Notification::new().message(notice), cx);
-            }
+    ) -> bool {
+        if !self.mock
+            && let Err(e) = keystore::config_dir().and_then(|dir| profile.save(&dir))
+        {
+            tracing::warn!("saving the profile: {e:#}");
+            let notice = format!("Couldn't keep your profile: {e}");
+            window.push_notification(Notification::new().message(notice), cx);
+            return false;
         }
+        self.profile_form.outdate_pick();
+        self.profile_form.edit = None;
+        self.set_profile(profile, cx);
+        true
     }
 
-    fn kept_profile(&self) -> anyhow::Result<Profile> {
-        if self.mock {
-            return Ok(Profile::default());
+    fn set_profile(&mut self, profile: Profile, cx: &mut Context<Self>) {
+        self.profile_avatar = profile.avatar();
+        if let (Some(hash), Some(bytes)) = (self.profile_avatar, &profile.picture) {
+            self.decode_picture(hash, bytes.clone(), cx);
         }
-        Profile::load(&keystore::config_dir()?)
-    }
-
-    /// Shows `profile` as ours on the profile page.
-    fn show_profile(&mut self, profile: Profile, cx: &mut Context<Self>) {
-        let picture = profile.picture.map(|bytes| {
-            let hash = Hash::of(&bytes);
-            self.decode_picture(hash, bytes, cx);
-            hash
-        });
-        let state = Arc::make_mut(&mut self.state);
-        state.profile_name = profile.name;
-        state.profile_picture = picture;
+        self.profile = Some(profile);
     }
 
     /// The name Save on the server page would give the server, if it differs, and why the
@@ -1451,14 +1465,8 @@ impl ThroccApp {
         match screen {
             Screen::Settings(SettingsPage::Profile) => {
                 self.profile_form.reset();
-                if self.client.is_none() && !self.mock {
-                    match self.kept_profile() {
-                        Ok(profile) => self.show_profile(profile, cx),
-                        Err(e) => tracing::warn!("no saved profile: {e:#}"),
-                    }
-                }
-                let name = self.state.profile_name.clone().unwrap_or_default();
-                set_field(&self.name, name, false, window, cx);
+                let name = self.profile.as_ref().map(|p| p.name.clone());
+                set_field(&self.name, name.unwrap_or_default(), false, window, cx);
             }
             Screen::Server(ServerPage::Overview) => {
                 self.server_form.reset();
@@ -1615,6 +1623,9 @@ impl ThroccApp {
             self.attach(Arc::new(client), window, cx);
             return;
         }
+        let Some(profile) = self.profile.clone() else {
+            return;
+        };
         self.verified_problem = read_verified(&self.verified);
         self.joining = true;
         self.join_attempt += 1;
@@ -1632,7 +1643,14 @@ impl ThroccApp {
             let verified = self.verified.clone();
             async move {
                 let keystore = Keystore::open_default().map_err(SignInError::Store)?;
-                Client::connect(&address, keystore, invite.as_ref(), options, verified)
+                Client::connect(
+                    &address,
+                    keystore,
+                    invite.as_ref(),
+                    profile,
+                    options,
+                    verified,
+                )
             }
         });
         cx.spawn(async move |this, cx| {
@@ -1792,13 +1810,13 @@ impl ThroccApp {
         }
     }
 
-    /// Opens a screen of the mock client by name, for screenshots: welcome, join, joinfailed,
-    /// lost, personmenu, addserver, removeserver, room, unwatched, alone, emptylobby, focus,
-    /// fullscreen, popout, slow, slowpopout, slowfullscreen, share, connection, person,
-    /// personverified, personchanged, keychange, ownprofile, pinmismatch, settings, appearance,
-    /// verified, newroom, editroom, roompassword, deleteroom, profile, server, keys, members,
-    /// invites, removeuser, leaveserver, identitymissing, identityback or startedover. Any
-    /// other name leaves the lobby.
+    /// Opens a screen of the mock client by name, for screenshots: onboarding, welcome, join,
+    /// joinfailed, lost, personmenu, addserver, removeserver, room, unwatched, alone,
+    /// emptylobby, focus, fullscreen, popout, slow, slowpopout, slowfullscreen, share,
+    /// connection, person, personverified, personchanged, keychange, ownprofile, pinmismatch,
+    /// settings, appearance, verified, newroom, editroom, roompassword, deleteroom, profile,
+    /// server, keys, members, invites, removeuser, leaveserver, identitymissing, identityback or
+    /// startedover. Any other name leaves the lobby.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         let room = RoomId(1);
         let joined = |app: &mut Self| {
@@ -1810,11 +1828,13 @@ impl ThroccApp {
             app.client = None;
             app.screen = Screen::Join;
         };
-        let with_picture = |app: &mut Self| {
-            app.command(UiCommand::SetProfile {
-                name: None,
-                picture: Some(Some(crate::avatar::sample())),
-            });
+        let with_picture = |app: &mut Self, cx: &mut Context<Self>| {
+            let profile = Profile {
+                name: "Felix".into(),
+                picture: Some(Arc::from(crate::avatar::sample())),
+            };
+            app.set_profile(profile.clone(), cx);
+            app.command(UiCommand::SetProfile(profile));
         };
         let slow = screen.starts_with("slow");
         let make_slow = |app: &mut Self| {
@@ -1824,6 +1844,13 @@ impl ThroccApp {
                 .insert(UserId(4));
         };
         match screen {
+            "onboarding" => {
+                offline(self);
+                self.known_servers.clear();
+                self.profile = None;
+                self.profile_avatar = None;
+                self.screen = Screen::Onboarding;
+            }
             "welcome" => {
                 offline(self);
                 self.known_servers.clear();
@@ -1921,7 +1948,7 @@ impl ThroccApp {
             "keychange" => self.open_profile(UserId(3), cx),
             "ownprofile" => {
                 joined(self);
-                with_picture(self);
+                with_picture(self, cx);
                 self.dialog = Some(Dialog::OwnProfile);
             }
             "pinmismatch" => {
@@ -1947,7 +1974,7 @@ impl ThroccApp {
             "profile" => {
                 self.screen = Screen::Settings(SettingsPage::Profile);
                 joined(self);
-                with_picture(self);
+                with_picture(self, cx);
             }
             "server" => self.screen = Screen::Server(ServerPage::Overview),
             "keys" => {
@@ -2100,6 +2127,7 @@ impl Render for ThroccApp {
         };
         let shows_lost = lost.is_some();
         let screen = match self.screen {
+            Screen::Onboarding => views::onboarding::render(self, cx).into_any_element(),
             Screen::Join => views::join::render(self, cx).into_any_element(),
             Screen::Main => match lost {
                 Some(lost) => lost.into_any_element(),
@@ -2108,7 +2136,9 @@ impl Render for ThroccApp {
             Screen::Settings(page) => views::settings::render(self, page, cx).into_any_element(),
             Screen::Server(page) => views::server::render(self, page, cx).into_any_element(),
         };
-        let screen = if self.fullscreen_stream().is_some() && !shows_lost {
+        let screen = if self.screen == Screen::Onboarding
+            || self.fullscreen_stream().is_some() && !shows_lost
+        {
             screen
         } else {
             div()

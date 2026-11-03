@@ -109,7 +109,8 @@ pub fn render_lost(app: &mut ThroccApp) -> Option<Div> {
     )
 }
 
-fn frame(mascot: &'static str) -> Div {
+/// A window-filling column centred on `mascot`, for screens with no server connected.
+pub fn frame(mascot: &'static str) -> Div {
     div()
         .size_full()
         .relative()

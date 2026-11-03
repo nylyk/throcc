@@ -80,11 +80,13 @@ pub async fn login(
     finish_login(connected, send, recv).await
 }
 
-/// Enrolls with an invite code. A server that can't prove it knows the code fails here.
+/// Enrolls with an invite code, as `name` if the account is new. A server that can't prove it
+/// knows the code fails here.
 pub async fn enroll(
     connected: Connected,
     identity: &IdentityKey,
     code: &InviteCode,
+    name: &str,
 ) -> Result<ControlLink, LoginError> {
     let (mut send, mut recv, hello) = greet(&connected).await?;
     let client_nonce: [u8; 32] = random();
@@ -95,6 +97,7 @@ pub async fn enroll(
         pubkey,
         client_nonce,
         pake_a: pake_a.clone(),
+        name: name.to_owned(),
     };
     write(&mut send, &enroll).await?;
 

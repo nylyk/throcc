@@ -1,12 +1,14 @@
 mod common;
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use throcc_client_core::account;
 use throcc_client_core::call::{Call, CallEvent};
 use throcc_client_core::client::{Client, ClientApi, ClientOptions, UiCommand, UiEvent};
 use throcc_client_core::keystore::Keystore;
+use throcc_client_core::profile::Profile;
 use throcc_client_core::state::{ConnectionStatus, KeyWarning, Sound, SoundLevel, State};
 use throcc_client_core::verified::VerifiedStore;
 use throcc_proto::Fingerprint;
@@ -32,15 +34,26 @@ fn client(address: &str, invite: &InviteCode) -> (Client, tempfile::TempDir) {
     (client_in(dir.path(), address, Some(invite)), dir)
 }
 
-/// A client keeping its keys and profile in `dir`, enrolling with `invite` if given.
+/// A client named Ilse keeping its keys in `dir`, enrolling with `invite` if given.
 fn client_in(dir: &Path, address: &str, invite: Option<&InviteCode>) -> Client {
+    client_as(dir, address, invite, named("Ilse"))
+}
+
+fn named(name: &str) -> Profile {
+    Profile {
+        name: name.into(),
+        picture: None,
+    }
+}
+
+fn client_as(dir: &Path, address: &str, invite: Option<&InviteCode>, profile: Profile) -> Client {
     let keystore = Keystore::open_in(dir).unwrap();
     let options = ClientOptions {
         audio: false,
         ..Default::default()
     };
     let verified = VerifiedStore::load(dir).unwrap();
-    Client::connect(address, keystore, invite, options, verified).unwrap()
+    Client::connect(address, keystore, invite, profile, options, verified).unwrap()
 }
 
 fn wait_for(client: &Client, what: &str, ready: impl FnMut(&State) -> bool) {
@@ -87,7 +100,7 @@ fn call_in(
 ) -> Call {
     runtime.block_on(async {
         let mut keystore = Keystore::open_in(dir).unwrap();
-        let link = account::enroll(&mut keystore, address, invite)
+        let link = account::enroll(&mut keystore, address, invite, "Ilse")
             .await
             .unwrap();
         let call = Call::start(link, &keystore).unwrap();
@@ -249,14 +262,19 @@ fn two_clients_see_each_others_presence_media_and_safety_number() {
 }
 
 #[test]
-fn a_picture_chosen_in_the_lobby_reaches_others_and_survives_a_rename() {
+fn a_changed_profile_reaches_others_and_the_next_session_renames_alone() {
     let (address, admin_invite, _server) = server();
-    let (alice, alice_dir) = client(&address, &admin_invite);
+    let alice_dir = tempfile::tempdir().unwrap();
+    let alice = client_in(alice_dir.path(), &address, Some(&admin_invite));
     wait_connected(&alice, "connected");
     let picture: Vec<u8> = (0..2000u32).map(|i| (i * 7) as u8).collect();
-    alice.command(UiCommand::SetProfile {
-        name: None,
-        picture: Some(Some(picture.clone())),
+    let with_picture = Profile {
+        picture: Some(Arc::from(picture.clone())),
+        ..named("Ilse")
+    };
+    let saved = UiCommand::SetProfile(with_picture.clone());
+    command_then(&alice, saved, "the profile wasn't saved", |e| {
+        matches!(e, UiEvent::ProfileSaved).then_some(())
     });
     let room = create_room(&alice);
     let code = invite(&alice);
@@ -264,8 +282,6 @@ fn a_picture_chosen_in_the_lobby_reaches_others_and_survives_a_rename() {
     alice.command(UiCommand::Join(Some(room)));
     bob.command(UiCommand::Join(Some(room)));
     let alice_id = alice.state().me.unwrap();
-    wait_for(&bob, "alice in the room", |s| s.person(alice_id).is_some());
-
     wait_for(&bob, "alice's avatar hash", |s| {
         s.person(alice_id).is_some_and(|p| p.avatar.is_some())
     });
@@ -275,19 +291,16 @@ fn a_picture_chosen_in_the_lobby_reaches_others_and_survives_a_rename() {
 
     // The server takes one profile change per session every 10 s, so rename in a new one.
     drop(alice);
-    let alice = client_in(alice_dir.path(), &address, None);
+    let renamed = Profile {
+        name: "Alice".into(),
+        ..with_picture
+    };
+    let alice = client_as(alice_dir.path(), &address, None, renamed);
     alice.command(UiCommand::Join(Some(room)));
-    wait_for(&alice, "alice back in the room", |s| {
-        s.person(alice_id).is_some_and(|p| p.avatar == Some(hash))
-    });
-    alice.command(UiCommand::SetProfile {
-        name: Some("Alice".into()),
-        picture: None,
-    });
     wait_for(&bob, "alice's new name", |s| {
-        s.person(alice_id).is_some_and(|p| p.name == "Alice")
+        s.person(alice_id)
+            .is_some_and(|p| p.name == "Alice" && p.avatar == Some(hash))
     });
-    assert_eq!(bob.state().person(alice_id).unwrap().avatar, Some(hash));
 }
 
 #[test]
@@ -375,34 +388,25 @@ fn a_dropped_client_leaves_at_once() {
 }
 
 #[test]
-fn the_profile_follows_us_to_the_next_server() {
+fn a_new_server_gets_our_name_at_enrollment_and_our_picture_once_connected() {
+    let (address, admin_invite, _server) = server();
     let dir = tempfile::tempdir().unwrap();
-    let (first, first_invite, _first) = server();
-    let alice = client_in(dir.path(), &first, Some(&first_invite));
-    wait_connected(&alice, "connected");
     let picture: Vec<u8> = (0..2000u32).map(|i| (i * 3) as u8).collect();
-    alice.command(UiCommand::SetProfile {
-        name: Some("Ilse".into()),
-        picture: Some(Some(picture.clone())),
-    });
-    wait_for(&alice, "the profile kept", |s| {
-        s.profile_name.as_deref() == Some("Ilse") && s.profile_picture.is_some()
-    });
-    alice.command(UiCommand::Disconnect);
-
-    let (second, second_invite, _second) = server();
-    let alice = client_in(dir.path(), &second, Some(&second_invite));
-    wait_connected(&alice, "connected again");
-    assert_eq!(alice.state().profile_name.as_deref(), Some("Ilse"));
+    let profile = Profile {
+        picture: Some(Arc::from(picture.clone())),
+        ..named("Mara")
+    };
+    let alice = client_as(dir.path(), &address, Some(&admin_invite), profile);
+    wait_connected(&alice, "connected");
     let room = create_room(&alice);
     let code = invite(&alice);
-    let (bob, _b) = client(&second, &code);
+    let (bob, _b) = client(&address, &code);
     alice.command(UiCommand::Join(Some(room)));
     bob.command(UiCommand::Join(Some(room)));
     let alice_id = alice.state().me.unwrap();
-    wait_for(&bob, "alice's profile on the second server", |s| {
+    wait_for(&bob, "alice's profile", |s| {
         s.person(alice_id)
-            .is_some_and(|p| p.name == "Ilse" && p.avatar.is_some())
+            .is_some_and(|p| p.name == "Mara" && p.avatar.is_some())
     });
     let hash = bob.state().person(alice_id).unwrap().avatar.unwrap();
     wait_for(&bob, "alice's picture", |_| bob.avatar(hash).is_some());
@@ -747,7 +751,7 @@ fn an_epoch_floor_outlives_a_restart_and_refuses_a_replayed_sender_key() {
     let bob_dir = tempfile::tempdir().unwrap();
     let (mut bob, placement) = runtime.block_on(async {
         let mut keystore = Keystore::open_in(bob_dir.path()).unwrap();
-        let link = account::enroll(&mut keystore, &address, &code)
+        let link = account::enroll(&mut keystore, &address, &code, "Ilse")
             .await
             .unwrap();
         let bob = Call::start(link, &keystore).unwrap();
@@ -841,7 +845,7 @@ fn enrolling_again_takes_a_new_encryption_key_and_drops_that_accounts_floors() {
     let runtime = Runtime::new().unwrap();
     let notices = runtime.block_on(async {
         let mut keystore = Keystore::open_in(alice_dir.path()).unwrap();
-        let link = account::enroll(&mut keystore, &address, &rebuilt.admin_invite())
+        let link = account::enroll(&mut keystore, &address, &rebuilt.admin_invite(), "Ilse")
             .await
             .unwrap();
         assert_ne!(keystore.encryption_key().public(), first_key);

@@ -6,7 +6,7 @@ use throcc_crypto::pake::{ServerPake, Transcript};
 use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::invite::{self, ID_CHARS, SECRET_CHARS};
 use throcc_proto::messages::{
-    AuthError, ClientHello, Event, PakeFinish, PakeReply, PakeStep, PublicKey,
+    AuthError, ClientHello, Event, PakeFinish, PakeReply, PakeStep, PublicKey, valid_name,
 };
 use tracing::{debug, info, warn};
 
@@ -66,12 +66,17 @@ pub async fn authenticate(
             pubkey,
             client_nonce,
             pake_a,
+            name,
         } => {
+            let name = valid_name(&name)
+                .ok_or(AuthRefusal::Enroll(AuthError::BadName))?
+                .to_owned();
             let run = Enrollment {
                 shared,
                 source: SourceKey::of(connection.remote_address().ip()),
                 code_id: invite::normalize(&code_id),
                 pubkey,
+                name,
                 server_nonce,
                 client_nonce,
                 exporter,
@@ -90,6 +95,7 @@ struct Enrollment<'a> {
     source: SourceKey,
     code_id: String,
     pubkey: PublicKey,
+    name: String,
     server_nonce: &'a [u8; 32],
     client_nonce: [u8; 32],
     exporter: [u8; 32],
@@ -129,7 +135,7 @@ impl Enrollment<'_> {
         }
         let enrolled = {
             let mut hub = self.shared.hub();
-            let enrolled = hub.db.enroll(&self.pubkey, &self.code_id, now);
+            let enrolled = hub.db.enroll(&self.pubkey, &self.code_id, &self.name, now);
             match &enrolled {
                 Ok(Some(Enrolled::Added(row))) => {
                     hub.emit_user_list_change(Event::UserAdded(row.to_user()));

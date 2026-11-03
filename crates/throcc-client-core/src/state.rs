@@ -26,10 +26,6 @@ pub struct State {
     pub deafened: bool,
     pub key_warnings: Vec<KeyWarning>,
     pub health: Health,
-    /// Our name as kept on this computer, once we have chosen one.
-    pub profile_name: Option<String>,
-    /// Our picture as kept on this computer, readable through the client's avatars.
-    pub profile_picture: Option<Hash>,
 }
 
 impl State {
@@ -51,15 +47,11 @@ impl State {
         self.rooms.iter_mut().find(|r| r.id == room)
     }
 
-    /// The pictures of the server, us and everyone shown.
+    /// The pictures of the server and everyone shown.
     pub fn avatars_in_use(&self) -> HashSet<Hash> {
         let server = self.server.as_ref().and_then(|s| s.avatar);
         let people = self.people.values().filter_map(|p| p.avatar);
-        server
-            .into_iter()
-            .chain(self.profile_picture)
-            .chain(people)
-            .collect()
+        server.into_iter().chain(people).collect()
     }
 
     /// Lists `room`, or updates it if it is listed already.

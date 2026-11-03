@@ -75,6 +75,8 @@ pub enum ClientHello {
         pubkey: PublicKey,
         client_nonce: [u8; 32],
         pake_a: Vec<u8>,
+        /// The name a new account starts with.
+        name: String,
     },
 }
 
@@ -108,6 +110,14 @@ pub struct Welcome {
     pub presence: Vec<Presence>,
     pub placement: Placement,
     pub server: ServerProfile,
+    pub profile: UserProfile,
+}
+
+/// Our own name and picture, as the server keeps them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserProfile {
+    pub name: String,
+    pub avatar: Option<Hash>,
 }
 
 /// The server's own name and picture, which admins set.
@@ -133,6 +143,8 @@ pub enum AuthError {
     RateLimited,
     #[error("the server is full; try again later")]
     ServerFull,
+    #[error("the name is empty, too long or hides text")]
+    BadName,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

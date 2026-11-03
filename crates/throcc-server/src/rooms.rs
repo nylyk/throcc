@@ -13,8 +13,8 @@ use throcc_proto::limits::{
 use throcc_proto::messages::{
     Audience, Audiences, AuthError, ErrorCode, Event, MAX_AVATAR_BYTES, MAX_NAME_CHARS,
     MAX_PASSWORD_CHARS, MediaState, Peer, Placement, Presence, Recovery, Request, Response, Room,
-    ServerMessage, ServerProfile, ShareTracks, SignedEncryptionKey, Tracks, Welcome, valid_name,
-    valid_password,
+    ServerMessage, ServerProfile, ShareTracks, SignedEncryptionKey, Tracks, UserProfile, Welcome,
+    valid_name, valid_password,
 };
 use throcc_proto::permissions;
 use throcc_proto::transport::close;
@@ -322,6 +322,10 @@ impl Hub {
         self.next_conn += 1;
         let conn_id = self.next_conn;
         let role = row.role;
+        let profile = UserProfile {
+            name: row.name.clone(),
+            avatar: row.avatar,
+        };
         self.sessions.insert(
             user,
             Session {
@@ -352,6 +356,7 @@ impl Hub {
             presence: self.sessions.values().filter_map(presence).collect(),
             placement,
             server,
+            profile,
         };
         Ok(Ok((conn_id, welcome)))
     }

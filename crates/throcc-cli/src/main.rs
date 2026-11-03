@@ -12,9 +12,12 @@ use throcc_client_core::account;
 use throcc_client_core::call::Call;
 use throcc_client_core::control::{ControlLink, Requester};
 use throcc_client_core::keystore::{IdentityMissing, Keystore, StartedOver};
+use throcc_client_core::profile::Profile;
 use throcc_proto::ids::RoomId;
 use throcc_proto::invite::InviteCode;
-use throcc_proto::messages::{Event, Presence, Request, Response, Room, Welcome};
+use throcc_proto::messages::{
+    Event, MAX_NAME_CHARS, Presence, Request, Response, Room, Welcome, valid_name,
+};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 #[derive(Parser)]
@@ -38,6 +41,9 @@ enum Command {
         /// The invite code. Given here, other local users can read it (`ps`, /proc) and it
         /// lands in shell history; prefer THROCC_INVITE or stdin.
         code: Option<String>,
+        /// Keeps this name for every server, in place of the one kept already.
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Connects and reads commands from stdin, printing events as they arrive.
     Connect { address: String },
@@ -53,7 +59,7 @@ enum Command {
     Users { address: String },
     /// Creates a room (managers and admins).
     CreateRoom { address: String, name: String },
-    /// Sets your display name.
+    /// Keeps your display name for every server and gives it to this one.
     Name { address: String, name: String },
     /// Holds a voice call in a room until Ctrl-C, printing who speaks.
     Call {
@@ -154,9 +160,14 @@ async fn run(cli: Cli) -> Result<()> {
     };
 
     match cli.command {
-        Command::Enroll { address, code } => {
+        Command::Enroll {
+            address,
+            code,
+            name,
+        } => {
+            let profile = kept_profile(&keystore, name)?;
             let code = invite_code(code).await?;
-            let link = account::enroll(&mut keystore, &address, &code).await?;
+            let link = account::enroll(&mut keystore, &address, &code, &profile.name).await?;
             println!(
                 "enrolled as user {} ({:?})",
                 link.welcome.me.0, link.welcome.role
@@ -182,7 +193,8 @@ async fn run(cli: Cli) -> Result<()> {
             one_shot(&keystore, &address, &format!("create-room {name}")).await?
         }
         Command::Name { address, name } => {
-            one_shot(&keystore, &address, &format!("name {name}")).await?
+            let profile = kept_profile(&keystore, Some(name))?;
+            one_shot(&keystore, &address, &format!("name {}", profile.name)).await?
         }
         Command::Call {
             address,
@@ -248,6 +260,26 @@ async fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
+/// The profile kept beside the keystore, first renamed to `name` and kept if one is given.
+fn kept_profile(keystore: &Keystore, name: Option<String>) -> Result<Profile> {
+    let kept = Profile::load(keystore.dir())?;
+    let Some(name) = name else {
+        return kept.context("no name kept yet; give one with `enroll --name` or `name`");
+    };
+    let profile = Profile {
+        name: valid_name(&name)
+            .with_context(|| {
+                format!(
+                    "names are 1 to {MAX_NAME_CHARS} characters, with nothing hidden or reversed"
+                )
+            })?
+            .to_owned(),
+        picture: kept.and_then(|p| p.picture),
+    };
+    profile.save(keystore.dir())?;
+    Ok(profile)
+}
+
 /// Runs a call with the real client until the connection ends or Ctrl-C.
 fn voice_call(
     address: &str,
@@ -270,7 +302,8 @@ fn voice_call(
         eprintln!("Couldn't read who you verified ({e:#}), so everyone shows as not verified.");
         VerifiedStore::empty(keystore.dir())
     });
-    let client = Client::connect(address, keystore, None, options, verified)?;
+    let profile = kept_profile(&keystore, None)?;
+    let client = Client::connect(address, keystore, None, profile, options, verified)?;
     let state = client.state();
     let rooms = state.rooms.iter().map(|r| (r.id, r.name.as_str()));
     let room = find_room(rooms, room)?;
@@ -448,7 +481,7 @@ async fn run_command(requester: &Requester, welcome: &Welcome, line: &str) -> Re
         },
         "name" => Request::SetProfile {
             name: rest.to_owned(),
-            avatar: None,
+            avatar: welcome.profile.avatar,
         },
         other => bail!("unknown command {other}"),
     };
@@ -668,7 +701,7 @@ fn moves_terminal(c: char) -> bool {
 mod tests {
     use super::*;
     use throcc_proto::ids::{Epoch, Role, UserId};
-    use throcc_proto::messages::{Placement, ServerProfile};
+    use throcc_proto::messages::{Placement, ServerProfile, UserProfile};
 
     fn welcome() -> Welcome {
         Welcome {
@@ -684,6 +717,10 @@ mod tests {
                 audiences: Default::default(),
             },
             server: ServerProfile::default(),
+            profile: UserProfile {
+                name: "Ilse".into(),
+                avatar: None,
+            },
         }
     }
 

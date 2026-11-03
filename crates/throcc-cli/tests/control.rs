@@ -9,7 +9,7 @@ use throcc_proto::framing;
 use throcc_proto::ids::{Epoch, Hash, Role, UserId};
 use throcc_proto::messages::{
     AuthResult, ClientHello, PROTOCOL, Placement, Request, Response, ServerHello, ServerMessage,
-    ServerProfile, Welcome,
+    ServerProfile, UserProfile, Welcome,
 };
 use throcc_proto::transport::{IDLE_TIMEOUT, close};
 use throcc_server::{Congestion, tls};
@@ -98,6 +98,10 @@ async fn unknown_reply_id_closes_the_connection() {
                 audiences: Default::default(),
             },
             server: ServerProfile::default(),
+            profile: UserProfile {
+                name: "Ilse".into(),
+                avatar: None,
+            },
         };
         send.write_all(&framing::encode(&AuthResult::Ok(Box::new(welcome))).unwrap())
             .await

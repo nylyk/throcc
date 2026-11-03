@@ -68,8 +68,12 @@ fn set_voice(app: &mut ThroccApp, change: impl FnOnce(&mut VoiceSettings)) {
 
 fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let seed = app.state.me.map_or(0, |me| me.0);
-    let name = app.state.profile_name.clone().unwrap_or_default();
-    let saved = app.state.profile_picture;
+    let name = app
+        .profile
+        .as_ref()
+        .map(|p| p.name.clone())
+        .unwrap_or_default();
+    let saved = app.profile.as_ref().and_then(|p| p.avatar());
     let picture = picture_editor(app, PictureFor::Profile, &name, seed, saved, true, cx);
     let name_error = typed_name(&app.name, cx).err();
     let save = primary("save-profile", "Save")
