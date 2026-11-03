@@ -20,6 +20,7 @@ use throcc_client_core::keystore::{self, Keystore, StartedOver};
 use throcc_client_core::media::audio::{Transmit, VoiceSettings};
 use throcc_client_core::media::cues::Cue;
 use throcc_client_core::media::devices;
+use throcc_client_core::profile::Profile;
 use throcc_client_core::server_look::ServerLook;
 use throcc_client_core::settings::Settings;
 use throcc_client_core::state::{
@@ -134,8 +135,6 @@ pub enum Screen {
 pub enum SaveStatus {
     Saving,
     Saved,
-    /// The picture is kept and goes on our profile when we next join a room.
-    UntilJoined,
     Failed(String),
 }
 
@@ -797,6 +796,15 @@ impl ThroccApp {
             return picture.clone();
         }
         let bytes = self.client.as_ref()?.avatar(hash)?;
+        self.decode_picture(hash, bytes, cx);
+        None
+    }
+
+    /// Decodes `bytes` in the background and keeps the result as the picture behind `hash`.
+    fn decode_picture(&mut self, hash: Hash, bytes: Arc<[u8]>, cx: &mut Context<Self>) {
+        if self.pictures.contains_key(&hash) {
+            return;
+        }
         if self.pictures.len() >= PICTURES_KEPT {
             let in_use = self.state.avatars_in_use();
             self.pictures.retain(|hash, _| in_use.contains(hash));
@@ -816,7 +824,6 @@ impl ThroccApp {
             }
         })
         .detach();
-        None
     }
 
     /// Switches every window to the preset `name` and keeps it for next time.
@@ -1321,16 +1328,6 @@ impl ThroccApp {
         self.set_dialog(None, cx);
     }
 
-    /// What a picture change waits on: the server, or, without a name kept here, the name
-    /// the server tells us when we next join a room.
-    fn saving_status(&self) -> SaveStatus {
-        if self.state.profile_name.is_some() || self.state.current.is_some() {
-            SaveStatus::Saving
-        } else {
-            SaveStatus::UntilJoined
-        }
-    }
-
     /// The name Save on the profile page would give us, if it differs from the kept one,
     /// and why the server would refuse it if it would.
     fn profile_name_change(&self, cx: &App) -> Result<Option<String>, &'static str> {
@@ -1344,7 +1341,7 @@ impl ThroccApp {
             .is_ok_and(|name| name.is_some() || self.profile_form.edit.is_some())
     }
 
-    pub fn save_profile(&mut self, cx: &mut Context<Self>) {
+    pub fn save_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Ok(name) = self.profile_name_change(cx) else {
             return;
         };
@@ -1352,18 +1349,67 @@ impl ThroccApp {
         if name.is_none() && picture.is_none() {
             return;
         }
-        let status = if name.is_some() {
-            SaveStatus::Saving
-        } else {
-            self.saving_status()
-        };
-        if status == SaveStatus::UntilJoined {
-            self.profile_form.edit = None;
-        }
         self.profile_form.outdate_pick();
-        self.profile_form.status = Some(status);
-        self.command(UiCommand::SetProfile { name, picture });
+        if self.client.is_some() {
+            self.profile_form.status = Some(SaveStatus::Saving);
+            self.command(UiCommand::SetProfile { name, picture });
+        } else {
+            self.keep_profile(name, picture, window, cx);
+        }
         cx.notify();
+    }
+
+    /// Changes the profile kept on this computer, for while no server session runs.
+    fn keep_profile(
+        &mut self,
+        name: Option<String>,
+        picture: Option<Option<Vec<u8>>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let kept = self.kept_profile().and_then(|mut profile| {
+            if let Some(name) = name {
+                profile.name = Some(name);
+            }
+            if let Some(picture) = picture {
+                profile.picture = picture.map(Arc::from);
+            }
+            if !self.mock {
+                profile.save(&keystore::config_dir()?)?;
+            }
+            Ok(profile)
+        });
+        match kept {
+            Ok(profile) => {
+                self.show_profile(profile, cx);
+                self.profile_form.edit = None;
+                self.profile_form.status = Some(SaveStatus::Saved);
+            }
+            Err(e) => {
+                tracing::warn!("saving the profile: {e:#}");
+                let notice = format!("Couldn't keep your profile: {e}");
+                window.push_notification(Notification::new().message(notice), cx);
+            }
+        }
+    }
+
+    fn kept_profile(&self) -> anyhow::Result<Profile> {
+        if self.mock {
+            return Ok(Profile::default());
+        }
+        Profile::load(&keystore::config_dir()?)
+    }
+
+    /// Shows `profile` as ours on the profile page.
+    fn show_profile(&mut self, profile: Profile, cx: &mut Context<Self>) {
+        let picture = profile.picture.map(|bytes| {
+            let hash = Hash::of(&bytes);
+            self.decode_picture(hash, bytes, cx);
+            hash
+        });
+        let state = Arc::make_mut(&mut self.state);
+        state.profile_name = profile.name;
+        state.profile_picture = picture;
     }
 
     /// The name Save on the server page would give the server, if it differs, and why the
@@ -1405,6 +1451,12 @@ impl ThroccApp {
         match screen {
             Screen::Settings(SettingsPage::Profile) => {
                 self.profile_form.reset();
+                if self.client.is_none() && !self.mock {
+                    match self.kept_profile() {
+                        Ok(profile) => self.show_profile(profile, cx),
+                        Err(e) => tracing::warn!("no saved profile: {e:#}"),
+                    }
+                }
                 let name = self.state.profile_name.clone().unwrap_or_default();
                 set_field(&self.name, name, false, window, cx);
             }

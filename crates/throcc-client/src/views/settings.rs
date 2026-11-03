@@ -74,7 +74,7 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let name_error = typed_name(&app.name, cx).err();
     let save = primary("save-profile", "Save")
         .disabled(app.profile_form.saving() || !app.profile_changed(cx))
-        .on_click(cx.listener(|app, _, _, cx| app.save_profile(cx)));
+        .on_click(cx.listener(|app, _, window, cx| app.save_profile(window, cx)));
     let save = save_line(
         app.profile_form.status.as_ref(),
         |reason| format!("Kept on this computer, but this server refused it: {reason}"),

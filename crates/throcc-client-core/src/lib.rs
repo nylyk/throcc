@@ -13,7 +13,7 @@ mod known_servers;
 pub mod media;
 mod people;
 mod playback;
-mod profile;
+pub mod profile;
 pub mod server_look;
 mod servers;
 mod session;

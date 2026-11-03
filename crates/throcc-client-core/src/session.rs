@@ -459,6 +459,7 @@ impl Session {
         };
         let Some(name) = self.profile.name.clone() else {
             self.pending_avatar = Some(avatar);
+            self.shared.emit(UiEvent::ProfileSaved);
             self.apply_pending_avatar().await;
             return;
         };

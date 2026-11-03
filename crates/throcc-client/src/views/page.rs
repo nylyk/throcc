@@ -187,9 +187,6 @@ pub fn save_line(
     let status = status.map(|status| match status {
         SaveStatus::Saving => caption("Saving…"),
         SaveStatus::Saved => caption("Saved").text_color(theme::ok_text()),
-        SaveStatus::UntilJoined => {
-            caption("Saved here. Others see your picture once you join a room.")
-        }
         SaveStatus::Failed(reason) => caption(refused(reason)).text_color(theme::danger_text()),
     });
     div()
