@@ -204,15 +204,15 @@ impl MediaEngine {
     }
 
     /// Applies our placement after `JoinRoom` or `LeaveRoom`.
-    pub fn placed(&self, placed: &Placement) -> Vec<KeyNotice> {
+    pub fn apply_placement(&self, placement: &Placement) -> Vec<KeyNotice> {
         let (room_changed, (requests, notices)) = {
             let mut keys = self.keys();
-            let room_changed = keys.room() != placed.room;
-            let applied = keys.placed(
-                placed.room,
-                placed.epoch,
-                placed.tracks.clone(),
-                &placed.peers,
+            let room_changed = keys.room() != placement.room;
+            let applied = keys.apply_placement(
+                placement.room,
+                placement.epoch,
+                placement.tracks.clone(),
+                &placement.peers,
                 Instant::now(),
             );
             (room_changed, applied)
@@ -254,7 +254,7 @@ impl MediaEngine {
     pub fn set_presence(&self, user: UserId, room: Option<RoomId>) -> Vec<KeyNotice> {
         self.rekey(|keys, now| {
             if keys.set_presence(user, room) {
-                keys.reapply_room_state(now)
+                keys.reapply_peers(now)
             } else {
                 (None, Vec::new())
             }

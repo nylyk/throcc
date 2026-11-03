@@ -76,13 +76,13 @@ impl Call {
         for p in &welcome.online {
             engine.set_presence(p.user, p.room);
         }
-        let placed_notices = match welcome.placement.room {
-            Some(_) => engine.placed(&welcome.placement),
+        let placement_notices = match welcome.placement.room {
+            Some(_) => engine.apply_placement(&welcome.placement),
             None => Vec::new(),
         };
 
         let (events_tx, events) = mpsc::channel(EVENTS);
-        for notice in placed_notices {
+        for notice in placement_notices {
             events_tx.try_send(CallEvent::Key(notice)).ok();
         }
         let pump_engine = engine.clone();
@@ -153,9 +153,9 @@ impl Call {
             None => Request::LeaveRoom,
         };
         match self.request(request).await? {
-            Response::Placement(placed) => {
-                let notices = self.engine.placed(&placed);
-                Ok((placed, notices))
+            Response::Placement(placement) => {
+                let notices = self.engine.apply_placement(&placement);
+                Ok((placement, notices))
             }
             other => bail!("{}", control::refusal(other)),
         }

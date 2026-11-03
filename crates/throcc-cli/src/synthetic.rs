@@ -85,8 +85,8 @@ pub async fn send(call: &mut Call, room: RoomId, options: SendOptions) -> Result
         count,
         with_audio,
     } = options;
-    let (placed, _) = call.join(Some(room), None).await?;
-    let tracks = placed.tracks.context("joined without tracks")?;
+    let (placement, _) = call.join(Some(room), None).await?;
+    let tracks = placement.tracks.context("joined without tracks")?;
     let share_video = tracks
         .shares
         .first()

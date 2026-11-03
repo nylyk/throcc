@@ -170,7 +170,7 @@ impl KeyManager {
     }
 
     /// Applies the room state last applied again, after a presence changed.
-    pub fn reapply_room_state(&mut self, now: Instant) -> (Option<Request>, Vec<KeyNotice>) {
+    pub fn reapply_peers(&mut self, now: Instant) -> (Option<Request>, Vec<KeyNotice>) {
         let Some(room) = self.room else {
             return (None, Vec::new());
         };
@@ -201,7 +201,7 @@ impl KeyManager {
 
     /// Applies our placement after `JoinRoom` or `LeaveRoom`. Returns the `PublishSenderKey`
     /// requests to send.
-    pub fn placed(
+    pub fn apply_placement(
         &mut self,
         room: Option<RoomId>,
         epoch: Epoch,
@@ -715,7 +715,7 @@ pub(crate) mod tests {
                     .collect()
             } else {
                 m.keys
-                    .placed(Some(ROOM), Epoch(epoch), tracks, peers, now)
+                    .apply_placement(Some(ROOM), Epoch(epoch), tracks, peers, now)
                     .0
             };
             for request in requests {
@@ -783,7 +783,9 @@ pub(crate) mod tests {
     ) -> Vec<KeyNotice> {
         show(&mut m.keys, peers);
         let tracks = room.map(|_| m.tracks.clone());
-        m.keys.placed(room, Epoch(epoch), tracks, peers, now).1
+        m.keys
+            .apply_placement(room, Epoch(epoch), tracks, peers, now)
+            .1
     }
 
     #[test]
@@ -974,14 +976,15 @@ pub(crate) mod tests {
             let (request, _) = m.keys.peers_changed(ROOM, Epoch(epoch), &peers, now);
             published.extend(request.map(|r| (m.id, r)));
             assert!(m.keys.set_presence(newcomer.id, Some(ROOM)));
-            let (request, _) = m.keys.reapply_room_state(now);
+            let (request, _) = m.keys.reapply_peers(now);
             published.extend(request.map(|r| (m.id, r)));
         }
         show(&mut newcomer.keys, &peers);
         let tracks = Some(newcomer.tracks.clone());
-        let (requests, _) = newcomer
-            .keys
-            .placed(Some(ROOM), Epoch(epoch), tracks, &peers, now);
+        let (requests, _) =
+            newcomer
+                .keys
+                .apply_placement(Some(ROOM), Epoch(epoch), tracks, &peers, now);
         published.extend(requests.into_iter().map(|r| (newcomer.id, r)));
         published
     }
@@ -1105,7 +1108,9 @@ pub(crate) mod tests {
         let peers = vec![peer(&a), peer(&b)];
         show(&mut a.keys, &peers);
         let tracks = Some(a.tracks.clone());
-        let (requests, _) = a.keys.placed(Some(ROOM), Epoch(1), tracks, &peers, now);
+        let (requests, _) = a
+            .keys
+            .apply_placement(Some(ROOM), Epoch(1), tracks, &peers, now);
         let Some(Request::PublishSenderKey { wrapped, .. }) = requests.into_iter().next() else {
             panic!()
         };
@@ -1128,7 +1133,9 @@ pub(crate) mod tests {
         let peers = vec![peer(&a), forged, expired];
         show(&mut a.keys, &peers);
         let tracks = Some(a.tracks.clone());
-        let (requests, notices) = a.keys.placed(Some(ROOM), Epoch(1), tracks, &peers, now);
+        let (requests, notices) = a
+            .keys
+            .apply_placement(Some(ROOM), Epoch(1), tracks, &peers, now);
         assert!(notices.contains(&KeyNotice::BadEncryptionKey { user: b.id }));
         assert!(notices.contains(&KeyNotice::BadEncryptionKey { user: c.id }));
         assert!(requests.is_empty());
@@ -1178,21 +1185,24 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn sender_key_before_room_state_is_applied_later() {
+    fn sender_key_before_its_peers_is_applied_later() {
         let now = Instant::now();
         let (mut a, mut b) = (member(1), member(2));
         let peers = vec![peer(&a), peer(&b)];
         show(&mut a.keys, &peers);
         show(&mut b.keys, &peers);
         let tracks = Some(a.tracks.clone());
-        let (requests, _) = a.keys.placed(Some(ROOM), Epoch(1), tracks, &peers, now);
+        let (requests, _) = a
+            .keys
+            .apply_placement(Some(ROOM), Epoch(1), tracks, &peers, now);
         let Some(Request::PublishSenderKey { epoch, wrapped }) = requests.into_iter().next() else {
             panic!()
         };
         b.keys.sender_key(a.id, epoch, &wrapped[0].1, now).unwrap();
         assert!(!can_read(&mut b, &a, 1));
         let tracks = Some(b.tracks.clone());
-        b.keys.placed(Some(ROOM), Epoch(1), tracks, &peers, now);
+        b.keys
+            .apply_placement(Some(ROOM), Epoch(1), tracks, &peers, now);
         assert!(can_read(&mut b, &a, 1));
     }
 
@@ -1205,9 +1215,11 @@ pub(crate) mod tests {
         a.keys.peers_changed(ROOM, Epoch(3), &peers, now);
         let tracks = Some(a.tracks.clone());
         a.keys
-            .placed(Some(ROOM), Epoch(2), tracks.clone(), &peers, now);
+            .apply_placement(Some(ROOM), Epoch(2), tracks.clone(), &peers, now);
         assert_eq!(a.keys.epoch(), Epoch(3));
-        let (requests, _) = a.keys.placed(Some(ROOM), Epoch(1), tracks, &peers, now);
+        let (requests, _) = a
+            .keys
+            .apply_placement(Some(ROOM), Epoch(1), tracks, &peers, now);
         assert!(requests.is_empty());
         assert_eq!(a.keys.epoch(), Epoch(3));
         assert!(a.keys.send_key(a.tracks.mic).is_some());
@@ -1223,7 +1235,7 @@ pub(crate) mod tests {
     }
 
     fn reapply(m: &mut Member, now: Instant) -> (Option<Request>, Vec<KeyNotice>) {
-        m.keys.reapply_room_state(now)
+        m.keys.reapply_peers(now)
     }
 
     #[test]
@@ -1233,7 +1245,9 @@ pub(crate) mod tests {
         let peers = vec![peer(&a), peer(&b), peer(&hidden)];
         show(&mut a.keys, &peers[..2]);
         let tracks = Some(a.tracks.clone());
-        let (requests, notices) = a.keys.placed(Some(ROOM), Epoch(1), tracks, &peers, now);
+        let (requests, notices) = a
+            .keys
+            .apply_placement(Some(ROOM), Epoch(1), tracks, &peers, now);
         assert_eq!(wrapped_to(requests.first()), [b.id]);
         assert_eq!(notices, []);
         assert_eq!(a.keys.owner(hidden.tracks.mic), None);
@@ -1249,7 +1263,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_room_state_reusing_a_media_id_trusts_nobody() {
+    fn peers_reusing_a_media_id_trust_nobody() {
         let now = Instant::now();
         let (mut a, mut b, c) = (member(1), member(2), member(3));
         rekey(&mut [&mut a, &mut b], 1, now);
@@ -1274,14 +1288,16 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_room_state_over_the_peer_limit_trusts_nobody() {
+    fn peers_over_the_limit_trust_nobody() {
         let now = Instant::now();
         let mut a = member(1);
         let mut peers = vec![peer(&a)];
         peers.extend((100..).take(MAX_ROOM_PEERS - 1).map(invented_peer));
         show(&mut a.keys, &peers);
         let tracks = Some(a.tracks.clone());
-        let (requests, _) = a.keys.placed(Some(ROOM), Epoch(1), tracks, &peers, now);
+        let (requests, _) = a
+            .keys
+            .apply_placement(Some(ROOM), Epoch(1), tracks, &peers, now);
         assert_eq!(wrapped_to(requests.first()).len(), MAX_ROOM_PEERS - 1);
 
         let crowd = invented_peer(99);
@@ -1302,7 +1318,8 @@ pub(crate) mod tests {
         let peers = vec![peer(&a), peer(&b), peer(&c)];
         show(&mut a.keys, &peers);
         let tracks = Some(a.tracks.clone());
-        a.keys.placed(Some(ROOM), Epoch(1), tracks, &peers, now);
+        a.keys
+            .apply_placement(Some(ROOM), Epoch(1), tracks, &peers, now);
         assert_eq!(a.keys.signature_checks, 2);
         for room in [None, Some(ROOM), None, Some(ROOM)] {
             assert!(a.keys.set_presence(c.id, room));
@@ -1330,9 +1347,12 @@ pub(crate) mod tests {
         show(&mut a.keys, &peers);
         show(&mut b.keys, &peers);
         let tracks = Some(a.tracks.clone());
-        a.keys.placed(Some(ROOM), Epoch(1), tracks, &peers, now);
+        a.keys
+            .apply_placement(Some(ROOM), Epoch(1), tracks, &peers, now);
         let tracks = Some(b.tracks.clone());
-        let (requests, _) = b.keys.placed(Some(ROOM), Epoch(1), tracks, &peers, now);
+        let (requests, _) = b
+            .keys
+            .apply_placement(Some(ROOM), Epoch(1), tracks, &peers, now);
         let Some(Request::PublishSenderKey { epoch, wrapped }) = requests.into_iter().next() else {
             panic!()
         };

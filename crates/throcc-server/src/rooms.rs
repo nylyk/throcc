@@ -326,7 +326,7 @@ impl Hub {
                 audience_seq: Cell::new(0),
             },
         );
-        let placed = want_room
+        let placement = want_room
             .filter(|room| self.may_rejoin(user, *room))
             .and_then(|room| self.rejoin(user, room))
             .unwrap_or_else(lobby);
@@ -339,7 +339,7 @@ impl Hub {
             role,
             rooms: self.room_list(),
             online: self.sessions.values().filter_map(presence).collect(),
-            placement: placed,
+            placement,
             server,
         };
         Ok(Some((conn_id, welcome)))
@@ -729,12 +729,12 @@ impl Hub {
         if moving && !self.room_changes.take(user, 1.0, Instant::now()) {
             return Err(changing_rooms_too_fast());
         }
-        let placed = self.place(user, target)?;
+        let placement = self.place(user, target)?;
         match target {
             Some(room) => self.last_joined.insert(user, room),
             None => self.last_joined.remove(&user),
         };
-        Ok(Response::Placement(placed))
+        Ok(Response::Placement(placement))
     }
 
     /// Whether moving `user` to `target` enters a room they aren't in, which counts against
@@ -766,9 +766,9 @@ impl Hub {
         if !self.rejoin_allowance(returning).holds(user, 1.0, now) {
             return None;
         }
-        let placed = self.place(user, Some(room)).ok()?;
+        let placement = self.place(user, Some(room)).ok()?;
         self.rejoin_allowance(returning).take(user, 1.0, now);
-        Some(placed)
+        Some(placement)
     }
 
     fn rejoin_allowance(&mut self, returning: bool) -> &mut Buckets<UserId> {
@@ -796,7 +796,7 @@ impl Hub {
         let session = self.session(user)?;
         let current = session.room;
         if current == target {
-            return Ok(self.placed(user));
+            return Ok(self.placement(user));
         }
         if let Some(room) = target {
             self.room_entry(room)?;
@@ -835,7 +835,7 @@ impl Hub {
             None => self.emit_all(Event::WentOffline(user)),
         }
         self.rebuild_routes();
-        Ok(self.placed(user))
+        Ok(self.placement(user))
     }
 
     /// Takes `user` out of their room even when the room's epoch can't be bumped.
@@ -873,7 +873,7 @@ impl Hub {
         }
     }
 
-    fn placed(&self, user: UserId) -> Placement {
+    fn placement(&self, user: UserId) -> Placement {
         let Some(session) = self.sessions.get(&user) else {
             return lobby();
         };

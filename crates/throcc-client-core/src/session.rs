@@ -753,7 +753,7 @@ impl Session {
 
     /// Leaves our room here after the server took us out of it.
     fn put_out_of_room(&mut self) {
-        self.call.engine.placed(&Placement {
+        self.call.engine.apply_placement(&Placement {
             room: None,
             epoch: throcc_proto::ids::Epoch(0),
             tracks: None,
@@ -821,9 +821,9 @@ impl Session {
         }
     }
 
-    async fn joined(&mut self, placed: &Placement, notices: Vec<KeyNotice>) {
-        self.after_join(placed);
-        self.cue(if placed.room.is_some() {
+    async fn joined(&mut self, placement: &Placement, notices: Vec<KeyNotice>) {
+        self.after_join(placement);
+        self.cue(if placement.room.is_some() {
             Cue::Join
         } else {
             Cue::Leave
@@ -832,24 +832,24 @@ impl Session {
         self.push_media().await;
     }
 
-    fn after_join(&mut self, placed: &Placement) {
+    fn after_join(&mut self, placement: &Placement) {
         // The floor of a new placement is what a replaying server wants lost, so it isn't
         // left to the next health tick.
         if let Err(e) = self.call.floors.save() {
             warn!("saving epoch floors: {e:#}");
         }
         self.reset_room();
-        self.room = placed.room;
-        self.my_tracks = placed.tracks.clone();
-        if placed.room.is_some() {
-            self.take_newer(placed.audiences.clone());
+        self.room = placement.room;
+        self.my_tracks = placement.tracks.clone();
+        if placement.room.is_some() {
+            self.take_newer(placement.audiences.clone());
         } else {
             self.audiences.shares.clear();
         }
         self.voice(VoiceCommand::ForgetAll);
         self.sync_voice();
         self.sync_peers();
-        let room = placed.room;
+        let room = placement.room;
         self.shared.update(|s| {
             s.current = room.map(|room| CurrentRoom {
                 room,
@@ -1107,12 +1107,12 @@ impl Session {
     async fn command(&mut self, command: UiCommand) -> ControlFlow<()> {
         match command {
             UiCommand::Join(room) => match self.call.join(room, None).await {
-                Ok((placed, notices)) => self.joined(&placed, notices).await,
+                Ok((placement, notices)) => self.joined(&placement, notices).await,
                 Err(e) => self.shared.notice(format!("Couldn't join: {e}")),
             },
             UiCommand::JoinWithPassword(room, password) => {
                 match self.call.join(Some(room), Some(password)).await {
-                    Ok((placed, notices)) => self.joined(&placed, notices).await,
+                    Ok((placement, notices)) => self.joined(&placement, notices).await,
                     Err(e) => self.shared.emit(UiEvent::PasswordRefused(e.to_string())),
                 }
             }

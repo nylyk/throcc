@@ -455,13 +455,13 @@ async fn run_command(requester: &Requester, welcome: &Welcome, line: &str) -> Re
     match requester.request(request).await? {
         Response::Ok => println!("ok"),
         Response::Err { code, message } => bail!("{message} ({code:?})"),
-        Response::Placement(placed) => match placed.room {
+        Response::Placement(placement) => match placement.room {
             Some(room) => println!(
                 "in room {} at epoch {}, {} peers, mic track {}",
                 room.0,
-                placed.epoch.0,
-                placed.peers.len(),
-                placed.tracks.map_or(0, |t| t.mic.0)
+                placement.epoch.0,
+                placement.peers.len(),
+                placement.tracks.map_or(0, |t| t.mic.0)
             ),
             None => println!("in the lobby"),
         },

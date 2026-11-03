@@ -179,7 +179,7 @@ impl TestClient {
     /// Moves to `room`, which must succeed.
     pub async fn join(&self, room: Option<RoomId>) -> Placement {
         match self.set_room(room, None).await {
-            Response::Placement(placed) => placed,
+            Response::Placement(placement) => placement,
             other => panic!("expected Placement, got {other:?}"),
         }
     }

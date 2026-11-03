@@ -159,10 +159,10 @@ async fn a_locked_room_needs_its_password_from_members_on_every_join() {
         &bob.set_room(Some(general), Some("hunter3")).await,
         ErrorCode::WrongPassword,
     );
-    let placed = bob.set_room(Some(general), Some("hunter2")).await;
-    assert!(matches!(placed, Response::Placement(p) if p.room == Some(general)));
-    let placed = alice.set_room(Some(general), None).await;
-    assert!(matches!(placed, Response::Placement(p) if p.room == Some(general)));
+    let placement = bob.set_room(Some(general), Some("hunter2")).await;
+    assert!(matches!(placement, Response::Placement(p) if p.room == Some(general)));
+    let placement = alice.set_room(Some(general), None).await;
+    assert!(matches!(placement, Response::Placement(p) if p.room == Some(general)));
 
     bob.reconnect(&server.addr, Some(general)).await;
     let welcome = &bob.link.welcome;
@@ -190,8 +190,8 @@ async fn a_room_created_with_a_password_is_locked_from_the_start() {
         &bob.set_room(Some(private), None).await,
         ErrorCode::WrongPassword,
     );
-    let placed = bob.set_room(Some(private), Some("hunter2")).await;
-    assert!(matches!(placed, Response::Placement(p) if p.room == Some(private)));
+    let placement = bob.set_room(Some(private), Some("hunter2")).await;
+    assert!(matches!(placement, Response::Placement(p) if p.room == Some(private)));
 
     bob.reconnect(&server.addr, None).await;
     let rooms = &bob.link.welcome.rooms;
@@ -280,11 +280,11 @@ async fn failed_set_room_leaves_the_client_in_place() {
     let mut alice = admin(&server).await;
     let general = create_room(&mut alice, "General").await;
     let bob = invited(&server, &alice).await;
-    let placed = bob.join(Some(general)).await;
+    let placement = bob.join(Some(general)).await;
     let missing = bob.set_room(Some(RoomId(999)), None).await;
     assert_error(&missing, ErrorCode::NotFound);
     let again = bob.join(Some(general)).await;
-    assert_eq!(again.tracks, placed.tracks);
+    assert_eq!(again.tracks, placement.tracks);
 }
 
 #[tokio::test]
@@ -296,10 +296,10 @@ async fn reconnect_returns_to_the_wanted_room_with_fresh_tracks() {
     let first = bob.join(Some(general)).await;
 
     bob.reconnect(&server.addr, Some(general)).await;
-    let placed = bob.link.welcome.placement;
-    assert_eq!(placed.room, Some(general));
-    assert!(placed.epoch > first.epoch);
-    let (old, new) = (first.tracks.unwrap(), placed.tracks.unwrap());
+    let placement = bob.link.welcome.placement;
+    assert_eq!(placement.room, Some(general));
+    assert!(placement.epoch > first.epoch);
+    let (old, new) = (first.tracks.unwrap(), placement.tracks.unwrap());
     assert!(new.mic > old.shares[0].audio);
 }
 
@@ -332,13 +332,13 @@ async fn media_ids_never_repeat_across_a_restart() {
     let _second = first.restart(|_| {});
 
     alice.reconnect(&addr, Some(general)).await;
-    let placed = &alice.link.welcome.placement;
-    let after = placed.tracks.as_ref().unwrap();
+    let placement = &alice.link.welcome.placement;
+    let after = placement.tracks.as_ref().unwrap();
     assert!(
         after.mic > before.shares[0].audio,
         "{before:?} then {after:?}"
     );
-    assert!(placed.epoch > Epoch(1));
+    assert!(placement.epoch > Epoch(1));
 }
 
 /// A relay that forwards both ways until the returned flag is set.
@@ -933,8 +933,8 @@ async fn wrong_room_passwords_make_that_guesser_wait() {
         matches!(&waiting, Response::Err { code: ErrorCode::RateLimited, message } if message.contains("wrong passwords")),
         "{waiting:?}"
     );
-    let placed = carol.set_room(Some(private), Some("hunter2")).await;
-    assert!(matches!(placed, Response::Placement(p) if p.room == Some(private)));
+    let placement = carol.set_room(Some(private), Some("hunter2")).await;
+    assert!(matches!(placement, Response::Placement(p) if p.room == Some(private)));
 }
 
 #[tokio::test]
@@ -952,8 +952,8 @@ async fn joins_waiting_for_the_password_workers_all_finish() {
         dave.set_room(Some(private), Some("hunter2")),
         erin.set_room(Some(private), Some("guess")),
     );
-    for placed in [b, c, d] {
-        assert!(matches!(placed, Response::Placement(p) if p.room == Some(private)));
+    for placement in [b, c, d] {
+        assert!(matches!(placement, Response::Placement(p) if p.room == Some(private)));
     }
     assert_error(&e, ErrorCode::WrongPassword);
 }

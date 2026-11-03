@@ -124,12 +124,12 @@ async fn the_room_learns_who_watches_a_share() {
 
     let carol = enroll(&server, &mint_admin_invite(server.dir.path())).await;
     let carol = Call::start(carol.link, &carol.keystore).unwrap();
-    let (placed, _) = carol.join(Some(room), None).await.unwrap();
+    let (placement, _) = carol.join(Some(room), None).await.unwrap();
     let expected = Audience {
         video,
         receivers: vec![bob.me()],
     };
-    assert_eq!(placed.audiences.shares, vec![expected]);
+    assert_eq!(placement.audiences.shares, vec![expected]);
 
     bob.join(None, None).await.unwrap();
     assert_eq!(audience(&mut alice, video).await, vec![]);
@@ -162,8 +162,8 @@ async fn nobody_outside_the_room_learns_who_watches() {
     let mut carol = enroll(&server, &mint_admin_invite(server.dir.path())).await;
     let elsewhere = create_room(&mut carol, "Elsewhere").await;
     let mut carol = Call::start(carol.link, &carol.keystore).unwrap();
-    let (placed, _) = carol.join(Some(elsewhere), None).await.unwrap();
-    let carol_seq = placed.audiences.seq;
+    let (placement, _) = carol.join(Some(elsewhere), None).await.unwrap();
+    let carol_seq = placement.audiences.seq;
     let dave = enroll(&server, &mint_admin_invite(server.dir.path())).await;
     let mut dave = Call::start(dave.link, &dave.keystore).unwrap();
 
@@ -190,9 +190,9 @@ async fn nobody_outside_the_room_learns_who_watches() {
         })
         .await;
     }
-    let (placed, _) = carol.join(Some(elsewhere), None).await.unwrap();
+    let (placement, _) = carol.join(Some(elsewhere), None).await.unwrap();
     assert_eq!(
-        placed.audiences.seq,
+        placement.audiences.seq,
         carol_seq + 1,
         "carol's seq counted changes in another room"
     );

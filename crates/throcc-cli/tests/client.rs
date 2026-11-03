@@ -745,14 +745,14 @@ fn an_epoch_floor_outlives_a_restart_and_refuses_a_replayed_sender_key() {
     let code = invite(&alice);
     let runtime = Runtime::new().unwrap();
     let bob_dir = tempfile::tempdir().unwrap();
-    let (mut bob, placed) = runtime.block_on(async {
+    let (mut bob, placement) = runtime.block_on(async {
         let mut keystore = Keystore::open_in(bob_dir.path()).unwrap();
         let link = account::enroll(&mut keystore, &address, &code)
             .await
             .unwrap();
         let bob = Call::start(link, &keystore).unwrap();
-        let (placed, _) = bob.join(Some(room), None).await.unwrap();
-        (bob, placed)
+        let (placement, _) = bob.join(Some(room), None).await.unwrap();
+        (bob, placement)
     });
     // Alice's sender key for bob, as a server could record it to replay later.
     let (epoch, wrapped) = runtime.block_on(async {
@@ -772,7 +772,7 @@ fn an_epoch_floor_outlives_a_restart_and_refuses_a_replayed_sender_key() {
         .await
         .expect("no sender key from alice")
     });
-    assert_eq!(epoch, placed.epoch);
+    assert_eq!(epoch, placement.epoch);
     // The same install before its floors were written, to show the replay works without them.
     let unsaved_dir = tempfile::tempdir().unwrap();
     for file in std::fs::read_dir(bob_dir.path()).unwrap() {
@@ -789,7 +789,7 @@ fn an_epoch_floor_outlives_a_restart_and_refuses_a_replayed_sender_key() {
             let link = account::sign_in(&keystore, &address, None).await.unwrap();
             Call::start(link, &keystore).unwrap()
         });
-        let notices = format!("{:?}", bob.engine.placed(&placed));
+        let notices = format!("{:?}", bob.engine.apply_placement(&placement));
         let taken = bob
             .engine
             .keys()

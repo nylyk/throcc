@@ -131,7 +131,7 @@ scenario_receiver_limited() {
     run_share receiver_limited
     check "a sees no server drops" eq "$(field receiver_limited-a server_dropped_units)" 0
     check "c sees no server drops" eq "$(field receiver_limited-c server_dropped_units)" 0
-    check "b sees server drops in LinkStats" gt "$(field receiver_limited-b server_dropped_units)" 0
+    check "b sees server drops in ReceiveStats" gt "$(field receiver_limited-b server_dropped_units)" 0
     check "b gets only whole units" eq "$(field receiver_limited-b corrupt)" 0
     check "audio to b is never dropped by the server" eq "$(field receiver_limited-b audio_server_dropped)" 0
     check "sender gets at most 1 keyframe request per second" spaced "$(field receiver_limited-s min_keyframe_gap_ms)"
