@@ -40,7 +40,7 @@ Each crate's `README.md` explains its modules and how they fit together. Update 
 - Only the main agent changes `throcc-proto`. Any change to messages bumps `PROTOCOL` in `messages.rs`; new enum variants go last.
 - The server never depends on codecs, capture, audio or media crypto. `check-server-deps.sh` enforces this.
 - The server never reads media past the 13-byte header and holds no media key.
-- **Frozen; changes need a human decision:** the media header, the media AEAD and track-key derivation, HPKE sender-key wrapping and its info, the signed encryption key, and the safety-number construction.
+- **Security-critical:** the media header, the media AEAD and track-key derivation, HPKE sender-key wrapping and its info, the signed encryption key, and the safety-number construction. Fix real issues here with great care and without changing the protocol; a fix that needs a protocol change needs a human decision.
 - Never weaken a security property to make a test pass. Stop and ask instead.
 - Audio and capture callbacks never block, allocate, lock, await or panic. Cross into tokio only with a bounded channel, `try_send`, drop on full and a counter.
   The one exception is outside our code: screencapturekit's own dispatcher on macOS takes a lock and allocates before our handler runs. Our handler itself stays lock-free (`try_lock` only).
@@ -65,4 +65,4 @@ Each crate's `README.md` explains its modules and how they fit together. Update 
 
 ## Review baseline
 
-The whole workspace was simplified, deep-reviewed line by line and security-reviewed through commit `64dcb54d10dc94b4837950066f18a36c23adb602` (2026-11-02), including the owner's follow-up decisions. Later deep reviews start from there: `git diff 64dcb54..HEAD`.
+The whole workspace was simplified, deep-reviewed line by line and security-reviewed through commit `64dcb54d10dc94b4837950066f18a36c23adb602` (2026-11-02), including the owner's follow-up decisions. Later deep reviews start from there: `git diff 64dcb54..HEAD`. Run them with the `deep-review` skill, which moves this baseline when it finishes.
