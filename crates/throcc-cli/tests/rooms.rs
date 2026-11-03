@@ -881,14 +881,21 @@ async fn sender_keys_for_the_current_epoch_need_no_request_allowance() {
     assert_eq!(bob.request(publish()).await, Response::Ok);
     assert_eq!(bob.request(publish()).await, Response::Ok);
     // A refused request can leave almost a whole request of allowance, which may refill
-    // before the publish arrives. A publish that is never refused is the failure.
+    // before the publish arrives. Then the publish spends it, and nothing is left for the next
+    // request; a free third publish would leave it.
     let mut refused = false;
     for _ in 0..5 {
         use_up_requests(&bob).await;
-        if let Response::Err { code, .. } = bob.request(publish()).await {
-            assert_eq!(code, ErrorCode::RateLimited);
-            refused = true;
-            break;
+        match bob.request(publish()).await {
+            Response::Ok => assert_error(
+                &bob.request(Request::ListUsers).await,
+                ErrorCode::RateLimited,
+            ),
+            refusal => {
+                assert_error(&refusal, ErrorCode::RateLimited);
+                refused = true;
+                break;
+            }
         }
     }
     assert!(refused, "a third publish was never limited");
