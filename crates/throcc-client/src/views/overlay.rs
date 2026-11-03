@@ -15,11 +15,11 @@ const TOO_SLOW: &str = "Connection too slow";
 const TOO_SLOW_HINT: &str = "Frames are dropping. Ask the sharer for a lower bitrate.";
 
 /// Distance of each label from the picture's edges.
-const INSET: Pixels = px(8.);
-const LABEL_HEIGHT: Pixels = px(28.);
+pub const INSET: Pixels = px(8.);
+pub const LABEL_HEIGHT: Pixels = px(28.);
 const AVATAR: Pixels = px(18.);
 const NAME: theme::TextStyle = theme::CALLOUT;
-const BUTTON: Size = Size::Medium;
+const BUTTON: Size = Size::Small;
 const BADGE_ICON: Pixels = px(14.);
 const BADGE_TEXT: theme::TextStyle = theme::CAPTION;
 const DETAILS_MIN_WIDTH: Pixels = px(240.);
