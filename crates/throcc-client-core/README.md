@@ -24,7 +24,7 @@ Trust follows identity keys, not servers. The key manager wraps our sender secre
 | `call.rs` | A signed-in connection with its media engine |
 | `media/engine.rs`, `fragment.rs`, `reorder.rs` | Sending and receiving media datagrams: fragments, the replay window, the reorder window |
 | `media/voice.rs`, `audio.rs`, `devices.rs`, `jitter.rs` | The audio thread: mic processing and Opus, the mix, device rings, jitter buffers. Devices open at 48 kHz where they offer it; on macOS, where opening at another rate would change the device's rate for every app, at their current rate when 10 ms of it is a whole number of frames. Otherwise they open at their current rate under the same condition, or not at all. The audio thread resamples the rest |
-| `media/cues.rs` | Join, leave, mute, deafen, connection and screen share cues, synthesized once and mixed in by the audio thread |
+| `media/cues.rs` | Join, leave, mute, deafen, connection, screen share and watching cues, synthesized once and mixed in by the audio thread |
 | `media/share.rs`, `share_audio.rs` | Our running share: capture, encode, send. Its audio, and the audio-led sync of shares we watch |
 | `media/capture/` | Screen and system-audio capture per OS: ScreenCaptureKit, Windows Graphics Capture with process loopback, the portal with PipeWire. The portal keeps nothing of what was picked, so every share asks again |
 | `media/video/` | Encode and decode through ffmpeg, hardware first, and the NV12 frames between them |

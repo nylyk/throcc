@@ -190,8 +190,6 @@ impl VerifiedKeys {
         })
     }
 
-    /// Stops expecting the verified key last seen as `user` on `server` there, after the
-    /// user accepted that it changed.
     /// Stops the warning for `user` on `server`. When `presented` is a verified key, the pair
     /// stays watched under it, in the same write, so a later swap is still warned of.
     pub fn dismiss_change(
