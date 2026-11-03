@@ -617,6 +617,9 @@ fn own_profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             secondary("edit-profile", "Edit Profile").on_click(cx.listener(
                 |app, _, window, cx| {
                     app.set_dialog(None, cx);
+                    if app.fullscreen_stream().is_some() {
+                        app.exit_fullscreen(window, cx);
+                    }
                     app.show_screen(Screen::Settings(SettingsPage::Profile), window, cx);
                 },
             )),
