@@ -186,25 +186,33 @@ fn stream_actions(app: &ThroccApp, user: UserId, mine: bool, cx: &mut Context<Th
             },
         )));
     }
-    rows.children((!mine).then(|| {
+    let fullscreen = app.fullscreen_stream() == Some(user);
+    rows.children((!mine && !fullscreen).then(|| {
         action("person-menu-pop-out", "picture-in-picture-2", "Pop Out").on_click(cx.listener(
-            move |app, _, window, cx| {
+            move |app, _, _, cx| {
                 app.close_person_menu(cx);
-                if app.fullscreen_stream() == Some(user) {
-                    app.exit_fullscreen(window, cx);
-                }
                 app.pop_out(user, CONTROLS_LINGER, cx);
             },
         ))
     }))
-    .children((app.fullscreen_stream() != Some(user)).then(|| {
+    .child(if fullscreen {
+        action(
+            "person-menu-exit-fullscreen",
+            "minimize-2",
+            "Exit Full Screen",
+        )
+        .on_click(cx.listener(|app, _, window, cx| {
+            app.close_person_menu(cx);
+            app.exit_fullscreen(window, cx);
+        }))
+    } else {
         action("person-menu-fullscreen", "maximize-2", "Full Screen").on_click(cx.listener(
             move |app, _, window, cx| {
                 app.close_person_menu(cx);
                 app.enter_fullscreen(user, window, cx);
             },
         ))
-    }))
+    })
     .child(
         action(
             "person-menu-stop-watching",
