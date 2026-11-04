@@ -67,7 +67,8 @@ impl PopOut {
                     let app = this.app.clone();
                     cx.defer(move |cx| {
                         app.update(cx, |app, cx| {
-                            app.popouts.remove(&user);
+                            app.popouts
+                                .retain(|_, w| w.window_id() != handle.window_id());
                             app.person_menu.take_if(|menu| menu.window == handle);
                             cx.notify();
                         })

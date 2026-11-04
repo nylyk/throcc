@@ -1112,7 +1112,8 @@ impl ThroccApp {
 
     pub fn close_popout(&mut self, user: UserId, cx: &mut Context<Self>) {
         if let Some(window) = self.popouts.remove(&user) {
-            // gpui cannot update a window while it handles an event, and this may run in the pop-out.
+            // gpui cannot update a window while it handles an event, and this may run in
+            // the pop-out.
             cx.defer(move |cx| {
                 window
                     .update(cx, |_, window, _| window.remove_window())
