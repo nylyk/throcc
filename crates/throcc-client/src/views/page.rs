@@ -1,6 +1,6 @@
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, Context, Div, ElementId, InteractiveElement, IntoElement, MouseButton,
+    AnyElement, Context, Div, ElementId, FontWeight, InteractiveElement, IntoElement, MouseButton,
     ParentElement, Pixels, SharedString, Stateful, StatefulInteractiveElement, Styled, div, px,
 };
 use gpui_component::Disableable;
@@ -212,6 +212,7 @@ pub fn field(label: &str, control: impl IntoElement) -> Div {
 pub fn field_label(label: &str) -> Div {
     div()
         .typeset(theme::CALLOUT)
+        .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme::text_2())
         .child(label.to_owned())
 }
