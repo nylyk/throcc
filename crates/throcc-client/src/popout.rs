@@ -140,8 +140,13 @@ impl Render for PopOut {
             ("maximize", "Full Screen")
         };
         let buttons = vec![
-            ghost_icon("return", "picture-in-picture", "Back to Room")
-                .on_click(|_, window, _| window.remove_window()),
+            ghost_icon("return", "picture-in-picture", "Back to Room").on_click(cx.listener(
+                move |this, _, _, cx| {
+                    this.app
+                        .update(cx, |app, cx| app.close_popout(user, cx))
+                        .ok();
+                },
+            )),
             ghost_icon("popout-fullscreen", fullscreen_icon, fullscreen_tooltip).on_click(
                 cx.listener(move |this, _, window, cx| {
                     this.set_fullscreen(!fullscreen, window, cx)
