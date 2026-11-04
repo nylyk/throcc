@@ -28,7 +28,8 @@ flags=(
     --disable-muxers --disable-demuxers --disable-protocols
 )
 have() { pkg-config --exists "$1" 2>/dev/null; }
-have dav1d || { echo "dav1d not found by pkg-config; AV1 can't be decoded in software" >&2; exit 1; }
+pkg-config --exists --print-errors dav1d ||
+    { echo "dav1d not found by pkg-config; AV1 can't be decoded in software" >&2; exit 1; }
 flags+=(--enable-libdav1d)
 have vpx && flags+=(--enable-libvpx)
 case "$(uname -s)" in
