@@ -21,14 +21,22 @@ pub enum DecodeError {
     Ffmpeg(#[from] RsmpegError),
 }
 
-/// Software decoders, fastest first. The last is FFmpeg's own, which is also the one that
-/// hands work to a hardware device.
-fn decoders(codec: Codec) -> &'static [&'static CStr] {
+/// FFmpeg's own decoder for `codec`, the one that hands work to a hardware device.
+fn native_decoder(codec: Codec) -> &'static CStr {
     match codec {
-        Codec::Av1 => &[c"libdav1d", c"av1"],
-        Codec::Hevc => &[c"hevc"],
-        Codec::H264 => &[c"h264"],
-        Codec::Vp9 => &[c"vp9"],
+        Codec::Av1 => c"av1",
+        Codec::Hevc => c"hevc",
+        Codec::H264 => c"h264",
+        Codec::Vp9 => c"vp9",
+    }
+}
+
+/// The decoder for `codec` without a hardware device. FFmpeg's own AV1 decoder decodes
+/// only on hardware.
+fn software_decoder(codec: Codec) -> &'static CStr {
+    match codec {
+        Codec::Av1 => c"libdav1d",
+        other => native_decoder(other),
     }
 }
 
@@ -106,7 +114,7 @@ impl Decoder {
     }
 
     fn on_hardware(codec: Codec, max_size: MaxSize) -> Option<Self> {
-        let found = AVCodec::find_decoder_by_name(decoders(codec).last()?)?;
+        let found = AVCodec::find_decoder_by_name(native_decoder(codec))?;
         devices().iter().find_map(|&device_type| {
             let supported = (0..).map_while(|i| found.hw_config(i)).any(|config| {
                 config.device_type == device_type
@@ -130,9 +138,7 @@ impl Decoder {
     }
 
     fn in_software(codec: Codec, max_size: MaxSize) -> Result<Self, DecodeError> {
-        let found = decoders(codec)
-            .iter()
-            .find_map(|name| AVCodec::find_decoder_by_name(name))
+        let found = AVCodec::find_decoder_by_name(software_decoder(codec))
             .ok_or(DecodeError::NoDecoder(codec))?;
         let mut ctx = context(&found, max_size.pixels());
         ctx.open(None)?;
