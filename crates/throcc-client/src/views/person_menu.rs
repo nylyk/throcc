@@ -9,7 +9,7 @@ use throcc_client_core::state::{Person, Sound};
 use throcc_proto::ids::UserId;
 use throcc_proto::permissions;
 
-use super::common::{CONTROLS_LINGER, Typeset, gain_to_loudness, icon, mono, section, toggle_icon};
+use super::common::{CONTROLS_LINGER, Typeset, gain_to_loudness, icon, section, toggle_icon};
 use crate::app::{Dialog, Screen, SettingsPage, SoundLevelControl, ThroccApp};
 use crate::theme;
 
@@ -159,7 +159,8 @@ fn playback(
                 )
                 .child(div().flex_1().child(Slider::new(&control.slider)))
                 .child(
-                    mono(format!("{percent:.0}%"))
+                    div()
+                        .child(format!("{percent:.0}%"))
                         .w(px(44.))
                         .flex_none()
                         .text_right()

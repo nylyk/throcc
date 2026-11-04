@@ -74,7 +74,7 @@ fn overview(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .gap_4()
         .child(picture)
         .child(field("Name", name))
-        .child(field("Address", mono(server.address.clone())))
+        .child(field("Address", div().child(server.address.clone())))
         .children(editable.then(|| {
             let save = primary("save-server", "Save")
                 .disabled(app.server_form.saving() || !app.server_changed(cx))
@@ -103,7 +103,7 @@ fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .flex_col()
                 .gap_2()
                 .child(section("This Server"))
-                .child(mono(address))
+                .child(address)
                 .child(
                     mono(fingerprint.to_string())
                         .typeset(theme::CAPTION)

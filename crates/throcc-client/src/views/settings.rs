@@ -284,7 +284,8 @@ fn percent_slider(state: &Entity<SliderState>, cx: &Context<ThroccApp>) -> Div {
         .gap_3()
         .child(div().flex_1().child(Slider::new(state)))
         .child(
-            mono(format!("{percent:.0}%"))
+            div()
+                .child(format!("{percent:.0}%"))
                 .w(px(64.))
                 .flex_none()
                 .text_right(),
@@ -370,7 +371,8 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                                     .child(Slider::new(&controls.threshold)),
                             )
                             .child(
-                                mono(format!("{threshold:.0} dB").replace('-', "−"))
+                                div()
+                                    .child(format!("{threshold:.0} dB").replace('-', "−"))
                                     .w(px(64.))
                                     .flex_none()
                                     .text_right(),
@@ -481,7 +483,8 @@ fn verified(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                     .flex_col()
                     .child(div().truncate().child(person.name.clone()))
                     .child(
-                        mono(servers.join(", "))
+                        div()
+                            .child(servers.join(", "))
                             .truncate()
                             .typeset(theme::CAPTION)
                             .text_color(theme::text_3()),
@@ -555,12 +558,7 @@ fn appearance(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                         .bg(theme::swatch(color)),
                 )
                 .child(div().flex_1().child(*label))
-                .child(
-                    div()
-                        .w(px(112.))
-                        .font_family(theme::mono_font())
-                        .child(Input::new(field)),
-                )
+                .child(div().w(px(112.)).child(Input::new(field)))
         });
     div()
         .flex()

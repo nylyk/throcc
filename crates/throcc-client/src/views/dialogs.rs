@@ -333,18 +333,19 @@ fn share(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .items_center()
                 .justify_between()
                 .child(field_label("Bitrate"))
-                .child(mono(mbps(choice.kbps)).font_weight(FontWeight::SEMIBOLD)),
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(mbps(choice.kbps)),
+                ),
         )
         .child(Slider::new(&app.bitrate))
         .child(
             div()
                 .flex()
                 .justify_between()
-                .child(
-                    caption(mbps(offered.first().copied().unwrap_or(0)))
-                        .font_family(theme::mono_font()),
-                )
-                .child(caption(mbps(choice.max_kbps())).font_family(theme::mono_font())),
+                .child(caption(mbps(offered.first().copied().unwrap_or(0))))
+                .child(caption(mbps(choice.max_kbps()))),
         );
     body("Share Your Screen")
         .child(field("Resolution", resolutions))
@@ -375,7 +376,7 @@ fn stat(label: &str, value: String) -> impl IntoElement {
         .flex_col()
         .gap_1()
         .child(caption(label.to_owned()))
-        .child(mono(value).typeset(theme::TITLE_2))
+        .child(div().typeset(theme::TITLE_2).child(value))
 }
 
 fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
@@ -392,9 +393,9 @@ fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                     .flex()
                     .gap_2()
                     .child(div().flex_1().truncate().child(label))
-                    .child(mono(set).w(px(90.)))
-                    .child(mono(rate).w(px(90.)))
-                    .child(mono(last).w(px(60.))),
+                    .child(div().w(px(90.)).child(set))
+                    .child(div().w(px(90.)).child(rate))
+                    .child(div().w(px(60.)).child(last)),
             )
             .child(caption(detail).truncate())
     };
@@ -718,7 +719,7 @@ fn add_server(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     body("Add Server")
         .child(field(
             "Address",
-            Input::new(&app.address).font_family(theme::mono_font()),
+            Input::new(&app.address),
         ))
         .child(
             field(

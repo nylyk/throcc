@@ -214,7 +214,7 @@ pub fn audience(count: usize, icon_size: Pixels) -> Div {
                 .size(icon_size)
                 .text_color(theme::danger_text()),
         )
-        .child(mono(count.to_string()))
+        .child(count.to_string())
 }
 
 pub fn caption(text: impl Into<SharedString>) -> Div {
@@ -238,7 +238,8 @@ pub fn mono(text: impl Into<SharedString>) -> Div {
 
 /// A key on the keyboard, as in a shortcut hint.
 pub fn key_cap(text: impl Into<SharedString>) -> Div {
-    mono(text)
+    div()
+        .child(text.into())
         .flex_none()
         .px_1p5()
         .rounded(theme::RADIUS_ROW)
