@@ -915,7 +915,10 @@ fn tile(
                 cx.stop_propagation();
                 app.enter_fullscreen(user, window, cx);
             }));
-        pop_out.into_iter().chain([stop, fullscreen]).collect()
+        std::iter::once(stop)
+            .chain(pop_out)
+            .chain([fullscreen])
+            .collect()
     };
     let overlay = ShareOverlay {
         name: t.person.name.clone().into(),
