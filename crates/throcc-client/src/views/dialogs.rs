@@ -22,7 +22,7 @@ use super::common::{
     Typeset, avatar, caption, card, chip, danger, description, error_box, field_error, mono,
     primary, rate, secondary, title, verified_as,
 };
-use super::page::{field, field_label, segmented};
+use super::page::{field, field_label};
 use crate::app::{Dialog, Screen, SettingsPage, StartOver, ThroccApp, typed_name, typed_password};
 use crate::theme;
 
@@ -263,6 +263,42 @@ fn callout(bg: Hsla, border: Hsla, text: Hsla) -> Div {
         .gap_2()
 }
 
+/// A row of mutually exclusive choices that fills its width, the picked one sunk.
+fn choices<T: Copy + PartialEq + 'static>(
+    id: &'static str,
+    options: impl IntoIterator<Item = (T, impl Into<SharedString>)>,
+    selected: T,
+    cx: &mut Context<ThroccApp>,
+    on_pick: impl Fn(&mut ThroccApp, T, &mut Context<ThroccApp>) + Clone + 'static,
+) -> Div {
+    div()
+        .flex()
+        .gap_1()
+        .p_1()
+        .rounded(theme::RADIUS_BUTTON)
+        .bg(theme::raised())
+        .children(options.into_iter().enumerate().map(|(i, (value, label))| {
+            let on_pick = on_pick.clone();
+            let picked = value == selected;
+            div()
+                .id((id, i))
+                .flex_1()
+                .flex()
+                .justify_center()
+                .py_1()
+                .rounded(theme::RADIUS_ROW)
+                .cursor_pointer()
+                .when(picked, |s| s.bg(theme::surface()))
+                .text_color(if picked {
+                    theme::text()
+                } else {
+                    theme::text_3()
+                })
+                .child(label.into())
+                .on_click(cx.listener(move |app, _, _, cx| on_pick(app, value, cx)))
+        }))
+}
+
 fn mbps(kbps: u32) -> String {
     format!("{} Mbps", kbps as f32 / 1000.0)
 }
@@ -271,7 +307,7 @@ fn share(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let choice = app.share_choice;
     let audio = app.share_audio;
     let offered = choice.bitrates();
-    let resolutions = segmented(
+    let resolutions = choices(
         "resolution",
         Resolution::ALL.map(|r| (r, r.label())),
         choice.resolution,
@@ -280,7 +316,7 @@ fn share(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             app.set_share_choice(app.share_choice.with_resolution(resolution), cx)
         },
     );
-    let frame_rates = segmented(
+    let frame_rates = choices(
         "fps",
         FRAME_RATES.map(|fps| (fps, format!("{fps} fps"))),
         choice.fps,
