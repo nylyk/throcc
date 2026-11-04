@@ -984,18 +984,13 @@ fn person_card(t: &Tile, height: Pixels, compact: bool, cx: &mut Context<ThroccA
         } else {
             ("Watch Stream", "eye")
         };
-        let button = Button::new(("watch", user.0 as usize))
+        Button::new(("watch", user.0 as usize))
             .label(label)
             .icon(icon(icon_name))
             .primary()
             .rounded(theme::RADIUS_BUTTON)
             .with_size(if compact { Size::Small } else { Size::Medium })
-            .on_click(cx.listener(move |app, _, _, cx| app.watch(user, cx)));
-        div().flex().items_center().gap_3().child(button).child(
-            audience(person.audience, px(14.))
-                .typeset(theme::CAPTION)
-                .text_color(theme::text_2()),
-        )
+            .on_click(cx.listener(move |app, _, _, cx| app.watch(user, cx)))
     });
     let status = person.sharing.map(|config| {
         div()
@@ -1004,6 +999,12 @@ fn person_card(t: &Tile, height: Pixels, compact: bool, cx: &mut Context<ThroccA
             .gap_2()
             .child(sharing_icon(px(14.)))
             .child(caption(share_label(&config)))
+            .child(
+                audience(person.audience, px(14.))
+                    .ml_1()
+                    .typeset(theme::CAPTION)
+                    .text_color(theme::text_2()),
+            )
     });
     div()
         .size_full()
