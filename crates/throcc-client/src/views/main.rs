@@ -70,7 +70,7 @@ fn fullscreen(
     let buttons = vec![
         ghost_icon("fullscreen-stop-watching", "eye-off", "Stop Watching")
             .on_click(cx.listener(move |app, _, window, cx| app.stop_watching(user, window, cx))),
-        ghost_icon("exit-fullscreen", "minimize-2", "Exit Full Screen")
+        ghost_icon("exit-fullscreen", "minimize", "Exit Full Screen")
             .on_click(cx.listener(|app, _, window, cx| app.exit_fullscreen(window, cx))),
     ];
     let overlay = ShareOverlay {
@@ -910,7 +910,7 @@ fn tile(
             cx.stop_propagation();
             app.stop_watching(user, window, cx);
         }));
-        let fullscreen = ghost_icon(("fullscreen", user.0 as usize), "maximize-2", "Full Screen")
+        let fullscreen = ghost_icon(("fullscreen", user.0 as usize), "maximize", "Full Screen")
             .on_click(cx.listener(move |app, _, window, cx| {
                 cx.stop_propagation();
                 app.enter_fullscreen(user, window, cx);
@@ -978,7 +978,7 @@ fn person_card(t: &Tile, height: Pixels, compact: bool, cx: &mut Context<ThroccA
     let (compact, picture_size) = card_fit(height, person.sharing.is_some(), compact);
     let action = person.sharing.map(|_| {
         let (label, icon_name) = if t.popped {
-            ("Bring Back", "panel-top-open")
+            ("Bring Back", "picture-in-picture")
         } else if t.mine {
             ("Preview", "eye")
         } else if compact {

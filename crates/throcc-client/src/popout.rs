@@ -135,12 +135,12 @@ impl Render for PopOut {
                 .into_any_element()
         };
         let (fullscreen_icon, fullscreen_tooltip) = if fullscreen {
-            ("minimize-2", "Exit Full Screen")
+            ("minimize", "Exit Full Screen")
         } else {
-            ("maximize-2", "Full Screen")
+            ("maximize", "Full Screen")
         };
         let buttons = vec![
-            ghost_icon("return", "panel-top-open", "Back to Room")
+            ghost_icon("return", "picture-in-picture", "Back to Room")
                 .on_click(|_, window, _| window.remove_window()),
             ghost_icon("popout-fullscreen", fullscreen_icon, fullscreen_tooltip).on_click(
                 cx.listener(move |this, _, window, cx| {

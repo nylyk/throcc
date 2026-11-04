@@ -173,7 +173,7 @@ fn stream_actions(app: &ThroccApp, user: UserId, mine: bool, cx: &mut Context<Th
     let rows = group();
     if !app.shows_stream(user) {
         let (id, icon_name, label) = if app.popouts.contains_key(&user) {
-            ("person-menu-bring-back", "panel-top-open", "Bring Back")
+            ("person-menu-bring-back", "picture-in-picture", "Bring Back")
         } else if mine {
             ("person-menu-watch", "eye", "Preview")
         } else {
@@ -198,7 +198,7 @@ fn stream_actions(app: &ThroccApp, user: UserId, mine: bool, cx: &mut Context<Th
     .child(if fullscreen {
         action(
             "person-menu-exit-fullscreen",
-            "minimize-2",
+            "minimize",
             "Exit Full Screen",
         )
         .on_click(cx.listener(|app, _, window, cx| {
@@ -206,7 +206,7 @@ fn stream_actions(app: &ThroccApp, user: UserId, mine: bool, cx: &mut Context<Th
             app.exit_fullscreen(window, cx);
         }))
     } else {
-        action("person-menu-fullscreen", "maximize-2", "Full Screen").on_click(cx.listener(
+        action("person-menu-fullscreen", "maximize", "Full Screen").on_click(cx.listener(
             move |app, _, window, cx| {
                 app.close_person_menu(cx);
                 app.enter_fullscreen(user, window, cx);
