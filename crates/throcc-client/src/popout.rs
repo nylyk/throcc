@@ -196,6 +196,7 @@ impl Render for PopOut {
                     audience: person.map_or(0, |p| p.audience),
                     controls,
                     too_slow: config.is_some() && state.health.slow_shares.contains(&user),
+                    fullscreen,
                 }
                 .render(),
             )

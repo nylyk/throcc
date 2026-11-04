@@ -92,6 +92,7 @@ fn fullscreen(
         audience: person.map_or(0, |p| p.audience),
         controls: std::time::Instant::now() < app.controls_until,
         too_slow: state.health.slow_shares.contains(&user),
+        fullscreen: true,
     };
     let stream = app
         .feeds
@@ -932,6 +933,7 @@ fn tile(
         audience: t.person.audience,
         controls: app.shows_overlay(user),
         too_slow: app.state.health.slow_shares.contains(&user),
+        fullscreen: false,
     };
     let radius = theme::RADIUS_TILE - px(1.);
     let picture = app
