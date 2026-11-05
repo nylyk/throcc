@@ -992,7 +992,11 @@ fn person_card(t: &Tile, height: Pixels, compact: bool, cx: &mut Context<ThroccA
         Button::new(("watch", user.0 as usize))
             .label(label)
             .icon(icon(icon_name))
-            .primary()
+            .with_variant(if t.popped {
+                ButtonVariant::Secondary
+            } else {
+                ButtonVariant::Primary
+            })
             .rounded(theme::RADIUS_BUTTON)
             .with_size(if compact { Size::Small } else { Size::Medium })
             .on_click(cx.listener(move |app, _, _, cx| app.watch(user, cx)))
