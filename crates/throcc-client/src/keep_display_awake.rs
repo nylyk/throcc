@@ -11,6 +11,7 @@ impl KeepDisplayAwake {
     }
 }
 
+#[cfg(not(windows))]
 const REASON: &str = "Watching a screen share";
 
 #[cfg(target_os = "macos")]
@@ -68,6 +69,7 @@ mod platform {
 #[cfg(target_os = "linux")]
 mod platform {
     use ashpd::desktop::inhibit::{InhibitFlags, InhibitOptions, InhibitProxy};
+    use gpui::AppContext;
     use tokio::sync::oneshot;
 
     pub struct Hold {
