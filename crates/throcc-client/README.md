@@ -13,5 +13,6 @@ The desktop app, built with gpui and gpui-component on top of `throcc-client-cor
 | `popout.rs` | A watched share in a window of its own |
 | `avatar.rs` | Profile pictures: scaled to send, decoded to draw (PNG and JPEG only, shrunk to 128 px) |
 | `hotkey.rs` | The global push-to-talk key |
+| `keep_display_awake.rs` | Keeps the display on while someone else's share is watched |
 
 `tests/surface.rs` and `tests/surface_windows.rs` check that NV12 surfaces render through the vendored gpui in `third_party/`.

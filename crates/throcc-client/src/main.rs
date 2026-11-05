@@ -4,6 +4,7 @@ mod app;
 mod assets;
 mod avatar;
 mod hotkey;
+mod keep_display_awake;
 mod popout;
 mod theme;
 mod video;

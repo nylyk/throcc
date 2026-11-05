@@ -20,7 +20,7 @@ throcc-client-core = { path = "crates/throcc-client-core" }
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "zeroize"] }
 anyhow = "1.0.104"
 arc-swap = "1.9.3"
-ashpd = { version = "=0.13.13", default-features = false, features = ["async-io", "screencast"] }
+ashpd = { version = "=0.13.13", default-features = false, features = ["async-io", "inhibit", "screencast"] }
 async-io = "2.6.0"
 bytes = "1.12.1"
 clap = { version = "4.6.7", features = ["derive"] }
@@ -32,7 +32,9 @@ getrandom = "0.4.3"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 keyring = "4.2.0"
 libc = "0.2.191"
+objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSButton", "NSControl", "NSResponder", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSProcessInfo", "NSString"] }
 raw-window-handle = "0.6.2"
 global-hotkey = "0.8.0"
 gpui = { package = "gpui-pre", version = "=0.3.10" }
@@ -84,6 +86,7 @@ windows = { version = "0.62.2", features = [
     "Win32_Security",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_Power",
     "Win32_System_Threading",
     "Win32_System_Variant",
     "Win32_System_WinRT_Direct3D11",

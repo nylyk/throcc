@@ -7739,6 +7739,7 @@ name = "throcc-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ashpd",
  "global-hotkey",
  "gpui-component",
  "gpui-kit-assets",
@@ -7747,7 +7748,9 @@ dependencies = [
  "gpui-pre-wgpu",
  "gpui-pre-windows",
  "image",
+ "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "raw-window-handle",
  "smallvec",
  "throcc-client-core",
@@ -7755,6 +7758,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "windows 0.62.2",
 ]
 
 [[package]]

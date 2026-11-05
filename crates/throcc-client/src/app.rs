@@ -32,6 +32,7 @@ use throcc_proto::invite::{self, InviteCode};
 use throcc_proto::messages::{MAX_NAME_CHARS, User, shows_something, valid_name, valid_password};
 use throcc_proto::{Fingerprint, permissions};
 
+use crate::keep_display_awake::KeepDisplayAwake;
 use crate::theme;
 use crate::views;
 use crate::views::common::{Typeset, slider_gain, slider_value, volume_slider};
@@ -479,6 +480,8 @@ pub struct ThroccApp {
     /// Whether our own share's self-view shows in our tile.
     pub preview_self: bool,
     pub popouts: HashMap<UserId, WindowHandle<Root>>,
+    /// Held while someone else's share is watched here or in a pop-out.
+    keep_display_awake: Option<KeepDisplayAwake>,
     /// The share filling the whole window, with the rest of the UI hidden.
     pub fullscreen: Option<UserId>,
     /// Until when the controls over the fullscreen share show.
@@ -631,6 +634,7 @@ impl ThroccApp {
             focus: None,
             preview_self: false,
             popouts: HashMap::new(),
+            keep_display_awake: None,
             fullscreen: None,
             controls_until: Instant::now(),
             made_window_fullscreen: false,
@@ -733,6 +737,7 @@ impl ThroccApp {
                     self.dialog = None;
                 }
                 self.close_unwatched_popouts(cx);
+                self.sync_keep_display_awake(cx);
                 if self
                     .person_menu
                     .as_ref()
@@ -1145,6 +1150,19 @@ impl ThroccApp {
             .collect();
         for user in gone {
             self.close_popout(user, cx);
+        }
+    }
+
+    fn sync_keep_display_awake(&mut self, cx: &App) {
+        let watching = self.state.current.as_ref().is_some_and(|c| {
+            c.watching.iter().any(|user| {
+                self.state
+                    .person(*user)
+                    .is_some_and(|p| p.sharing.is_some())
+            })
+        });
+        if watching != self.keep_display_awake.is_some() {
+            self.keep_display_awake = watching.then(|| KeepDisplayAwake::new(cx));
         }
     }
 
@@ -1799,6 +1817,7 @@ impl ThroccApp {
         self.stop_mic_test();
         self.client = None;
         self.events = None;
+        self.keep_display_awake = None;
         self.invite = None;
         self.users.clear();
         self.dialog = None;
