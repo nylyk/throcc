@@ -582,7 +582,7 @@ impl Worker {
             while let Ok(unit) = units.try_recv() {
                 if let Err(e) = call
                     .mixer
-                    .insert(*user, unit.timestamp, &unit.data, self.played)
+                    .insert(*user, unit.timestamp, unit.data, self.played)
                 {
                     warn!("dropping audio from user {}: {e}", user.0);
                 }
@@ -590,7 +590,7 @@ impl Worker {
         }
         for share in call.shares.values_mut() {
             while let Ok(unit) = share.units.try_recv() {
-                share.jitter.insert(unit.timestamp, &unit.data, self.played);
+                share.jitter.insert(unit.timestamp, unit.data, self.played);
             }
         }
     }

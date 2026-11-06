@@ -250,7 +250,7 @@ impl Previews {
         let mut downloaded = AVFrame::new();
         downloaded.set_format(ffi::AV_PIX_FMT_NV12);
         downloaded.hwframe_transfer_data(&surface)?;
-        to_nv12(&downloaded, timestamp).ok_or(EncodeError::PreviewFormat(downloaded.format))
+        to_nv12(&downloaded, timestamp, None).ok_or(EncodeError::PreviewFormat(downloaded.format))
     }
 }
 

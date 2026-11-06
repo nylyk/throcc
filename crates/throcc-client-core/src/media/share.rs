@@ -289,7 +289,7 @@ impl Sending {
                 continue;
             };
             if self_view {
-                let factor = self.frame.width / SELF_VIEW_WIDTH;
+                let factor = self.frame.width.div_ceil(SELF_VIEW_WIDTH);
                 let thumbnail = Arc::new(self.frame.shrunk(factor));
                 self.self_view.send_replace(Some(thumbnail));
             }
@@ -346,7 +346,7 @@ impl Sending {
             return true;
         };
         if self_view {
-            let thumbnail = picture.shrunk(picture.width() / SELF_VIEW_WIDTH);
+            let thumbnail = picture.shrunk(picture.width().div_ceil(SELF_VIEW_WIDTH));
             if let Some(thumbnail) = thumbnail {
                 self.self_view.send_replace(Some(Arc::new(thumbnail)));
             }
@@ -498,6 +498,7 @@ pub fn receive(
         .name("throcc-decode".into())
         .spawn(move || {
             let mut held: VecDeque<Arc<VideoFrame>> = VecDeque::new();
+            let mut replaced: Option<Arc<VideoFrame>> = None;
             let mut asked = false;
             let mut oversized: u64 = 0;
             loop {
@@ -551,11 +552,21 @@ pub fn receive(
                 }
                 let heard = playout.as_ref().and_then(|p| p.heard());
                 let due = due_frames(held.iter().map(|f| f.timestamp), heard);
-                if let Some(newest) = held.drain(..due).next_back()
-                    && tx.send(Some(newest)).is_err()
-                {
+                let mut drained = held.drain(..due);
+                let Some(newest) = drained.next_back() else {
+                    continue;
+                };
+                let superseded = drained.next();
+                drop(drained);
+                if tx.is_closed() {
                     return;
                 }
+                // The renderer has had a picture's time to let go of the one replaced before.
+                let unused = superseded.or(replaced.take());
+                if let Some(frame) = unused.and_then(|frame| Arc::try_unwrap(frame).ok()) {
+                    decoder.recycle(frame);
+                }
+                replaced = tx.send_replace(Some(newest));
             }
         })
         .map_err(|e| e.to_string())?;

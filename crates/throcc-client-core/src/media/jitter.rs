@@ -78,7 +78,7 @@ impl JitterBuffer {
 
     /// Adds a packet with its media timestamp, arriving at `arrival` on the local clock
     /// counting samples played.
-    pub fn insert(&mut self, timestamp: u32, payload: &[u8], arrival: u64) {
+    pub fn insert(&mut self, timestamp: u32, payload: impl Into<Vec<u8>>, arrival: u64) {
         let transit = arrival as i64 - i64::from(timestamp);
         if let Some(last) = self.last_transit {
             let d = (transit - last).unsigned_abs() as f64;
@@ -107,7 +107,7 @@ impl JitterBuffer {
             self.packets.pop_first();
             self.stats.overflow += 1;
         }
-        self.packets.insert(timestamp, payload.to_vec());
+        self.packets.insert(timestamp, payload.into());
     }
 
     /// The delay the buffer aims for, in samples.
@@ -322,7 +322,7 @@ mod tests {
     fn steady_packets_play_in_order_after_the_target_delay() {
         let mut jb = JitterBuffer::new(Channels::Mono).unwrap();
         for (i, p) in packets(10).iter().enumerate() {
-            jb.insert(1000 + (i * FRAME) as u32, p, (i * FRAME) as u64);
+            jb.insert(1000 + (i * FRAME) as u32, p.clone(), (i * FRAME) as u64);
         }
         drain(&mut jb, 20);
         let JitterStats {
@@ -345,7 +345,7 @@ mod tests {
             let mut jb = JitterBuffer::new(Channels::Mono).unwrap();
             for (i, p) in packets(10).iter().enumerate() {
                 if !lost.contains(&i) {
-                    jb.insert((i * FRAME) as u32, p, (i * FRAME) as u64);
+                    jb.insert((i * FRAME) as u32, p.clone(), (i * FRAME) as u64);
                 }
             }
             drain(&mut jb, 18);
@@ -361,7 +361,7 @@ mod tests {
     fn playout_timestamp_is_known_after_every_pull() {
         let mut jb = JitterBuffer::new(Channels::Mono).unwrap();
         for (i, p) in packets(6).iter().enumerate() {
-            jb.insert(5000 + (i * FRAME) as u32, p, (i * FRAME) as u64);
+            jb.insert(5000 + (i * FRAME) as u32, p.clone(), (i * FRAME) as u64);
         }
         let mut out = [0.0; PULL];
         for pulls in 1..=8u32 {
@@ -435,7 +435,7 @@ mod tests {
         let all = packets(12);
         for (i, p) in all.iter().enumerate() {
             let shift = if i < 4 { 0 } else { 333 };
-            jb.insert((i * FRAME + shift) as u32, p, (i * FRAME) as u64);
+            jb.insert((i * FRAME + shift) as u32, p.clone(), (i * FRAME) as u64);
         }
         drain(&mut jb, 24);
         assert_eq!(jb.stats.realigned, 1);
@@ -448,10 +448,10 @@ mod tests {
         let mut jb = JitterBuffer::new(Channels::Mono).unwrap();
         let all = packets(8);
         for (i, p) in all.iter().enumerate().take(6).filter(|(i, _)| *i != 1) {
-            jb.insert((i * FRAME) as u32, p, (i * FRAME) as u64);
+            jb.insert((i * FRAME) as u32, p.clone(), (i * FRAME) as u64);
         }
         drain(&mut jb, 6);
-        jb.insert(FRAME as u32, &all[1], 7 * FRAME as u64);
+        jb.insert(FRAME as u32, all[1].clone(), 7 * FRAME as u64);
         assert_eq!(jb.stats.late, 1);
     }
 
@@ -557,11 +557,11 @@ mod tests {
         let all = packets(8);
         let mut out = [0.0; PULL];
         for (i, p) in all.iter().enumerate().take(2) {
-            jb.insert((i * FRAME) as u32, p, (i * FRAME) as u64);
+            jb.insert((i * FRAME) as u32, p.clone(), (i * FRAME) as u64);
         }
         drain(&mut jb, 5);
         for (i, p) in all.iter().enumerate().skip(2) {
-            jb.insert((i * FRAME) as u32, p, 5 * PULL as u64);
+            jb.insert((i * FRAME) as u32, p.clone(), 5 * PULL as u64);
         }
         for _ in 0..12 {
             jb.pull(&mut out);

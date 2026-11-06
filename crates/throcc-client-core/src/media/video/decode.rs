@@ -95,6 +95,10 @@ pub struct Decoder {
     hardware: bool,
     engine: &'static str,
     max_size: MaxSize,
+    /// Where hardware pictures are downloaded, kept while their size holds.
+    downloaded: Option<AVFrame>,
+    /// A picture no longer shown, whose planes the next picture is written into.
+    spare: Option<VideoFrame>,
 }
 
 impl Decoder {
@@ -133,6 +137,8 @@ impl Decoder {
                 hardware: true,
                 engine: device_name(device_type),
                 max_size,
+                downloaded: None,
+                spare: None,
             })
         })
     }
@@ -153,6 +159,8 @@ impl Decoder {
             hardware: false,
             engine,
             max_size,
+            downloaded: None,
+            spare: None,
         })
     }
 
@@ -160,6 +168,11 @@ impl Decoder {
     #[cfg(test)]
     pub fn is_hardware(&self) -> bool {
         self.hardware
+    }
+
+    /// Hands back a picture no longer needed, so the next one reuses its memory.
+    pub fn recycle(&mut self, frame: VideoFrame) {
+        self.spare = Some(frame);
     }
 
     /// The hardware API or software decoder doing the work, as people see it named.
@@ -216,15 +229,22 @@ impl Decoder {
                 Err(e) => return Err(e.into()),
             }
         }
-        let Some(mut frame) = newest else {
+        let Some(frame) = newest else {
             return Ok(None);
         };
-        if !frame.hw_frames_ctx.is_null() {
-            let mut copied = AVFrame::new();
-            copied.hwframe_transfer_data(&frame)?;
-            frame = copied;
-        }
-        let picture = to_nv12(&frame, timestamp).ok_or(DecodeError::Format(frame.format))?;
+        let frame = if frame.hw_frames_ctx.is_null() {
+            &frame
+        } else {
+            let same_size = |d: &AVFrame| d.width == frame.width && d.height == frame.height;
+            if !self.downloaded.as_ref().is_some_and(same_size) {
+                self.downloaded = None;
+            }
+            let downloaded = self.downloaded.get_or_insert_with(AVFrame::new);
+            downloaded.hwframe_transfer_data(&frame)?;
+            &*downloaded
+        };
+        let picture = to_nv12(frame, timestamp, self.spare.take())
+            .ok_or(DecodeError::Format(frame.format))?;
         Ok(Some(picture))
     }
 }
@@ -248,16 +268,23 @@ fn context(found: &AVCodec, max_pixels: usize) -> AVCodecContext {
     ctx
 }
 
-/// Copies a 4:2:0 frame, planar or NV12, into NV12 cropped to even dimensions. `None` for
-/// frames in any other format.
-pub(super) fn to_nv12(frame: &AVFrame, timestamp: u32) -> Option<VideoFrame> {
+/// Copies a 4:2:0 frame, planar or NV12, into NV12 cropped to even dimensions, reusing the
+/// planes of `spare` if given. `None` for frames in any other format.
+pub(super) fn to_nv12(
+    frame: &AVFrame,
+    timestamp: u32,
+    spare: Option<VideoFrame>,
+) -> Option<VideoFrame> {
     let (width, height) = (frame.width as usize & !1, frame.height as usize & !1);
     let planar = [ffi::AV_PIX_FMT_YUV420P, ffi::AV_PIX_FMT_YUVJ420P].contains(&frame.format);
     if !planar && frame.format != ffi::AV_PIX_FMT_NV12 {
         return None;
     }
-    let mut y = Vec::with_capacity(width * height);
-    let mut uv = Vec::with_capacity(width * height / 2);
+    let (mut y, mut uv) = spare.map_or_else(Default::default, |spare| (spare.y, spare.uv));
+    y.clear();
+    uv.clear();
+    y.reserve(width * height);
+    uv.reserve(width * height / 2);
     // SAFETY: the decoder or transfer sized each plane for `width`×`height` 4:2:0 with the
     // strides in `linesize`, and each row read lies within one row of one plane.
     unsafe {

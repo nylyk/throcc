@@ -205,6 +205,9 @@ impl Reassembler {
     }
 
     pub fn push(&mut self, seq: u32, flags: Flags, plaintext: &[u8]) -> Option<Unit> {
+        if flags.contains(Flags::FIRST | Flags::LAST) && !self.fragments.contains_key(&seq) {
+            return whole_unit(seq, flags, plaintext);
+        }
         if self.fragments.len() >= self.max_buffered
             && !self.fragments.contains_key(&seq)
             && let Some(&oldest) = self.fragments.keys().next()
@@ -235,6 +238,9 @@ impl Reassembler {
 
     /// Drops buffered fragments older than `seq`, which can no longer complete in order.
     pub fn forget_before(&mut self, seq: u32) {
+        if self.fragments.is_empty() {
+            return;
+        }
         self.fragments = self.fragments.split_off(&seq);
         self.firsts = self.firsts.split_off(&seq);
         self.lasts = self.lasts.split_off(&seq);
@@ -343,6 +349,18 @@ impl Reassembler {
     fn buffered(&self) -> usize {
         self.fragments.len()
     }
+}
+
+/// The unit that one fragment, both first and last, carries whole.
+fn whole_unit(seq: u32, flags: Flags, plaintext: &[u8]) -> Option<Unit> {
+    let (timestamp, data) = plaintext.split_first_chunk::<TIMESTAMP_BYTES>()?;
+    Some(Unit {
+        first_seq: seq,
+        last_seq: seq,
+        timestamp: u32::from_be_bytes(*timestamp),
+        flags,
+        data: data.to_vec(),
+    })
 }
 
 #[cfg(test)]

@@ -307,7 +307,7 @@ impl Mixer {
         &mut self,
         user: UserId,
         timestamp: u32,
-        payload: &[u8],
+        payload: impl Into<Vec<u8>>,
         arrival: u64,
     ) -> Result<(), AudioError> {
         let stream = match self.streams.entry(user) {
@@ -706,7 +706,7 @@ mod tests {
                 for (i, packet) in packets.iter().enumerate() {
                     let timestamp = (i * FRAME) as u32;
                     mixer
-                        .insert(user, timestamp, packet, u64::from(timestamp))
+                        .insert(user, timestamp, packet.clone(), u64::from(timestamp))
                         .unwrap();
                 }
             }
