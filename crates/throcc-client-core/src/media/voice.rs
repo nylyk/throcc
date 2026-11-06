@@ -321,7 +321,10 @@ impl DeviceIo {
         );
         let queued = self.devices.playback.buffer().capacity() - self.devices.playback.slots();
         let over_ahead = (queued + 1).saturating_sub(PLAYBACK_AHEAD * self.device_out.len());
-        capture.min(wait(over_ahead, self.device_out.len()))
+        // The speakers drain the queue one device period at a time, so the queue sits just
+        // over PLAYBACK_AHEAD pulls until the next period. Half a pull later, 30 ms remain.
+        let playback = wait(over_ahead, self.device_out.len()).max(PULL_TIME / 2);
+        capture.min(playback)
     }
 
     /// Drops 10 ms from the mic unprocessed.

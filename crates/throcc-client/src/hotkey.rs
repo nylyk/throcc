@@ -30,7 +30,6 @@ impl PushToTalkKey {
     pub fn register(spec: &str, changed: impl Fn(bool) + Send + 'static) -> anyhow::Result<Self> {
         let hotkey: HotKey = spec.parse()?;
         let manager = GlobalHotKeyManager::new()?;
-        manager.register(hotkey)?;
         ROUTE_EVENTS.call_once(|| {
             GlobalHotKeyEvent::set_event_handler(Some(|event| {
                 if let Some(handler) = HANDLER.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
@@ -45,6 +44,10 @@ impl PushToTalkKey {
             }
         });
         *HANDLER.lock().unwrap_or_else(|e| e.into_inner()) = Some(handler);
+        if let Err(e) = manager.register(hotkey) {
+            HANDLER.lock().unwrap_or_else(|e| e.into_inner()).take();
+            return Err(e.into());
+        }
         Ok(Self { manager, hotkey })
     }
 }

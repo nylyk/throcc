@@ -53,6 +53,7 @@ impl Feeds {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
+        self.drawn.insert(user);
         if let Some(client) = client {
             client.picture_drawn(user);
             let view = window.current_view();
@@ -64,6 +65,9 @@ impl Feeds {
             .and_then(|c| c.picture(user))
             .and_then(|picture| picture.borrow().clone());
         let Some(frame) = frame else {
+            if let Some(shown) = self.shown.remove(&user) {
+                shown.release(window, cx);
+            }
             return div()
                 .size_full()
                 .flex()
@@ -77,7 +81,6 @@ impl Feeds {
                 )
                 .into_any_element();
         };
-        self.drawn.insert(user);
         let previous = self.shown.get(&user);
         if previous.is_none_or(|s| s.timestamp != frame.timestamp)
             && let Some(shown) = Shown::new(frame, previous)
@@ -107,6 +110,7 @@ fn redraw_on_new_pictures(
                 cx.background_executor().timer(PICTURE_WAIT).await;
                 continue;
             };
+            picture.mark_unchanged();
             cx.update(|cx| cx.notify(view));
             loop {
                 tokio::select! {
@@ -121,6 +125,7 @@ fn redraw_on_new_pictures(
                     }
                 }
             }
+            cx.background_executor().timer(PICTURE_WAIT).await;
         }
     }
 }
