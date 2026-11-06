@@ -26,7 +26,7 @@ pub(crate) const MAX_PACKET: usize = 1500;
 /// Speech probability above which the speech detector counts 10 ms as speech.
 const SPEECH_PROBABILITY: f32 = 0.5;
 /// A decoded level above this (dBFS) counts as speaking for the UI's ring.
-const SPEAKING_DBFS: f32 = -45.0;
+const SPEAKING_DBFS: f32 = -60.0;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AudioError {
