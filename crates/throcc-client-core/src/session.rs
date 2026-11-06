@@ -19,7 +19,7 @@ use tracing::{info, warn};
 use crate::account::{self, SignInError};
 use crate::avatars;
 use crate::call::{Call, CallEvent};
-use crate::client::{ClientOptions, MicLevel, UiCommand, UiEvent};
+use crate::client::{UiCommand, UiEvent};
 use crate::control::{self, LoginError};
 use crate::keys::KeyNotice;
 use crate::keystore::Keystore;
@@ -28,7 +28,7 @@ use crate::media::cues::Cue;
 use crate::media::engine::Kind;
 use crate::media::share_audio::Playout;
 use crate::media::video::{Picture, PreviewDemand};
-use crate::media::voice::{VoiceCommand, VoiceEngine};
+use crate::media::voice::{AudioEngine, CallAudio, CallCommand};
 use crate::playback::SavedPlayback;
 use crate::profile::Profile;
 use crate::server_look::ServerLook;
@@ -72,7 +72,6 @@ pub(crate) struct Shared {
     /// Our own user and the preview demand of our running share.
     pub preview: Mutex<Option<(UserId, Arc<PreviewDemand>)>>,
     pub avatars: Mutex<HashMap<Hash, AvatarSlot>>,
-    pub mic_level: Mutex<Option<MicLevel>>,
 }
 
 /// A profile picture fetched once per hash and kept for the session.
@@ -92,7 +91,6 @@ impl Shared {
             pictures: Mutex::default(),
             preview: Mutex::default(),
             avatars: Mutex::default(),
-            mic_level: Mutex::default(),
         }
     }
 
@@ -244,9 +242,8 @@ pub(crate) struct Session {
     shared: Arc<Shared>,
     keystore: Keystore,
     address: String,
-    options: ClientOptions,
     call: Call,
-    voice: Option<VoiceEngine>,
+    audio: Option<CallAudio>,
     room: Option<RoomId>,
     my_tracks: Option<throcc_proto::messages::Tracks>,
     media: MediaState,
@@ -261,7 +258,6 @@ pub(crate) struct Session {
     last_audience_cue: Option<Instant>,
     /// The shares we receive, by who shares them.
     watched_shares: HashMap<UserId, WatchedShare>,
-    mic_test: bool,
     /// Whether the mic was on when we deafened, so undeafening restores it.
     mic_before_deafen: bool,
     profile: Profile,
@@ -360,7 +356,7 @@ impl Session {
         keystore: Keystore,
         address: String,
         profile: Profile,
-        options: ClientOptions,
+        audio: Option<Arc<AudioEngine>>,
         call: Call,
         verified: VerifiedStore,
     ) -> Self {
@@ -377,8 +373,7 @@ impl Session {
             shared,
             keystore,
             address,
-            options,
-            voice: None,
+            audio: audio.map(|engine| engine.call()),
             room: None,
             my_tracks: None,
             media: MediaState {
@@ -392,7 +387,6 @@ impl Session {
             audiences: Audiences::default(),
             last_audience_cue: None,
             watched_shares: HashMap::new(),
-            mic_test: false,
             mic_before_deafen: false,
             server_profile: call.welcome.profile.clone(),
             profile,
@@ -408,7 +402,6 @@ impl Session {
             last: LastCounts::default(),
             call,
         };
-        session.start_voice();
         let welcome = session.call.welcome.clone();
         session.apply_welcome(&welcome);
         session
@@ -459,53 +452,26 @@ impl Session {
         }
     }
 
-    /// Starts the voice engine afresh and gives it everything it plays and sends.
-    fn start_voice(&mut self) {
-        self.voice = None;
-        *lock(&self.shared.mic_level) = None;
-        if self.options.audio {
-            match VoiceEngine::start(
-                self.call.engine.clone(),
-                self.options.voice,
-                self.options.input_device.as_deref(),
-                self.options.output_device.as_deref(),
-            ) {
-                Ok(voice) => self.voice = Some(voice),
-                Err(e) => {
-                    warn!("no audio: {e:#}");
-                    self.shared.notice(format!("Audio is unavailable: {e}"));
-                }
-            }
-        }
-        let heard: Vec<UserId> = self.peers.keys().copied().collect();
-        self.play_as_kept(heard);
-        self.voice(VoiceCommand::Loopback(self.mic_test));
-        if self.room.is_some() {
-            self.sync_voice();
-            self.peers.clear();
-            self.sync_peers();
-            self.stop_watching_all();
-            self.sync_watching();
-        }
+    /// Tells the call audio our switches and the track our mic goes out on.
+    fn sync_audio(&self) {
+        self.audio(CallCommand::Muted(!self.media.mic));
+        self.audio(CallCommand::Deafened(self.media.deafened));
+        let mic = self
+            .my_tracks
+            .as_ref()
+            .map(|t| (self.call.engine.clone(), t.mic));
+        self.audio(CallCommand::SendOn(mic));
     }
 
-    /// Tells the voice engine our switches and the track our mic goes out on.
-    fn sync_voice(&self) {
-        self.voice(VoiceCommand::Muted(!self.media.mic));
-        self.voice(VoiceCommand::Deafened(self.media.deafened));
-        self.voice(VoiceCommand::SendOn(self.my_tracks.as_ref().map(|t| t.mic)));
-    }
-
-    fn voice(&self, command: VoiceCommand) {
-        if let Some(voice) = &self.voice {
-            voice.command(command);
+    fn audio(&self, command: CallCommand) {
+        if let Some(audio) = &self.audio {
+            audio.command(command);
         }
     }
 
     fn cue(&self, cue: Cue) {
-        let gain = self.options.voice.cue_volume;
-        if gain > 0.0 {
-            self.voice(VoiceCommand::Cue(cue, gain));
+        if let Some(audio) = &self.audio {
+            audio.cue(cue);
         }
     }
 
@@ -717,7 +683,7 @@ impl Session {
                     self.call = call;
                     self.trust.forget_presented();
                     self.reset_room();
-                    self.start_voice();
+                    self.audio = self.audio.as_ref().map(CallAudio::renew);
                     self.cue(Cue::Reconnected);
                     let welcome = self.call.welcome.clone();
                     let wanted = want_room.map(|room| (room, self.room_name(room)));
@@ -760,8 +726,8 @@ impl Session {
         });
         self.reset_room();
         self.audiences.shares.clear();
-        self.voice(VoiceCommand::ForgetAll);
-        self.voice(VoiceCommand::SendOn(None));
+        self.audio(CallCommand::ForgetAll);
+        self.audio(CallCommand::SendOn(None));
         self.shared.update(|s| s.current = None);
     }
 
@@ -845,8 +811,8 @@ impl Session {
         } else {
             self.audiences.shares.clear();
         }
-        self.voice(VoiceCommand::ForgetAll);
-        self.sync_voice();
+        self.audio(CallCommand::ForgetAll);
+        self.sync_audio();
         self.sync_peers();
         let room = placement.room;
         self.shared.update(|s| {
@@ -873,7 +839,7 @@ impl Session {
             {
                 self.call.engine.unsubscribe(old.tracks.mic);
                 self.tracks.remove(&old.tracks.mic);
-                self.voice(VoiceCommand::Forget(*user));
+                self.audio(CallCommand::Forget(*user));
             }
         }
         for (user, peer) in &current {
@@ -886,7 +852,7 @@ impl Session {
                     .call
                     .engine
                     .subscribe(peer.tracks.mic, Kind::Audio, 256);
-                self.voice(VoiceCommand::Listen { user: *user, units });
+                self.audio(CallCommand::Listen { user: *user, units });
                 self.tracks.insert(
                     peer.tracks.mic,
                     self.watched(peer.tracks.mic, *user, Carries::Mic),
@@ -948,7 +914,7 @@ impl Session {
             .collect();
         for (user, playback) in &kept {
             for sound in Sound::ALL {
-                self.voice(gain_command(*user, sound, playback.get(sound)));
+                self.audio(gain_command(*user, sound, playback.get(sound)));
             }
         }
         self.shared.update(|s| {
@@ -1149,7 +1115,7 @@ impl Session {
                 self.push_watching().await;
             }
             UiCommand::SetSoundLevel(user, sound, level) => {
-                self.voice(gain_command(user, sound, level));
+                self.audio(gain_command(user, sound, level));
                 match self.trust.of(user).1 {
                     Some(key) => self.saved_playback.set(&key, sound, level),
                     None => {
@@ -1228,21 +1194,6 @@ impl Session {
                 }
             }
             UiCommand::VerifiedChanged => self.refresh_trust(),
-            UiCommand::Voice(settings) => {
-                self.options.voice = settings;
-                self.voice(VoiceCommand::Settings(settings));
-            }
-            UiCommand::Devices { input, output } => {
-                self.options.input_device = input;
-                self.options.output_device = output;
-                self.start_voice();
-            }
-            UiCommand::MicTest(on) => {
-                self.mic_test = on;
-                self.voice(VoiceCommand::Loopback(on));
-            }
-            UiCommand::PushToTalk(down) => self.voice(VoiceCommand::PushToTalk(down)),
-            UiCommand::PlayCue(cue) => self.cue(cue),
             UiCommand::LeaveServer => {
                 if self.leave_server().await {
                     return ControlFlow::Break(());
@@ -1370,8 +1321,8 @@ impl Session {
         if self.room.is_none() {
             return;
         }
-        self.voice(VoiceCommand::Muted(!self.media.mic));
-        self.voice(VoiceCommand::Deafened(self.media.deafened));
+        self.audio(CallCommand::Muted(!self.media.mic));
+        self.audio(CallCommand::Deafened(self.media.deafened));
         self.show_shares();
         let response = self.call.request(Request::SetMedia(media)).await;
         if refuses_share_start(&response, media.share, self.server_share) {
@@ -1468,7 +1419,7 @@ impl Session {
             let playout = config.audio.then(|| {
                 let playout = Playout::new();
                 let units = self.call.engine.subscribe(share.audio, Kind::Audio, 64);
-                self.voice(VoiceCommand::ListenShare {
+                self.audio(CallCommand::ListenShare {
                     user,
                     units,
                     playout: playout.clone(),
@@ -1535,7 +1486,7 @@ impl Session {
             if let Some(audio) = watched.audio {
                 self.call.engine.unsubscribe(audio);
                 self.tracks.remove(&audio);
-                self.voice(VoiceCommand::ForgetShare(user));
+                self.audio(CallCommand::ForgetShare(user));
             }
         }
         self.shared.set_picture(user, None);
@@ -1850,9 +1801,8 @@ impl Session {
     }
 
     fn refresh_levels(&mut self) {
-        let Some(voice) = &self.voice else { return };
-        let levels = voice.levels();
-        *lock(&self.shared.mic_level) = Some(levels.mic);
+        let Some(audio) = &self.audio else { return };
+        let levels = audio.levels();
         let me = self.call.me();
         let speaking = |user: &UserId| {
             if *user == me {
@@ -1938,8 +1888,7 @@ impl Session {
         };
         let mut wanted = Vec::new();
         if self.media.mic {
-            let kbps = self.options.voice.kbps;
-            wanted.push(("mic", VOICE_DETAIL.into(), tracks.mic, kbps, None));
+            wanted.push(("mic", VOICE_DETAIL.into(), tracks.mic, MIC_KBPS, None));
         }
         if let (Some(config), Some(share)) = (self.media.share, tracks.shares.first()) {
             let detail = self
@@ -2098,10 +2047,10 @@ fn set_deafened(media: &mut MediaState, mic_before: &mut bool, deafened: bool) {
     media.deafened = deafened;
 }
 
-fn gain_command(user: UserId, sound: Sound, level: SoundLevel) -> VoiceCommand {
+fn gain_command(user: UserId, sound: Sound, level: SoundLevel) -> CallCommand {
     match sound {
-        Sound::Voice => VoiceCommand::Volume(user, level.gain()),
-        Sound::Share => VoiceCommand::ShareVolume(user, level.gain()),
+        Sound::Voice => CallCommand::Volume(user, level.gain()),
+        Sound::Share => CallCommand::ShareVolume(user, level.gain()),
     }
 }
 
@@ -2112,16 +2061,9 @@ fn supersedes(newer: &UiCommand, older: &UiCommand) -> bool {
         (UiCommand::SetSoundLevel(a, sa, _), UiCommand::SetSoundLevel(b, sb, _)) => {
             a == b && sa == sb
         }
-        (
-            UiCommand::SetMic(_)
-            | UiCommand::SetDeafened(_)
-            | UiCommand::PushToTalk(_)
-            | UiCommand::MicTest(_)
-            | UiCommand::Voice(_)
-            | UiCommand::Devices { .. }
-            | UiCommand::SetProfile(_),
-            _,
-        ) => discriminant(newer) == discriminant(older),
+        (UiCommand::SetMic(_) | UiCommand::SetDeafened(_) | UiCommand::SetProfile(_), _) => {
+            discriminant(newer) == discriminant(older)
+        }
         _ => false,
     }
 }
@@ -2270,10 +2212,6 @@ mod tests {
     #[test]
     fn only_the_latest_setting_is_replayed() {
         use crate::client::UiCommand;
-        assert!(supersedes(
-            &UiCommand::PushToTalk(false),
-            &UiCommand::PushToTalk(true)
-        ));
         assert!(supersedes(
             &UiCommand::SetMic(false),
             &UiCommand::SetMic(true)

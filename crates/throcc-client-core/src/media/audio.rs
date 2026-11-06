@@ -3,17 +3,16 @@ use std::collections::hash_map::Entry;
 
 use ropus::{Application, Bitrate, Channels, Encoder, FrameDuration, InbandFec};
 use sonora::config::{
-    AdaptiveDigital, EchoCanceller, GainController2, HighPassFilter, NoiseSuppression,
+    AdaptiveDigital, EchoCanceller, GainController2, HighPassFilter, NoiseSuppressionLevel,
 };
 use sonora::{AudioProcessing, Config, StreamConfig};
 use sonora_agc2::vad_wrapper::VoiceActivityDetectorWrapper;
 use throcc_proto::frame::AUDIO_CLOCK_HZ;
 use throcc_proto::ids::UserId;
 
-pub use sonora::config::NoiseSuppressionLevel;
-
 use super::jitter::JitterBuffer;
-use crate::state::MAX_VOLUME;
+use crate::settings::{NoiseSuppression, Transmit, VoiceSettings};
+use crate::state::{MAX_VOLUME, MIC_KBPS};
 
 /// The rate all audio is processed at, which is also its media clock.
 pub const SAMPLE_RATE: u32 = AUDIO_CLOCK_HZ;
@@ -24,53 +23,10 @@ pub const PULL: usize = SAMPLE_RATE as usize / 100;
 /// Voice activation keeps sending, and the speaking ring stays lit, this long after speech stops.
 const HANGOVER_PULLS: u32 = 30;
 pub(crate) const MAX_PACKET: usize = 1500;
-/// Processed mic level (dBFS) above which voice activation opens, unless configured otherwise.
-pub const DEFAULT_GATE_DBFS: f32 = -50.0;
 /// Speech probability above which the speech detector counts 10 ms as speech.
 const SPEECH_PROBABILITY: f32 = 0.5;
 /// A decoded level above this (dBFS) counts as speaking for the UI's ring.
 const SPEAKING_DBFS: f32 = -45.0;
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Transmit {
-    VoiceActivity { threshold_dbfs: f32 },
-    PushToTalk,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct VoiceSettings {
-    pub echo_cancellation: bool,
-    pub noise_suppression: Option<NoiseSuppressionLevel>,
-    pub automatic_gain: bool,
-    pub transmit: Transmit,
-    /// Voice activation opens only while the speech detector also hears speech.
-    pub speech_only: bool,
-    pub kbps: u32,
-    /// Gain on the mic before processing, 0 to 2.
-    pub input_volume: f32,
-    /// Gain on everything played, 0 to 2.
-    pub output_volume: f32,
-    /// Gain on cues before the output volume, 0 to 2.
-    pub cue_volume: f32,
-}
-
-impl Default for VoiceSettings {
-    fn default() -> Self {
-        Self {
-            echo_cancellation: true,
-            noise_suppression: Some(NoiseSuppressionLevel::Moderate),
-            automatic_gain: true,
-            transmit: Transmit::VoiceActivity {
-                threshold_dbfs: DEFAULT_GATE_DBFS,
-            },
-            speech_only: false,
-            kbps: 64,
-            input_volume: 1.0,
-            output_volume: 1.0,
-            cue_volume: 1.0,
-        }
-    }
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum AudioError {
@@ -88,20 +44,17 @@ pub struct Packet<'a> {
     pub data: &'a [u8],
 }
 
-/// Mic input to Opus packets: 10 ms frames through AEC3, noise suppression and AGC2, then
-/// a level gate, optionally also requiring speech, or push to talk, then 20 ms Opus frames
-/// with FEC and DTX. The media clock runs on while gated, so timestamps stay real time.
+/// Mic input to Opus packets: processing, the transmit gate, then 20 ms frames with FEC
+/// and DTX. The media clock runs on while gated, so timestamps stay real time.
 pub struct CaptureChain {
     apm: AudioProcessing,
     encoder: Encoder,
     transmit: Transmit,
     speech_only: bool,
     speech: VoiceActivityDetectorWrapper,
-    /// The processed 10 ms in the 16-bit sample range the speech detector expects.
-    speech_input: [f32; PULL],
     input_volume: f32,
     /// Echo cancellation, noise suppression and gain control as last applied.
-    processing: (bool, Option<NoiseSuppressionLevel>, bool),
+    processing: (bool, Option<NoiseSuppression>, bool),
     processed: [f32; PULL],
     frame: [f32; FRAME],
     frame_len: usize,
@@ -112,9 +65,9 @@ pub struct CaptureChain {
     muted: bool,
     transmitting: bool,
     /// Level of the last 10 ms after processing, in dBFS.
-    pub level_dbfs: f32,
+    level_dbfs: f32,
     /// Whether the transmit gate let the last 10 ms through, before muting.
-    pub gate_open: bool,
+    gate_open: bool,
 }
 
 impl CaptureChain {
@@ -126,7 +79,7 @@ impl CaptureChain {
         apm.apply_config(processing_config(settings));
         let encoder = Encoder::builder(SAMPLE_RATE, Channels::Mono, Application::Voip)
             .frame_duration(FrameDuration::Ms20)
-            .bitrate(Bitrate::Bits(settings.kbps * 1000))
+            .bitrate(Bitrate::Bits(MIC_KBPS * 1000))
             .inband_fec(InbandFec::Enabled)
             .packet_loss_perc(5)
             .dtx(true)
@@ -141,7 +94,6 @@ impl CaptureChain {
                 sonora_simd::detect_backend(),
                 SAMPLE_RATE as i32,
             ),
-            speech_input: [0.0; PULL],
             input_volume: settings.input_volume,
             processing: processing_choice(settings),
             processed: [0.0; PULL],
@@ -167,9 +119,6 @@ impl CaptureChain {
         self.transmit = settings.transmit;
         self.speech_only = settings.speech_only;
         self.input_volume = settings.input_volume;
-        self.encoder
-            .set_bitrate(Bitrate::Bits(settings.kbps * 1000))
-            .ok();
     }
 
     /// Closes the gate while keeping processing and the media clock running.
@@ -187,6 +136,23 @@ impl CaptureChain {
     /// Whether the last 20 ms went out.
     pub fn transmitting(&self) -> bool {
         self.transmitting
+    }
+
+    /// Level of the last 10 ms after processing, in dBFS.
+    pub fn level_dbfs(&self) -> f32 {
+        self.level_dbfs
+    }
+
+    /// Whether the transmit gate let the last 10 ms through, before muting.
+    pub fn gate_open(&self) -> bool {
+        self.gate_open
+    }
+
+    /// Reports silence until the next capture, for a mic that stopped delivering.
+    pub fn reset_levels(&mut self) {
+        self.level_dbfs = f32::NEG_INFINITY;
+        self.gate_open = false;
+        self.transmitting = false;
     }
 
     /// Feeds 10 ms of what the speakers play, the echo canceller's reference.
@@ -249,14 +215,12 @@ impl CaptureChain {
     }
 
     fn hears_speech(&mut self) -> bool {
-        for (scaled, sample) in self.speech_input.iter_mut().zip(&self.processed) {
-            *scaled = sample * 32768.0;
-        }
-        self.speech.analyze(&self.speech_input) > SPEECH_PROBABILITY
+        let in_16_bit_range = self.processed.map(|sample| sample * 32768.0);
+        self.speech.analyze(&in_16_bit_range) > SPEECH_PROBABILITY
     }
 }
 
-fn processing_choice(settings: &VoiceSettings) -> (bool, Option<NoiseSuppressionLevel>, bool) {
+fn processing_choice(settings: &VoiceSettings) -> (bool, Option<NoiseSuppression>, bool) {
     (
         settings.echo_cancellation,
         settings.noise_suppression,
@@ -264,13 +228,23 @@ fn processing_choice(settings: &VoiceSettings) -> (bool, Option<NoiseSuppression
     )
 }
 
+fn sonora_level(choice: NoiseSuppression) -> NoiseSuppressionLevel {
+    match choice {
+        NoiseSuppression::Low => NoiseSuppressionLevel::Low,
+        NoiseSuppression::Moderate => NoiseSuppressionLevel::Moderate,
+        NoiseSuppression::High => NoiseSuppressionLevel::High,
+    }
+}
+
 fn processing_config(settings: &VoiceSettings) -> Config {
     Config {
         high_pass_filter: Some(HighPassFilter::default()),
         echo_canceller: settings.echo_cancellation.then(EchoCanceller::default),
-        noise_suppression: settings.noise_suppression.map(|level| NoiseSuppression {
-            level,
-            ..Default::default()
+        noise_suppression: settings.noise_suppression.map(|choice| {
+            sonora::config::NoiseSuppression {
+                level: sonora_level(choice),
+                ..Default::default()
+            }
         }),
         gain_controller2: settings.automatic_gain.then(|| GainController2 {
             adaptive_digital: Some(AdaptiveDigital::default()),
@@ -677,7 +651,10 @@ mod tests {
         for _ in 0..100 {
             chain.capture(&[0.0; PULL], false).unwrap();
         }
-        assert!(!chain.gate_open, "the gate stayed open through a second of silence");
+        assert!(
+            !chain.gate_open,
+            "the gate stayed open through a second of silence"
+        );
     }
 
     #[test]

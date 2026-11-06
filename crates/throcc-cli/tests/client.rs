@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use throcc_client_core::account;
 use throcc_client_core::call::{Call, CallEvent};
-use throcc_client_core::client::{Client, ClientApi, ClientOptions, UiCommand, UiEvent};
+use throcc_client_core::client::{Client, ClientApi, UiCommand, UiEvent};
 use throcc_client_core::keystore::Keystore;
 use throcc_client_core::profile::Profile;
 use throcc_client_core::state::{ConnectionStatus, KeyWarning, Sound, SoundLevel, State};
@@ -48,12 +48,8 @@ fn named(name: &str) -> Profile {
 
 fn client_as(dir: &Path, address: &str, invite: Option<&InviteCode>, profile: Profile) -> Client {
     let keystore = Keystore::open_in(dir).unwrap();
-    let options = ClientOptions {
-        audio: false,
-        ..Default::default()
-    };
     let verified = VerifiedStore::load(dir).unwrap();
-    Client::connect(address, keystore, invite, profile, options, verified).unwrap()
+    Client::connect(address, keystore, invite, profile, None, verified).unwrap()
 }
 
 fn wait_for(client: &Client, what: &str, ready: impl FnMut(&State) -> bool) {

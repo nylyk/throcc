@@ -11,9 +11,10 @@ use gpui_component::select::{Select, SelectEvent, SelectState};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::switch::Switch;
 use gpui_component::{Disableable, IndexPath};
-use throcc_client_core::client::{MicLevel, UiCommand};
-use throcc_client_core::media::audio::{
-    DEFAULT_GATE_DBFS, NoiseSuppressionLevel, Transmit, VoiceSettings,
+use throcc_client_core::media::cues::Cue;
+use throcc_client_core::media::voice::MicLevel;
+use throcc_client_core::settings::{
+    AudioSettings, DEFAULT_GATE_DBFS, NoiseSuppression, Transmit, VoiceSettings,
 };
 use throcc_proto::Fingerprint;
 
@@ -22,7 +23,7 @@ use super::common::{
     slider_value, volume_slider,
 };
 use super::page::{field, frame, nav, picture_editor, row, save_line, segmented, switch_row};
-use crate::app::{PictureFor, Screen, SettingsPage, ThroccApp, typed_name};
+use crate::app::{DeviceNames, PictureFor, Screen, SettingsPage, ThroccApp, typed_name};
 use crate::hotkey::DEFAULT_KEY_LABEL;
 use crate::theme;
 
@@ -43,6 +44,16 @@ pub fn render(
         SettingsPage::Appearance => appearance(app, cx),
         SettingsPage::Verified => verified(app, cx),
     };
+    let content = match app.settings_problem.clone() {
+        Some(problem) => div()
+            .flex()
+            .flex_col()
+            .gap_6()
+            .child(field_error(problem))
+            .child(content)
+            .into_any_element(),
+        None => content,
+    };
     frame(
         app.sidebar_width,
         "Settings",
@@ -61,14 +72,29 @@ fn gate_dbfs(transmit: Transmit) -> f32 {
     }
 }
 
+/// Changes the voice settings and gives them to the audio thread.
+fn change_voice(app: &mut ThroccApp, change: impl FnOnce(&mut VoiceSettings)) {
+    change(&mut app.settings.audio.voice);
+    app.audio_engine.apply(app.settings.audio.voice);
+}
+
 fn set_voice(app: &mut ThroccApp, change: impl FnOnce(&mut VoiceSettings)) {
-    change(&mut app.voice);
-    app.command(UiCommand::Voice(app.voice));
+    change_voice(app, change);
+    app.save_settings();
+}
+
+/// Applies a slider's voice setting as it moves, and keeps it once let go.
+fn slide_voice(app: &mut ThroccApp, event: &SliderEvent, change: impl FnOnce(&mut VoiceSettings)) {
+    change_voice(app, change);
+    if matches!(event, SliderEvent::Release(_)) {
+        app.save_settings();
+    }
 }
 
 fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let seed = app.state.me.map_or(0, |me| me.0);
     let name = app
+        .settings
         .profile
         .as_ref()
         .map(|p| p.name.clone())
@@ -121,20 +147,15 @@ pub struct AudioControls {
 }
 
 impl AudioControls {
-    pub fn new(
-        voice: &VoiceSettings,
-        inputs: &[String],
-        outputs: &[String],
-        window: &mut Window,
-        cx: &mut Context<ThroccApp>,
-    ) -> Self {
-        let mut device_select = |names: &[String]| {
-            let mut items: Devices = vec![SYSTEM_DEFAULT.into()];
-            items.extend(names.iter().cloned().map(SharedString::from));
+    /// The controls for `voice`, offering only the system default devices until
+    /// [`Self::show_devices`] gives the rest.
+    pub fn new(voice: &VoiceSettings, window: &mut Window, cx: &mut Context<ThroccApp>) -> Self {
+        let mut device_select = || {
+            let items = device_items(&[]);
             cx.new(|cx| SelectState::new(items, Some(IndexPath::new(0)), window, cx))
         };
-        let input = device_select(inputs);
-        let output = device_select(outputs);
+        let input = device_select();
+        let output = device_select();
         let input_volume = cx.new(|_| volume_slider(voice.input_volume));
         let output_volume = cx.new(|_| volume_slider(voice.output_volume));
         let cue_volume = cx.new(|_| volume_slider(voice.cue_volume));
@@ -147,35 +168,35 @@ impl AudioControls {
         });
         let on_device = |is_input: bool| {
             move |app: &mut ThroccApp,
-                  _,
+                  _: &Entity<SelectState<Devices>>,
                   event: &SelectEvent<Devices>,
+                  window: &mut Window,
                   cx: &mut Context<ThroccApp>| {
                 let SelectEvent::Confirm(picked) = event;
                 let device = picked
                     .as_ref()
                     .filter(|name| name.as_ref() != SYSTEM_DEFAULT)
                     .map(ToString::to_string);
-                if is_input {
-                    app.input_device = device;
-                } else {
-                    app.output_device = device;
-                }
-                app.command(UiCommand::Devices {
-                    input: app.input_device.clone(),
-                    output: app.output_device.clone(),
+                app.change_settings(|s| {
+                    if is_input {
+                        s.audio.input_device = device;
+                    } else {
+                        s.audio.output_device = device;
+                    }
                 });
+                app.change_devices(window, cx);
                 cx.notify();
             }
         };
         let on_slide = |change: fn(&mut VoiceSettings, &SliderEvent)| {
             move |app: &mut ThroccApp, _, event: &SliderEvent, cx: &mut Context<ThroccApp>| {
-                set_voice(app, |voice| change(voice, event));
+                slide_voice(app, event, |voice| change(voice, event));
                 cx.notify();
             }
         };
         let subscriptions = vec![
-            cx.subscribe(&input, on_device(true)),
-            cx.subscribe(&output, on_device(false)),
+            cx.subscribe_in(&input, window, on_device(true)),
+            cx.subscribe_in(&output, window, on_device(false)),
             cx.subscribe(
                 &input_volume,
                 on_slide(|voice, event| voice.input_volume = slider_gain(event)),
@@ -185,9 +206,9 @@ impl AudioControls {
                 on_slide(|voice, event| voice.output_volume = slider_gain(event)),
             ),
             cx.subscribe(&cue_volume, |app, _, event: &SliderEvent, cx| {
-                set_voice(app, |voice| voice.cue_volume = slider_gain(event));
+                slide_voice(app, event, |voice| voice.cue_volume = slider_gain(event));
                 if matches!(event, SliderEvent::Release(_)) {
-                    app.save_cue_volume();
+                    app.audio_engine.cue(Cue::Join);
                 }
                 cx.notify();
             }),
@@ -211,6 +232,37 @@ impl AudioControls {
             _subscriptions: subscriptions,
         }
     }
+
+    /// Offers `names` in the device dropdowns, with the devices `audio` names picked.
+    pub fn show_devices(
+        &self,
+        (inputs, outputs): &DeviceNames,
+        audio: &AudioSettings,
+        window: &mut Window,
+        cx: &mut Context<ThroccApp>,
+    ) {
+        let pairs = [
+            (&self.input, inputs, &audio.input_device),
+            (&self.output, outputs, &audio.output_device),
+        ];
+        for (select, names, picked) in pairs {
+            let row = picked
+                .as_ref()
+                .and_then(|picked| names.iter().position(|name| name == picked))
+                .map_or(0, |i| i + 1);
+            select.update(cx, |select, cx| {
+                select.set_items(device_items(names), window, cx);
+                select.set_selected_index(Some(IndexPath::new(row)), window, cx);
+            });
+        }
+    }
+}
+
+/// The system default followed by `names`.
+fn device_items(names: &[String]) -> Devices {
+    let mut items: Devices = vec![SYSTEM_DEFAULT.into()];
+    items.extend(names.iter().cloned().map(SharedString::from));
+    items
 }
 
 /// Redraws the page every 100 ms while it shows the audio settings with a level meter that
@@ -226,10 +278,13 @@ fn keep_metering(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) {
             let shown = this.update(cx, |app, cx| {
                 let shown = app.screen == Screen::Settings(SettingsPage::Audio);
                 app.audio.metering = shown;
-                let meter_shown = matches!(app.voice.transmit, Transmit::VoiceActivity { .. });
+                let meter_shown = matches!(
+                    app.settings.audio.voice.transmit,
+                    Transmit::VoiceActivity { .. }
+                );
                 if !shown {
-                    app.stop_mic_test();
-                } else if meter_shown && app.client.is_some() {
+                    app.set_mic_test(false);
+                } else if meter_shown {
                     cx.notify();
                 }
                 shown
@@ -244,12 +299,8 @@ fn keep_metering(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) {
 
 /// The mic level as a bar, green while the gate lets it through, with a mark at
 /// `threshold_dbfs`.
-fn meter(level: Option<MicLevel>, threshold_dbfs: f32) -> Div {
+fn meter(level: MicLevel, threshold_dbfs: f32) -> Div {
     let fraction = |dbfs: f32| (1. - dbfs / METER_FLOOR_DBFS).clamp(0., 1.);
-    let level = level.unwrap_or(MicLevel {
-        dbfs: f32::NEG_INFINITY,
-        gate_open: false,
-    });
     div()
         .relative()
         .h(px(8.))
@@ -298,10 +349,10 @@ fn percent_slider(state: &Entity<SliderState>, cx: &Context<ThroccApp>) -> Div {
 
 fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     keep_metering(app, cx);
-    let voice = app.voice;
+    let voice = app.settings.audio.voice;
     let vad = matches!(voice.transmit, Transmit::VoiceActivity { .. });
     let threshold = gate_dbfs(voice.transmit);
-    let level = app.client.as_ref().and_then(|c| c.mic_level());
+    let level = app.audio_engine.mic_level();
     let controls = &app.audio;
     div()
         .flex()
@@ -313,6 +364,7 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .flex_col()
                 .gap_2()
                 .child(section("Devices"))
+                .children(app.audio_problem.clone().map(field_error))
                 .child(row("Input", Select::new(&controls.input).w_full()))
                 .child(row(
                     "Input volume",
@@ -423,9 +475,9 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                         "ns",
                         [
                             (None, "Off"),
-                            (Some(NoiseSuppressionLevel::Low), "Low"),
-                            (Some(NoiseSuppressionLevel::Moderate), "Moderate"),
-                            (Some(NoiseSuppressionLevel::High), "High"),
+                            (Some(NoiseSuppression::Low), "Low"),
+                            (Some(NoiseSuppression::Moderate), "Moderate"),
+                            (Some(NoiseSuppression::High), "High"),
                         ],
                         voice.noise_suppression,
                         cx,
@@ -462,8 +514,7 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                     },
                 )
                 .on_click(cx.listener(|app, _, _, cx| {
-                    app.mic_test = !app.mic_test;
-                    app.command(UiCommand::MicTest(app.mic_test));
+                    app.set_mic_test(!app.mic_test);
                     cx.notify();
                 })),
             ),
@@ -535,27 +586,22 @@ fn verified(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
 }
 
 fn appearance(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
-    let custom = app.picked_theme == theme::CUSTOM;
-    let presets = theme::PRESETS
+    let (picked, _) = theme::picked(&app.settings.appearance);
+    let custom_colors = theme::custom(&app.settings.appearance);
+    let custom = picked == theme::CUSTOM;
+    let option = |id: ElementId, name: &'static str, palette, cx: &mut Context<ThroccApp>| {
+        theme_option(id, name, palette, picked == name)
+            .on_click(cx.listener(move |app, _, _, cx| app.use_theme(name, cx)))
+    };
+    let presets: Vec<_> = theme::PRESETS
         .iter()
         .enumerate()
-        .map(|(i, &(name, palette))| {
-            theme_option(("preset", i), name, palette, app.picked_theme == name).on_click(
-                cx.listener(move |app, _, _, cx| {
-                    app.use_preset(name, palette, cx);
-                    cx.notify();
-                }),
-            )
-        });
-    let custom_option = theme_option("custom", theme::CUSTOM, app.custom_colors, custom).on_click(
-        cx.listener(|app, _, _, cx| {
-            app.use_custom(cx);
-            cx.notify();
-        }),
-    );
+        .map(|(i, &(name, palette))| option(("preset", i).into(), name, palette, cx))
+        .collect();
+    let custom_option = option("custom".into(), theme::CUSTOM, custom_colors, cx);
     let colors = theme::Palette::LABELS
         .iter()
-        .zip(app.custom_colors.colors())
+        .zip(custom_colors.colors())
         .zip(app.palette_fields.iter())
         .map(|((label, color), field)| {
             div()
@@ -616,8 +662,7 @@ fn appearance(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                             .checked(theme::translucent_sidebar())
                             .label("Translucent")
                             .on_click(cx.listener(|app, on: &bool, _, cx| {
-                                app.use_translucent_sidebar(*on);
-                                cx.notify();
+                                app.use_translucent_sidebar(*on, cx)
                             })),
                     )),
             )

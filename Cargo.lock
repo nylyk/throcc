@@ -7768,6 +7768,7 @@ dependencies = [
  "anyhow",
  "ashpd",
  "async-io",
+ "base64 0.22.1",
  "bytes",
  "cpal",
  "directories",

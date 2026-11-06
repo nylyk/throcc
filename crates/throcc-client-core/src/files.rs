@@ -14,15 +14,6 @@ pub fn read_if_exists(path: &Path) -> Result<Option<Vec<u8>>> {
     }
 }
 
-pub fn remove_if_exists(path: &Path) -> Result<()> {
-    match fs::remove_file(path) {
-        Err(e) if e.kind() != ErrorKind::NotFound => {
-            Err(e).with_context(|| format!("removing {}", path.display()))
-        }
-        _ => Ok(()),
-    }
-}
-
 /// Writes `bytes` to a new 0600 file at `path`.
 fn write_new_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut options = fs::OpenOptions::new();

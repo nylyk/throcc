@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use gpui::{App, FontWeight, Hsla, Pixels, SharedString, px, rgb};
 use gpui_component::{Theme, ThemeMode};
-use throcc_client_core::settings::Settings;
+use throcc_client_core::settings::Appearance;
 
 /// The eight colours a theme is made of. Every other colour is mixed from them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -185,10 +185,10 @@ pub fn format_hex(color: u32) -> String {
 
 thread_local! {
     static PALETTE: Cell<Palette> = const { Cell::new(PRESETS[0].1) };
-    static TRANSLUCENT_SIDEBAR: Cell<bool> = const { Cell::new(cfg!(target_os = "macos")) };
+    static TRANSLUCENT_SIDEBAR: Cell<bool> = const { Cell::new(false) };
 }
 
-pub fn palette() -> Palette {
+fn palette() -> Palette {
     PALETTE.with(Cell::get)
 }
 
@@ -196,18 +196,17 @@ pub fn translucent_sidebar() -> bool {
     TRANSLUCENT_SIDEBAR.with(Cell::get)
 }
 
-pub fn set_translucent_sidebar(translucent: bool) {
-    TRANSLUCENT_SIDEBAR.with(|t| t.set(translucent));
-}
-
 pub const CUSTOM: &str = "Custom";
 
-/// The name and palette of the theme kept in `settings`, if one was.
-pub fn picked(settings: &Settings) -> Option<(&'static str, Palette)> {
-    match settings.theme.as_deref()? {
-        CUSTOM => Some((CUSTOM, Palette::from_hex(settings.palette.as_ref()?)?)),
-        name => preset(name),
-    }
+/// The name and palette of the theme `appearance` picks, the first preset where it picks
+/// none that exists.
+pub fn picked(appearance: &Appearance) -> (&'static str, Palette) {
+    let picked = match appearance.theme.as_deref() {
+        Some(CUSTOM) => saved_custom(appearance).map(|palette| (CUSTOM, palette)),
+        Some(name) => preset(name),
+        None => None,
+    };
+    picked.unwrap_or(PRESETS[0])
 }
 
 /// The preset called `name`, ignoring case.
@@ -218,34 +217,24 @@ pub fn preset(name: &str) -> Option<(&'static str, Palette)> {
         .copied()
 }
 
-/// The Custom theme's colours in `settings`, if they were ever saved.
-pub fn custom(settings: &Settings) -> Option<Palette> {
-    Palette::from_hex(settings.palette.as_ref()?)
+/// The Custom theme's colours in `appearance`, or the picked theme's until any are saved.
+pub fn custom(appearance: &Appearance) -> Palette {
+    saved_custom(appearance).unwrap_or(picked(appearance).1)
 }
 
-/// Keeps the preset called `name` as the picked theme.
-pub fn save_preset(name: &str) {
-    save(|s| s.theme = Some(name.into()));
+fn saved_custom(appearance: &Appearance) -> Option<Palette> {
+    Palette::from_hex(appearance.palette.as_ref()?)
 }
 
-/// Keeps Custom as the picked theme, with `palette` as its colours.
-pub fn save_custom(palette: Palette) {
-    save(|s| {
-        s.theme = Some(CUSTOM.into());
-        s.palette = Some(palette.to_hex());
-    });
-}
-
-pub fn save_translucent_sidebar(translucent: bool) {
-    save(|s| s.translucent_sidebar = Some(translucent));
-}
-
-fn save(change: impl FnOnce(&mut Settings)) {
-    let saved =
-        throcc_client_core::keystore::config_dir().and_then(|dir| Settings::update(&dir, change));
-    if let Err(e) = saved {
-        tracing::warn!("could not save the appearance: {e:#}");
-    }
+/// Makes every window show the theme and sidebar `appearance` picks.
+pub fn apply(appearance: &Appearance, cx: &mut App) {
+    PALETTE.with(|p| p.set(picked(appearance).1));
+    let translucent = appearance
+        .translucent_sidebar
+        .unwrap_or(cfg!(target_os = "macos"));
+    TRANSLUCENT_SIDEBAR.with(|t| t.set(translucent));
+    install(cx);
+    cx.refresh_windows();
 }
 
 fn hex(value: u32) -> Hsla {
@@ -538,13 +527,6 @@ pub const HEADER_HEIGHT: Pixels = px(56.);
 /// Height shared by the profile bar and the control bar.
 pub const FOOTER_HEIGHT: Pixels = px(68.);
 
-/// Makes `palette` the theme of every window.
-pub fn set(palette: Palette, cx: &mut App) {
-    PALETTE.with(|p| p.set(palette));
-    install(cx);
-    cx.refresh_windows();
-}
-
 /// Points gpui-component's own widgets (buttons, inputs, switches, focus rings) at these tokens.
 fn install(cx: &mut App) {
     let families = FAMILIES.get_or_init(|| pick_families(cx)).clone();
@@ -631,21 +613,25 @@ mod tests {
 
     #[test]
     fn the_picked_theme_is_found_by_name() {
-        let custom = PRESETS[2].1;
-        let mut settings = Settings {
+        let colors = PRESETS[2].1;
+        let mut settings = Appearance {
             theme: Some("Paper".into()),
-            palette: Some(custom.to_hex()),
-            ..Settings::default()
+            palette: Some(colors.to_hex()),
+            ..Appearance::default()
         };
         let paper = PRESETS.iter().find(|(name, _)| *name == "Paper").copied();
-        assert!(paper.is_some());
-        assert_eq!(picked(&settings), paper);
+        assert_eq!(Some(picked(&settings)), paper);
+        assert_eq!(custom(&settings), colors);
         settings.theme = Some(CUSTOM.into());
-        assert_eq!(picked(&settings), Some((CUSTOM, custom)));
+        assert_eq!(picked(&settings), (CUSTOM, colors));
         settings.theme = None;
-        assert_eq!(picked(&settings), None);
+        assert_eq!(picked(&settings), PRESETS[0]);
         settings.theme = Some("Gone".into());
-        assert_eq!(picked(&settings), None);
+        assert_eq!(picked(&settings), PRESETS[0]);
+        settings.palette = None;
+        assert_eq!(custom(&settings), PRESETS[0].1);
+        settings.theme = Some(CUSTOM.into());
+        assert_eq!(picked(&settings), PRESETS[0]);
     }
 
     #[test]

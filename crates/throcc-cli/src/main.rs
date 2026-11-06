@@ -13,6 +13,7 @@ use throcc_client_core::call::Call;
 use throcc_client_core::control::{ControlLink, Requester};
 use throcc_client_core::keystore::{IdentityMissing, Keystore, StartedOver};
 use throcc_client_core::profile::Profile;
+use throcc_client_core::settings::Settings;
 use throcc_proto::ids::RoomId;
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
@@ -71,10 +72,10 @@ enum Command {
         /// Opens no audio devices.
         #[arg(long)]
         no_audio: bool,
-        /// Input device name, from `devices`.
+        /// Input device name, from `devices`, else the saved one.
         #[arg(long)]
         input: Option<String>,
-        /// Output device name, from `devices`.
+        /// Output device name, from `devices`, else the saved one.
         #[arg(long)]
         output: Option<String>,
     },
@@ -262,7 +263,8 @@ async fn run(cli: Cli) -> Result<()> {
 
 /// The profile kept beside the keystore, first renamed to `name` and kept if one is given.
 fn kept_profile(keystore: &Keystore, name: Option<String>) -> Result<Profile> {
-    let kept = Profile::load(keystore.dir())?;
+    let mut settings = Settings::load(keystore.dir())?;
+    let kept = settings.profile.take();
     let Some(name) = name else {
         return kept.context("no name kept yet; give one with `enroll --name` or `name`");
     };
@@ -276,7 +278,8 @@ fn kept_profile(keystore: &Keystore, name: Option<String>) -> Result<Profile> {
             .to_owned(),
         picture: kept.and_then(|p| p.picture),
     };
-    profile.save(keystore.dir())?;
+    settings.profile = Some(profile.clone());
+    settings.save(keystore.dir())?;
     Ok(profile)
 }
 
@@ -290,20 +293,25 @@ fn voice_call(
     input: Option<String>,
     output: Option<String>,
 ) -> Result<()> {
-    use throcc_client_core::client::{Client, ClientApi, ClientOptions, UiCommand, UiEvent};
+    use throcc_client_core::client::{Client, ClientApi, UiCommand, UiEvent};
+    use throcc_client_core::media::voice::AudioEngine;
     use throcc_client_core::verified::VerifiedStore;
-    let options = ClientOptions {
-        audio,
-        input_device: input,
-        output_device: output,
-        ..Default::default()
+    let saved = Settings::load(keystore.dir())?.audio;
+    let audio = if audio {
+        let engine = AudioEngine::start(saved.voice)?;
+        let input = input.or(saved.input_device);
+        let output = output.or(saved.output_device);
+        engine.open_devices(input.as_deref(), output.as_deref())?;
+        Some(std::sync::Arc::new(engine))
+    } else {
+        None
     };
     let verified = VerifiedStore::load(keystore.dir()).unwrap_or_else(|e| {
         eprintln!("Couldn't read who you verified ({e:#}), so everyone shows as not verified.");
         VerifiedStore::empty(keystore.dir())
     });
     let profile = kept_profile(&keystore, None)?;
-    let client = Client::connect(address, keystore, None, profile, options, verified)?;
+    let client = Client::connect(address, keystore, None, profile, audio, verified)?;
     let state = client.state();
     let rooms = state.rooms.iter().map(|r| (r.id, r.name.as_str()));
     let room = find_room(rooms, room)?;

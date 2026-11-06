@@ -12,6 +12,10 @@ mod views;
 
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, point, px, size};
 use gpui_component::Root;
+use std::sync::Arc;
+
+use throcc_client_core::keystore;
+use throcc_client_core::media::voice::AudioEngine;
 use throcc_client_core::settings::Settings;
 use views::common;
 
@@ -27,7 +31,6 @@ fn main() {
         let at = args.iter().position(|a| a == flag)?;
         args.get(at + 1).cloned()
     };
-    let theme = value_of("--theme").and_then(|name| theme::preset(&name));
     let window_size = value_of("--size")
         .and_then(|s| {
             let (w, h) = s.split_once('x')?;
@@ -35,22 +38,26 @@ fn main() {
         })
         .unwrap_or(size(px(1280.), px(800.)));
     let screen = value_of("--screen");
-    let settings = if mock {
-        Settings::default()
+    let (mut settings, settings_problem) = if mock {
+        (Settings::default(), None)
     } else {
-        app::saved_settings()
+        saved_settings()
+    };
+    if mock && let Some((name, _)) = value_of("--theme").and_then(|name| theme::preset(&name)) {
+        settings.appearance.theme = Some(name.into());
+    }
+    let audio = match AudioEngine::start(settings.audio.voice) {
+        Ok(engine) => Arc::new(engine),
+        Err(e) => {
+            eprintln!("throcc can't start its audio: {e:#}");
+            std::process::exit(1);
+        }
     };
     gpui_platform::application()
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
-            let (theme_name, palette) = theme
-                .or_else(|| theme::picked(&settings))
-                .unwrap_or(theme::PRESETS[0]);
-            theme::set(palette, cx);
-            if let Some(translucent) = settings.translucent_sidebar {
-                theme::set_translucent_sidebar(translucent);
-            }
+            theme::apply(&settings.appearance, cx);
             app::bind_keys(cx);
             let bounds = Bounds::centered(None, window_size, cx);
             let options = common::app_titlebar(
@@ -64,8 +71,9 @@ fn main() {
             );
             let opened = cx.open_window(options, |window, cx| {
                 window.set_window_title("throcc");
-                let view =
-                    cx.new(|cx| app::ThroccApp::new(mock, theme_name, &settings, window, cx));
+                let view = cx.new(|cx| {
+                    app::ThroccApp::new(mock, settings, settings_problem, audio, window, cx)
+                });
                 if let Some(screen) = &screen {
                     view.update(cx, |app, cx| app.show_sample(screen, window, cx));
                 }
@@ -88,4 +96,16 @@ fn main() {
             }
             cx.activate(true);
         });
+}
+
+/// This computer's settings, or the defaults with why they couldn't be read.
+fn saved_settings() -> (Settings, Option<String>) {
+    match keystore::config_dir().and_then(|dir| Settings::load(&dir)) {
+        Ok(settings) => (settings, None),
+        Err(e) => {
+            tracing::warn!("no saved settings: {e:#}");
+            let problem = format!("Couldn't read your settings ({e}), so changes aren't kept.");
+            (Settings::default(), Some(problem))
+        }
+    }
 }

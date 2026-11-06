@@ -13,18 +13,15 @@ use gpui_component::slider::{SliderEvent, SliderState};
 use gpui_component::{Root, WindowExt};
 use throcc_client_core::account::SignInError;
 use throcc_client_core::avatars;
-use throcc_client_core::client::{
-    Client, ClientApi, ClientOptions, MockClient, UiCommand, UiEvent,
-};
+use throcc_client_core::client::{Client, ClientApi, MockClient, UiCommand, UiEvent};
 use throcc_client_core::keystore::{self, Keystore, StartedOver};
-use throcc_client_core::media::audio::{Transmit, VoiceSettings};
-use throcc_client_core::media::cues::Cue;
 use throcc_client_core::media::devices;
+use throcc_client_core::media::voice::AudioEngine;
 use throcc_client_core::profile::Profile;
 use throcc_client_core::server_look::ServerLook;
-use throcc_client_core::settings::Settings;
+use throcc_client_core::settings::{Appearance, AudioSettings, Settings, Transmit};
 use throcc_client_core::state::{
-    ConnectionStatus, MAX_VOLUME, ServerView, ShareChoice, Sound, SoundLevel, State,
+    ConnectionStatus, ServerView, ShareChoice, Sound, SoundLevel, State,
 };
 use throcc_client_core::verified::VerifiedStore;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
@@ -413,15 +410,26 @@ fn set_field(
     });
 }
 
-/// This computer's settings, or the defaults if they can't be read.
-pub fn saved_settings() -> Settings {
-    keystore::config_dir()
-        .and_then(|dir| Settings::load(&dir))
-        .unwrap_or_else(|e| {
-            tracing::warn!("no saved settings: {e:#}");
-            Settings::default()
-        })
+/// Opens the devices `audio` names, or the system default for one that isn't among
+/// `inputs` and `outputs`. Returns why audio doesn't work if it doesn't.
+fn open_devices(
+    engine: &AudioEngine,
+    audio: &AudioSettings,
+    (inputs, outputs): &DeviceNames,
+) -> Option<String> {
+    let present =
+        |name: &Option<String>, all: &[String]| name.clone().filter(|name| all.contains(name));
+    let input = present(&audio.input_device, inputs);
+    let output = present(&audio.output_device, outputs);
+    let e = engine
+        .open_devices(input.as_deref(), output.as_deref())
+        .err()?;
+    tracing::warn!("no audio: {e:#}");
+    Some(format!("Audio is unavailable: {e}"))
 }
+
+/// The input and the output device names.
+pub type DeviceNames = (Vec<String>, Vec<String>);
 
 pub struct ThroccApp {
     /// Running on sample data, which must leave this computer's settings and servers alone.
@@ -439,10 +447,6 @@ pub struct ThroccApp {
     pub server_form: PictureForm,
     /// One hex field per palette colour, in [`theme::Palette::LABELS`] order.
     pub palette_fields: Vec<Entity<InputState>>,
-    /// The picked theme's name: a preset's, or [`theme::CUSTOM`], which unlocks the colour fields.
-    pub picked_theme: &'static str,
-    /// The Custom theme's colours, kept while a preset is picked.
-    pub custom_colors: theme::Palette,
     /// Pictures by hash, `None` while one decodes in the background or if it can't be shown.
     pub pictures: HashMap<Hash, Option<Arc<RenderImage>>>,
     pub joining: bool,
@@ -451,8 +455,6 @@ pub struct ThroccApp {
     join_attempt: u64,
     pub join_error: Option<String>,
     pub start_over: StartOver,
-    /// Our name and picture as kept on this computer, `None` until onboarding keeps them.
-    pub profile: Option<Profile>,
     pub profile_avatar: Option<Hash>,
     pub profile_form: PictureForm,
     pub known_servers: Vec<(String, Fingerprint)>,
@@ -462,12 +464,21 @@ pub struct ThroccApp {
     pub server_looks: HashMap<String, CachedLook>,
     pub users: Vec<User>,
     pub invite: Option<String>,
-    pub voice: VoiceSettings,
-    pub input_device: Option<String>,
-    pub output_device: Option<String>,
+    /// Everything set on the settings pages, kept on this computer as it changes.
+    pub settings: Settings,
+    /// Why the settings couldn't be read or kept, the last time that failed.
+    pub settings_problem: Option<String>,
+    /// The audio thread, from launch to exit.
+    pub audio_engine: Arc<AudioEngine>,
+    /// Why the audio devices don't work, if they don't.
+    pub audio_problem: Option<String>,
+    /// The device change under way, which the next one waits for.
+    changing_devices: Option<Task<()>>,
     pub mic_test: bool,
     pub audio: views::settings::AudioControls,
     push_to_talk: Option<(crate::hotkey::PushToTalkKey, Task<()>)>,
+    /// Whether Space is held down as the push-to-talk key.
+    space_talking: bool,
     pub feeds: crate::video::Feeds,
     /// What the share dialog asks for, kept between shares.
     pub share_choice: ShareChoice,
@@ -505,8 +516,9 @@ pub struct ThroccApp {
 impl ThroccApp {
     pub fn new(
         mock: bool,
-        picked_theme: &'static str,
-        settings: &Settings,
+        settings: Settings,
+        settings_problem: Option<String>,
+        audio_engine: Arc<AudioEngine>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -520,8 +532,7 @@ impl ThroccApp {
                 .placeholder("Password")
         });
         let server_name = cx.new(|cx| InputState::new(window, cx).placeholder("Server name"));
-        let custom_colors = theme::custom(settings).unwrap_or_else(theme::palette);
-        let palette_fields: Vec<Entity<InputState>> = custom_colors
+        let palette_fields: Vec<Entity<InputState>> = theme::custom(&settings.appearance)
             .colors()
             .iter()
             .map(|color| {
@@ -583,12 +594,7 @@ impl ThroccApp {
         };
         let share_choice = ShareChoice::default();
         let (bitrate, bitrate_changes) = Self::bitrate_slider(share_choice, cx);
-        let (inputs, outputs) = devices::list();
-        let voice = VoiceSettings {
-            cue_volume: settings.cue_volume.clamp(0.0, MAX_VOLUME),
-            ..VoiceSettings::default()
-        };
-        let audio = views::settings::AudioControls::new(&voice, &inputs, &outputs, window, cx);
+        let audio = views::settings::AudioControls::new(&settings.audio.voice, window, cx);
         let mut app = Self {
             mock,
             client: None,
@@ -603,15 +609,12 @@ impl ThroccApp {
             server_name,
             server_form: PictureForm::default(),
             palette_fields,
-            picked_theme,
-            custom_colors,
             pictures: HashMap::new(),
             joining: false,
             mascot: views::mascot::Shown::default(),
             join_attempt: 0,
             join_error: None,
             start_over: StartOver::NotStarted,
-            profile: None,
             profile_avatar: None,
             profile_form: PictureForm::default(),
             known_servers,
@@ -620,12 +623,15 @@ impl ThroccApp {
             server_looks,
             users: Vec::new(),
             invite: None,
-            voice,
-            input_device: None,
-            output_device: None,
+            settings,
+            settings_problem,
+            audio_engine,
+            audio_problem: None,
+            changing_devices: None,
             mic_test: false,
             audio,
             push_to_talk: None,
+            space_talking: false,
             feeds: crate::video::Feeds::default(),
             share_choice,
             share_audio: true,
@@ -651,6 +657,8 @@ impl ThroccApp {
             _subscriptions: subscriptions,
         };
         window.focus(&app.root_focus, cx);
+        app.sync_push_to_talk(cx);
+        app.change_devices(window, cx);
         if mock {
             let profile = Profile {
                 name: "Felix".into(),
@@ -659,13 +667,9 @@ impl ThroccApp {
             app.set_profile(profile, cx);
             app.attach(Arc::new(MockClient::new(app.verified.clone())), window, cx);
         } else {
-            match keystore::config_dir().and_then(|dir| Profile::load(&dir)) {
-                Ok(Some(profile)) => app.set_profile(profile, cx),
-                Ok(None) => app.show_screen(Screen::Onboarding, window, cx),
-                Err(e) => {
-                    tracing::warn!("no saved profile: {e:#}");
-                    app.show_screen(Screen::Onboarding, window, cx);
-                }
+            match app.settings.profile.clone() {
+                Some(profile) => app.set_profile(profile, cx),
+                None => app.show_screen(Screen::Onboarding, window, cx),
             }
         }
         app
@@ -704,7 +708,9 @@ impl ThroccApp {
         self.join_error = None;
         self.dialog = None;
         window.focus(&self.root_focus, cx);
-        self.sync_push_to_talk(cx);
+        if let Some(problem) = &self.audio_problem {
+            window.push_notification(Notification::new().message(problem.clone()), cx);
+        }
         let window_handle = window.window_handle();
         self.events = Some(cx.spawn(async move |this, cx| {
             loop {
@@ -808,7 +814,7 @@ impl ThroccApp {
         let person = me.and_then(|m| self.state.person(m));
         let name = person
             .map(|p| p.name.clone())
-            .or_else(|| self.profile.as_ref().map(|p| p.name.clone()))
+            .or_else(|| self.settings.profile.as_ref().map(|p| p.name.clone()))
             .unwrap_or_else(|| "You".into());
         let avatar = person.and_then(|p| p.avatar);
         let picture = self
@@ -860,27 +866,19 @@ impl ThroccApp {
         .detach();
     }
 
-    /// Switches every window to the preset `name` and keeps it for next time.
-    pub fn use_preset(
-        &mut self,
-        name: &'static str,
-        palette: theme::Palette,
-        cx: &mut Context<Self>,
-    ) {
-        self.picked_theme = name;
-        theme::set(palette, cx);
-        if !self.mock {
-            theme::save_preset(name);
-        }
+    /// Switches every window to the theme called `name`, a preset or Custom, and keeps it.
+    pub fn use_theme(&mut self, name: &'static str, cx: &mut Context<Self>) {
+        let custom = theme::custom(&self.settings.appearance).to_hex();
+        self.change_appearance(cx, |appearance| {
+            appearance.theme = Some(name.into());
+            appearance.palette = Some(custom);
+        });
     }
 
-    /// Switches every window to the Custom theme and keeps it for next time.
-    pub fn use_custom(&mut self, cx: &mut Context<Self>) {
-        self.picked_theme = theme::CUSTOM;
-        theme::set(self.custom_colors, cx);
-        if !self.mock {
-            theme::save_custom(self.custom_colors);
-        }
+    /// Changes the appearance, keeps it and shows it in every window.
+    fn change_appearance(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut Appearance)) {
+        self.change_settings(|s| change(&mut s.appearance));
+        theme::apply(&self.settings.appearance, cx);
     }
 
     /// Takes `key` off the verified people, on every server.
@@ -893,11 +891,10 @@ impl ThroccApp {
     }
 
     /// Makes the sidebar see-through or solid and keeps the choice for next time.
-    pub fn use_translucent_sidebar(&mut self, translucent: bool) {
-        theme::set_translucent_sidebar(translucent);
-        if !self.mock {
-            theme::save_translucent_sidebar(translucent);
-        }
+    pub fn use_translucent_sidebar(&mut self, translucent: bool, cx: &mut Context<Self>) {
+        self.change_appearance(cx, |appearance| {
+            appearance.translucent_sidebar = Some(translucent)
+        });
     }
 
     /// Takes a typed hex colour into the Custom theme once it parses.
@@ -905,15 +902,13 @@ impl ThroccApp {
         let Some(color) = theme::parse_hex(typed) else {
             return;
         };
-        let mut colors = self.custom_colors.colors();
+        let mut colors = theme::custom(&self.settings.appearance).colors();
         if colors[index] == color {
             return;
         }
         colors[index] = color;
-        self.custom_colors = theme::Palette::from_colors(colors);
-        if self.picked_theme == theme::CUSTOM {
-            self.use_custom(cx);
-        }
+        let palette = theme::Palette::from_colors(colors).to_hex();
+        self.change_appearance(cx, |appearance| appearance.palette = Some(palette));
     }
 
     /// The share filling the whole window, while it is still shown here.
@@ -1385,7 +1380,11 @@ impl ThroccApp {
         let name = typed_name(&self.name, cx).ok()??;
         let picture = match &self.profile_form.edit {
             Some(edit) => edit.bytes.clone().map(Arc::from),
-            None => self.profile.as_ref().and_then(|p| p.picture.clone()),
+            None => self
+                .settings
+                .profile
+                .as_ref()
+                .and_then(|p| p.picture.clone()),
         };
         Some(Profile { name, picture })
     }
@@ -1393,19 +1392,20 @@ impl ThroccApp {
     /// Whether Save on the profile page has something to save that the server would take.
     pub fn profile_changed(&self, cx: &App) -> bool {
         self.edited_profile(cx)
-            .is_some_and(|edited| self.profile.as_ref() != Some(&edited))
+            .is_some_and(|edited| self.settings.profile.as_ref() != Some(&edited))
     }
 
     pub fn save_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(profile) = self
             .edited_profile(cx)
-            .filter(|edited| self.profile.as_ref() != Some(edited))
+            .filter(|edited| self.settings.profile.as_ref() != Some(edited))
         else {
             return;
         };
-        if self.joining || !self.keep_profile(profile.clone(), window, cx) {
+        if self.joining {
             return;
         }
+        self.keep_profile(profile.clone(), window, cx);
         if self.connected_server().is_some() {
             self.profile_form.status = Some(SaveStatus::Saving);
             self.command(UiCommand::SetProfile(profile));
@@ -1428,31 +1428,20 @@ impl ThroccApp {
         let Some(profile) = self.edited_profile(cx) else {
             return;
         };
-        if self.keep_profile(profile, window, cx) {
-            self.show_screen(Screen::Join, window, cx);
-        }
+        self.keep_profile(profile, window, cx);
+        self.show_screen(Screen::Join, window, cx);
     }
 
-    /// Keeps `profile` on this computer and shows it as ours. False, after telling the user,
-    /// if it couldn't be kept.
-    fn keep_profile(
-        &mut self,
-        profile: Profile,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if !self.mock
-            && let Err(e) = keystore::config_dir().and_then(|dir| profile.save(&dir))
-        {
-            tracing::warn!("saving the profile: {e:#}");
-            let notice = format!("Couldn't keep your profile: {e}");
-            window.push_notification(Notification::new().message(notice), cx);
-            return false;
-        }
+    /// Shows `profile` as ours and keeps it on this computer, telling the user if it couldn't
+    /// be kept.
+    fn keep_profile(&mut self, profile: Profile, window: &mut Window, cx: &mut Context<Self>) {
         self.profile_form.outdate_pick();
         self.profile_form.edit = None;
         self.set_profile(profile, cx);
-        true
+        self.save_settings();
+        if let Some(problem) = self.settings_problem.clone() {
+            window.push_notification(Notification::new().message(problem), cx);
+        }
     }
 
     fn set_profile(&mut self, profile: Profile, cx: &mut Context<Self>) {
@@ -1460,7 +1449,24 @@ impl ThroccApp {
         if let (Some(hash), Some(bytes)) = (self.profile_avatar, &profile.picture) {
             self.decode_picture(hash, bytes.clone(), cx);
         }
-        self.profile = Some(profile);
+        self.settings.profile = Some(profile);
+    }
+
+    pub fn change_settings(&mut self, change: impl FnOnce(&mut Settings)) {
+        change(&mut self.settings);
+        self.save_settings();
+    }
+
+    /// Writes the settings to disk, unless running on sample data.
+    pub fn save_settings(&mut self) {
+        if self.mock {
+            return;
+        }
+        let saved = keystore::config_dir().and_then(|dir| self.settings.save(&dir));
+        self.settings_problem = saved.err().map(|e| {
+            tracing::warn!("saving the settings: {e:#}");
+            format!("Couldn't keep your settings: {e}")
+        });
     }
 
     /// The name Save on the server page would give the server, if it differs, and why the
@@ -1522,7 +1528,7 @@ impl ThroccApp {
             }
             Screen::Settings(SettingsPage::Profile) => {
                 self.profile_form.reset();
-                let name = self.profile.as_ref().map(|p| p.name.clone());
+                let name = self.settings.profile.as_ref().map(|p| p.name.clone());
                 set_field(&self.name, name.unwrap_or_default(), false, window, cx);
             }
             Screen::Server(ServerPage::Overview) => {
@@ -1680,7 +1686,7 @@ impl ThroccApp {
             self.attach(Arc::new(client), window, cx);
             return;
         }
-        let Some(profile) = self.profile.clone() else {
+        let Some(profile) = self.settings.profile.clone() else {
             return;
         };
         self.verified_problem = read_verified(&self.verified);
@@ -1688,12 +1694,7 @@ impl ThroccApp {
         self.join_attempt += 1;
         let attempt = self.join_attempt;
         self.join_error = None;
-        let options = ClientOptions {
-            voice: self.voice,
-            input_device: self.input_device.clone(),
-            output_device: self.output_device.clone(),
-            audio: true,
-        };
+        let audio = Some(self.audio_engine.clone());
         let window_handle = window.window_handle();
         let connecting = cx.background_executor().spawn({
             let address = address.clone();
@@ -1705,7 +1706,7 @@ impl ThroccApp {
                     keystore,
                     invite.as_ref(),
                     profile,
-                    options,
+                    audio,
                     verified,
                 )
             }
@@ -1809,12 +1810,11 @@ impl ThroccApp {
         self.end_session(window, cx);
     }
 
-    /// Returns to the screen for no server without anything that belonged to the server's
-    /// session, and reloads the known servers, whose looks it may have changed.
+    /// Drops everything that belonged to the server's session, shows the screen for no server
+    /// unless a settings page is open, and reloads the known servers' looks.
     fn end_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_all_popouts(cx);
         self.exit_fullscreen(window, cx);
-        self.stop_mic_test();
         self.client = None;
         self.events = None;
         self.keep_display_awake = None;
@@ -1824,10 +1824,11 @@ impl ThroccApp {
         self.person_menu = None;
         self.focus = None;
         self.preview_self = false;
-        self.push_to_talk = None;
         self.server_form.reset();
         self.settle_profile_save();
-        self.screen = Screen::Join;
+        if !matches!(self.screen, Screen::Settings(_)) {
+            self.screen = Screen::Join;
+        }
         self.reload_known_servers();
     }
 
@@ -1906,7 +1907,7 @@ impl ThroccApp {
             "onboarding" => {
                 offline(self);
                 self.known_servers.clear();
-                self.profile = None;
+                self.settings.profile = None;
                 self.profile_avatar = None;
                 self.show_screen(Screen::Onboarding, window, cx);
             }
@@ -2086,7 +2087,9 @@ impl ThroccApp {
     /// Registers or drops the global push-to-talk key to match the transmit mode.
     pub fn sync_push_to_talk(&mut self, cx: &mut Context<Self>) {
         if !self.uses_push_to_talk() {
-            self.push_to_talk = None;
+            if self.push_to_talk.take().is_some() {
+                self.audio_engine.push_to_talk(false);
+            }
             return;
         }
         if self.push_to_talk.is_some() {
@@ -2103,7 +2106,7 @@ impl ThroccApp {
                             if let Some(down) =
                                 app.push_to_talk.as_ref().and_then(|(key, _)| key.poll())
                             {
-                                app.command(UiCommand::PushToTalk(down));
+                                app.audio_engine.push_to_talk(down);
                             }
                         });
                         if alive.is_err() {
@@ -2120,35 +2123,52 @@ impl ThroccApp {
     }
 
     fn uses_push_to_talk(&self) -> bool {
-        self.voice.transmit == Transmit::PushToTalk
+        self.settings.audio.voice.transmit == Transmit::PushToTalk
     }
 
-    /// Whether Space should talk: in push-to-talk mode, connected, with no dialog open and no
-    /// text field taking the keys.
+    /// Whether Space should talk: in push-to-talk mode, with no dialog open and no text field
+    /// taking the keys.
     fn push_to_talk_ready(&self, window: &Window) -> bool {
-        self.client.is_some()
-            && self.dialog.is_none()
-            && self.uses_push_to_talk()
-            && self.root_focus.is_focused(window)
+        self.dialog.is_none() && self.uses_push_to_talk() && self.root_focus.is_focused(window)
     }
 
-    /// Keeps the cue volume on this computer and plays a cue at it.
-    pub fn save_cue_volume(&mut self) {
-        let volume = self.voice.cue_volume;
-        if !self.mock
-            && let Err(e) = keystore::config_dir()
-                .and_then(|dir| Settings::update(&dir, |s| s.cue_volume = volume))
-        {
-            tracing::warn!("could not save the cue volume: {e:#}");
-        }
-        self.command(UiCommand::PlayCue(Cue::Join));
+    /// Lists the devices, opens the ones the settings name and offers them on the audio page.
+    /// Sample data opens none.
+    pub fn change_devices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let engine = (!self.mock).then(|| self.audio_engine.clone());
+        let audio = self.settings.audio.clone();
+        let earlier = self.changing_devices.take();
+        let window_handle = window.window_handle();
+        self.changing_devices = Some(cx.spawn(async move |this, cx| {
+            if let Some(earlier) = earlier {
+                earlier.await;
+            }
+            let (names, opened) = cx
+                .background_executor()
+                .spawn(async move {
+                    let names = devices::list();
+                    let opened = engine.map(|engine| open_devices(&engine, &audio, &names));
+                    (names, opened)
+                })
+                .await;
+            cx.update_window(window_handle, |_, window, cx| {
+                this.update(cx, |app, cx| {
+                    app.audio
+                        .show_devices(&names, &app.settings.audio, window, cx);
+                    if let Some(problem) = opened {
+                        app.audio_problem = problem;
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .ok();
+        }));
     }
 
-    pub fn stop_mic_test(&mut self) {
-        if self.mic_test {
-            self.mic_test = false;
-            self.command(UiCommand::MicTest(false));
-        }
+    pub fn set_mic_test(&mut self, on: bool) {
+        self.mic_test = on;
+        self.audio_engine.mic_test(on);
     }
 
     /// Whether the push-to-talk key works while another app has focus.
@@ -2219,12 +2239,13 @@ impl Render for ThroccApp {
                     && !event.is_held
                     && app.push_to_talk_ready(window)
                 {
-                    app.command(UiCommand::PushToTalk(true));
+                    app.space_talking = true;
+                    app.audio_engine.push_to_talk(true);
                 }
             }))
-            .on_key_up(cx.listener(|app, event: &gpui::KeyUpEvent, window, _| {
-                if event.keystroke.key == "space" && app.push_to_talk_ready(window) {
-                    app.command(UiCommand::PushToTalk(false));
+            .on_key_up(cx.listener(|app, event: &gpui::KeyUpEvent, _, _| {
+                if event.keystroke.key == "space" && std::mem::take(&mut app.space_talking) {
+                    app.audio_engine.push_to_talk(false);
                 }
             }))
             .size_full()

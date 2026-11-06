@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use throcc_crypto::safety;
 use throcc_proto::Fingerprint;
@@ -14,11 +14,9 @@ use crate::account::{self, SignInError};
 use crate::avatars;
 use crate::call::Call;
 use crate::keystore::Keystore;
-use crate::lock;
-use crate::media::audio::{DEFAULT_GATE_DBFS, VoiceSettings};
-use crate::media::cues::Cue;
 use crate::media::video::Picture;
 use crate::media::video::frame::VideoFrame;
+use crate::media::voice::AudioEngine;
 use crate::profile::Profile;
 use crate::session::{AvatarSlot, Session, Shared};
 use crate::state::{
@@ -27,15 +25,6 @@ use crate::state::{
     TrackHealth, VOICE_DETAIL, share_detail,
 };
 use crate::verified::VerifiedStore;
-
-#[derive(Clone, Debug, Default)]
-pub struct ClientOptions {
-    pub voice: VoiceSettings,
-    pub input_device: Option<String>,
-    pub output_device: Option<String>,
-    /// Opens audio devices. Off for headless tests.
-    pub audio: bool,
-}
 
 /// What the UI asks the core to do. The core's own type, never `throcc-proto`'s.
 #[derive(Clone, Debug, PartialEq)]
@@ -94,16 +83,6 @@ pub enum UiCommand {
     /// Shows who is verified again, after a change to the [`VerifiedStore`] made outside
     /// the client.
     VerifiedChanged,
-    Voice(VoiceSettings),
-    Devices {
-        input: Option<String>,
-        output: Option<String>,
-    },
-    /// Plays your processed mic back to you.
-    MicTest(bool),
-    PushToTalk(bool),
-    /// Plays a cue at the cue volume, to hear the setting.
-    PlayCue(Cue),
     /// Ends our membership of this server and forgets it, then disconnects.
     LeaveServer,
     Disconnect,
@@ -150,15 +129,6 @@ pub trait ClientApi: Send + Sync {
     fn picture_drawn(&self, _user: UserId) {}
     /// The profile picture behind `hash`, fetched in the background on first ask.
     fn avatar(&self, hash: Hash) -> Option<Arc<[u8]>>;
-    /// The mic level and gate, refreshed every 100 ms while audio runs.
-    fn mic_level(&self) -> Option<MicLevel>;
-}
-
-/// The processed mic level, and whether the transmit gate lets it through.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct MicLevel {
-    pub dbfs: f32,
-    pub gate_open: bool,
 }
 
 const COMMANDS: usize = 64;
@@ -183,7 +153,7 @@ impl Client {
         mut keystore: Keystore,
         invite: Option<&InviteCode>,
         profile: Profile,
-        options: ClientOptions,
+        audio: Option<Arc<AudioEngine>>,
         verified: VerifiedStore,
     ) -> Result<Self, SignInError> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -216,7 +186,7 @@ impl Client {
                 keystore,
                 address.to_owned(),
                 profile,
-                options,
+                audio,
                 call,
                 verified,
             )
@@ -286,10 +256,6 @@ impl ClientApi for Client {
         }
         bytes
     }
-
-    fn mic_level(&self) -> Option<MicLevel> {
-        *lock(&self.shared.mic_level)
-    }
 }
 
 /// A client with canned people and rooms that reacts to commands locally.
@@ -298,7 +264,6 @@ pub struct MockClient {
     verified: VerifiedStore,
     /// A test pattern every share shows.
     picture: watch::Sender<Option<Arc<VideoFrame>>>,
-    started: Instant,
 }
 
 impl Default for MockClient {
@@ -324,7 +289,6 @@ impl MockClient {
             shared: Shared::new(sample_state()),
             verified,
             picture: watch::Sender::new(Some(Arc::new(frame))),
-            started: Instant::now(),
         }
     }
 
@@ -530,13 +494,6 @@ impl ClientApi for MockClient {
                     }
                 });
             }
-            UiCommand::PushToTalk(down) => {
-                self.update(|s| set_mine(s, me, |_, p| p.speaking = down))
-            }
-            UiCommand::Voice(_)
-            | UiCommand::Devices { .. }
-            | UiCommand::MicTest(_)
-            | UiCommand::PlayCue(_) => {}
             UiCommand::LeaveServer => {
                 self.update(|s| s.connection = ConnectionStatus::Disconnected);
                 self.shared.emit(UiEvent::LeftServer);
@@ -563,15 +520,6 @@ impl ClientApi for MockClient {
 
     fn avatar(&self, hash: Hash) -> Option<Arc<[u8]>> {
         self.shared.avatar(hash).0
-    }
-
-    fn mic_level(&self) -> Option<MicLevel> {
-        let wave = self.started.elapsed().as_secs_f32() * 3.0;
-        let dbfs = -38.0 + 14.0 * wave.sin();
-        Some(MicLevel {
-            dbfs,
-            gate_open: dbfs > DEFAULT_GATE_DBFS,
-        })
     }
 }
 

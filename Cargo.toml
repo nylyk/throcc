@@ -65,6 +65,7 @@ sonora-agc2 = "0.2.0"
 sonora-common-audio = "0.2.0"
 sonora-simd = "0.2.0"
 spake2 = "0.4.0"
+base64 = "0.22.1"
 argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "password-hash"] }
 screencapturekit = { version = "=11.0.0", features = ["macos_14_0"] }
 smallvec = "1.16.4"
