@@ -102,6 +102,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [patch.crates-io]
 gpui-pre = { path = "third_party/gpui-pre" }
+gpui-pre-apple = { path = "third_party/gpui-pre-apple" }
 gpui-pre-wgpu = { path = "third_party/gpui-pre-wgpu" }
 gpui-pre-windows = { path = "third_party/gpui-pre-windows" }
 

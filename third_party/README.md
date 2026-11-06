@@ -2,7 +2,7 @@
 
 Crates we carry patches on, wired in through `[patch.crates-io]` in the workspace `Cargo.toml`.
 
-## gpui-pre, gpui-pre-wgpu, gpui-pre-windows 0.3.10
+## gpui-pre, gpui-pre-apple, gpui-pre-wgpu, gpui-pre-windows 0.3.10
 
 Apache-2.0, a crates.io republish of zed-industries/zed@08cbb88. Each directory started as an
 exact copy of the published crate, so `git log -p third_party/` shows only our changes.
@@ -34,10 +34,10 @@ renderer lives in `gpui-pre-apple`, which is not vendored.
 ## Refreshing on a gpui update
 
 1. Bump the pins, `cargo fetch`, and copy the unmodified `gpui-pre*-<version>` crates from
-   `~/.cargo/registry/src/*/` over the three directories. Commit that alone.
+   `~/.cargo/registry/src/*/` over the four directories. Commit that alone.
 2. Re-apply our commits on top (`git log -p -- third_party/` lists them; `git cherry-pick`
    usually applies) and update this file.
 3. If upstream has gained an NV12 or YUV surface on Linux and Windows, drop the vendored copies
    and the patch section instead.
-4. Check that `Cargo.lock` lists the three without a `source`, and that
+4. Check that `Cargo.lock` lists the four without a `source`, and that
    `crates/throcc-client/tests/surface.rs` and `tests/surface/run.sh` still pass.
