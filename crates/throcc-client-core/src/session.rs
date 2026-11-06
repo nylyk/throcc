@@ -19,7 +19,7 @@ use tracing::{info, warn};
 use crate::account::{self, SignInError};
 use crate::avatars;
 use crate::call::{Call, CallEvent};
-use crate::client::{ClientOptions, UiCommand, UiEvent};
+use crate::client::{ClientOptions, MicLevel, UiCommand, UiEvent};
 use crate::control::{self, LoginError};
 use crate::keys::KeyNotice;
 use crate::keystore::Keystore;
@@ -72,8 +72,7 @@ pub(crate) struct Shared {
     /// Our own user and the preview demand of our running share.
     pub preview: Mutex<Option<(UserId, Arc<PreviewDemand>)>>,
     pub avatars: Mutex<HashMap<Hash, AvatarSlot>>,
-    /// The processed mic level in dBFS while audio runs.
-    pub mic_level: Mutex<Option<f32>>,
+    pub mic_level: Mutex<Option<MicLevel>>,
 }
 
 /// A profile picture fetched once per hash and kept for the session.
@@ -1853,7 +1852,7 @@ impl Session {
     fn refresh_levels(&mut self) {
         let Some(voice) = &self.voice else { return };
         let levels = voice.levels();
-        *lock(&self.shared.mic_level) = Some(levels.mic_dbfs);
+        *lock(&self.shared.mic_level) = Some(levels.mic);
         let me = self.call.me();
         let speaking = |user: &UserId| {
             if *user == me {

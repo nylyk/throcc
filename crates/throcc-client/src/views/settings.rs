@@ -11,7 +11,7 @@ use gpui_component::select::{Select, SelectEvent, SelectState};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::switch::Switch;
 use gpui_component::{Disableable, IndexPath};
-use throcc_client_core::client::UiCommand;
+use throcc_client_core::client::{MicLevel, UiCommand};
 use throcc_client_core::media::audio::{
     DEFAULT_GATE_DBFS, NoiseSuppressionLevel, Transmit, VoiceSettings,
 };
@@ -242,10 +242,14 @@ fn keep_metering(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) {
     .detach();
 }
 
-/// The mic level as a bar, green while it is above `threshold_dbfs`, with a mark there.
-fn meter(level_dbfs: Option<f32>, threshold_dbfs: f32) -> Div {
+/// The mic level as a bar, green while the gate lets it through, with a mark at
+/// `threshold_dbfs`.
+fn meter(level: Option<MicLevel>, threshold_dbfs: f32) -> Div {
     let fraction = |dbfs: f32| (1. - dbfs / METER_FLOOR_DBFS).clamp(0., 1.);
-    let level = level_dbfs.unwrap_or(f32::NEG_INFINITY);
+    let level = level.unwrap_or(MicLevel {
+        dbfs: f32::NEG_INFINITY,
+        gate_open: false,
+    });
     div()
         .relative()
         .h(px(8.))
@@ -258,8 +262,8 @@ fn meter(level_dbfs: Option<f32>, threshold_dbfs: f32) -> Div {
                 .left_0()
                 .top_0()
                 .h_full()
-                .w(relative(fraction(level)))
-                .bg(if level > threshold_dbfs {
+                .w(relative(fraction(level.dbfs)))
+                .bg(if level.gate_open {
                     theme::ok_text()
                 } else {
                     theme::text_3()
@@ -377,6 +381,17 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                                     .flex_none()
                                     .text_right(),
                             ),
+                    )
+                }))
+                .children(vad.then(|| {
+                    switch_row(
+                        Switch::new("speech-only")
+                            .checked(voice.speech_only)
+                            .label("Speech detection")
+                            .on_click(cx.listener(|app, on: &bool, _, cx| {
+                                set_voice(app, |v| v.speech_only = *on);
+                                cx.notify();
+                            })),
                     )
                 }))
                 .children((!vad).then(|| {

@@ -15,7 +15,7 @@ use crate::avatars;
 use crate::call::Call;
 use crate::keystore::Keystore;
 use crate::lock;
-use crate::media::audio::VoiceSettings;
+use crate::media::audio::{DEFAULT_GATE_DBFS, VoiceSettings};
 use crate::media::cues::Cue;
 use crate::media::video::Picture;
 use crate::media::video::frame::VideoFrame;
@@ -150,8 +150,15 @@ pub trait ClientApi: Send + Sync {
     fn picture_drawn(&self, _user: UserId) {}
     /// The profile picture behind `hash`, fetched in the background on first ask.
     fn avatar(&self, hash: Hash) -> Option<Arc<[u8]>>;
-    /// The processed mic level in dBFS, refreshed every 100 ms while audio runs.
-    fn mic_level(&self) -> Option<f32>;
+    /// The mic level and gate, refreshed every 100 ms while audio runs.
+    fn mic_level(&self) -> Option<MicLevel>;
+}
+
+/// The processed mic level, and whether the transmit gate lets it through.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MicLevel {
+    pub dbfs: f32,
+    pub gate_open: bool,
 }
 
 const COMMANDS: usize = 64;
@@ -280,7 +287,7 @@ impl ClientApi for Client {
         bytes
     }
 
-    fn mic_level(&self) -> Option<f32> {
+    fn mic_level(&self) -> Option<MicLevel> {
         *lock(&self.shared.mic_level)
     }
 }
@@ -558,9 +565,13 @@ impl ClientApi for MockClient {
         self.shared.avatar(hash).0
     }
 
-    fn mic_level(&self) -> Option<f32> {
+    fn mic_level(&self) -> Option<MicLevel> {
         let wave = self.started.elapsed().as_secs_f32() * 3.0;
-        Some(-38.0 + 14.0 * wave.sin())
+        let dbfs = -38.0 + 14.0 * wave.sin();
+        Some(MicLevel {
+            dbfs,
+            gate_open: dbfs > DEFAULT_GATE_DBFS,
+        })
     }
 }
 

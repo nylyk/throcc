@@ -6,6 +6,7 @@ use sonora::config::{
     AdaptiveDigital, EchoCanceller, GainController2, HighPassFilter, NoiseSuppression,
 };
 use sonora::{AudioProcessing, Config, StreamConfig};
+use sonora_agc2::vad_wrapper::VoiceActivityDetectorWrapper;
 use throcc_proto::frame::AUDIO_CLOCK_HZ;
 use throcc_proto::ids::UserId;
 
@@ -25,6 +26,8 @@ const HANGOVER_PULLS: u32 = 30;
 pub(crate) const MAX_PACKET: usize = 1500;
 /// Processed mic level (dBFS) above which voice activation opens, unless configured otherwise.
 pub const DEFAULT_GATE_DBFS: f32 = -50.0;
+/// Speech probability above which the speech detector counts 10 ms as speech.
+const SPEECH_PROBABILITY: f32 = 0.5;
 /// A decoded level above this (dBFS) counts as speaking for the UI's ring.
 const SPEAKING_DBFS: f32 = -45.0;
 
@@ -40,6 +43,8 @@ pub struct VoiceSettings {
     pub noise_suppression: Option<NoiseSuppressionLevel>,
     pub automatic_gain: bool,
     pub transmit: Transmit,
+    /// Voice activation opens only while the speech detector also hears speech.
+    pub speech_only: bool,
     pub kbps: u32,
     /// Gain on the mic before processing, 0 to 2.
     pub input_volume: f32,
@@ -58,6 +63,7 @@ impl Default for VoiceSettings {
             transmit: Transmit::VoiceActivity {
                 threshold_dbfs: DEFAULT_GATE_DBFS,
             },
+            speech_only: false,
             kbps: 64,
             input_volume: 1.0,
             output_volume: 1.0,
@@ -83,12 +89,16 @@ pub struct Packet<'a> {
 }
 
 /// Mic input to Opus packets: 10 ms frames through AEC3, noise suppression and AGC2, then
-/// a level or push-to-talk gate, then 20 ms Opus frames with FEC and DTX.
-/// The media clock runs on while gated, so timestamps stay real time.
+/// a level gate, optionally also requiring speech, or push to talk, then 20 ms Opus frames
+/// with FEC and DTX. The media clock runs on while gated, so timestamps stay real time.
 pub struct CaptureChain {
     apm: AudioProcessing,
     encoder: Encoder,
     transmit: Transmit,
+    speech_only: bool,
+    speech: VoiceActivityDetectorWrapper,
+    /// The processed 10 ms in the 16-bit sample range the speech detector expects.
+    speech_input: [f32; PULL],
     input_volume: f32,
     /// Echo cancellation, noise suppression and gain control as last applied.
     processing: (bool, Option<NoiseSuppressionLevel>, bool),
@@ -103,6 +113,8 @@ pub struct CaptureChain {
     transmitting: bool,
     /// Level of the last 10 ms after processing, in dBFS.
     pub level_dbfs: f32,
+    /// Whether the transmit gate let the last 10 ms through, before muting.
+    pub gate_open: bool,
 }
 
 impl CaptureChain {
@@ -124,6 +136,12 @@ impl CaptureChain {
             apm,
             encoder,
             transmit: settings.transmit,
+            speech_only: settings.speech_only,
+            speech: VoiceActivityDetectorWrapper::new(
+                sonora_simd::detect_backend(),
+                SAMPLE_RATE as i32,
+            ),
+            speech_input: [0.0; PULL],
             input_volume: settings.input_volume,
             processing: processing_choice(settings),
             processed: [0.0; PULL],
@@ -136,6 +154,7 @@ impl CaptureChain {
             muted: false,
             transmitting: false,
             level_dbfs: f32::NEG_INFINITY,
+            gate_open: false,
         })
     }
 
@@ -146,6 +165,7 @@ impl CaptureChain {
             self.processing = processing;
         }
         self.transmit = settings.transmit;
+        self.speech_only = settings.speech_only;
         self.input_volume = settings.input_volume;
         self.encoder
             .set_bitrate(Bitrate::Bits(settings.kbps * 1000))
@@ -192,9 +212,14 @@ impl CaptureChain {
         let open = match self.transmit {
             Transmit::PushToTalk => push_to_talk,
             Transmit::VoiceActivity { threshold_dbfs } => {
-                hold(&mut self.hangover, self.level_dbfs > threshold_dbfs)
+                let speech = !self.speech_only || self.hears_speech();
+                hold(
+                    &mut self.hangover,
+                    speech && self.level_dbfs > threshold_dbfs,
+                )
             }
         };
+        self.gate_open = open;
         self.frame_open |= open && !self.muted;
         self.frame[self.frame_len..self.frame_len + PULL].copy_from_slice(&self.processed);
         self.frame_len += PULL;
@@ -221,6 +246,13 @@ impl CaptureChain {
     /// The last 10 ms after processing, before the gate.
     pub fn processed(&self) -> &[f32; PULL] {
         &self.processed
+    }
+
+    fn hears_speech(&mut self) -> bool {
+        for (scaled, sample) in self.speech_input.iter_mut().zip(&self.processed) {
+            *scaled = sample * 32768.0;
+        }
+        self.speech.analyze(&self.speech_input) > SPEECH_PROBABILITY
     }
 }
 
@@ -584,6 +616,68 @@ mod tests {
             timestamps[0] >= 50 * FRAME as u32,
             "the clock stopped while gated"
         );
+    }
+
+    /// Loud broadband clicks, like typing, 20 ms long every 150 ms.
+    fn clicks(seconds: f32) -> Vec<f32> {
+        let n = (seconds * SAMPLE_RATE as f32) as usize;
+        let mut noise = 0x9e37_79b9u32;
+        (0..n)
+            .map(|i| {
+                noise ^= noise << 13;
+                noise ^= noise >> 17;
+                noise ^= noise << 5;
+                let in_click = i % (SAMPLE_RATE as usize * 150 / 1000) < FRAME;
+                if in_click {
+                    (noise as f32 / u32::MAX as f32 - 0.5) * 0.8
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    }
+
+    fn packets_sent(settings: &VoiceSettings, input: &[f32]) -> usize {
+        let mut chain = CaptureChain::new(settings).unwrap();
+        input
+            .as_chunks::<PULL>()
+            .0
+            .iter()
+            .filter(|frame| chain.capture(frame, false).unwrap().is_some())
+            .count()
+    }
+
+    #[test]
+    fn speech_only_keeps_loud_clicks_out_and_lets_speech_through() {
+        let speech_only = VoiceSettings {
+            speech_only: true,
+            ..VoiceSettings::default()
+        };
+        let typing = clicks(3.0);
+        let by_level = packets_sent(&VoiceSettings::default(), &typing);
+        let by_speech = packets_sent(&speech_only, &typing);
+        let talking = packets_sent(&speech_only, &speech(5, 3.0));
+        println!("clicks: {by_level} packets by level, {by_speech} speech only; speech: {talking}");
+        assert!(by_level > 50, "the clicks never crossed the level gate");
+        assert!(by_speech < by_level / 2, "{by_speech} packets of clicks");
+        assert!(talking > 75, "only {talking} packets of 150 for speech");
+    }
+
+    #[test]
+    fn a_muted_chain_sends_nothing_but_still_reports_its_gate() {
+        let mut chain = CaptureChain::new(&VoiceSettings::default()).unwrap();
+        chain.set_muted(true);
+        let (mut sent, mut opened) = (0, 0);
+        for frame in speech(5, 2.0).as_chunks::<PULL>().0 {
+            sent += usize::from(chain.capture(frame, false).unwrap().is_some());
+            opened += usize::from(chain.gate_open);
+        }
+        assert_eq!(sent, 0);
+        assert!(opened > 100, "the gate opened for {opened} of 200 pulls");
+        for _ in 0..100 {
+            chain.capture(&[0.0; PULL], false).unwrap();
+        }
+        assert!(!chain.gate_open, "the gate stayed open through a second of silence");
     }
 
     #[test]

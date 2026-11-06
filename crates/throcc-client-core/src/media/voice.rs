@@ -16,6 +16,7 @@ use super::devices::{self, Devices};
 use super::engine::{Kind, MediaEngine, Outgoing, Received};
 use super::jitter::JitterBuffer;
 use super::share_audio::Playout;
+use crate::client::MicLevel;
 use crate::lock;
 
 /// Playback kept queued in the device ring, in 10 ms pulls: enough to ride out
@@ -57,7 +58,7 @@ pub enum VoiceCommand {
 /// What the UI shows about audio, refreshed every 100 ms.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Levels {
-    pub mic_dbfs: f32,
+    pub mic: MicLevel,
     pub transmitting: bool,
     pub speaking: HashMap<UserId, bool>,
 }
@@ -452,7 +453,10 @@ impl Worker {
 
     fn publish_levels(&self) {
         let mut levels = lock(&self.levels);
-        levels.mic_dbfs = self.chain.level_dbfs;
+        levels.mic = MicLevel {
+            dbfs: self.chain.level_dbfs,
+            gate_open: self.chain.gate_open,
+        };
         levels.transmitting = self.chain.transmitting();
         levels.speaking.clear();
         levels.speaking.extend(self.mixer.speaking());
