@@ -190,6 +190,8 @@ pub struct Encoder {
     width: usize,
     height: usize,
     idr_next: bool,
+    /// The frame pictures are copied into, reused once the encoder lets go of it.
+    staging: Option<AVFrame>,
     /// Fits pictures of another size into the encoder's.
     fitter: Option<Fitter>,
     /// The VA-API device of a VA-API encoder.
@@ -282,6 +284,7 @@ impl Encoder {
                     width: config.width,
                     height: config.height,
                     idr_next: true,
+                    staging: None,
                     fitter: None,
                     #[cfg(target_os = "linux")]
                     device,
@@ -319,16 +322,22 @@ impl Encoder {
 
     pub fn encode(&mut self, picture: &VideoFrame) -> Result<Vec<EncodedUnit>, EncodeError> {
         let input = self.backend.input();
-        let mut frame = new_frame(self.width, self.height, input)?;
+        let mut frame = match self.staging.take() {
+            Some(frame) if frame.is_writable()? => frame,
+            _ => new_frame(self.width, self.height, input)?,
+        };
         if (picture.width, picture.height) == (self.width, self.height) {
             copy_into(&mut frame, picture, input);
         } else {
             self.fit(picture, &mut frame)?;
         }
-        if self.backend.uploads() {
-            frame = self.upload(&frame)?;
-        }
-        self.submit(frame, picture.timestamp)
+        let submitted = if self.backend.uploads() {
+            self.upload(&frame)?
+        } else {
+            frame.clone()
+        };
+        self.staging = Some(frame);
+        self.submit(submitted, picture.timestamp)
     }
 
     fn submit(
