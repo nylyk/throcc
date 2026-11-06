@@ -170,8 +170,7 @@ struct Watched {
     last_bytes: u64,
     last_received: u64,
     last_lost: u64,
-    /// Units the server dropped for us since the last health refresh.
-    dropped: u64,
+    dropped_this_refresh: bool,
     dropped_last_refresh: bool,
 }
 
@@ -179,7 +178,7 @@ impl Watched {
     /// Ends one health refresh. The track is too slow for our connection when the server
     /// dropped units for us in this refresh and the one before.
     fn too_slow_this_refresh(&mut self) -> bool {
-        let dropped = std::mem::take(&mut self.dropped) > 0;
+        let dropped = std::mem::take(&mut self.dropped_this_refresh);
         let too_slow = dropped && self.dropped_last_refresh;
         self.dropped_last_refresh = dropped;
         too_slow
@@ -1461,7 +1460,7 @@ impl Session {
             last_bytes: arrived.bytes,
             last_received: arrived.datagrams,
             last_lost: arrived.lost,
-            dropped: 0,
+            dropped_this_refresh: false,
             dropped_last_refresh: false,
         }
     }
@@ -1749,7 +1748,7 @@ impl Session {
                     if let Some(watched) = self.tracks.get_mut(&t.media_id)
                         && matches!(watched.carries, Carries::ShareVideo { .. })
                     {
-                        watched.dropped += u64::from(t.dropped_units);
+                        watched.dropped_this_refresh |= t.dropped_units > 0;
                     }
                 }
             }
@@ -1835,8 +1834,7 @@ impl Session {
             let new_lost = advance(&mut track.last_lost, arrived.lost);
             received_total += new_received;
             lost_total += new_lost;
-            if matches!(track.carries, Carries::ShareVideo { .. }) && track.too_slow_this_refresh()
-            {
+            if track.too_slow_this_refresh() {
                 slow_shares.insert(track.user);
             }
             let name = state
@@ -2095,13 +2093,13 @@ mod tests {
             last_bytes: 0,
             last_received: 0,
             last_lost: 0,
-            dropped: 0,
+            dropped_this_refresh: false,
             dropped_last_refresh: false,
         };
-        let slow: Vec<bool> = [5, 0, 1, 1, 1, 0, 1]
+        let slow: Vec<bool> = [true, false, true, true, true, false, true]
             .into_iter()
             .map(|dropped| {
-                track.dropped = dropped;
+                track.dropped_this_refresh = dropped;
                 track.too_slow_this_refresh()
             })
             .collect();
