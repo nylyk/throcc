@@ -114,7 +114,7 @@ async fn a_shared_picture_arrives_within_a_few_frames() {
 #[ignore = "needs a hardware video encoder; virtual machines queue frames for seconds"]
 async fn two_percent_loss_brings_a_refresh_within_a_second() {
     let server = start_server();
-    let relay = lossy_relay(&server.addr, 50).await;
+    let relay = lossy_relay(&server.addr, Toward::Client, 50).await;
     let (mut alice, bob, _) = room_with_two_at(&server, &relay.addr).await;
     let epoch = Instant::now();
     let Some((sender, tracks, wanted)) = share_pattern(&mut alice, &bob, WANTED, epoch).await

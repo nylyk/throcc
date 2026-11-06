@@ -3,6 +3,7 @@
 #[path = "../../src/unit.rs"]
 pub mod unit;
 
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -410,7 +411,7 @@ pub async fn relay(
     addr
 }
 
-/// A relay that, while `lossy` is set, drops one in `nth` packets on the way to the client,
+/// A relay that, while `lossy` is set, drops one in `nth` packets travelling `lossy_toward`,
 /// at random.
 pub struct LossyRelay {
     pub addr: String,
@@ -418,13 +419,13 @@ pub struct LossyRelay {
     pub dropped: Arc<AtomicU64>,
 }
 
-pub async fn lossy_relay(server: &str, nth: u64) -> LossyRelay {
+pub async fn lossy_relay(server: &str, lossy_toward: Toward, nth: u64) -> LossyRelay {
     let lossy = Arc::new(AtomicBool::new(false));
     let dropped = Arc::new(AtomicU64::new(0));
     let (relay_lossy, relay_dropped) = (lossy.clone(), dropped.clone());
     let mut random = 0x9e37_79b9_7f4a_7c15u64;
     let addr = relay(server, move |toward, _| {
-        if toward == Toward::Server {
+        if toward != lossy_toward {
             return true;
         }
         random ^= random << 13;
@@ -442,6 +443,60 @@ pub async fn lossy_relay(server: &str, nth: u64) -> LossyRelay {
         lossy,
         dropped,
     }
+}
+
+/// A relay that, while `kbps` is above zero, carries what goes to the client at that rate,
+/// queueing up to 100 ms of it and dropping the rest, like a link that slow.
+pub struct CappedRelay {
+    pub addr: String,
+    pub kbps: Arc<AtomicU64>,
+}
+
+pub async fn capped_relay(server: &str) -> CappedRelay {
+    const QUEUE: Duration = Duration::from_millis(100);
+    let front = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let back = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    back.connect(server).await.unwrap();
+    let addr = front.local_addr().unwrap().to_string();
+    let kbps = Arc::new(AtomicU64::new(0));
+    let cap = kbps.clone();
+    tokio::spawn(async move {
+        let mut client = None;
+        let mut queue: VecDeque<(Instant, Vec<u8>)> = VecDeque::new();
+        let mut link_free = Instant::now();
+        let mut up = vec![0u8; 65536];
+        let mut down = vec![0u8; 65536];
+        loop {
+            let next = queue
+                .front()
+                .map(|(at, _)| tokio::time::Instant::from_std(*at));
+            tokio::select! {
+                Ok((n, from)) = front.recv_from(&mut up) => {
+                    client = Some(from);
+                    back.send(&up[..n]).await.ok();
+                }
+                Ok(n) = back.recv(&mut down) => {
+                    let (now, kbps) = (Instant::now(), cap.load(Ordering::Relaxed));
+                    let start = link_free.max(now);
+                    if kbps == 0 {
+                        queue.push_back((now, down[..n].to_vec()));
+                    } else if start - now <= QUEUE {
+                        link_free = start + Duration::from_secs_f64(n as f64 / (kbps as f64 * 125.0));
+                        queue.push_back((link_free, down[..n].to_vec()));
+                    }
+                }
+                () = tokio::time::sleep_until(next.unwrap_or_else(tokio::time::Instant::now)),
+                    if next.is_some() =>
+                {
+                    let (_, packet) = queue.pop_front().unwrap();
+                    if let Some(client) = client {
+                        front.send_to(&packet, client).await.ok();
+                    }
+                }
+            }
+        }
+    });
+    CappedRelay { addr, kbps }
 }
 
 /// A relay that passes the client's packets on only until the server answers with anything

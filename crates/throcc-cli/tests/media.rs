@@ -278,7 +278,7 @@ async fn keyframes_arrive_whole_through_two_percent_loss() {
     const KEYFRAMES: u32 = 50;
     const LEN: usize = 60 * 1100;
     let server = start_server();
-    let relay = lossy_relay(&server.addr, 50).await;
+    let relay = lossy_relay(&server.addr, Toward::Client, 50).await;
     let (alice, bob, _) = room_with_two_at(&server, &relay.addr).await;
     let share = sharing(share_1080p60(Codec::H264, 10_000));
     assert_eq!(
