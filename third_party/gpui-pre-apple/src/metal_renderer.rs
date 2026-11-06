@@ -1373,8 +1373,11 @@ impl MetalRenderer {
 
 impl MetalRenderer {
     /// The Y and CbCr textures holding `frame`, uploaded into a slot the GPU is done reading
-    /// when the frame is new. `None` when its planes are too short for its size.
+    /// when the frame is new. `None` for an empty frame or one whose planes are too short.
     fn nv12_textures(&mut self, frame: &Nv12Frame) -> Option<(metal::Texture, metal::Texture)> {
+        if frame.width == 0 || frame.height == 0 {
+            return None;
+        }
         let (y, cb_cr) = frame.planes()?;
         let size = (frame.width, frame.height);
         let completed = self.frames_completed.load(Ordering::Acquire);

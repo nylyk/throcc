@@ -183,3 +183,17 @@ fn short_planes_draw_nothing() {
         .unwrap();
     assert_rgb(&image, 16, 16, [0, 0, 0]);
 }
+
+#[test]
+fn empty_frames_draw_nothing() {
+    let mut renderer = renderer();
+    let scene = scene_of([surface(
+        nv12(SurfaceId::new(), 0, flat(0, 0, 200, 128, 128)),
+        bounds(0.0, 0.0, 32.0, 32.0),
+        0.0,
+    )]);
+    let image = renderer
+        .render_scene_to_image(&scene, device_size(32, 32))
+        .unwrap();
+    assert_rgb(&image, 16, 16, [0, 0, 0]);
+}
