@@ -1066,6 +1066,7 @@ mod failed_open {
 
 #[cfg(test)]
 mod round_trip {
+    use super::super::Frame;
     use super::super::decode::{Decoder, MaxSize};
     use super::super::frame::{VideoFrame, luma_psnr};
     use super::*;
@@ -1086,7 +1087,11 @@ mod round_trip {
         for n in 0..30u16 {
             let input = VideoFrame::test_pattern(1280, 720, n, u32::from(n) * 3000);
             for unit in encoder.encode(&input).unwrap() {
-                if let Some(output) = decoder.decode(&unit.data, unit.timestamp).unwrap() {
+                if let Some(output) = decoder
+                    .decode(&unit.data, unit.timestamp)
+                    .unwrap()
+                    .map(Frame::copied_to_memory)
+                {
                     let number = output.read_test_number();
                     let reference = VideoFrame::test_pattern(1280, 720, number, 0);
                     shown.push(luma_psnr(&output, &reference));
@@ -1296,7 +1301,11 @@ mod gpu_input {
         for n in 0..10 {
             frame.timestamp = n * 3000;
             for unit in encoder.encode_dmabuf(&frame, None).unwrap().units {
-                if let Some(output) = decoder.decode(&unit.data, unit.timestamp).unwrap() {
+                if let Some(output) = decoder
+                    .decode(&unit.data, unit.timestamp)
+                    .unwrap()
+                    .map(Frame::copied_to_memory)
+                {
                     last = Some(output);
                 }
             }
@@ -1337,6 +1346,7 @@ mod gpu_input {
 
 #[cfg(all(test, target_os = "macos"))]
 mod pixel_buffers {
+    use super::super::Frame;
     use super::super::decode::{Decoder, MaxSize};
     use super::super::frame::luma_psnr;
     use super::*;
@@ -1353,18 +1363,21 @@ mod pixel_buffers {
     }
 
     #[test]
-    fn captured_pixel_buffers_encode_uncopied_and_decode_back() {
+    fn captured_pixel_buffers_encode_uncopied_and_decode_back_into_pixel_buffers() {
         let Some(mut encoder) = opened(c"hevc_videotoolbox") else {
             eprintln!("skipped: no VideoToolbox HEVC encoder here");
             return;
         };
         let mut decoder = Decoder::new(Codec::Hevc, MaxSize::ANY).unwrap();
         let mut shown = Vec::new();
+        let mut in_gpu_memory = true;
         for n in 0..30u16 {
             let input = VideoFrame::test_pattern(1280, 720, n, u32::from(n) * 3000);
             let picture = PixelBuffer::holding(&input);
             for unit in encoder.encode_pixel_buffer(&picture).unwrap() {
                 if let Some(output) = decoder.decode(&unit.data, unit.timestamp).unwrap() {
+                    in_gpu_memory &= matches!(output, Frame::PixelBuffer(_));
+                    let output = output.copied_to_memory();
                     let number = output.read_test_number();
                     let reference = VideoFrame::test_pattern(1280, 720, number, 0);
                     shown.push(luma_psnr(&output, &reference));
@@ -1378,6 +1391,10 @@ mod pixel_buffers {
         );
         let worst = shown.iter().copied().fold(f64::INFINITY, f64::min);
         assert!(worst > 25.0, "picture quality {worst:.1} dB");
+        assert!(
+            in_gpu_memory || !decoder.is_hardware(),
+            "VideoToolbox pictures were copied out of their pixel buffers"
+        );
     }
 
     #[test]

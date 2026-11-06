@@ -7,7 +7,7 @@ use gpui::{
     div,
 };
 use throcc_client_core::client::ClientApi;
-use throcc_client_core::media::video::frame::VideoFrame;
+use throcc_client_core::media::video::Frame;
 use throcc_proto::ids::UserId;
 
 use gpui_component::spinner::Spinner;
@@ -78,7 +78,7 @@ impl Feeds {
                 .into_any_element();
         };
         let previous = self.shown.get(&user);
-        if previous.is_none_or(|s| s.timestamp != frame.timestamp) {
+        if previous.is_none_or(|s| s.timestamp != frame.timestamp()) {
             let shown = Shown::new(frame, previous);
             self.shown.insert(user, shown);
         }
@@ -124,32 +124,47 @@ fn redraw_on_new_pictures(
     }
 }
 
-/// The last frame handed to the GPU for one share, as an NV12 surface the renderer uploads
-/// two planes of, at 1.5 bytes a pixel.
+/// The last picture handed to the GPU for one share: NV12 planes the renderer uploads at
+/// 1.5 bytes a pixel, or on macOS a pixel buffer it draws from where it is.
 struct Shown {
     timestamp: u32,
-    frame: gpui::Nv12Frame,
+    source: gpui::SurfaceSource,
 }
 
 impl Shown {
-    fn new(frame: Arc<VideoFrame>, previous: Option<&Shown>) -> Self {
-        let (id, generation) = previous.map_or((gpui::SurfaceId::new(), 0), |shown| {
-            (shown.frame.id, shown.frame.generation + 1)
-        });
+    fn new(frame: Arc<Frame>, previous: Option<&Shown>) -> Self {
+        let timestamp = frame.timestamp();
+        #[cfg(target_os = "macos")]
+        if let Frame::PixelBuffer(buffer) = &*frame
+            && let Some(pointer) = std::ptr::NonNull::new(buffer.as_ptr().cast())
+        {
+            // SAFETY: `buffer` holds a live CVPixelBufferRef, and the renderer gets a
+            // reference of its own.
+            let retained = unsafe { objc2_core_foundation::CFRetained::retain(pointer) };
+            return Self {
+                timestamp,
+                source: gpui::SurfaceSource::Surface(retained),
+            };
+        }
+        let (id, generation) = match previous.map(|shown| &shown.source) {
+            Some(gpui::SurfaceSource::Nv12(previous)) => (previous.id, previous.generation + 1),
+            _ => (gpui::SurfaceId::new(), 0),
+        };
+        let (width, height) = frame.size();
         Self {
-            timestamp: frame.timestamp,
-            frame: gpui::Nv12Frame {
+            timestamp,
+            source: gpui::SurfaceSource::Nv12(gpui::Nv12Frame {
                 id,
                 generation,
-                width: frame.width as u32,
-                height: frame.height as u32,
+                width: width as u32,
+                height: height as u32,
                 planes: Arc::new(Planes(frame)),
-            },
+            }),
         }
     }
 
     fn element(&self, radius: Pixels) -> AnyElement {
-        gpui::surface(self.frame.clone())
+        gpui::surface(self.source.clone())
             .absolute()
             .inset_0()
             .size_full()
@@ -158,14 +173,14 @@ impl Shown {
     }
 }
 
-struct Planes(Arc<VideoFrame>);
+struct Planes(Arc<Frame>);
 
 impl gpui::Nv12Planes for Planes {
     fn y(&self) -> &[u8] {
-        &self.0.y
+        self.0.planes().map_or(&[], |frame| &frame.y)
     }
 
     fn uv(&self) -> &[u8] {
-        &self.0.uv
+        self.0.planes().map_or(&[], |frame| &frame.uv)
     }
 }

@@ -30,7 +30,8 @@ const RING: usize = 4;
 const AUDIO_RING: usize = 32;
 const NANOS: i128 = 1_000_000_000;
 
-/// A captured picture, full-range NV12 in GPU memory.
+/// A captured or decoded picture, full-range NV12 in GPU memory.
+#[derive(Clone)]
 pub struct PixelBuffer {
     pub buffer: CVPixelBuffer,
     pub timestamp: u32,
@@ -41,14 +42,26 @@ impl PixelBuffer {
         self.buffer.width()
     }
 
-    /// The picture `factor` times smaller each way, read out of GPU memory.
-    pub fn shrunk(&self, factor: usize) -> Option<VideoFrame> {
-        let guard = self.buffer.lock_read_only().ok()?;
-        let (y, uv) = (plane(&guard, 0)?, plane(&guard, 1)?);
-        let size = (guard.width(), guard.height());
-        let mut out = VideoFrame::shrunk_nv12(y, uv, size, factor);
+    pub fn height(&self) -> usize {
+        self.buffer.height()
+    }
+
+    /// The `CVPixelBufferRef`, valid while this lives.
+    pub fn as_ptr(&self) -> *mut std::ffi::c_void {
+        self.buffer.as_ptr()
+    }
+
+    /// The picture copied into memory.
+    #[cfg(test)]
+    pub(crate) fn copied_to_memory(&self) -> VideoFrame {
+        let mut out = VideoFrame::blank(self.width(), self.height());
+        if let Ok(guard) = self.buffer.lock_read_only()
+            && let (Some(y), Some(uv)) = (plane(&guard, 0), plane(&guard, 1))
+        {
+            copy_nv12(&mut out, y, uv, (guard.width(), guard.height()));
+        }
         out.timestamp = self.timestamp;
-        Some(out)
+        out
     }
 }
 
@@ -62,9 +75,9 @@ fn plane<'a>(guard: &'a CVPixelBufferLockGuard<'_>, index: usize) -> Option<(&'a
     Some((unsafe { std::slice::from_raw_parts(base, len) }, stride))
 }
 
-/// ScreenCaptureKit's `420f`: full-range NV12.
-#[cfg(test)]
-const FULL_RANGE_NV12: u32 = u32::from_be_bytes(*b"420f");
+/// CoreVideo's `420f`: full-range NV12, as ScreenCaptureKit captures and renderers draw.
+#[cfg(any(test, feature = "ffmpeg"))]
+pub(crate) const FULL_RANGE_NV12: u32 = u32::from_be_bytes(*b"420f");
 
 #[cfg(test)]
 impl PixelBuffer {
@@ -131,7 +144,7 @@ fn capture(
         .with_height(height as u32)
         .with_pixel_format(PixelFormat::YCbCr_420f)
         .with_minimum_frame_interval(&CMTime::new(1, fps as i32))
-        .with_queue_depth(5)
+        .with_queue_depth(8)
         .with_shows_cursor(true)
         .with_captures_audio(config.audio)
         .with_sample_rate(SAMPLE_RATE as i32)
@@ -362,10 +375,9 @@ mod tests {
     use crate::media::capture::{Capture, frames_within};
 
     #[test]
-    fn a_pixel_buffer_shrinks_like_a_frame() {
+    fn a_pixel_buffer_copies_out_unchanged() {
         let frame = VideoFrame::test_pattern(1280, 720, 7, 4500);
-        let shrunk = PixelBuffer::holding(&frame).shrunk(4).unwrap();
-        assert_eq!(shrunk, frame.shrunk(4));
+        assert_eq!(PixelBuffer::holding(&frame).copied_to_memory(), frame);
     }
 
     #[test]

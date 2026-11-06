@@ -197,3 +197,53 @@ fn empty_frames_draw_nothing() {
         .unwrap();
     assert_rgb(&image, 16, 16, [0, 0, 0]);
 }
+
+#[cfg(all(target_os = "macos", feature = "ffmpeg"))]
+#[test]
+fn decoded_pixel_buffers_draw_uncopied() {
+    use throcc_client_core::media::video::Frame;
+    use throcc_client_core::media::video::decode::{Decoder, MaxSize};
+    use throcc_client_core::media::video::encode::{Encoder, EncoderConfig};
+
+    let config = EncoderConfig {
+        width: 1280,
+        height: 720,
+        fps: 30,
+        kbps: 4000,
+    };
+    let mut encoder = Encoder::open(config).expect("a video encoder");
+    let mut decoder = Decoder::new(encoder.codec(), MaxSize::new(1280, 720)).unwrap();
+    let mut last = None;
+    for n in 0..10 {
+        let mut input = flat(1280, 720, 200, 128, 128);
+        input.timestamp = n * 3000;
+        for unit in encoder.encode(&input).unwrap() {
+            if let Some(frame) = decoder.decode(&unit.data, unit.timestamp).unwrap() {
+                last = Some(frame);
+            }
+        }
+    }
+    let Some(Frame::PixelBuffer(buffer)) = last else {
+        eprintln!("skipped: {} decoded into memory", decoder.engine());
+        return;
+    };
+    let pointer = std::ptr::NonNull::new(buffer.as_ptr().cast()).unwrap();
+    // SAFETY: `buffer` holds a live CVPixelBufferRef, and the surface takes its own reference.
+    let retained = unsafe { objc2_core_foundation::CFRetained::retain(pointer) };
+    let at = bounds(0.0, 0.0, 64.0, 36.0);
+    let scene = scene_of([PaintSurface {
+        order: 0,
+        bounds: at,
+        content_mask: ContentMask { bounds: at },
+        corner_radii: Corners::all(ScaledPixels(0.0)),
+        source: gpui::SurfaceSource::Surface(retained),
+    }]);
+    let image = renderer()
+        .render_scene_to_image(&scene, device_size(64, 36))
+        .unwrap();
+    let pixel = image.get_pixel(32, 18).0;
+    assert!(
+        pixel[..3].iter().all(|channel| channel.abs_diff(200) <= 6),
+        "the decoded picture drew as {pixel:?}"
+    );
+}

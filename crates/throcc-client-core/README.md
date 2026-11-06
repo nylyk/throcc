@@ -27,7 +27,7 @@ Trust follows identity keys, not servers. The key manager wraps our sender secre
 | `media/cues.rs` | Join, leave, mute, deafen, connection, screen share and watching cues, synthesized once and mixed in by the audio thread |
 | `media/share.rs`, `share_audio.rs` | Our running share: capture, encode, send. Its audio, and the audio-led sync of shares we watch |
 | `media/capture/` | Screen and system-audio capture per OS: ScreenCaptureKit, Windows Graphics Capture with process loopback, the portal with PipeWire. The portal keeps nothing of what was picked, so every share asks again |
-| `media/video/` | Encode and decode through ffmpeg, hardware first, and the NV12 frames between them |
+| `media/video/` | Encode and decode through ffmpeg, hardware first, and the NV12 frames between them. On macOS, our own share's preview and VideoToolbox-decoded pictures reach the UI as the pixel buffers they are in, uncopied |
 
 Video needs the `ffmpeg` feature. Without it the client does voice only. Audio and capture callbacks never block, allocate, lock or panic; they reach tokio only through bounded rings that drop when full.
 

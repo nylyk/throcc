@@ -14,8 +14,8 @@ use crate::account::{self, SignInError};
 use crate::avatars;
 use crate::call::Call;
 use crate::keystore::Keystore;
-use crate::media::video::Picture;
 use crate::media::video::frame::VideoFrame;
+use crate::media::video::{Frame, Picture};
 use crate::media::voice::AudioEngine;
 use crate::profile::Profile;
 use crate::session::{AvatarSlot, Session, Shared};
@@ -263,7 +263,7 @@ pub struct MockClient {
     shared: Shared,
     verified: VerifiedStore,
     /// A test pattern every share shows.
-    picture: watch::Sender<Option<Arc<VideoFrame>>>,
+    picture: watch::Sender<Option<Arc<Frame>>>,
 }
 
 impl Default for MockClient {
@@ -288,7 +288,7 @@ impl MockClient {
         Self {
             shared: Shared::new(sample_state()),
             verified,
-            picture: watch::Sender::new(Some(Arc::new(frame))),
+            picture: watch::Sender::new(Some(Arc::new(Frame::Planes(frame)))),
         }
     }
 

@@ -19,9 +19,10 @@ use metal::{
 };
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::{
-    CVMetalTexture, CVMetalTextureCache, CVMetalTextureGetTexture, CVPixelBufferGetHeight,
-    CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
-    CVPixelBufferGetWidthOfPlane, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, kCVReturnSuccess,
+    CVMetalTexture, CVMetalTextureCache, CVMetalTextureGetTexture, CVPixelBuffer,
+    CVPixelBufferGetHeight, CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPixelFormatType,
+    CVPixelBufferGetWidth, CVPixelBufferGetWidthOfPlane,
+    kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, kCVReturnSuccess,
 };
 use parking_lot::Mutex;
 
@@ -149,6 +150,9 @@ pub struct MetalRenderer {
     path_intermediate_texture: Option<metal::Texture>,
     path_intermediate_msaa_texture: Option<metal::Texture>,
     nv12_streams: HashMap<SurfaceId, Nv12Stream>,
+    /// The CoreVideo textures the frame being encoded reads, held until the GPU is done
+    /// with it so their pixel buffers are not reused while it reads them.
+    pixel_buffer_textures: Vec<CFRetained<CVMetalTexture>>,
     /// Frames encoded so far, the one being encoded included.
     frames_encoded: u64,
     /// The newest frame the GPU has finished.
@@ -454,6 +458,7 @@ impl MetalRenderer {
             path_intermediate_texture: None,
             path_intermediate_msaa_texture: None,
             nv12_streams: HashMap::new(),
+            pixel_buffer_textures: Vec::new(),
             frames_encoded: 0,
             frames_completed: Arc::new(AtomicU64::new(0)),
             path_sample_count: PATH_SAMPLE_COUNT,
@@ -624,10 +629,13 @@ impl MetalRenderer {
         let instance_buffer_pool = self.instance_buffer_pool.clone();
         let instance_buffer = Cell::new(Some(writer.finish()));
         let frames_completed = self.frames_completed.clone();
+        self.core_video_texture_cache.flush(0);
+        let pixel_buffer_textures = Cell::new(mem::take(&mut self.pixel_buffer_textures));
         let block = RcBlock::new(move |_: ptr::NonNull<AnyObject>| {
             if let Some(instance_buffer) = instance_buffer.take() {
                 instance_buffer_pool.lock().release(instance_buffer);
             }
+            drop(pixel_buffer_textures.take());
             frames_completed.fetch_max(frame, Ordering::Release);
         });
         // SAFETY: Both pointee types are opaque views of the same Objective-C block pointer ABI.
@@ -1311,34 +1319,15 @@ impl MetalRenderer {
                 DevicePixels::from(CVPixelBufferGetHeight(image_buffer) as i32),
             );
 
-            assert_eq!(
-                CVPixelBufferGetPixelFormatType(image_buffer),
-                kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-            );
-
-            let plane_texture = |plane, format| unsafe {
-                let mut texture = ptr::null_mut();
-                let status = CVMetalTextureCache::create_texture_from_image(
-                    None,
-                    &self.core_video_texture_cache,
-                    image_buffer,
-                    None,
-                    format,
-                    CVPixelBufferGetWidthOfPlane(image_buffer, plane),
-                    CVPixelBufferGetHeightOfPlane(image_buffer, plane),
-                    plane,
-                    ptr::NonNull::from(&mut texture),
-                );
-                assert_eq!(
-                    status, kCVReturnSuccess,
-                    "failed to create CoreVideo Metal texture"
-                );
-                CFRetained::<CVMetalTexture>::from_raw(
-                    ptr::NonNull::new(texture).expect("CoreVideo returned a null texture"),
-                )
+            let Some((y_texture, cb_cr_texture)) = self.pixel_buffer_planes(image_buffer) else {
+                continue;
             };
-            let y_texture = plane_texture(0, objc2_metal::MTLPixelFormat::R8Unorm);
-            let cb_cr_texture = plane_texture(1, objc2_metal::MTLPixelFormat::RG8Unorm);
+            let (Some(y_metal), Some(cb_cr_metal)) = (
+                CVMetalTextureGetTexture(&y_texture),
+                CVMetalTextureGetTexture(&cb_cr_texture),
+            ) else {
+                continue;
+            };
 
             command_encoder.set_vertex_bytes(
                 SurfaceInputIndex::TextureSize as u64,
@@ -1346,17 +1335,13 @@ impl MetalRenderer {
                 &texture_size as *const Size<DevicePixels> as *const _,
             );
             command_encoder.set_fragment_texture(SurfaceInputIndex::YTexture as u64, unsafe {
-                let texture = CVMetalTextureGetTexture(&y_texture)
-                    .expect("CoreVideo returned no Metal texture");
                 Some(metal::TextureRef::from_ptr(
-                    objc2::rc::Retained::as_ptr(&texture) as *mut _,
+                    objc2::rc::Retained::as_ptr(&y_metal) as *mut _,
                 ))
             });
             command_encoder.set_fragment_texture(SurfaceInputIndex::CbCrTexture as u64, unsafe {
-                let texture = CVMetalTextureGetTexture(&cb_cr_texture)
-                    .expect("CoreVideo returned no Metal texture");
                 Some(metal::TextureRef::from_ptr(
-                    objc2::rc::Retained::as_ptr(&texture) as *mut _,
+                    objc2::rc::Retained::as_ptr(&cb_cr_metal) as *mut _,
                 ))
             });
 
@@ -1367,11 +1352,50 @@ impl MetalRenderer {
                 1,
                 (first_surface + index) as u64,
             );
+            self.pixel_buffer_textures
+                .extend([y_texture, cb_cr_texture]);
         }
     }
 }
 
 impl MetalRenderer {
+    /// CoreVideo textures over the Y and CbCr planes of a full-range NV12 pixel buffer, or
+    /// `None` for any other buffer or one CoreVideo can't map.
+    fn pixel_buffer_planes(
+        &self,
+        image_buffer: &CVPixelBuffer,
+    ) -> Option<(CFRetained<CVMetalTexture>, CFRetained<CVMetalTexture>)> {
+        if CVPixelBufferGetPixelFormatType(image_buffer)
+            != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+        {
+            return None;
+        }
+        let plane_texture = |plane, format| unsafe {
+            let mut texture = ptr::null_mut();
+            let status = CVMetalTextureCache::create_texture_from_image(
+                None,
+                &self.core_video_texture_cache,
+                image_buffer,
+                None,
+                format,
+                CVPixelBufferGetWidthOfPlane(image_buffer, plane),
+                CVPixelBufferGetHeightOfPlane(image_buffer, plane),
+                plane,
+                ptr::NonNull::from(&mut texture),
+            );
+            if status != kCVReturnSuccess {
+                return None;
+            }
+            Some(CFRetained::<CVMetalTexture>::from_raw(ptr::NonNull::new(
+                texture,
+            )?))
+        };
+        Some((
+            plane_texture(0, objc2_metal::MTLPixelFormat::R8Unorm)?,
+            plane_texture(1, objc2_metal::MTLPixelFormat::RG8Unorm)?,
+        ))
+    }
+
     /// The Y and CbCr textures holding `frame`, uploaded into a slot the GPU is done reading
     /// when the frame is new. `None` for an empty frame or one whose planes are too short.
     fn nv12_textures(&mut self, frame: &Nv12Frame) -> Option<(metal::Texture, metal::Texture)> {

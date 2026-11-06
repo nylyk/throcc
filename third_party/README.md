@@ -31,7 +31,9 @@ BGRA on the UI thread:
   `replace_region` into a slot no frame still on the GPU reads, so frames in flight never
   tear. Streams missing from a scene drop theirs. `SurfaceBounds` carries the corner radii,
   and `surface_fragment`, which `CVPixelBuffer`s share, uses full-range BT.709 and rounds
-  corners with `quad_sdf`.
+  corners with `quad_sdf`. The CoreVideo textures a frame reads from `CVPixelBuffer`s are
+  held until the GPU finishes that frame, so a capture or decoder pool can't reuse a buffer
+  still being drawn.
 
 The BGRA image path these replace cost 37 ms of UI-thread CPU per 2560×1440 frame, more than
 a 60 fps frame lasts; the NV12 surface costs 2 ms. On an Apple GPU, a release build took 5 ms

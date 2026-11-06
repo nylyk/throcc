@@ -18,11 +18,11 @@ use super::video::decode::{DecodeError, Decoder, MaxSize};
 use super::video::encode::EncodeError;
 use super::video::encode::{EncodedUnit, Encoder, EncoderConfig};
 use super::video::frame::{VideoFrame, share_size};
-use super::video::{Picture, PreviewDemand};
+use super::video::{Frame, Picture, PreviewDemand};
 
 const IDLE: Duration = Duration::from_millis(2);
-/// Self-view gets every Nth frame, shrunk to about this wide; it is only a thumbnail of
-/// what is sent.
+/// Self-view gets every Nth frame. Where the frame is in memory, it is shrunk to at most
+/// this wide, a thumbnail of what is sent; a macOS pixel buffer is shown whole.
 const SELF_VIEW_EVERY: u32 = 2;
 const SELF_VIEW_WIDTH: usize = 960;
 
@@ -250,7 +250,7 @@ struct Sending {
     frame: VideoFrame,
     /// Whether `frame` holds a captured picture that has not been sent yet.
     unsent: bool,
-    self_view: watch::Sender<Option<Arc<VideoFrame>>>,
+    self_view: watch::Sender<Option<Arc<Frame>>>,
     admission: Admission,
     tally: Tally,
     /// Whether captured pixel buffers go to the encoder uncopied.
@@ -290,8 +290,8 @@ impl Sending {
             };
             if self_view {
                 let factor = self.frame.width.div_ceil(SELF_VIEW_WIDTH);
-                let thumbnail = Arc::new(self.frame.shrunk(factor));
-                self.self_view.send_replace(Some(thumbnail));
+                let thumbnail = Frame::Planes(self.frame.shrunk(factor));
+                self.self_view.send_replace(Some(Arc::new(thumbnail)));
             }
             self.send_video();
         }
@@ -314,7 +314,8 @@ impl Sending {
                 self.send_units(encoded.units);
                 match encoded.preview {
                     Some(Ok(preview)) => {
-                        self.self_view.send_replace(Some(Arc::new(preview)));
+                        self.self_view
+                            .send_replace(Some(Arc::new(Frame::Planes(preview))));
                     }
                     Some(Err(e)) => warn!("no self-view picture: {e}"),
                     None => {}
@@ -346,10 +347,8 @@ impl Sending {
             return true;
         };
         if self_view {
-            let thumbnail = picture.shrunk(picture.width().div_ceil(SELF_VIEW_WIDTH));
-            if let Some(thumbnail) = thumbnail {
-                self.self_view.send_replace(Some(Arc::new(thumbnail)));
-            }
+            let shown = Frame::PixelBuffer(picture.clone());
+            self.self_view.send_replace(Some(Arc::new(shown)));
         }
         match self.encoder.encode_pixel_buffer(&picture) {
             Ok(units) => self.send_units(units),
@@ -464,12 +463,14 @@ fn max_size(config: &ShareConfig) -> MaxSize {
     MaxSize::new(side(config.width), side(config.height))
 }
 
-fn frame_bytes(frame: &VideoFrame) -> usize {
-    frame.y.len() + frame.uv.len()
+/// The bytes of an NV12 picture of `frame`'s size, wherever it is held.
+fn frame_bytes(frame: &Frame) -> usize {
+    let (width, height) = frame.size();
+    width * height + 2 * width.div_ceil(2) * height.div_ceil(2)
 }
 
 /// Drops the oldest held frames until one of `incoming` bytes fits both bounds.
-fn make_room(held: &mut VecDeque<Arc<VideoFrame>>, incoming: usize) {
+fn make_room(held: &mut VecDeque<Arc<Frame>>, incoming: usize) {
     let mut bytes: usize = held.iter().map(|f| frame_bytes(f)).sum();
     while held.len() >= MAX_HELD
         || (!held.is_empty() && bytes.saturating_add(incoming) > MAX_HELD_BYTES)
@@ -497,8 +498,8 @@ pub fn receive(
     std::thread::Builder::new()
         .name("throcc-decode".into())
         .spawn(move || {
-            let mut held: VecDeque<Arc<VideoFrame>> = VecDeque::new();
-            let mut replaced: Option<Arc<VideoFrame>> = None;
+            let mut held: VecDeque<Arc<Frame>> = VecDeque::new();
+            let mut replaced: Option<Arc<Frame>> = None;
             let mut asked = false;
             let mut oversized: u64 = 0;
             loop {
@@ -551,7 +552,7 @@ pub fn receive(
                     }
                 }
                 let heard = playout.as_ref().and_then(|p| p.heard());
-                let due = due_frames(held.iter().map(|f| f.timestamp), heard);
+                let due = due_frames(held.iter().map(|f| f.timestamp()), heard);
                 let mut drained = held.drain(..due);
                 let Some(newest) = drained.next_back() else {
                     continue;
@@ -563,7 +564,8 @@ pub fn receive(
                 }
                 // The renderer has had a picture's time to let go of the one replaced before.
                 let unused = superseded.or(replaced.take());
-                if let Some(frame) = unused.and_then(|frame| Arc::try_unwrap(frame).ok()) {
+                let unused = unused.and_then(|frame| Arc::try_unwrap(frame).ok());
+                if let Some(frame) = unused.and_then(Frame::into_planes) {
                     decoder.recycle(frame);
                 }
                 replaced = tx.send_replace(Some(newest));
@@ -655,14 +657,14 @@ mod receive_tests {
     #[test]
     fn held_frames_stay_within_count_and_bytes() {
         let mut held = VecDeque::new();
-        let small = Arc::new(VideoFrame::blank(16, 16));
+        let small = Arc::new(Frame::Planes(VideoFrame::blank(16, 16)));
         for _ in 0..MAX_HELD + 5 {
             make_room(&mut held, frame_bytes(&small));
             held.push_back(small.clone());
         }
         assert_eq!(held.len(), MAX_HELD);
 
-        let big = Arc::new(VideoFrame::blank(4096, 4096));
+        let big = Arc::new(Frame::Planes(VideoFrame::blank(4096, 4096)));
         for _ in 0..MAX_HELD {
             make_room(&mut held, frame_bytes(&big));
             held.push_back(big.clone());

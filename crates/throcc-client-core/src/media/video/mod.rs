@@ -11,7 +11,62 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// The newest picture of a share, shared with the renderer.
-pub type Picture = tokio::sync::watch::Receiver<Option<Arc<frame::VideoFrame>>>;
+pub type Picture = tokio::sync::watch::Receiver<Option<Arc<Frame>>>;
+
+/// A picture of a share as handed to the renderer: NV12 in memory, or on macOS the pixel
+/// buffer in GPU memory it was captured or decoded into.
+pub enum Frame {
+    Planes(frame::VideoFrame),
+    #[cfg(target_os = "macos")]
+    PixelBuffer(crate::media::capture::PixelBuffer),
+}
+
+impl Frame {
+    pub fn timestamp(&self) -> u32 {
+        match self {
+            Frame::Planes(frame) => frame.timestamp,
+            #[cfg(target_os = "macos")]
+            Frame::PixelBuffer(buffer) => buffer.timestamp,
+        }
+    }
+
+    /// Width and height in pixels.
+    pub fn size(&self) -> (usize, usize) {
+        match self {
+            Frame::Planes(frame) => (frame.width, frame.height),
+            #[cfg(target_os = "macos")]
+            Frame::PixelBuffer(buffer) => (buffer.width(), buffer.height()),
+        }
+    }
+
+    /// The planes, for a picture held in memory.
+    pub fn planes(&self) -> Option<&frame::VideoFrame> {
+        match self {
+            Frame::Planes(frame) => Some(frame),
+            #[cfg(target_os = "macos")]
+            Frame::PixelBuffer(_) => None,
+        }
+    }
+
+    /// The planes, for a picture held in memory.
+    pub fn into_planes(self) -> Option<frame::VideoFrame> {
+        match self {
+            Frame::Planes(frame) => Some(frame),
+            #[cfg(target_os = "macos")]
+            Frame::PixelBuffer(_) => None,
+        }
+    }
+
+    /// The picture in memory, copied out of GPU memory if it is there.
+    #[cfg(test)]
+    pub fn copied_to_memory(self) -> frame::VideoFrame {
+        match self {
+            Frame::Planes(frame) => frame,
+            #[cfg(target_os = "macos")]
+            Frame::PixelBuffer(buffer) => buffer.copied_to_memory(),
+        }
+    }
+}
 
 /// How long our share's preview counts as on screen after the UI last drew it.
 const PREVIEW_LINGER: Duration = Duration::from_secs(1);
@@ -70,6 +125,7 @@ mod preview_tests {
 mod tests {
     use throcc_proto::messages::Recovery;
 
+    use super::Frame;
     use super::decode::{Decoder, MaxSize};
     use super::encode::{Encoder, EncoderConfig};
     use super::frame::{VideoFrame, luma_psnr};
@@ -99,7 +155,11 @@ mod tests {
                 if unit.keyframe {
                     keyframes.push(unit.timestamp / 3000);
                 }
-                if let Some(output) = decoder.decode(&unit.data, unit.timestamp).unwrap() {
+                if let Some(output) = decoder
+                    .decode(&unit.data, unit.timestamp)
+                    .unwrap()
+                    .map(Frame::copied_to_memory)
+                {
                     let number = output.read_test_number();
                     let psnr = luma_psnr(&output, &VideoFrame::test_pattern(1280, 720, number, 0));
                     shown.push((number, psnr));
@@ -157,7 +217,11 @@ mod tests {
             input.y.fill(200);
             input.timestamp = n as u32 * 3000;
             for unit in encoder.encode(&input).unwrap() {
-                if let Some(output) = decoder.decode(&unit.data, unit.timestamp).unwrap() {
+                if let Some(output) = decoder
+                    .decode(&unit.data, unit.timestamp)
+                    .unwrap()
+                    .map(Frame::copied_to_memory)
+                {
                     last = Some(output);
                 }
             }
@@ -166,7 +230,11 @@ mod tests {
             let mut input = VideoFrame::blank(1000, 1000);
             input.y.fill(200);
             for unit in encoder.encode(&input).unwrap() {
-                if let Some(output) = decoder.decode(&unit.data, unit.timestamp).unwrap() {
+                if let Some(output) = decoder
+                    .decode(&unit.data, unit.timestamp)
+                    .unwrap()
+                    .map(Frame::copied_to_memory)
+                {
                     last = Some(output);
                 }
             }

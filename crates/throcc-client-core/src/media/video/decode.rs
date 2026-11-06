@@ -7,6 +7,7 @@ use rsmpeg::ffi;
 use throcc_proto::messages::Codec;
 use tracing::{info, warn};
 
+use super::Frame;
 use super::frame::VideoFrame;
 
 #[derive(Debug, thiserror::Error)]
@@ -184,11 +185,7 @@ impl Decoder {
     /// decoder that FFmpeg reports failing is swapped for a software one, which decodes the
     /// same unit. Invalid data such as a unit before the first keyframe, a picture too large,
     /// or one in a format throcc doesn't present is no fault of the hardware, so it keeps it.
-    pub fn decode(
-        &mut self,
-        unit: &[u8],
-        timestamp: u32,
-    ) -> Result<Option<VideoFrame>, DecodeError> {
+    pub fn decode(&mut self, unit: &[u8], timestamp: u32) -> Result<Option<Frame>, DecodeError> {
         match self.decode_unit(unit, timestamp) {
             Err(DecodeError::Ffmpeg(e))
                 if self.hardware && e.raw_error() != Some(ffi::AVERROR_INVALIDDATA) =>
@@ -201,11 +198,7 @@ impl Decoder {
         }
     }
 
-    fn decode_unit(
-        &mut self,
-        unit: &[u8],
-        timestamp: u32,
-    ) -> Result<Option<VideoFrame>, DecodeError> {
+    fn decode_unit(&mut self, unit: &[u8], timestamp: u32) -> Result<Option<Frame>, DecodeError> {
         let mut packet = AVPacket::new();
         // SAFETY: av_new_packet allocates `len` bytes plus padding, filled right after.
         unsafe {
@@ -232,6 +225,11 @@ impl Decoder {
         let Some(frame) = newest else {
             return Ok(None);
         };
+        #[cfg(target_os = "macos")]
+        if let Some(buffer) = full_range_pixel_buffer(&frame) {
+            let picture = crate::media::capture::PixelBuffer { buffer, timestamp };
+            return Ok(Some(Frame::PixelBuffer(picture)));
+        }
         let frame = if frame.hw_frames_ctx.is_null() {
             &frame
         } else {
@@ -245,8 +243,26 @@ impl Decoder {
         };
         let picture = to_nv12(frame, timestamp, self.spare.take())
             .ok_or(DecodeError::Format(frame.format))?;
-        Ok(Some(picture))
+        Ok(Some(Frame::Planes(picture)))
     }
+}
+
+/// The pixel buffer a VideoToolbox frame was decoded into, when renderers can draw it as it
+/// is: full-range NV12 holding exactly the frame's picture, with no padding cropped away.
+#[cfg(target_os = "macos")]
+fn full_range_pixel_buffer(frame: &AVFrame) -> Option<screencapturekit::cv::CVPixelBuffer> {
+    use crate::media::capture::macos::FULL_RANGE_NV12;
+
+    if frame.format != ffi::AV_PIX_FMT_VIDEOTOOLBOX {
+        return None;
+    }
+    // SAFETY: a VideoToolbox frame carries its CVPixelBufferRef in data[3], live while the
+    // frame is, and the wrapper takes a reference of its own.
+    let buffer =
+        unsafe { screencapturekit::cv::CVPixelBuffer::from_raw_borrowed(frame.data[3].cast()) }?;
+    let size = (frame.width as usize, frame.height as usize);
+    (buffer.pixel_format() == FULL_RANGE_NV12 && (buffer.width(), buffer.height()) == size)
+        .then_some(buffer)
 }
 
 fn device_name(device_type: ffi::AVHWDeviceType) -> &'static str {
