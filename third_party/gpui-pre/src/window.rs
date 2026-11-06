@@ -35,10 +35,6 @@ use gpui_util::post_inc;
 use gpui_util::{ResultExt, measure};
 use itertools::FoldWhile::{Continue, Done};
 use itertools::Itertools;
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-use objc2_core_foundation::CFRetained;
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-use objc2_core_video::CVPixelBuffer;
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use raw_window_handle::{HandleError, HasDisplayHandle, HasWindowHandle};
 use refineable::Refineable;
@@ -5174,7 +5170,7 @@ impl Window {
         &mut self,
         bounds: Bounds<Pixels>,
         corner_radii: Corners<Pixels>,
-        image_buffer: CFRetained<CVPixelBuffer>,
+        source: crate::SurfaceSource,
     ) {
         use crate::PaintSurface;
 
@@ -5190,7 +5186,7 @@ impl Window {
             bounds,
             content_mask,
             corner_radii,
-            image_buffer,
+            source,
         });
     }
 

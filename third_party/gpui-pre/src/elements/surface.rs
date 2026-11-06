@@ -2,7 +2,11 @@ use crate::{
     App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
     ObjectFit, Pixels, Style, StyleRefinement, Styled, Window,
 };
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+use objc2_core_foundation::CFRetained;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+use objc2_core_video::{CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetWidth};
+use refineable::Refineable;
 use std::{
     fmt,
     sync::{
@@ -10,11 +14,6 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-use objc2_core_foundation::CFRetained;
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-use objc2_core_video::{CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetWidth};
-use refineable::Refineable;
 
 /// A source of a surface's content.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,7 +22,6 @@ pub enum SurfaceSource {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     Surface(CFRetained<CVPixelBuffer>),
     /// An NV12 picture in CPU memory, uploaded by the renderer when its generation changes
-    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     Nv12(Nv12Frame),
 }
 
@@ -34,7 +32,6 @@ impl From<CFRetained<CVPixelBuffer>> for SurfaceSource {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 impl From<Nv12Frame> for SurfaceSource {
     fn from(value: Nv12Frame) -> Self {
         SurfaceSource::Nv12(value)
@@ -43,11 +40,9 @@ impl From<Nv12Frame> for SurfaceSource {
 
 /// Identifies one video stream drawn with [`surface`]. Renderers keep one set of textures per
 /// id and reuse them for every frame of that stream.
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SurfaceId(u64);
 
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 impl SurfaceId {
     /// A new id, distinct from every other in this process.
     pub fn new() -> Self {
@@ -56,7 +51,6 @@ impl SurfaceId {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 impl Default for SurfaceId {
     fn default() -> Self {
         Self::new()
@@ -66,7 +60,6 @@ impl Default for SurfaceId {
 /// The pixels of an NV12 picture: a full-resolution Y plane, then a plane of interleaved Cb
 /// and Cr at half the width and half the height, rounded up. Rows are tightly packed.
 /// Full range, BT.709.
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 pub trait Nv12Planes: Send + Sync {
     /// The Y plane, `width * height` bytes.
     fn y(&self) -> &[u8];
@@ -75,7 +68,6 @@ pub trait Nv12Planes: Send + Sync {
 }
 
 /// One frame of a video stream, for [`surface`].
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 #[derive(Clone)]
 pub struct Nv12Frame {
     /// The stream this frame belongs to.
@@ -91,7 +83,6 @@ pub struct Nv12Frame {
     pub planes: Arc<dyn Nv12Planes>,
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 impl Nv12Frame {
     /// The width and height of the CbCr plane, in CbCr pairs.
     pub fn chroma_size(&self) -> (u32, u32) {
@@ -109,7 +100,6 @@ impl Nv12Frame {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 impl fmt::Debug for Nv12Frame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Nv12Frame")
@@ -121,7 +111,6 @@ impl fmt::Debug for Nv12Frame {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 impl PartialEq for Nv12Frame {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
@@ -131,7 +120,6 @@ impl PartialEq for Nv12Frame {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 impl Eq for Nv12Frame {}
 
 /// A surface element.
@@ -215,15 +203,17 @@ impl Element for Surface {
                     CVPixelBufferGetHeight(surface).into(),
                 );
                 let new_bounds = self.object_fit.get_bounds(bounds, size);
-                window.paint_surface(new_bounds, corner_radii, surface.clone());
+                window.paint_surface(new_bounds, corner_radii, self.source.clone());
             }
-            #[cfg(not(any(target_os = "macos", target_os = "ios")))]
             SurfaceSource::Nv12(frame) => {
                 let size = crate::size(
                     crate::DevicePixels(frame.width as i32),
                     crate::DevicePixels(frame.height as i32),
                 );
                 let new_bounds = self.object_fit.get_bounds(bounds, size);
+                #[cfg(any(target_os = "macos", target_os = "ios"))]
+                window.paint_surface(new_bounds, corner_radii, self.source.clone());
+                #[cfg(not(any(target_os = "macos", target_os = "ios")))]
                 window.paint_surface(new_bounds, corner_radii, frame.clone());
             }
         }

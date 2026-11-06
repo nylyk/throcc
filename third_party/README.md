@@ -7,13 +7,13 @@ Crates we carry patches on, wired in through `[patch.crates-io]` in the workspac
 Apache-2.0, a crates.io republish of zed-industries/zed@08cbb88. Each directory started as an
 exact copy of the published crate, so `git log -p third_party/` shows only our changes.
 
-Changes, all for drawing received screen shares as NV12 on Linux and Windows instead of
-converting every frame to BGRA on the UI thread:
+Changes, all for drawing received screen shares as NV12 instead of converting every frame to
+BGRA on the UI thread:
 
 - **gpui-pre:** `surface()` also takes an `Nv12Frame` (a `SurfaceId` per stream, a generation,
-  the size and the Y and CbCr planes) off Apple platforms. `PaintSurface` carries it and the
-  element's corner radii. The macOS `CVPixelBuffer` path is unchanged apart from the radii,
-  which the Metal renderer does not read.
+  the size and the Y and CbCr planes). `PaintSurface` carries it and the element's corner
+  radii; on Apple platforms it carries a `SurfaceSource`, either a `CVPixelBuffer` or an
+  `Nv12Frame`.
 - **gpui-pre-wgpu:** draws the `Surfaces` batch, which it skipped. Each stream keeps an R8 Y
   and an RG8 CbCr texture, recreated only when its size changes and written only when the
   frame's generation changes; streams missing from a scene drop theirs. The surface parameters
@@ -26,10 +26,16 @@ converting every frame to BGRA on the UI thread:
   `UpdateSubresource` only for a new generation, sampled through a clamping sampler, with the
   same content-mask clipping and `quad_sdf` rounding as polychrome sprites. A lost device drops
   the textures.
+- **gpui-pre-apple:** `draw_surfaces` also draws `Nv12Frame`s: each stream keeps up to four
+  slots of an R8 Y and an RG8 CbCr texture, and a new generation is written with
+  `replace_region` into a slot no frame still on the GPU reads, so frames in flight never
+  tear. Streams missing from a scene drop theirs. `SurfaceBounds` carries the corner radii,
+  and `surface_fragment`, which `CVPixelBuffer`s share, uses full-range BT.709 and rounds
+  corners with `quad_sdf`.
 
 The BGRA image path these replace cost 37 ms of UI-thread CPU per 2560×1440 frame, more than
-a 60 fps frame lasts; the NV12 surface costs 2 ms. macOS keeps the BGRA path, because its Metal
-renderer lives in `gpui-pre-apple`, which is not vendored.
+a 60 fps frame lasts; the NV12 surface costs 2 ms. On an Apple GPU, a release build took 5 ms
+for the conversion alone, and takes 0.55 ms to upload and draw the NV12 surface.
 
 ## Refreshing on a gpui update
 

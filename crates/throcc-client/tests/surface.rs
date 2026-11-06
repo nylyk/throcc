@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::sync::Arc;
 
@@ -6,7 +6,6 @@ use gpui::{
     Bounds, ContentMask, Corners, DevicePixels, Nv12Frame, Nv12Planes, PaintSurface,
     PlatformHeadlessRenderer, ScaledPixels, Scene, Size, SurfaceId, point, size,
 };
-use gpui_wgpu::WgpuHeadlessRenderer;
 use throcc_client_core::media::video::frame::VideoFrame;
 
 struct Planes(Arc<VideoFrame>);
@@ -57,7 +56,10 @@ fn surface(frame: Nv12Frame, at: Bounds<ScaledPixels>, radius: f32) -> PaintSurf
         bounds: at,
         content_mask: ContentMask { bounds: at },
         corner_radii: Corners::all(ScaledPixels(radius)),
+        #[cfg(target_os = "linux")]
         frame,
+        #[cfg(target_os = "macos")]
+        source: gpui::SurfaceSource::Nv12(frame),
     }
 }
 
@@ -68,8 +70,15 @@ fn flat(width: usize, height: usize, y: u8, u: u8, v: u8) -> VideoFrame {
     frame
 }
 
-fn renderer() -> WgpuHeadlessRenderer {
-    WgpuHeadlessRenderer::new().expect("no Vulkan or GL adapter; install mesa's lavapipe")
+#[cfg(target_os = "linux")]
+fn renderer() -> gpui_wgpu::WgpuHeadlessRenderer {
+    gpui_wgpu::WgpuHeadlessRenderer::new()
+        .expect("no Vulkan or GL adapter; install mesa's lavapipe")
+}
+
+#[cfg(target_os = "macos")]
+fn renderer() -> gpui_apple::metal_renderer::MetalHeadlessRenderer {
+    gpui_apple::metal_renderer::MetalHeadlessRenderer::new()
 }
 
 fn assert_rgb(image: &image::RgbaImage, x: u32, y: u32, expected: [u8; 3]) {
