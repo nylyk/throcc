@@ -23,8 +23,13 @@ use crate::settings::VoiceSettings;
 /// Playback kept queued in the device ring, in 10 ms pulls: enough to ride out
 /// scheduling hiccups, little enough to keep mouth-to-ear delay low.
 const PLAYBACK_AHEAD: usize = 4;
-const IDLE: Duration = Duration::from_millis(2);
+/// One pull of audio.
+const PULL_TIME: Duration = Duration::from_millis(10);
+/// The shortest wait between pulls, so a device that delivers late is not spun on.
+const LEAST_WAIT: Duration = Duration::from_millis(1);
 const LEVELS_EVERY: Duration = Duration::from_millis(100);
+/// How long the mic is processed outside a call after the UI last read its level.
+const METER_LINGER: Duration = Duration::from_secs(1);
 const DEVICE_COUNTERS_EVERY: Duration = Duration::from_secs(10);
 
 /// What a server session tells the audio thread about its call.
@@ -97,6 +102,7 @@ pub(crate) struct CallLevels {
 struct Levels {
     mic: MicLevel,
     call: CallLevels,
+    mic_read_at: Option<Instant>,
 }
 
 /// The app-wide audio thread: mic processing, the mix and playback, with or without a call.
@@ -154,9 +160,12 @@ impl AudioEngine {
         self.send(Command::Cue(cue));
     }
 
-    /// The mic level and gate, refreshed every 100 ms while a mic is open.
+    /// The mic level and gate, refreshed every 100 ms while a mic is open. Outside a call
+    /// the mic is processed only while this keeps being called.
     pub fn mic_level(&self) -> MicLevel {
-        lock(&self.levels).mic
+        let mut levels = lock(&self.levels);
+        levels.mic_read_at = Some(Instant::now());
+        levels.mic
     }
 
     /// A handle for a new call, which takes the call audio over from any earlier one.
@@ -300,6 +309,28 @@ impl DeviceIo {
         self.devices.capture.slots() >= self.device_in.len()
     }
 
+    /// Roughly how long until the mic has 10 ms ready or the speakers have room for 10 ms.
+    fn next_pull_in(&self) -> Duration {
+        let wait = |samples: usize, per_pull: usize| {
+            PULL_TIME.mul_f64(samples as f64 / per_pull.max(1) as f64)
+        };
+        let captured = self.devices.capture.slots();
+        let capture = wait(
+            self.device_in.len().saturating_sub(captured),
+            self.device_in.len(),
+        );
+        let queued = self.devices.playback.buffer().capacity() - self.devices.playback.slots();
+        let over_ahead = (queued + 1).saturating_sub(PLAYBACK_AHEAD * self.device_out.len());
+        capture.min(wait(over_ahead, self.device_out.len()))
+    }
+
+    /// Drops 10 ms from the mic unprocessed.
+    fn discard_capture(&mut self) {
+        if let Ok(chunk) = self.devices.capture.read_chunk(self.device_in.len()) {
+            chunk.commit_all();
+        }
+    }
+
     /// Takes 10 ms from the mic at [`SAMPLE_RATE`].
     fn capture(&mut self) -> [f32; PULL] {
         for slot in self.device_in.iter_mut() {
@@ -388,6 +419,8 @@ struct Worker {
     levels_at: Instant,
     push_to_talk: bool,
     mic_test: bool,
+    /// Whether the UI read the mic level within [`METER_LINGER`].
+    meter_shown: bool,
     /// The last 10 ms of processed mic, which the mic test plays back.
     last_capture: [f32; PULL],
     /// Samples played, the local 48 kHz clock that packet arrivals are stamped with.
@@ -406,6 +439,7 @@ impl Worker {
             levels_at: Instant::now(),
             push_to_talk: false,
             mic_test: false,
+            meter_shown: false,
             last_capture: [0.0; PULL],
             played: 0,
         }
@@ -436,8 +470,17 @@ impl Worker {
                     io.log_counters();
                 }
             }
-            if !busy {
-                std::thread::sleep(IDLE);
+            if busy {
+                continue;
+            }
+            let wait = match &self.io {
+                Some(io) => io.next_pull_in().clamp(LEAST_WAIT, PULL_TIME),
+                None => LEVELS_EVERY,
+            };
+            match commands.recv_timeout(wait) {
+                Ok(command) => self.apply(command),
+                Err(std_mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std_mpsc::RecvTimeoutError::Disconnected) => return,
             }
         }
     }
@@ -559,9 +602,12 @@ impl Worker {
             self.play(io);
         }
         let capturing = io.has_capture();
-        if capturing {
+        if capturing && self.processes_mic() {
             let input = io.capture();
             self.last_capture = self.capture(&input);
+        } else if capturing {
+            io.discard_capture();
+            self.chain.reset_levels();
         }
         playing || capturing
     }
@@ -593,7 +639,9 @@ impl Worker {
         for (r, [left, right]) in reference.iter_mut().zip(stereo.as_chunks::<2>().0) {
             *r = (left + right) * 0.5;
         }
-        if let Err(e) = self.chain.render(&reference) {
+        if self.processes_mic()
+            && let Err(e) = self.chain.render(&reference)
+        {
             warn!("echo canceller reference: {e}");
         }
         self.played += PULL as u64;
@@ -637,8 +685,16 @@ impl Worker {
         *self.chain.processed()
     }
 
-    fn publish_levels(&self) {
+    /// Whether anything uses the processed mic: a call, the mic test or the level meter.
+    fn processes_mic(&self) -> bool {
+        self.call.mic.is_some() || self.mic_test || self.meter_shown
+    }
+
+    fn publish_levels(&mut self) {
         let mut levels = lock(&self.levels);
+        self.meter_shown = levels
+            .mic_read_at
+            .is_some_and(|at| at.elapsed() < METER_LINGER);
         levels.mic = MicLevel {
             dbfs: self.chain.level_dbfs(),
             gate_open: self.chain.gate_open(),

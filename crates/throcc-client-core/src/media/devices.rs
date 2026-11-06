@@ -16,8 +16,10 @@ use cpal::{
 
 use super::audio::SAMPLE_RATE;
 
-/// Ring capacity in seconds of audio, at the device rate.
+/// Capture ring capacity in seconds of audio, at the device rate.
 const RING_SECONDS: u32 = 1;
+/// Playback ring capacity in milliseconds of audio, room for the few pulls kept queued.
+const PLAYBACK_RING_MS: u32 = 200;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DeviceError {
@@ -203,7 +205,7 @@ pub fn open(input: Option<&str>, output: Option<&str>) -> Result<Devices, Device
     );
     let (output_stream, output_rate, playback) = open_first(output_configs, |config| {
         let rate = config.sample_rate();
-        let (playback, ring) = rtrb::RingBuffer::new((rate * RING_SECONDS) as usize * 2);
+        let (playback, ring) = rtrb::RingBuffer::new((rate * PLAYBACK_RING_MS / 1000) as usize * 2);
         let counters = counters.clone();
         let stream_config = config.config();
         let stream = match config.sample_format() {
