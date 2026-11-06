@@ -42,14 +42,6 @@ use crate::verified::VerifiedStore;
 
 const LEVELS_EVERY: Duration = Duration::from_millis(100);
 const HEALTH_EVERY: Duration = Duration::from_secs(2);
-/// Frames of one watched share the server drops for us within one health refresh that mark
-/// the share too slow for our connection.
-const SLOW_SHARE_DROPS: u64 = 2;
-/// The percentage of one watched share's datagrams lost within one health refresh that marks
-/// the share too slow for our connection.
-const SLOW_SHARE_LOSS_PERCENT: u64 = 1;
-/// Health refreshes a share stays marked too slow, counting its last lossy one.
-const SLOW_SHARE_HOLD: u8 = 3;
 /// The shortest time between two cues for others joining or leaving an audience.
 const AUDIENCE_CUE_GAP: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(15);
@@ -180,22 +172,17 @@ struct Watched {
     last_lost: u64,
     /// Units the server dropped for us since the last health refresh.
     dropped: u64,
-    /// Health refreshes left showing this track as too slow.
-    slow_for: u8,
+    dropped_last_refresh: bool,
 }
 
 impl Watched {
-    /// Counts one health refresh's `received` and `lost` datagrams and the units the server
-    /// dropped, and says whether the track is still too slow for our connection.
-    fn too_slow_after(&mut self, received: u64, lost: u64) -> bool {
-        let dropped = std::mem::take(&mut self.dropped);
-        let lossy = lost > 0 && lost * 100 >= (received + lost) * SLOW_SHARE_LOSS_PERCENT;
-        self.slow_for = if dropped >= SLOW_SHARE_DROPS || lossy {
-            SLOW_SHARE_HOLD
-        } else {
-            self.slow_for.saturating_sub(1)
-        };
-        self.slow_for > 0
+    /// Ends one health refresh. The track is too slow for our connection when the server
+    /// dropped units for us in this refresh and the one before.
+    fn too_slow_this_refresh(&mut self) -> bool {
+        let dropped = std::mem::take(&mut self.dropped) > 0;
+        let too_slow = dropped && self.dropped_last_refresh;
+        self.dropped_last_refresh = dropped;
+        too_slow
     }
 }
 
@@ -1475,7 +1462,7 @@ impl Session {
             last_received: arrived.datagrams,
             last_lost: arrived.lost,
             dropped: 0,
-            slow_for: 0,
+            dropped_last_refresh: false,
         }
     }
 
@@ -1848,8 +1835,7 @@ impl Session {
             let new_lost = advance(&mut track.last_lost, arrived.lost);
             received_total += new_received;
             lost_total += new_lost;
-            if matches!(track.carries, Carries::ShareVideo { .. })
-                && track.too_slow_after(new_received, new_lost)
+            if matches!(track.carries, Carries::ShareVideo { .. }) && track.too_slow_this_refresh()
             {
                 slow_shares.insert(track.user);
             }
@@ -2102,7 +2088,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_share_is_too_slow_after_server_drops_or_heavy_loss_and_stays_so_briefly() {
+    fn a_share_is_too_slow_only_while_the_server_drops_in_consecutive_refreshes() {
         let mut track = Watched {
             user: UserId(4),
             carries: Carries::ShareAudio,
@@ -2110,16 +2096,16 @@ mod tests {
             last_received: 0,
             last_lost: 0,
             dropped: 0,
-            slow_for: 0,
+            dropped_last_refresh: false,
         };
-        assert!(!track.too_slow_after(1000, 3));
-        track.dropped = 1;
-        assert!(!track.too_slow_after(1000, 0));
-        track.dropped = 2;
-        assert!(track.too_slow_after(1000, 0));
-        let held: Vec<bool> = (0..3).map(|_| track.too_slow_after(1000, 0)).collect();
-        assert_eq!(held, [true, true, false]);
-        assert!(track.too_slow_after(990, 10));
+        let slow: Vec<bool> = [5, 0, 1, 1, 1, 0, 1]
+            .into_iter()
+            .map(|dropped| {
+                track.dropped = dropped;
+                track.too_slow_this_refresh()
+            })
+            .collect();
+        assert_eq!(slow, [false, false, false, true, true, false, false]);
     }
 
     #[test]
