@@ -521,7 +521,11 @@ impl Session {
                 }
                 _ = health.tick() => {
                     self.refresh_health();
-                    if let Err(e) = self.call.floors.save() {
+                    let floors = self.call.floors.clone();
+                    let saved = tokio::task::spawn_blocking(move || floors.save())
+                        .await
+                        .unwrap_or_else(|e| Err(e.into()));
+                    if let Err(e) = saved {
                         warn!("saving epoch floors: {e:#}");
                     }
                     if let Err(e) = self.saved_playback.save() {
@@ -817,7 +821,16 @@ impl Session {
         let current: BTreeMap<UserId, Peer> = trusted.into_iter().map(|p| (p.user, p)).collect();
         let changed = current != self.peers;
         self.note_identities(&current);
-        self.play_as_kept(current.keys().copied());
+        let arrived: Vec<UserId> = current
+            .iter()
+            .filter(|(user, peer)| {
+                self.peers
+                    .get(user)
+                    .is_none_or(|old| old.identity_key != peer.identity_key)
+            })
+            .map(|(user, _)| *user)
+            .collect();
+        self.play_as_kept(arrived);
         for (user, old) in &self.peers {
             if current
                 .get(user)
@@ -898,6 +911,9 @@ impl Session {
             .into_iter()
             .map(|user| (user, self.playback_of(user)))
             .collect();
+        if kept.is_empty() {
+            return;
+        }
         for (user, playback) in &kept {
             for sound in Sound::ALL {
                 self.audio(gain_command(*user, sound, playback.get(sound)));
