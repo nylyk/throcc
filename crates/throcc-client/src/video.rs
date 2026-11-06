@@ -1,7 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
-use gpui::{AnyElement, App, IntoElement, ParentElement, Pixels, Styled, Window, div};
+use gpui::{
+    AnyElement, App, AsyncApp, EntityId, IntoElement, ParentElement, Pixels, Styled, Task, Window,
+    div,
+};
 use throcc_client_core::client::ClientApi;
 use throcc_client_core::media::video::frame::VideoFrame;
 use throcc_proto::ids::UserId;
@@ -12,10 +16,18 @@ use gpui_component::{Sizable, Size};
 use crate::theme;
 use crate::views::common::icon;
 
+/// How often a share on screen tells the core it is still drawn, which keeps our own
+/// share's preview coming while the screen holds still. Under the core's one-second linger.
+const STILL_DRAWN_EVERY: Duration = Duration::from_millis(500);
+/// How often a share on screen looks for its picture before the core has one.
+const PICTURE_WAIT: Duration = Duration::from_millis(100);
+
 /// The share pictures shown in one window, by sharer. The only place frames meet gpui.
 #[derive(Default)]
 pub struct Feeds {
     shown: HashMap<UserId, Shown>,
+    /// One task per share on screen, redrawing the window when its picture changes.
+    watchers: HashMap<UserId, Task<()>>,
     /// The sharers drawn since the last [`Self::sweep`].
     drawn: HashSet<UserId>,
 }
@@ -28,6 +40,7 @@ impl Feeds {
         for (_, shown) in self.shown.extract_if(|user, _| !drawn.contains(user)) {
             shown.release(window, cx);
         }
+        self.watchers.retain(|user, _| drawn.contains(user));
     }
 
     /// `user`'s share, as large as fits its parent with the aspect ratio kept, its corners
@@ -40,9 +53,12 @@ impl Feeds {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        window.request_animation_frame();
         if let Some(client) = client {
             client.picture_drawn(user);
+            let view = window.current_view();
+            self.watchers
+                .entry(user)
+                .or_insert_with(|| cx.spawn(redraw_on_new_pictures(client.clone(), user, view)));
         }
         let frame = client
             .and_then(|c| c.picture(user))
@@ -76,6 +92,36 @@ impl Feeds {
             .rounded(radius)
             .children(self.shown.get(&user).map(|shown| shown.element(radius)))
             .into_any_element()
+    }
+}
+
+/// Redraws `view` whenever `user`'s picture changes, until the returned future is dropped.
+fn redraw_on_new_pictures(
+    client: Arc<dyn ClientApi>,
+    user: UserId,
+    view: EntityId,
+) -> impl AsyncFnOnce(&mut AsyncApp) {
+    async move |cx: &mut AsyncApp| {
+        loop {
+            let Some(mut picture) = client.picture(user) else {
+                cx.background_executor().timer(PICTURE_WAIT).await;
+                continue;
+            };
+            cx.update(|cx| cx.notify(view));
+            loop {
+                tokio::select! {
+                    changed = picture.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        cx.update(|cx| cx.notify(view));
+                    }
+                    () = cx.background_executor().timer(STILL_DRAWN_EVERY) => {
+                        client.picture_drawn(user);
+                    }
+                }
+            }
+        }
     }
 }
 
