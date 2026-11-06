@@ -406,7 +406,7 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                                     Transmit::PushToTalk
                                 }
                             });
-                            app.sync_push_to_talk(cx);
+                            app.sync_push_to_talk();
                         },
                     ),
                 ))

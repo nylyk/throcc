@@ -476,7 +476,7 @@ pub struct ThroccApp {
     changing_devices: Option<Task<()>>,
     pub mic_test: bool,
     pub audio: views::settings::AudioControls,
-    push_to_talk: Option<(crate::hotkey::PushToTalkKey, Task<()>)>,
+    push_to_talk: Option<crate::hotkey::PushToTalkKey>,
     /// Whether Space is held down as the push-to-talk key.
     space_talking: bool,
     pub feeds: crate::video::Feeds,
@@ -657,7 +657,7 @@ impl ThroccApp {
             _subscriptions: subscriptions,
         };
         window.focus(&app.root_focus, cx);
-        app.sync_push_to_talk(cx);
+        app.sync_push_to_talk();
         app.change_devices(window, cx);
         if mock {
             let profile = Profile {
@@ -2085,7 +2085,7 @@ impl ThroccApp {
     }
 
     /// Registers or drops the global push-to-talk key to match the transmit mode.
-    pub fn sync_push_to_talk(&mut self, cx: &mut Context<Self>) {
+    pub fn sync_push_to_talk(&mut self) {
         if !self.uses_push_to_talk() {
             if self.push_to_talk.take().is_some() {
                 self.audio_engine.push_to_talk(false);
@@ -2095,27 +2095,10 @@ impl ThroccApp {
         if self.push_to_talk.is_some() {
             return;
         }
-        match crate::hotkey::PushToTalkKey::register(crate::hotkey::DEFAULT_KEY) {
-            Ok(key) => {
-                let poller = cx.spawn(async move |this, cx| {
-                    loop {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(10))
-                            .await;
-                        let alive = this.update(cx, |app, _| {
-                            if let Some(down) =
-                                app.push_to_talk.as_ref().and_then(|(key, _)| key.poll())
-                            {
-                                app.audio_engine.push_to_talk(down);
-                            }
-                        });
-                        if alive.is_err() {
-                            return;
-                        }
-                    }
-                });
-                self.push_to_talk = Some((key, poller));
-            }
+        let audio = self.audio_engine.clone();
+        let changed = move |down| audio.push_to_talk(down);
+        match crate::hotkey::PushToTalkKey::register(crate::hotkey::DEFAULT_KEY, changed) {
+            Ok(key) => self.push_to_talk = Some(key),
             Err(e) => tracing::warn!(
                 "no global push-to-talk key ({e:#}); hold Space in the window instead"
             ),
