@@ -99,7 +99,7 @@ impl PopOut {
 
 impl Render for PopOut {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.feeds.sweep(window, cx);
+        self.feeds.sweep();
         let user = self.user;
         let Some(app) = self.app.upgrade() else {
             return div().id("popout").size_full().bg(theme::bg());

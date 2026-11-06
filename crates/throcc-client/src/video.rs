@@ -35,11 +35,9 @@ pub struct Feeds {
 impl Feeds {
     /// Lets go of the last frames of shares not drawn since the last sweep, so a share that
     /// left the window holds no memory. Called at the start of each render of the window.
-    pub fn sweep(&mut self, window: &mut Window, cx: &mut App) {
+    pub fn sweep(&mut self) {
         let drawn = std::mem::take(&mut self.drawn);
-        for (_, shown) in self.shown.extract_if(|user, _| !drawn.contains(user)) {
-            shown.release(window, cx);
-        }
+        self.shown.retain(|user, _| drawn.contains(user));
         self.watchers.retain(|user, _| drawn.contains(user));
     }
 
@@ -65,9 +63,7 @@ impl Feeds {
             .and_then(|c| c.picture(user))
             .and_then(|picture| picture.borrow().clone());
         let Some(frame) = frame else {
-            if let Some(shown) = self.shown.remove(&user) {
-                shown.release(window, cx);
-            }
+            self.shown.remove(&user);
             return div()
                 .size_full()
                 .flex()
@@ -82,11 +78,9 @@ impl Feeds {
                 .into_any_element();
         };
         let previous = self.shown.get(&user);
-        if previous.is_none_or(|s| s.timestamp != frame.timestamp)
-            && let Some(shown) = Shown::new(frame, previous)
-            && let Some(previous) = self.shown.insert(user, shown)
-        {
-            previous.release(window, cx);
+        if previous.is_none_or(|s| s.timestamp != frame.timestamp) {
+            let shown = Shown::new(frame, previous);
+            self.shown.insert(user, shown);
         }
         div()
             .size_full()
@@ -132,19 +126,17 @@ fn redraw_on_new_pictures(
 
 /// The last frame handed to the GPU for one share, as an NV12 surface the renderer uploads
 /// two planes of, at 1.5 bytes a pixel.
-#[cfg(not(target_os = "macos"))]
 struct Shown {
     timestamp: u32,
     frame: gpui::Nv12Frame,
 }
 
-#[cfg(not(target_os = "macos"))]
 impl Shown {
-    fn new(frame: Arc<VideoFrame>, previous: Option<&Shown>) -> Option<Self> {
+    fn new(frame: Arc<VideoFrame>, previous: Option<&Shown>) -> Self {
         let (id, generation) = previous.map_or((gpui::SurfaceId::new(), 0), |shown| {
             (shown.frame.id, shown.frame.generation + 1)
         });
-        Some(Self {
+        Self {
             timestamp: frame.timestamp,
             frame: gpui::Nv12Frame {
                 id,
@@ -153,7 +145,7 @@ impl Shown {
                 height: frame.height as u32,
                 planes: Arc::new(Planes(frame)),
             },
-        })
+        }
     }
 
     fn element(&self, radius: Pixels) -> AnyElement {
@@ -164,14 +156,10 @@ impl Shown {
             .rounded(radius)
             .into_any_element()
     }
-
-    fn release(self, _window: &mut Window, _cx: &mut App) {}
 }
 
-#[cfg(not(target_os = "macos"))]
 struct Planes(Arc<VideoFrame>);
 
-#[cfg(not(target_os = "macos"))]
 impl gpui::Nv12Planes for Planes {
     fn y(&self) -> &[u8] {
         &self.0.y
@@ -179,41 +167,5 @@ impl gpui::Nv12Planes for Planes {
 
     fn uv(&self) -> &[u8] {
         &self.0.uv
-    }
-}
-
-/// The last frame handed to the GPU for one share, as a BGRA image in the sprite atlas.
-#[cfg(target_os = "macos")]
-struct Shown {
-    timestamp: u32,
-    image: Arc<gpui::RenderImage>,
-}
-
-#[cfg(target_os = "macos")]
-impl Shown {
-    fn new(frame: Arc<VideoFrame>, _previous: Option<&Shown>) -> Option<Self> {
-        let buffer =
-            image::RgbaImage::from_raw(frame.width as u32, frame.height as u32, frame.to_bgra())?;
-        let image = gpui::RenderImage::new(smallvec::smallvec![image::Frame::new(buffer)]);
-        Some(Self {
-            timestamp: frame.timestamp,
-            image: Arc::new(image),
-        })
-    }
-
-    fn element(&self, radius: Pixels) -> AnyElement {
-        use gpui::StyledImage;
-
-        gpui::img(self.image.clone())
-            .absolute()
-            .inset_0()
-            .size_full()
-            .rounded(radius)
-            .object_fit(gpui::ObjectFit::Contain)
-            .into_any_element()
-    }
-
-    fn release(self, window: &mut Window, cx: &mut App) {
-        cx.drop_image(self.image, Some(window));
     }
 }

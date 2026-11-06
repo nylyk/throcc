@@ -2180,7 +2180,7 @@ impl ThroccApp {
 
 impl Render for ThroccApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.feeds.sweep(window, cx);
+        self.feeds.sweep();
         self.sidebar_width = self.sidebar_width.min(widest_sidebar(window));
         self.mascot.start_render();
         let lost = match self.screen {
