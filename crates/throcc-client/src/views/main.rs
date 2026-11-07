@@ -5,7 +5,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Context, Div, FontFeatures, FontWeight, InteractiveElement, IntoElement,
     MouseButton, MouseDownEvent, ParentElement, Pixels, RenderImage, Size as Area, Stateful,
-    StatefulInteractiveElement, Styled, Window, canvas, div, px, size,
+    StatefulInteractiveElement, StyleRefinement, Styled, Window, canvas, div, px, size,
 };
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
@@ -45,7 +45,14 @@ pub fn render(
     div()
         .size_full()
         .flex()
-        .child(sidebar(app, &pictures, cx))
+        .child(
+            app.sidebar_view(cx).cached(
+                StyleRefinement::default()
+                    .w(app.sidebar_width)
+                    .h_full()
+                    .flex_none(),
+            ),
+        )
         .child(
             div()
                 .flex_1()
@@ -55,6 +62,16 @@ pub fn render(
                 .child(content),
         )
         .into_any_element()
+}
+
+/// The sidebar, for [`ThroccApp::sidebar_view`].
+pub fn sidebar_part(
+    app: &mut ThroccApp,
+    _window: &mut Window,
+    cx: &mut Context<ThroccApp>,
+) -> AnyElement {
+    let pictures = app.pictures_of_people(cx);
+    sidebar(app, &pictures, cx).into_any_element()
 }
 
 /// One share filling the window. Its controls show while the pointer moves.

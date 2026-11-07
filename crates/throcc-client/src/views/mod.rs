@@ -7,6 +7,7 @@ pub mod mascot;
 pub mod onboarding;
 pub mod overlay;
 pub mod page;
+pub mod part;
 pub mod person_menu;
 pub mod server;
 pub mod server_bar;

@@ -480,6 +480,8 @@ pub struct ThroccApp {
     /// Whether Space is held down as the push-to-talk key.
     space_talking: bool,
     pub feeds: crate::video::Feeds,
+    sidebar: Option<Entity<views::part::AppPart>>,
+    server_bar: Option<Entity<views::part::AppPart>>,
     /// What the share dialog asks for, kept between shares.
     pub share_choice: ShareChoice,
     pub share_audio: bool,
@@ -633,6 +635,8 @@ impl ThroccApp {
             push_to_talk: None,
             space_talking: false,
             feeds: crate::video::Feeds::default(),
+            sidebar: None,
+            server_bar: None,
             share_choice,
             share_audio: true,
             bitrate,
@@ -809,6 +813,26 @@ impl ThroccApp {
 
     /// Our name, avatar seed and picture: as the server shows us, or from our profile
     /// outside a server.
+    /// The sidebar, drawn as a view the window reuses while only a share redraws.
+    pub fn sidebar_view(&mut self, cx: &mut Context<Self>) -> Entity<views::part::AppPart> {
+        let app = cx.entity();
+        self.sidebar
+            .get_or_insert_with(|| {
+                cx.new(|cx| views::part::AppPart::new(&app, views::main::sidebar_part, cx))
+            })
+            .clone()
+    }
+
+    /// The server bar, drawn as a view the window reuses while only a share redraws.
+    fn server_bar_view(&mut self, cx: &mut Context<Self>) -> Entity<views::part::AppPart> {
+        let app = cx.entity();
+        self.server_bar
+            .get_or_insert_with(|| {
+                cx.new(|cx| views::part::AppPart::new(&app, views::server_bar::part, cx))
+            })
+            .clone()
+    }
+
     pub fn own_look(&mut self, cx: &mut Context<Self>) -> (String, u64, Option<Arc<RenderImage>>) {
         let me = self.state.me;
         let person = me.and_then(|m| self.state.person(m));
@@ -2206,7 +2230,14 @@ impl Render for ThroccApp {
             div()
                 .size_full()
                 .flex()
-                .child(views::server_bar::render(self, cx))
+                .child(
+                    self.server_bar_view(cx).cached(
+                        gpui::StyleRefinement::default()
+                            .w(theme::SERVER_BAR_WIDTH)
+                            .h_full()
+                            .flex_none(),
+                    ),
+                )
                 .child(div().flex_1().min_w_0().h_full().child(screen))
                 .into_any_element()
         };
