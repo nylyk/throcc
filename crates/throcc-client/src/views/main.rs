@@ -94,9 +94,7 @@ fn fullscreen(
         too_slow: state.health.slow_shares.contains(&user),
         fullscreen: true,
     };
-    let stream = app
-        .feeds
-        .surface(app.client.as_ref(), user, px(0.), window, cx);
+    let stream = app.feeds.surface(app.client.as_ref(), user, px(0.), cx);
     div()
         .id("fullscreen")
         .size_full()
@@ -619,8 +617,8 @@ fn room(
             .into_any_element()
     } else {
         match focus {
-            Some(focus) => focused(app, &tiles, focus, area, window, cx),
-            None => grid(app, &tiles, area, window, cx),
+            Some(focus) => focused(app, &tiles, focus, area, cx),
+            None => grid(app, &tiles, area, cx),
         }
     };
     let this = cx.entity().downgrade();
@@ -741,7 +739,6 @@ fn grid(
     app: &mut ThroccApp,
     tiles: &[Tile],
     area: Area<Pixels>,
-    window: &mut Window,
     cx: &mut Context<ThroccApp>,
 ) -> AnyElement {
     let (_, tile_size) = grid_fit(tiles.len(), area, TILE_GAP);
@@ -760,7 +757,7 @@ fn grid(
                 .flex_none()
                 .w(tile_size.width)
                 .h(tile_size.height)
-                .child(tile(app, t, Layout::Grid, tile_size, window, cx))
+                .child(tile(app, t, Layout::Grid, tile_size, cx))
         }))
         .into_any_element()
 }
@@ -770,7 +767,6 @@ fn focused(
     tiles: &[Tile],
     focus: UserId,
     area: Area<Pixels>,
-    window: &mut Window,
     cx: &mut Context<ThroccApp>,
 ) -> AnyElement {
     let others: Vec<&Tile> = tiles.iter().filter(|t| t.user != focus).collect();
@@ -786,7 +782,7 @@ fn focused(
         STRIP_HEIGHT + TILE_GAP
     };
     let stage_size = fit_aspect(size(area.width, area.height - strip_room), aspect);
-    let stage = focused.map(|t| tile(app, t, Layout::Stage, stage_size, window, cx));
+    let stage = focused.map(|t| tile(app, t, Layout::Stage, stage_size, cx));
     let fitting_width = (area.width - TILE_GAP * others.len().saturating_sub(1) as f32)
         / others.len().max(1) as f32;
     let tile_width = fitting_width
@@ -808,7 +804,7 @@ fn focused(
                     .flex_none()
                     .w(strip_tile.width)
                     .h(strip_tile.height)
-                    .child(tile(app, t, Layout::Strip, strip_tile, window, cx))
+                    .child(tile(app, t, Layout::Strip, strip_tile, cx))
             }))
     });
     div()
@@ -848,7 +844,6 @@ fn tile(
     t: &Tile,
     layout: Layout,
     size: Area<Pixels>,
-    window: &mut Window,
     cx: &mut Context<ThroccApp>,
 ) -> AnyElement {
     let user = t.user;
@@ -939,9 +934,7 @@ fn tile(
         fullscreen: false,
     };
     let radius = theme::RADIUS_TILE - px(1.);
-    let picture = app
-        .feeds
-        .surface(app.client.as_ref(), user, radius, window, cx);
+    let picture = app.feeds.surface(app.client.as_ref(), user, radius, cx);
     frame
         .cursor_pointer()
         .bg(theme::surface())

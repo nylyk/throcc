@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, AsyncApp, EntityId, IntoElement, ParentElement, Pixels, Styled, Task, Window,
-    div,
+    AnyElement, App, AppContext, AsyncApp, Context, Entity, IntoElement, ParentElement, Pixels,
+    Render, Styled, Task, WeakEntity, Window, div, px,
 };
 use throcc_client_core::client::ClientApi;
 use throcc_client_core::media::video::Frame;
@@ -25,20 +25,17 @@ const PICTURE_WAIT: Duration = Duration::from_millis(100);
 /// The share pictures shown in one window, by sharer. The only place frames meet gpui.
 #[derive(Default)]
 pub struct Feeds {
-    shown: HashMap<UserId, Shown>,
-    /// One task per share on screen, redrawing the window when its picture changes.
-    watchers: HashMap<UserId, Task<()>>,
+    views: HashMap<UserId, Entity<ShareView>>,
     /// The sharers drawn since the last [`Self::sweep`].
     drawn: HashSet<UserId>,
 }
 
 impl Feeds {
-    /// Lets go of the last frames of shares not drawn since the last sweep, so a share that
-    /// left the window holds no memory. Called at the start of each render of the window.
+    /// Lets go of the shares not drawn since the last sweep, so a share that left the window
+    /// holds no memory. Called at the start of each render of the window.
     pub fn sweep(&mut self) {
         let drawn = std::mem::take(&mut self.drawn);
-        self.shown.retain(|user, _| drawn.contains(user));
-        self.watchers.retain(|user, _| drawn.contains(user));
+        self.views.retain(|user, _| drawn.contains(user));
     }
 
     /// `user`'s share, as large as fits its parent with the aspect ratio kept, its corners
@@ -48,22 +45,75 @@ impl Feeds {
         client: Option<&Arc<dyn ClientApi>>,
         user: UserId,
         radius: Pixels,
-        window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
         self.drawn.insert(user);
-        if let Some(client) = client {
-            client.picture_drawn(user);
-            let view = window.current_view();
-            self.watchers
-                .entry(user)
-                .or_insert_with(|| cx.spawn(redraw_on_new_pictures(client.clone(), user, view)));
+        let view = self
+            .views
+            .entry(user)
+            .or_insert_with(|| cx.new(|_| ShareView::new(user)));
+        view.update(cx, |view, cx| view.follow(client, radius, cx));
+        view.clone().into_any_element()
+    }
+}
+
+/// One share on screen, redrawn on its own whenever its picture changes.
+struct ShareView {
+    user: UserId,
+    radius: Pixels,
+    client: Option<Arc<dyn ClientApi>>,
+    shown: Option<Shown>,
+    /// Redraws this view whenever the share's picture changes.
+    watcher: Option<Task<()>>,
+}
+
+impl ShareView {
+    fn new(user: UserId) -> Self {
+        Self {
+            user,
+            radius: px(0.),
+            client: None,
+            shown: None,
+            watcher: None,
         }
-        let frame = client
+    }
+
+    /// Draws from `client` with corners rounded by `radius`, watching its pictures.
+    fn follow(
+        &mut self,
+        client: Option<&Arc<dyn ClientApi>>,
+        radius: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        self.radius = radius;
+        let same = match (client, &self.client) {
+            (Some(new), Some(old)) => Arc::ptr_eq(new, old),
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            return;
+        }
+        self.client = client.cloned();
+        self.shown = None;
+        self.watcher =
+            client.map(|client| cx.spawn(redraw_on_new_pictures(client.clone(), self.user)));
+    }
+}
+
+impl Render for ShareView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let user = self.user;
+        if let Some(client) = &self.client {
+            client.picture_drawn(user);
+        }
+        let frame = self
+            .client
+            .as_ref()
             .and_then(|c| c.picture(user))
             .and_then(|picture| picture.borrow().clone());
         let Some(frame) = frame else {
-            self.shown.remove(&user);
+            self.shown = None;
             return div()
                 .size_full()
                 .flex()
@@ -77,42 +127,48 @@ impl Feeds {
                 )
                 .into_any_element();
         };
-        let previous = self.shown.get(&user);
-        if previous.is_none_or(|s| s.timestamp != frame.timestamp()) {
-            let shown = Shown::new(frame, previous);
-            self.shown.insert(user, shown);
+        if self
+            .shown
+            .as_ref()
+            .is_none_or(|s| s.timestamp != frame.timestamp())
+        {
+            self.shown = Some(Shown::new(frame, self.shown.as_ref()));
         }
         div()
             .size_full()
             .relative()
             .overflow_hidden()
-            .rounded(radius)
-            .children(self.shown.get(&user).map(|shown| shown.element(radius)))
+            .rounded(self.radius)
+            .children(self.shown.as_ref().map(|shown| shown.element(self.radius)))
             .into_any_element()
     }
 }
 
-/// Redraws `view` whenever `user`'s picture changes, until the returned future is dropped.
+/// Redraws the view whenever `user`'s picture changes, until the returned future is dropped.
 fn redraw_on_new_pictures(
     client: Arc<dyn ClientApi>,
     user: UserId,
-    view: EntityId,
-) -> impl AsyncFnOnce(&mut AsyncApp) {
-    async move |cx: &mut AsyncApp| {
+) -> impl AsyncFnOnce(WeakEntity<ShareView>, &mut AsyncApp) {
+    async move |view: WeakEntity<ShareView>, cx: &mut AsyncApp| {
+        let redraw = |cx: &mut AsyncApp| view.update(cx, |_, cx| cx.notify()).is_ok();
         loop {
             let Some(mut picture) = client.picture(user) else {
                 cx.background_executor().timer(PICTURE_WAIT).await;
                 continue;
             };
             picture.mark_unchanged();
-            cx.update(|cx| cx.notify(view));
+            if !redraw(cx) {
+                return;
+            }
             loop {
                 tokio::select! {
                     changed = picture.changed() => {
                         if changed.is_err() {
                             break;
                         }
-                        cx.update(|cx| cx.notify(view));
+                        if !redraw(cx) {
+                            return;
+                        }
                     }
                     () = cx.background_executor().timer(STILL_DRAWN_EVERY) => {
                         client.picture_drawn(user);

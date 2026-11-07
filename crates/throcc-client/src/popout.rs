@@ -124,8 +124,7 @@ impl Render for PopOut {
         };
         let fullscreen = window.is_fullscreen();
         let picture = if config.is_some() {
-            self.feeds
-                .surface(client.as_ref(), user, px(0.), window, cx)
+            self.feeds.surface(client.as_ref(), user, px(0.), cx)
         } else {
             div()
                 .size_full()
