@@ -484,8 +484,9 @@ fn make_room(held: &mut VecDeque<Arc<Frame>>, incoming: usize) {
 /// Decodes one remote share's `units` on a thread of its own and keeps its newest due
 /// picture. With `playout`, a frame is due once the share audio reaching the speakers has
 /// caught up with it. After a unit fails to decode, `ask_idr` is called once, and again only
-/// after a unit has decoded since. Pictures larger than `config` announces are dropped.
-/// Also returns what decodes the share, which changes when hardware decoding fails.
+/// after a unit has decoded since; it is also called when what decodes the share changes.
+/// Pictures larger than `config` announces are dropped. Also returns what decodes the share,
+/// which changes when hardware decoding fails.
 pub fn receive(
     mut units: mpsc::Receiver<Received>,
     config: ShareConfig,
@@ -522,6 +523,8 @@ pub fn receive(
                     let decoded = decoder.decode(&unit.data, unit.timestamp);
                     if *engine_tx.borrow() != decoder.engine() {
                         engine_tx.send_replace(decoder.engine());
+                        ask_idr();
+                        asked = true;
                     }
                     match decoded {
                         Ok(Some(frame)) => {

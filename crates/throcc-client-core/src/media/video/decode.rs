@@ -206,7 +206,10 @@ impl Decoder {
                 return self.decode_unit(unit, timestamp);
             }
             self.ctx.flush_buffers();
-            result = self.decode_unit(unit, timestamp);
+            result = match self.decode_unit(unit, timestamp) {
+                Ok(None) => result,
+                retried => retried,
+            };
         }
         if let Ok(Some(_)) = result {
             self.failing_since = None;
