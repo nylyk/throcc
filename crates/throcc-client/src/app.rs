@@ -500,6 +500,8 @@ pub struct ThroccApp {
     pub fullscreen: Option<UserId>,
     /// Until when the controls over the fullscreen share show.
     pub controls_until: Instant,
+    /// Redraws once the controls over the fullscreen share are due to hide.
+    hide_controls: Option<Task<()>>,
     /// Whether [`Self::enter_fullscreen`] made the window fullscreen, so leaving undoes only that.
     made_window_fullscreen: bool,
     /// The whole window's focus, so its key bindings work when no field has focus.
@@ -648,6 +650,7 @@ impl ThroccApp {
             keep_display_awake: None,
             fullscreen: None,
             controls_until: Instant::now(),
+            hide_controls: None,
             made_window_fullscreen: false,
             root_focus: cx.focus_handle(),
             sidebar_width: theme::SIDEBAR_WIDTH,
@@ -1068,7 +1071,12 @@ impl ThroccApp {
     }
 
     pub fn show_controls(&mut self, cx: &mut Context<Self>) {
-        self.controls_until = Instant::now() + crate::views::common::CONTROLS_LINGER;
+        let linger = crate::views::common::CONTROLS_LINGER;
+        self.controls_until = Instant::now() + linger;
+        self.hide_controls = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(linger).await;
+            this.update(cx, |_, cx| cx.notify()).ok();
+        }));
         cx.notify();
     }
 

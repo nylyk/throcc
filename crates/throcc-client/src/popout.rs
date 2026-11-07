@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     App, AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, Styled, Subscription,
+    MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, Styled, Subscription, Task,
     WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions, div, point, px, size,
 };
 use gpui_component::Root;
@@ -30,6 +30,8 @@ pub struct PopOut {
     user: UserId,
     feeds: Feeds,
     controls_until: Instant,
+    /// Redraws once the controls are due to hide.
+    hide_controls: Option<Task<()>>,
     traffic_lights_shown: bool,
     focus: FocusHandle,
     _released: Subscription,
@@ -56,25 +58,30 @@ impl PopOut {
         let opened = cx.open_window(options, |window, cx| {
             window.set_window_title(&title);
             let handle = window.window_handle();
-            let view = cx.new(|cx| Self {
-                app,
-                user,
-                feeds: Feeds::default(),
-                controls_until: Instant::now() + controls_for,
-                traffic_lights_shown: true,
-                focus: cx.focus_handle(),
-                _released: cx.on_release(move |this: &mut Self, cx| {
-                    let app = this.app.clone();
-                    cx.defer(move |cx| {
-                        app.update(cx, |app, cx| {
-                            app.popouts
-                                .retain(|_, w| w.window_id() != handle.window_id());
-                            app.person_menu.take_if(|menu| menu.window == handle);
-                            cx.notify();
-                        })
-                        .ok();
-                    });
-                }),
+            let view = cx.new(|cx| {
+                let mut popout = Self {
+                    app,
+                    user,
+                    feeds: Feeds::default(),
+                    controls_until: Instant::now(),
+                    hide_controls: None,
+                    traffic_lights_shown: true,
+                    focus: cx.focus_handle(),
+                    _released: cx.on_release(move |this: &mut Self, cx| {
+                        let app = this.app.clone();
+                        cx.defer(move |cx| {
+                            app.update(cx, |app, cx| {
+                                app.popouts
+                                    .retain(|_, w| w.window_id() != handle.window_id());
+                                app.person_menu.take_if(|menu| menu.window == handle);
+                                cx.notify();
+                            })
+                            .ok();
+                        });
+                    }),
+                };
+                popout.show_controls_for(controls_for, cx);
+                popout
             });
             cx.new(|cx| Root::new(view, window, cx))
         });
@@ -92,7 +99,15 @@ impl PopOut {
     }
 
     fn show_controls(&mut self, cx: &mut Context<Self>) {
-        self.controls_until = Instant::now() + CONTROLS_LINGER;
+        self.show_controls_for(CONTROLS_LINGER, cx);
+    }
+
+    fn show_controls_for(&mut self, linger: Duration, cx: &mut Context<Self>) {
+        self.controls_until = Instant::now() + linger;
+        self.hide_controls = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(linger).await;
+            this.update(cx, |_, cx| cx.notify()).ok();
+        }));
         cx.notify();
     }
 }
