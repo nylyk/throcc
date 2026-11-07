@@ -565,7 +565,6 @@ pub fn receive(
                 if tx.is_closed() {
                     return;
                 }
-                // The renderer has had a picture's time to let go of the one replaced before.
                 let unused = superseded.or(replaced.take());
                 let unused = unused.and_then(|frame| Arc::try_unwrap(frame).ok());
                 if let Some(frame) = unused.and_then(Frame::into_planes) {

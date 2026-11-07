@@ -4,8 +4,8 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Context, Div, FontFeatures, FontWeight, InteractiveElement, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement, Pixels, RenderImage, SharedString, Size as Area,
-    Stateful, StatefulInteractiveElement, StyleRefinement, Styled, Window, canvas, div, px, size,
+    MouseButton, MouseDownEvent, ParentElement, Pixels, RenderImage, Size as Area, Stateful,
+    StatefulInteractiveElement, StyleRefinement, Styled, Window, canvas, div, px, size,
 };
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
@@ -547,7 +547,7 @@ fn room(
         .into_iter()
         .map(|(user, person)| Tile {
             user,
-            person,
+            person: person.clone(),
             picture: pictures.get(&user).cloned(),
             mine: Some(user) == state.me,
             shows_stream: app.shows_stream(user),
@@ -752,9 +752,10 @@ fn room_marker(locked: bool, selected: bool) -> AnyElement {
 }
 
 /// One person in the room, and what their tile shows.
-struct Tile<'a> {
+#[derive(Clone)]
+struct Tile {
     user: UserId,
-    person: &'a Person,
+    person: Person,
     picture: Option<Arc<RenderImage>>,
     mine: bool,
     shows_stream: bool,
@@ -946,22 +947,10 @@ fn tile(
             .border_color(theme::speaking())
     });
     if !t.shows_stream {
-        let (person, picture, mine, popped) =
-            (t.person.clone(), t.picture.clone(), t.mine, t.popped);
-        let height = size.height;
+        let (tile, height) = (t.clone(), size.height);
         let card = app.part(
             Part::Card(user),
-            move |_, _, cx| {
-                let t = Tile {
-                    user,
-                    person: &person,
-                    picture: picture.clone(),
-                    mine,
-                    shows_stream: false,
-                    popped,
-                };
-                person_card(&t, height, compact, cx).into_any_element()
-            },
+            move |_, _, cx| person_card(&tile, height, compact, cx).into_any_element(),
             cx,
         );
         return frame
@@ -970,24 +959,11 @@ fn tile(
             .children(speaking_ring)
             .into_any_element();
     }
-    let look = OverlayLook {
-        name: t.person.name.clone().into(),
-        picture: t.picture.clone(),
-        details: t
-            .person
-            .sharing
-            .map(|c| share_label(&c))
-            .unwrap_or_default()
-            .into(),
-        audience: t.person.audience,
-        width: size.width,
-        compact,
-        mine: t.mine,
-    };
+    let (tile, width) = (t.clone(), size.width);
     let overlay = app
         .part(
             Part::TileOverlay(user),
-            move |app, _, cx| tile_overlay(app, user, &look, cx),
+            move |app, _, cx| tile_overlay(app, &tile, width, compact, cx),
             cx,
         )
         .cached(
@@ -1013,28 +989,19 @@ fn tile(
         .into_any_element()
 }
 
-/// What a share's tile overlay shows of its sharer.
-struct OverlayLook {
-    name: SharedString,
-    picture: Option<Arc<RenderImage>>,
-    details: SharedString,
-    audience: usize,
-    width: Pixels,
-    compact: bool,
-    mine: bool,
-}
-
-/// The labels and controls over `user`'s share in a tile.
+/// The labels and controls over the share in tile `t`, drawn `width` wide.
 fn tile_overlay(
     app: &mut ThroccApp,
-    user: UserId,
-    look: &OverlayLook,
+    t: &Tile,
+    width: Pixels,
+    compact: bool,
     cx: &mut Context<ThroccApp>,
 ) -> AnyElement {
-    let buttons = if look.compact {
+    let user = t.user;
+    let buttons = if compact {
         Vec::new()
     } else {
-        let pop_out = (!look.mine).then(|| {
+        let pop_out = (!t.mine).then(|| {
             ghost_icon(
                 ("pop-out", user.0 as usize),
                 "picture-in-picture-2",
@@ -1065,14 +1032,19 @@ fn tile_overlay(
             .collect()
     };
     let overlay = ShareOverlay {
-        name: look.name.clone(),
+        name: t.person.name.clone().into(),
         seed: user.0,
-        picture: look.picture.clone(),
-        details: look.details.clone(),
-        width: look.width,
+        picture: t.picture.clone(),
+        details: t
+            .person
+            .sharing
+            .map(|c| share_label(&c))
+            .unwrap_or_default()
+            .into(),
+        width,
         title_inset: px(0.),
         buttons,
-        audience: look.audience,
+        audience: t.person.audience,
         controls: app.shows_overlay(user),
         too_slow: app.state.health.slow_shares.contains(&user),
         fullscreen: false,
@@ -1105,7 +1077,7 @@ fn card_fit(height: Pixels, sharing: bool, compact: bool) -> (bool, Pixels) {
 /// watch it when they share.
 fn person_card(t: &Tile, height: Pixels, compact: bool, cx: &mut Context<ThroccApp>) -> Div {
     let user = t.user;
-    let person = t.person;
+    let person = &t.person;
     let (compact, picture_size) = card_fit(height, person.sharing.is_some(), compact);
     let action = person.sharing.map(|_| {
         let (label, icon_name) = if t.popped {

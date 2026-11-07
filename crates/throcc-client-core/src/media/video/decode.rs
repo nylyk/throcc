@@ -105,8 +105,7 @@ pub struct Decoder {
 }
 
 /// How long, in 90 kHz media time, a hardware decoder may keep failing before it is swapped
-/// for a software one. Flushed after bad data, VideoToolbox decodes again from the next
-/// keyframe, which the receiver asks the sender for.
+/// for a software one.
 const HARDWARE_GRACE: u32 = 3 * 90_000;
 
 impl Decoder {
@@ -190,12 +189,8 @@ impl Decoder {
         self.engine
     }
 
-    /// Decodes one access unit. Returns the newest picture it produced, if any. A hardware
-    /// decoder that FFmpeg reports failing is reset and given the unit again; one failing for
-    /// [`HARDWARE_GRACE`] with no picture in between is swapped for a software one, which
-    /// decodes the same unit. Invalid data such as a unit before the first keyframe, a picture
-    /// too large, or one in a format throcc doesn't present is no fault of the hardware, so it
-    /// never counts.
+    /// Decodes one access unit into its newest picture, if any. A hardware failure, not bad
+    /// data, resets the decoder; failing for [`HARDWARE_GRACE`] swaps in software decoding.
     pub fn decode(&mut self, unit: &[u8], timestamp: u32) -> Result<Option<Frame>, DecodeError> {
         let mut result = self.decode_unit(unit, timestamp);
         if self.hardware_failed(&result) {

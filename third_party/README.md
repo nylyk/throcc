@@ -33,7 +33,8 @@ BGRA on the UI thread:
   and `surface_fragment`, which `CVPixelBuffer`s share, uses full-range BT.709 and rounds
   corners with `quad_sdf`. The CoreVideo textures a frame reads from `CVPixelBuffer`s are
   held until the GPU finishes that frame, so a capture or decoder pool can't reuse a buffer
-  still being drawn.
+  still being drawn. A pixel buffer in any other format, or one CoreVideo can't map, is skipped
+  instead of panicking.
 
 The BGRA image path these replace cost 37 ms of UI-thread CPU per 2560×1440 frame, more than
 a 60 fps frame lasts; the NV12 surface costs 2 ms. On an Apple GPU, a release build took 5 ms
@@ -45,7 +46,7 @@ for the conversion alone, and takes 0.55 ms to upload and draw the NV12 surface.
    `~/.cargo/registry/src/*/` over the four directories. Commit that alone.
 2. Re-apply our commits on top (`git log -p -- third_party/` lists them; `git cherry-pick`
    usually applies) and update this file.
-3. If upstream has gained an NV12 or YUV surface on Linux and Windows, drop the vendored copies
-   and the patch section instead.
+3. If upstream has gained an NV12 or YUV surface for frames in memory on every platform, drop
+   the vendored copies and the patch section instead.
 4. Check that `Cargo.lock` lists the four without a `source`, and that
    `crates/throcc-client/tests/surface.rs` and `tests/surface/run.sh` still pass.

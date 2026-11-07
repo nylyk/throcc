@@ -815,8 +815,6 @@ impl ThroccApp {
             .collect()
     }
 
-    /// Our name, avatar seed and picture: as the server shows us, or from our profile
-    /// outside a server.
     /// `part` of the window as a view the window reuses while only a share redraws, drawn
     /// with `draw` whenever the app changes.
     pub fn part(
@@ -825,17 +823,20 @@ impl ThroccApp {
         draw: impl Fn(&mut ThroccApp, &mut Window, &mut Context<ThroccApp>) -> AnyElement + 'static,
         cx: &mut Context<Self>,
     ) -> Entity<views::part::AppPart> {
-        let app = cx.entity();
-        let view = self
-            .parts
-            .entry(part)
-            .or_insert_with(|| cx.new(|cx| views::part::AppPart::new(&app, cx)))
-            .clone();
-        view.update(cx, |view, _| view.set_draw(std::rc::Rc::new(draw)));
+        let draw: views::part::Draw = std::rc::Rc::new(draw);
         self.parts_drawn.insert(part);
+        if let Some(view) = self.parts.get(&part).cloned() {
+            view.update(cx, |view, _| view.set_draw(draw));
+            return view;
+        }
+        let app = cx.entity();
+        let view = cx.new(|cx| views::part::AppPart::new(&app, draw, cx));
+        self.parts.insert(part, view.clone());
         view
     }
 
+    /// Our name, avatar seed and picture: as the server shows us, or from our profile
+    /// outside a server.
     pub fn own_look(&mut self, cx: &mut Context<Self>) -> (String, u64, Option<Arc<RenderImage>>) {
         let me = self.state.me;
         let person = me.and_then(|m| self.state.person(m));

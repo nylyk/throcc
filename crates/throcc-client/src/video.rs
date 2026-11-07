@@ -16,8 +16,8 @@ use gpui_component::{Sizable, Size};
 use crate::theme;
 use crate::views::common::icon;
 
-/// How often a share on screen tells the core it is still drawn, which keeps our own
-/// share's preview coming while the screen holds still. Under the core's one-second linger.
+/// How often a share on screen tells the core it is still drawn; under the core's one-second
+/// preview linger.
 const STILL_DRAWN_EVERY: Duration = Duration::from_millis(500);
 /// How often a share on screen looks for its picture before the core has one.
 const PICTURE_WAIT: Duration = Duration::from_millis(100);
@@ -96,8 +96,10 @@ impl ShareView {
         }
         self.client = client.cloned();
         self.shown = None;
-        self.watcher =
-            client.map(|client| cx.spawn(redraw_on_new_pictures(client.clone(), self.user)));
+        let user = self.user;
+        self.watcher = client.cloned().map(|client| {
+            cx.spawn(async move |view, cx| redraw_on_new_pictures(view, client, user, cx).await)
+        });
     }
 }
 
@@ -144,39 +146,39 @@ impl Render for ShareView {
     }
 }
 
-/// Redraws the view whenever `user`'s picture changes, until the returned future is dropped.
-fn redraw_on_new_pictures(
+/// Redraws `view` whenever `user`'s picture changes, until the view is gone.
+async fn redraw_on_new_pictures(
+    view: WeakEntity<ShareView>,
     client: Arc<dyn ClientApi>,
     user: UserId,
-) -> impl AsyncFnOnce(WeakEntity<ShareView>, &mut AsyncApp) {
-    async move |view: WeakEntity<ShareView>, cx: &mut AsyncApp| {
-        let redraw = |cx: &mut AsyncApp| view.update(cx, |_, cx| cx.notify()).is_ok();
+    cx: &mut AsyncApp,
+) {
+    let redraw = |cx: &mut AsyncApp| view.update(cx, |_, cx| cx.notify()).is_ok();
+    loop {
+        let Some(mut picture) = client.picture(user) else {
+            cx.background_executor().timer(PICTURE_WAIT).await;
+            continue;
+        };
+        picture.mark_unchanged();
+        if !redraw(cx) {
+            return;
+        }
         loop {
-            let Some(mut picture) = client.picture(user) else {
-                cx.background_executor().timer(PICTURE_WAIT).await;
-                continue;
-            };
-            picture.mark_unchanged();
-            if !redraw(cx) {
-                return;
-            }
-            loop {
-                tokio::select! {
-                    changed = picture.changed() => {
-                        if changed.is_err() {
-                            break;
-                        }
-                        if !redraw(cx) {
-                            return;
-                        }
+            tokio::select! {
+                changed = picture.changed() => {
+                    if changed.is_err() {
+                        break;
                     }
-                    () = cx.background_executor().timer(STILL_DRAWN_EVERY) => {
-                        client.picture_drawn(user);
+                    if !redraw(cx) {
+                        return;
                     }
                 }
+                () = cx.background_executor().timer(STILL_DRAWN_EVERY) => {
+                    client.picture_drawn(user);
+                }
             }
-            cx.background_executor().timer(PICTURE_WAIT).await;
         }
+        cx.background_executor().timer(PICTURE_WAIT).await;
     }
 }
 

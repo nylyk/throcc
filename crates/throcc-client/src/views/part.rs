@@ -29,30 +29,28 @@ pub enum Part {
 /// reuses it while only a share redraws. It redraws whenever the app is notified.
 pub struct AppPart {
     app: WeakEntity<ThroccApp>,
-    draw: Option<Draw>,
+    draw: Draw,
     _redraw_with_app: Subscription,
 }
 
 impl AppPart {
-    pub fn new(app: &Entity<ThroccApp>, cx: &mut Context<Self>) -> Self {
+    pub fn new(app: &Entity<ThroccApp>, draw: Draw, cx: &mut Context<Self>) -> Self {
         Self {
             app: app.downgrade(),
-            draw: None,
+            draw,
             _redraw_with_app: cx.observe(app, |_, _, cx| cx.notify()),
         }
     }
 
     /// Draws with `draw` the next time this part redraws.
     pub fn set_draw(&mut self, draw: Draw) {
-        self.draw = Some(draw);
+        self.draw = draw;
     }
 }
 
 impl Render for AppPart {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(draw) = self.draw.clone() else {
-            return div().into_any_element();
-        };
+        let draw = self.draw.clone();
         self.app
             .update(cx, |app, cx| draw(app, window, cx))
             .unwrap_or_else(|_| div().into_any_element())

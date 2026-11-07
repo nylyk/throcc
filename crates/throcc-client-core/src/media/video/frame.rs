@@ -79,34 +79,25 @@ impl VideoFrame {
     /// The picture `factor` times smaller each way, each pixel the mean of the block it
     /// covers. Sizes stay even.
     pub fn shrunk(&self, factor: usize) -> VideoFrame {
-        let mut out = Self::shrunk_nv12(
-            (&self.y, self.width),
-            (&self.uv, self.width),
-            (self.width, self.height),
+        let factor = factor.clamp(1, (self.width.min(self.height) / 2).max(1));
+        let width = ((self.width / factor) & !1).max(2);
+        let height = ((self.height / factor) & !1).max(2);
+        let mut out = VideoFrame::blank(width, height);
+        shrink_plane(&self.y, self.width, 1, factor, &mut out.y, width, height);
+        shrink_plane(
+            &self.uv,
+            self.width,
+            2,
             factor,
+            &mut out.uv,
+            width / 2,
+            height / 2,
         );
         out.timestamp = self.timestamp;
         out
     }
 
-    /// An NV12 picture of `size` given as its (plane, stride) pairs, shrunk like
-    /// [`VideoFrame::shrunk`].
-    pub fn shrunk_nv12(
-        (y, y_stride): (&[u8], usize),
-        (uv, uv_stride): (&[u8], usize),
-        (source_width, source_height): (usize, usize),
-        factor: usize,
-    ) -> VideoFrame {
-        let factor = factor.clamp(1, (source_width.min(source_height) / 2).max(1));
-        let width = ((source_width / factor) & !1).max(2);
-        let height = ((source_height / factor) & !1).max(2);
-        let mut out = VideoFrame::blank(width, height);
-        shrink_plane(y, y_stride, 1, factor, &mut out.y, width, height);
-        shrink_plane(uv, uv_stride, 2, factor, &mut out.uv, width / 2, height / 2);
-        out
-    }
-
-    /// The same picture as BGRA, for renderers that take RGB images.
+    /// The same picture as BGRA, the reference the surface tests compare against.
     pub fn to_bgra(&self) -> Vec<u8> {
         let mut out = vec![0u8; self.width * self.height * 4];
         let width = self.width.max(1);

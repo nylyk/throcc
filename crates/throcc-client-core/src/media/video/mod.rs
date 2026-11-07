@@ -48,7 +48,7 @@ impl Frame {
         }
     }
 
-    /// The planes, for a picture held in memory.
+    /// Takes the planes out, for a picture held in memory.
     pub fn into_planes(self) -> Option<frame::VideoFrame> {
         match self {
             Frame::Planes(frame) => Some(frame),

@@ -34,7 +34,6 @@ keyring = "4.2.0"
 libc = "0.2.191"
 objc2 = "0.6.5"
 objc2-core-foundation = { version = "0.3.2", default-features = false }
-objc2-core-video = { version = "0.3.2", default-features = false, features = ["CVBuffer", "CVImageBuffer", "CVPixelBuffer"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSButton", "NSControl", "NSResponder", "NSView", "NSWindow"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSProcessInfo", "NSString"] }
 raw-window-handle = "0.6.2"

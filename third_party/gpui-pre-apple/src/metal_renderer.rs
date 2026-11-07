@@ -1283,68 +1283,28 @@ impl MetalRenderer {
         );
 
         for (index, surface) in surfaces.iter().enumerate() {
-            let image_buffer = match &surface.source {
-                SurfaceSource::Surface(image_buffer) => image_buffer,
-                SurfaceSource::Nv12(frame) => {
-                    let Some((y_texture, cb_cr_texture)) = self.nv12_textures(frame) else {
-                        continue;
-                    };
-                    let texture_size = size(
+            let textures = match &surface.source {
+                SurfaceSource::Surface(image_buffer) => self.pixel_buffer_textures(image_buffer),
+                SurfaceSource::Nv12(frame) => self.nv12_textures(frame).map(|(y, cb_cr)| {
+                    let frame_size = size(
                         DevicePixels(frame.width as i32),
                         DevicePixels(frame.height as i32),
                     );
-                    command_encoder.set_vertex_bytes(
-                        SurfaceInputIndex::TextureSize as u64,
-                        mem::size_of_val(&texture_size) as u64,
-                        &texture_size as *const Size<DevicePixels> as *const _,
-                    );
-                    command_encoder
-                        .set_fragment_texture(SurfaceInputIndex::YTexture as u64, Some(&y_texture));
-                    command_encoder.set_fragment_texture(
-                        SurfaceInputIndex::CbCrTexture as u64,
-                        Some(&cb_cr_texture),
-                    );
-                    command_encoder.draw_primitives_instanced_base_instance(
-                        metal::MTLPrimitiveType::Triangle,
-                        0,
-                        6,
-                        1,
-                        (first_surface + index) as u64,
-                    );
-                    continue;
-                }
+                    (frame_size, y, cb_cr)
+                }),
             };
-            let texture_size = size(
-                DevicePixels::from(CVPixelBufferGetWidth(image_buffer) as i32),
-                DevicePixels::from(CVPixelBufferGetHeight(image_buffer) as i32),
-            );
-
-            let Some((y_texture, cb_cr_texture)) = self.pixel_buffer_planes(image_buffer) else {
+            let Some((texture_size, y_texture, cb_cr_texture)) = textures else {
                 continue;
             };
-            let (Some(y_metal), Some(cb_cr_metal)) = (
-                CVMetalTextureGetTexture(&y_texture),
-                CVMetalTextureGetTexture(&cb_cr_texture),
-            ) else {
-                continue;
-            };
-
             command_encoder.set_vertex_bytes(
                 SurfaceInputIndex::TextureSize as u64,
                 mem::size_of_val(&texture_size) as u64,
                 &texture_size as *const Size<DevicePixels> as *const _,
             );
-            command_encoder.set_fragment_texture(SurfaceInputIndex::YTexture as u64, unsafe {
-                Some(metal::TextureRef::from_ptr(
-                    objc2::rc::Retained::as_ptr(&y_metal) as *mut _,
-                ))
-            });
-            command_encoder.set_fragment_texture(SurfaceInputIndex::CbCrTexture as u64, unsafe {
-                Some(metal::TextureRef::from_ptr(
-                    objc2::rc::Retained::as_ptr(&cb_cr_metal) as *mut _,
-                ))
-            });
-
+            command_encoder
+                .set_fragment_texture(SurfaceInputIndex::YTexture as u64, Some(&y_texture));
+            command_encoder
+                .set_fragment_texture(SurfaceInputIndex::CbCrTexture as u64, Some(&cb_cr_texture));
             command_encoder.draw_primitives_instanced_base_instance(
                 metal::MTLPrimitiveType::Triangle,
                 0,
@@ -1352,19 +1312,17 @@ impl MetalRenderer {
                 1,
                 (first_surface + index) as u64,
             );
-            self.pixel_buffer_textures
-                .extend([y_texture, cb_cr_texture]);
         }
     }
 }
 
 impl MetalRenderer {
-    /// CoreVideo textures over the Y and CbCr planes of a full-range NV12 pixel buffer, or
-    /// `None` for any other buffer or one CoreVideo can't map.
-    fn pixel_buffer_planes(
-        &self,
+    /// The size of a full-range NV12 pixel buffer and Metal textures over its Y and CbCr
+    /// planes, kept mapped until the GPU finishes this frame. `None` for any other buffer.
+    fn pixel_buffer_textures(
+        &mut self,
         image_buffer: &CVPixelBuffer,
-    ) -> Option<(CFRetained<CVMetalTexture>, CFRetained<CVMetalTexture>)> {
+    ) -> Option<(Size<DevicePixels>, metal::Texture, metal::Texture)> {
         if CVPixelBufferGetPixelFormatType(image_buffer)
             != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
         {
@@ -1390,10 +1348,25 @@ impl MetalRenderer {
                 texture,
             )?))
         };
-        Some((
-            plane_texture(0, objc2_metal::MTLPixelFormat::R8Unorm)?,
-            plane_texture(1, objc2_metal::MTLPixelFormat::RG8Unorm)?,
-        ))
+        let y = plane_texture(0, objc2_metal::MTLPixelFormat::R8Unorm)?;
+        let cb_cr = plane_texture(1, objc2_metal::MTLPixelFormat::RG8Unorm)?;
+        let metal_texture = |texture: &CVMetalTexture| {
+            let texture = CVMetalTextureGetTexture(texture)?;
+            // SAFETY: the pointer is a live MTLTexture, which the owned handle retains.
+            Some(
+                unsafe {
+                    metal::TextureRef::from_ptr(objc2::rc::Retained::as_ptr(&texture) as *mut _)
+                }
+                .to_owned(),
+            )
+        };
+        let textures = (metal_texture(&y)?, metal_texture(&cb_cr)?);
+        self.pixel_buffer_textures.extend([y, cb_cr]);
+        let buffer_size = size(
+            DevicePixels::from(CVPixelBufferGetWidth(image_buffer) as i32),
+            DevicePixels::from(CVPixelBufferGetHeight(image_buffer) as i32),
+        );
+        Some((buffer_size, textures.0, textures.1))
     }
 
     /// The Y and CbCr textures holding `frame`, uploaded into a slot the GPU is done reading
@@ -1404,24 +1377,15 @@ impl MetalRenderer {
         }
         let (y, cb_cr) = frame.planes()?;
         let size = (frame.width, frame.height);
+        let chroma = frame.chroma_size();
         let completed = self.frames_completed.load(Ordering::Acquire);
         let shared_storage = cfg!(target_os = "ios") || self.is_apple_gpu;
         let stream = self
             .nv12_streams
             .entry(frame.id)
-            .or_insert_with(|| Nv12Stream {
-                size,
-                generation: frame.generation,
-                slots: Vec::new(),
-                shown: None,
-            });
+            .or_insert_with(|| Nv12Stream::new(size, frame.generation));
         if stream.size != size {
-            *stream = Nv12Stream {
-                size,
-                generation: frame.generation,
-                slots: Vec::new(),
-                shown: None,
-            };
+            *stream = Nv12Stream::new(size, frame.generation);
         }
         let shown = match stream.shown {
             Some(shown) if stream.generation == frame.generation => shown,
@@ -1433,7 +1397,6 @@ impl MetalRenderer {
                 let slot = match free {
                     Some(free) => free,
                     None if stream.slots.len() < NV12_SLOTS => {
-                        let chroma = frame.chroma_size();
                         stream.slots.push(Nv12Slot {
                             y: plane_texture(
                                 &self.device,
@@ -1458,7 +1421,6 @@ impl MetalRenderer {
                         .min_by_key(|(_, slot)| slot.read_in)
                         .map(|(index, _)| index)?,
                 };
-                let chroma = frame.chroma_size();
                 upload_plane(&stream.slots[slot].y, size, 1, y);
                 upload_plane(&stream.slots[slot].cb_cr, chroma, 2, cb_cr);
                 stream.shown = Some(slot);
@@ -1479,6 +1441,17 @@ struct Nv12Stream {
     slots: Vec<Nv12Slot>,
     /// The slot holding the frame of `generation`.
     shown: Option<usize>,
+}
+
+impl Nv12Stream {
+    fn new(size: (u32, u32), generation: u64) -> Self {
+        Self {
+            size,
+            generation,
+            slots: Vec::new(),
+            shown: None,
+        }
+    }
 }
 
 struct Nv12Slot {

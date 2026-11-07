@@ -25,7 +25,7 @@ use crate::settings::VoiceSettings;
 const PLAYBACK_AHEAD: usize = 4;
 /// One pull of audio.
 const PULL_TIME: Duration = Duration::from_millis(10);
-/// The shortest wait between pulls, so a device that delivers late is not spun on.
+/// The shortest wait between pulls.
 const LEAST_WAIT: Duration = Duration::from_millis(1);
 const LEVELS_EVERY: Duration = Duration::from_millis(100);
 /// How long the mic is processed outside a call after the UI last read its level.
@@ -322,7 +322,7 @@ impl DeviceIo {
         let queued = self.devices.playback.buffer().capacity() - self.devices.playback.slots();
         let over_ahead = (queued + 1).saturating_sub(PLAYBACK_AHEAD * self.device_out.len());
         // The speakers drain the queue one device period at a time, so the queue sits just
-        // over PLAYBACK_AHEAD pulls until the next period. Half a pull later, 30 ms remain.
+        // over PLAYBACK_AHEAD pulls until the next period.
         let playback = wait(over_ahead, self.device_out.len()).max(PULL_TIME / 2);
         capture.min(playback)
     }
