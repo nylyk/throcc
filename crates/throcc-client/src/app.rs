@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, AppContext, Context, Entity, InteractiveElement, IntoElement, KeyBinding, ParentElement,
-    PathPromptOptions, Render, RenderImage, SharedString, Styled, Subscription, Task, Window,
-    WindowHandle, actions, div,
+    AnyElement, App, AppContext, Context, Entity, InteractiveElement, IntoElement, KeyBinding,
+    ParentElement, PathPromptOptions, Render, RenderImage, SharedString, Styled, Subscription,
+    Task, Window, WindowHandle, actions, div,
 };
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::notification::Notification;
@@ -480,8 +480,9 @@ pub struct ThroccApp {
     /// Whether Space is held down as the push-to-talk key.
     space_talking: bool,
     pub feeds: crate::video::Feeds,
-    sidebar: Option<Entity<views::part::AppPart>>,
-    server_bar: Option<Entity<views::part::AppPart>>,
+    parts: HashMap<views::part::Part, Entity<views::part::AppPart>>,
+    /// The parts drawn since the last render swept the others away.
+    parts_drawn: HashSet<views::part::Part>,
     /// What the share dialog asks for, kept between shares.
     pub share_choice: ShareChoice,
     pub share_audio: bool,
@@ -635,8 +636,8 @@ impl ThroccApp {
             push_to_talk: None,
             space_talking: false,
             feeds: crate::video::Feeds::default(),
-            sidebar: None,
-            server_bar: None,
+            parts: HashMap::new(),
+            parts_drawn: HashSet::new(),
             share_choice,
             share_audio: true,
             bitrate,
@@ -813,24 +814,23 @@ impl ThroccApp {
 
     /// Our name, avatar seed and picture: as the server shows us, or from our profile
     /// outside a server.
-    /// The sidebar, drawn as a view the window reuses while only a share redraws.
-    pub fn sidebar_view(&mut self, cx: &mut Context<Self>) -> Entity<views::part::AppPart> {
+    /// `part` of the window as a view the window reuses while only a share redraws, drawn
+    /// with `draw` whenever the app changes.
+    pub fn part(
+        &mut self,
+        part: views::part::Part,
+        draw: impl Fn(&mut ThroccApp, &mut Window, &mut Context<ThroccApp>) -> AnyElement + 'static,
+        cx: &mut Context<Self>,
+    ) -> Entity<views::part::AppPart> {
         let app = cx.entity();
-        self.sidebar
-            .get_or_insert_with(|| {
-                cx.new(|cx| views::part::AppPart::new(&app, views::main::sidebar_part, cx))
-            })
-            .clone()
-    }
-
-    /// The server bar, drawn as a view the window reuses while only a share redraws.
-    fn server_bar_view(&mut self, cx: &mut Context<Self>) -> Entity<views::part::AppPart> {
-        let app = cx.entity();
-        self.server_bar
-            .get_or_insert_with(|| {
-                cx.new(|cx| views::part::AppPart::new(&app, views::server_bar::part, cx))
-            })
-            .clone()
+        let view = self
+            .parts
+            .entry(part)
+            .or_insert_with(|| cx.new(|cx| views::part::AppPart::new(&app, cx)))
+            .clone();
+        view.update(cx, |view, _| view.set_draw(std::rc::Rc::new(draw)));
+        self.parts_drawn.insert(part);
+        view
     }
 
     pub fn own_look(&mut self, cx: &mut Context<Self>) -> (String, u64, Option<Arc<RenderImage>>) {
@@ -2205,6 +2205,8 @@ impl ThroccApp {
 impl Render for ThroccApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.feeds.sweep();
+        let drawn = std::mem::take(&mut self.parts_drawn);
+        self.parts.retain(|part, _| drawn.contains(part));
         self.sidebar_width = self.sidebar_width.min(widest_sidebar(window));
         self.mascot.start_render();
         let lost = match self.screen {
@@ -2231,7 +2233,12 @@ impl Render for ThroccApp {
                 .size_full()
                 .flex()
                 .child(
-                    self.server_bar_view(cx).cached(
+                    self.part(
+                        views::part::Part::ServerBar,
+                        |app, _, cx| views::server_bar::render(app, cx).into_any_element(),
+                        cx,
+                    )
+                    .cached(
                         gpui::StyleRefinement::default()
                             .w(theme::SERVER_BAR_WIDTH)
                             .h_full()

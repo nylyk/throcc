@@ -1,7 +1,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Context, Div, ElementId, InteractiveElement, IntoElement, ParentElement,
-    SharedString, Stateful, StatefulInteractiveElement, Styled, Window, div, px,
+    SharedString, Stateful, StatefulInteractiveElement, Styled, div, px,
 };
 use gpui_component::menu::ContextMenuExt;
 use gpui_component::tooltip::Tooltip;
@@ -12,12 +12,7 @@ use crate::theme;
 
 /// The column of known servers along the window's left edge, under the traffic lights on
 /// macOS, with buttons to add one and to open the settings.
-/// The server bar, for the app's cached part.
-pub fn part(app: &mut ThroccApp, _window: &mut Window, cx: &mut Context<ThroccApp>) -> AnyElement {
-    render(app, cx).into_any_element()
-}
-
-fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
+pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
     let connected = app.connected_server().cloned();
     let connected_picture = app.picture(connected.as_ref().and_then(|s| s.avatar), cx);
     let servers =

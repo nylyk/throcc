@@ -4,8 +4,8 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Context, Div, FontFeatures, FontWeight, InteractiveElement, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement, Pixels, RenderImage, Size as Area, Stateful,
-    StatefulInteractiveElement, StyleRefinement, Styled, Window, canvas, div, px, size,
+    MouseButton, MouseDownEvent, ParentElement, Pixels, RenderImage, SharedString, Size as Area,
+    Stateful, StatefulInteractiveElement, StyleRefinement, Styled, Window, canvas, div, px, size,
 };
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
@@ -23,6 +23,7 @@ use super::common::{
 use super::mascot;
 use super::overlay::ShareOverlay;
 use super::page::{resize_handle, sidebar_column};
+use super::part::Part;
 use crate::app::{Dialog, Screen, ServerPage, ThroccApp, ToggleDeafen, ToggleMic};
 use crate::theme;
 
@@ -35,7 +36,7 @@ pub fn render(
     cx: &mut Context<ThroccApp>,
 ) -> impl IntoElement {
     if let Some(user) = app.fullscreen_stream() {
-        return fullscreen(app, user, window, cx).into_any_element();
+        return fullscreen(app, user, cx).into_any_element();
     }
     let pictures = app.pictures_of_people(cx);
     let content = match app.state.current.as_ref().map(|c| c.room) {
@@ -46,7 +47,15 @@ pub fn render(
         .size_full()
         .flex()
         .child(
-            app.sidebar_view(cx).cached(
+            app.part(
+                Part::Sidebar,
+                |app, _, cx| {
+                    let pictures = app.pictures_of_people(cx);
+                    sidebar(app, &pictures, cx).into_any_element()
+                },
+                cx,
+            )
+            .cached(
                 StyleRefinement::default()
                     .w(app.sidebar_width)
                     .h_full()
@@ -64,23 +73,45 @@ pub fn render(
         .into_any_element()
 }
 
-/// The sidebar, for [`ThroccApp::sidebar_view`].
-pub fn sidebar_part(
-    app: &mut ThroccApp,
-    _window: &mut Window,
-    cx: &mut Context<ThroccApp>,
-) -> AnyElement {
-    let pictures = app.pictures_of_people(cx);
-    sidebar(app, &pictures, cx).into_any_element()
+/// One share filling the window. Its controls show while the pointer moves.
+fn fullscreen(app: &mut ThroccApp, user: UserId, cx: &mut Context<ThroccApp>) -> impl IntoElement {
+    let overlay = app
+        .part(
+            Part::FullscreenOverlay(user),
+            move |app, window, cx| fullscreen_overlay(app, user, window, cx),
+            cx,
+        )
+        .cached(
+            StyleRefinement::default()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+        );
+    let stream = app.feeds.surface(app.client.as_ref(), user, px(0.), cx);
+    div()
+        .id("fullscreen")
+        .size_full()
+        .relative()
+        .bg(theme::player_bg())
+        .on_mouse_move(cx.listener(|app, _, _, cx| app.show_controls(cx)))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |app, event: &MouseDownEvent, window, cx| {
+                app.open_person_menu(user, event.position, window, cx)
+            }),
+        )
+        .child(stream)
+        .child(overlay)
 }
 
-/// One share filling the window. Its controls show while the pointer moves.
-fn fullscreen(
+/// The labels and controls over `user`'s share filling the window.
+fn fullscreen_overlay(
     app: &mut ThroccApp,
     user: UserId,
     window: &mut Window,
     cx: &mut Context<ThroccApp>,
-) -> impl IntoElement {
+) -> AnyElement {
     let state = app.state.clone();
     let person = state.person(user);
     let picture = app.picture(person.and_then(|p| p.avatar), cx);
@@ -111,21 +142,11 @@ fn fullscreen(
         too_slow: state.health.slow_shares.contains(&user),
         fullscreen: true,
     };
-    let stream = app.feeds.surface(app.client.as_ref(), user, px(0.), cx);
     div()
-        .id("fullscreen")
         .size_full()
         .relative()
-        .bg(theme::player_bg())
-        .on_mouse_move(cx.listener(|app, _, _, cx| app.show_controls(cx)))
-        .on_mouse_down(
-            MouseButton::Right,
-            cx.listener(move |app, event: &MouseDownEvent, window, cx| {
-                app.open_person_menu(user, event.position, window, cx)
-            }),
-        )
-        .child(stream)
         .children(overlay.render())
+        .into_any_element()
 }
 
 fn people_in(state: &State, room: RoomId) -> Vec<(UserId, &Person)> {
@@ -522,7 +543,6 @@ fn room(
     cx: &mut Context<ThroccApp>,
 ) -> impl IntoElement {
     let state = app.state.clone();
-    let name = state.room(room).map_or("Room".into(), |r| r.name.clone());
     let tiles: Vec<Tile> = people_in(&state, room)
         .into_iter()
         .map(|(user, person)| Tile {
@@ -534,83 +554,27 @@ fn room(
             popped: app.popouts.contains_key(&user),
         })
         .collect();
-    let rtt = state.health.rtt_ms;
-
-    let header = top_bar()
-        .gap_3()
-        .px_6()
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .typeset(theme::TITLE_3)
-                .child(name),
+    let header = app
+        .part(
+            Part::RoomHeader,
+            move |app, _, cx| room_header(app, room, cx),
+            cx,
         )
-        .child(
-            Button::new("connection")
-                .flex_none()
-                .label(format!(
-                    "{rtt:.0} ms  ↓ {}  ↑ {}",
-                    rate(state.health.download_kbps),
-                    rate(state.health.upload_kbps)
-                ))
-                .icon(icon("activity"))
-                .font_features(FontFeatures(Arc::new(vec![("tnum".into(), 1)])))
-                .ghost()
-                .tooltip("Connection")
-                .on_click(
-                    cx.listener(|app, _, _, cx| app.set_dialog(Some(Dialog::Connection), cx)),
-                ),
+        .cached(
+            StyleRefinement::default()
+                .w_full()
+                .h(theme::HEADER_HEIGHT)
+                .flex_none(),
         );
-
+    let controls = app
+        .part(Part::RoomControls, |app, _, cx| room_controls(app, cx), cx)
+        .cached(
+            StyleRefinement::default()
+                .w_full()
+                .h(theme::FOOTER_HEIGHT)
+                .flex_none(),
+        );
     let sharing = state.current.as_ref().is_some_and(|c| c.sharing.is_some());
-    let controls = bottom_bar()
-        .justify_center()
-        .child(
-            Button::new("share")
-                .child(
-                    icon(if sharing {
-                        "screen-share-off"
-                    } else {
-                        "monitor-up"
-                    })
-                    .size(px(16.)),
-                )
-                .tooltip(if sharing {
-                    "Stop sharing"
-                } else {
-                    "Share screen"
-                })
-                .with_variant(if sharing {
-                    ButtonVariant::Danger
-                } else {
-                    ButtonVariant::Secondary
-                })
-                .rounded(theme::RADIUS_CALL_BUTTON)
-                .w(theme::TOUCH)
-                .h(theme::TOUCH)
-                .px_0()
-                .on_click(cx.listener(move |app, _, _, cx| {
-                    if sharing {
-                        app.command(UiCommand::StopShare);
-                        cx.notify();
-                    } else {
-                        app.set_dialog(Some(Dialog::Share), cx);
-                    }
-                })),
-        )
-        .child(
-            Button::new("leave")
-                .child(icon("phone-off").size(px(16.)))
-                .tooltip("Leave the room")
-                .danger()
-                .rounded(theme::RADIUS_CALL_BUTTON)
-                .w(theme::TOUCH)
-                .h(theme::TOUCH)
-                .px_0()
-                .on_click(cx.listener(|app, _, _, _| app.command(UiCommand::Join(None)))),
-        );
 
     let focus = app
         .focus
@@ -673,6 +637,96 @@ fn room(
                 .child(body),
         )
         .child(controls)
+}
+
+/// The room's name and connection button, across the top of the room.
+fn room_header(app: &mut ThroccApp, room: RoomId, cx: &mut Context<ThroccApp>) -> AnyElement {
+    let state = app.state.clone();
+    let name = state.room(room).map_or("Room".into(), |r| r.name.clone());
+    let rtt = state.health.rtt_ms;
+    top_bar()
+        .w_full()
+        .gap_3()
+        .px_6()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .typeset(theme::TITLE_3)
+                .child(name),
+        )
+        .child(
+            Button::new("connection")
+                .flex_none()
+                .label(format!(
+                    "{rtt:.0} ms  ↓ {}  ↑ {}",
+                    rate(state.health.download_kbps),
+                    rate(state.health.upload_kbps)
+                ))
+                .icon(icon("activity"))
+                .font_features(FontFeatures(Arc::new(vec![("tnum".into(), 1)])))
+                .ghost()
+                .tooltip("Connection")
+                .on_click(
+                    cx.listener(|app, _, _, cx| app.set_dialog(Some(Dialog::Connection), cx)),
+                ),
+        )
+        .into_any_element()
+}
+
+/// The share and leave buttons, across the bottom of the room.
+fn room_controls(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
+    let state = app.state.clone();
+    let sharing = state.current.as_ref().is_some_and(|c| c.sharing.is_some());
+    bottom_bar()
+        .w_full()
+        .justify_center()
+        .child(
+            Button::new("share")
+                .child(
+                    icon(if sharing {
+                        "screen-share-off"
+                    } else {
+                        "monitor-up"
+                    })
+                    .size(px(16.)),
+                )
+                .tooltip(if sharing {
+                    "Stop sharing"
+                } else {
+                    "Share screen"
+                })
+                .with_variant(if sharing {
+                    ButtonVariant::Danger
+                } else {
+                    ButtonVariant::Secondary
+                })
+                .rounded(theme::RADIUS_CALL_BUTTON)
+                .w(theme::TOUCH)
+                .h(theme::TOUCH)
+                .px_0()
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    if sharing {
+                        app.command(UiCommand::StopShare);
+                        cx.notify();
+                    } else {
+                        app.set_dialog(Some(Dialog::Share), cx);
+                    }
+                })),
+        )
+        .child(
+            Button::new("leave")
+                .child(icon("phone-off").size(px(16.)))
+                .tooltip("Leave the room")
+                .danger()
+                .rounded(theme::RADIUS_CALL_BUTTON)
+                .w(theme::TOUCH)
+                .h(theme::TOUCH)
+                .px_0()
+                .on_click(cx.listener(|app, _, _, _| app.command(UiCommand::Join(None)))),
+        )
+        .into_any_element()
 }
 
 /// The dot before a room's name in the sidebar, or a lock when it needs a password.
@@ -892,17 +946,95 @@ fn tile(
             .border_color(theme::speaking())
     });
     if !t.shows_stream {
+        let (person, picture, mine, popped) =
+            (t.person.clone(), t.picture.clone(), t.mine, t.popped);
+        let height = size.height;
+        let card = app.part(
+            Part::Card(user),
+            move |_, _, cx| {
+                let t = Tile {
+                    user,
+                    person: &person,
+                    picture: picture.clone(),
+                    mine,
+                    shows_stream: false,
+                    popped,
+                };
+                person_card(&t, height, compact, cx).into_any_element()
+            },
+            cx,
+        );
         return frame
             .bg(theme::surface())
-            .child(person_card(t, size.height, compact, cx))
+            .child(card.cached(StyleRefinement::default().size_full()))
             .children(speaking_ring)
             .into_any_element();
     }
-    let mine = t.mine;
-    let buttons = if compact {
+    let look = OverlayLook {
+        name: t.person.name.clone().into(),
+        picture: t.picture.clone(),
+        details: t
+            .person
+            .sharing
+            .map(|c| share_label(&c))
+            .unwrap_or_default()
+            .into(),
+        audience: t.person.audience,
+        width: size.width,
+        compact,
+        mine: t.mine,
+    };
+    let overlay = app
+        .part(
+            Part::TileOverlay(user),
+            move |app, _, cx| tile_overlay(app, user, &look, cx),
+            cx,
+        )
+        .cached(
+            StyleRefinement::default()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+        );
+    let radius = theme::RADIUS_TILE - px(1.);
+    let picture = app.feeds.surface(app.client.as_ref(), user, radius, cx);
+    frame
+        .cursor_pointer()
+        .bg(theme::surface())
+        .child(picture)
+        .child(overlay)
+        .children(speaking_ring)
+        .on_hover(cx.listener(move |app, hovered: &bool, _, cx| app.hover_tile(user, *hovered, cx)))
+        .on_click(cx.listener(move |app, _, _, cx| {
+            app.focus = (layout != Layout::Stage).then_some(user);
+            cx.notify();
+        }))
+        .into_any_element()
+}
+
+/// What a share's tile overlay shows of its sharer.
+struct OverlayLook {
+    name: SharedString,
+    picture: Option<Arc<RenderImage>>,
+    details: SharedString,
+    audience: usize,
+    width: Pixels,
+    compact: bool,
+    mine: bool,
+}
+
+/// The labels and controls over `user`'s share in a tile.
+fn tile_overlay(
+    app: &mut ThroccApp,
+    user: UserId,
+    look: &OverlayLook,
+    cx: &mut Context<ThroccApp>,
+) -> AnyElement {
+    let buttons = if look.compact {
         Vec::new()
     } else {
-        let pop_out = (!mine).then(|| {
+        let pop_out = (!look.mine).then(|| {
             ghost_icon(
                 ("pop-out", user.0 as usize),
                 "picture-in-picture-2",
@@ -933,36 +1065,22 @@ fn tile(
             .collect()
     };
     let overlay = ShareOverlay {
-        name: t.person.name.clone().into(),
+        name: look.name.clone(),
         seed: user.0,
-        picture: t.picture.clone(),
-        details: t
-            .person
-            .sharing
-            .map(|c| share_label(&c))
-            .unwrap_or_default()
-            .into(),
-        width: size.width,
+        picture: look.picture.clone(),
+        details: look.details.clone(),
+        width: look.width,
         title_inset: px(0.),
         buttons,
-        audience: t.person.audience,
+        audience: look.audience,
         controls: app.shows_overlay(user),
         too_slow: app.state.health.slow_shares.contains(&user),
         fullscreen: false,
     };
-    let radius = theme::RADIUS_TILE - px(1.);
-    let picture = app.feeds.surface(app.client.as_ref(), user, radius, cx);
-    frame
-        .cursor_pointer()
-        .bg(theme::surface())
-        .child(picture)
+    div()
+        .size_full()
+        .relative()
         .children(overlay.render())
-        .children(speaking_ring)
-        .on_hover(cx.listener(move |app, hovered: &bool, _, cx| app.hover_tile(user, *hovered, cx)))
-        .on_click(cx.listener(move |app, _, _, cx| {
-            app.focus = (layout != Layout::Stage).then_some(user);
-            cx.notify();
-        }))
         .into_any_element()
 }
 
