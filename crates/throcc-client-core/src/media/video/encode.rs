@@ -1398,6 +1398,53 @@ mod pixel_buffers {
     }
 
     #[test]
+    fn a_corrupt_unit_keeps_hardware_decoding_until_the_next_keyframe() {
+        let Some(mut encoder) = opened(c"hevc_videotoolbox") else {
+            eprintln!("skipped: no VideoToolbox HEVC encoder here");
+            return;
+        };
+        let mut decoder = Decoder::new(Codec::Hevc, MaxSize::ANY).unwrap();
+        if !decoder.is_hardware() {
+            eprintln!("skipped: no hardware HEVC decoder here");
+            return;
+        }
+        let (mut failed, mut asked, mut shown_after) = (false, false, 0);
+        for n in 0..40u16 {
+            let input = VideoFrame::test_pattern(1280, 720, n, u32::from(n) * 3000);
+            for mut unit in encoder.encode(&input).unwrap() {
+                if n == 15 {
+                    let mut bytes = unit.data.to_vec();
+                    let len = bytes.len();
+                    for byte in &mut bytes[len / 4..len * 3 / 4] {
+                        *byte ^= 0x5a;
+                    }
+                    unit.data = bytes.into();
+                }
+                match decoder.decode(&unit.data, unit.timestamp) {
+                    Ok(Some(_)) => {
+                        asked = false;
+                        shown_after += usize::from(failed);
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        failed = true;
+                        if !asked {
+                            encoder.recover(Recovery::Idr);
+                            asked = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(failed, "the corrupt unit decoded");
+        assert!(decoder.is_hardware(), "fell back to software");
+        assert!(
+            shown_after >= 15,
+            "only {shown_after} pictures after the corrupt unit"
+        );
+    }
+
+    #[test]
     fn a_picture_of_another_size_or_a_software_encoder_is_refused() {
         let picture = PixelBuffer::holding(&VideoFrame::test_pattern(640, 360, 0, 0));
         if let Some(mut videotoolbox) = opened(c"h264_videotoolbox") {

@@ -100,7 +100,14 @@ pub struct Decoder {
     downloaded: Option<AVFrame>,
     /// A picture no longer shown, whose planes the next picture is written into.
     spare: Option<VideoFrame>,
+    /// The timestamp of the first unit in the current run of hardware failures.
+    failing_since: Option<u32>,
 }
+
+/// How long, in 90 kHz media time, a hardware decoder may keep failing before it is swapped
+/// for a software one. Flushed after bad data, VideoToolbox decodes again from the next
+/// keyframe, which the receiver asks the sender for.
+const HARDWARE_GRACE: u32 = 3 * 90_000;
 
 impl Decoder {
     /// Opens a decoder that refuses pictures larger than `max_size`.
@@ -140,6 +147,7 @@ impl Decoder {
                 max_size,
                 downloaded: None,
                 spare: None,
+                failing_since: None,
             })
         })
     }
@@ -162,6 +170,7 @@ impl Decoder {
             max_size,
             downloaded: None,
             spare: None,
+            failing_since: None,
         })
     }
 
@@ -182,20 +191,33 @@ impl Decoder {
     }
 
     /// Decodes one access unit. Returns the newest picture it produced, if any. A hardware
-    /// decoder that FFmpeg reports failing is swapped for a software one, which decodes the
-    /// same unit. Invalid data such as a unit before the first keyframe, a picture too large,
-    /// or one in a format throcc doesn't present is no fault of the hardware, so it keeps it.
+    /// decoder that FFmpeg reports failing is reset and given the unit again; one failing for
+    /// [`HARDWARE_GRACE`] with no picture in between is swapped for a software one, which
+    /// decodes the same unit. Invalid data such as a unit before the first keyframe, a picture
+    /// too large, or one in a format throcc doesn't present is no fault of the hardware, so it
+    /// never counts.
     pub fn decode(&mut self, unit: &[u8], timestamp: u32) -> Result<Option<Frame>, DecodeError> {
-        match self.decode_unit(unit, timestamp) {
-            Err(DecodeError::Ffmpeg(e))
-                if self.hardware && e.raw_error() != Some(ffi::AVERROR_INVALIDDATA) =>
-            {
-                warn!("hardware decoding failed ({e}); decoding in software");
+        let mut result = self.decode_unit(unit, timestamp);
+        if self.hardware_failed(&result) {
+            let since = *self.failing_since.get_or_insert(timestamp);
+            if timestamp.wrapping_sub(since) >= HARDWARE_GRACE {
+                warn!("hardware decoding keeps failing; decoding in software");
                 *self = Self::in_software(self.codec, self.max_size)?;
-                self.decode_unit(unit, timestamp)
+                return self.decode_unit(unit, timestamp);
             }
-            result => result,
+            self.ctx.flush_buffers();
+            result = self.decode_unit(unit, timestamp);
         }
+        if let Ok(Some(_)) = result {
+            self.failing_since = None;
+        }
+        result
+    }
+
+    /// Whether `result` is a failure of the hardware rather than of the data it was given.
+    fn hardware_failed(&self, result: &Result<Option<Frame>, DecodeError>) -> bool {
+        self.hardware
+            && matches!(result, Err(DecodeError::Ffmpeg(e)) if e.raw_error() != Some(ffi::AVERROR_INVALIDDATA))
     }
 
     fn decode_unit(&mut self, unit: &[u8], timestamp: u32) -> Result<Option<Frame>, DecodeError> {
