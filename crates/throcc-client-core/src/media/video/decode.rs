@@ -124,6 +124,10 @@ impl Decoder {
         Ok(decoder)
     }
 
+    #[allow(
+        clippy::unnecessary_cast,
+        reason = "bindgen types AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32 on MSVC only"
+    )]
     fn on_hardware(codec: Codec, max_size: MaxSize) -> Option<Self> {
         let found = AVCodec::find_decoder_by_name(native_decoder(codec))?;
         devices().iter().find_map(|&device_type| {
