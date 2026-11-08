@@ -518,18 +518,18 @@ pub fn receive(
                 };
                 if let Some(unit) = &unit {
                     let decoded = decoder.decode(&unit.data, unit.timestamp);
-                    let mut lost_references = decoder.take_flushed();
-                    if *engine_tx.borrow() != decoder.engine() {
+                    let flushed = decoder.take_flushed();
+                    let engine_changed = *engine_tx.borrow() != decoder.engine();
+                    if engine_changed {
                         engine_tx.send_replace(decoder.engine());
-                        lost_references = true;
                     }
-                    if lost_references {
+                    if engine_changed || (flushed && !asked) {
                         ask_idr();
                         asked = true;
                     }
                     match decoded {
                         Ok(Some(frame)) => {
-                            asked = false;
+                            asked &= flushed;
                             make_room(&mut held, frame_bytes(&frame));
                             held.push_back(Arc::new(frame));
                         }
