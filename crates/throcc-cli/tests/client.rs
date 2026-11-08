@@ -20,7 +20,7 @@ use throcc_proto::messages::{
 use throcc_server::identity::KEY_FILE;
 use tokio::runtime::Runtime;
 
-use common::{ProcessLikeServer, share_1080p60, sharing};
+use common::{ProcessLikeServer, client_as, named, share_1080p60, sharing, wait_for_state_within};
 
 /// A server's address and an admin invite. It runs until the returned handle drops.
 fn server() -> (String, InviteCode, ProcessLikeServer) {
@@ -39,38 +39,8 @@ fn client_in(dir: &Path, address: &str, invite: Option<&InviteCode>) -> Client {
     client_as(dir, address, invite, named("Ilse"))
 }
 
-fn named(name: &str) -> Profile {
-    Profile {
-        name: name.into(),
-        picture: None,
-    }
-}
-
-fn client_as(dir: &Path, address: &str, invite: Option<&InviteCode>, profile: Profile) -> Client {
-    let keystore = Keystore::open_in(dir).unwrap();
-    let verified = VerifiedStore::load(dir).unwrap();
-    Client::connect(address, keystore, invite, profile, None, verified).unwrap()
-}
-
 fn wait_for(client: &Client, what: &str, ready: impl FnMut(&State) -> bool) {
-    wait_for_within(Duration::from_secs(5), client, what, ready);
-}
-
-fn wait_for_within(
-    timeout: Duration,
-    client: &Client,
-    what: &str,
-    mut ready: impl FnMut(&State) -> bool,
-) {
-    let deadline = Instant::now() + timeout;
-    while !ready(&client.state()) {
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for {what}: {:?}",
-            client.state()
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_for_state_within(Duration::from_secs(5), client, what, ready);
 }
 
 /// Waits until `ready` holds, for checks on a bare call.
@@ -725,7 +695,7 @@ fn people_not_verified_are_shown_so_and_still_hear_us() {
             && s.key_warnings.is_empty()
     });
     wait_until("bob to hold alice's key", || holds_key_of(&bob, alice_id));
-    wait_for_within(Duration::from_secs(10), &alice, "bob's mic followed", |s| {
+    wait_for_state_within(Duration::from_secs(10), &alice, "bob's mic followed", |s| {
         s.health
             .receiving
             .iter()
@@ -873,7 +843,7 @@ fn a_removed_member_stops_reconnecting() {
         user: bob_id,
         cascade: false,
     });
-    wait_for_within(Duration::from_secs(10), &bob, "bob to give up", |s| {
+    wait_for_state_within(Duration::from_secs(10), &bob, "bob to give up", |s| {
         matches!(s.connection, ConnectionStatus::Failed(_))
     });
 }

@@ -4,6 +4,7 @@
 pub mod unit;
 
 use std::collections::VecDeque;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,10 +15,14 @@ use serde::de::DeserializeOwned;
 use tempfile::TempDir;
 use throcc_client_core::account::{self, SignInError};
 use throcc_client_core::call::{Call, CallEvent};
+use throcc_client_core::client::{Client, ClientApi};
 use throcc_client_core::connection::{self, Connected};
 use throcc_client_core::control::ControlLink;
 use throcc_client_core::keystore::Keystore;
 use throcc_client_core::media::engine::{Kind, Received};
+use throcc_client_core::profile::Profile;
+use throcc_client_core::state::State;
+use throcc_client_core::verified::VerifiedStore;
 use throcc_crypto::identity::IdentityKey;
 use throcc_crypto::pake::{ClientPake, Transcript};
 use throcc_proto::framing;
@@ -281,6 +286,49 @@ pub async fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+pub fn named(name: &str) -> Profile {
+    Profile {
+        name: name.into(),
+        picture: None,
+    }
+}
+
+pub fn client_as(
+    dir: &Path,
+    address: &str,
+    invite: Option<&InviteCode>,
+    profile: Profile,
+) -> Client {
+    let keystore = Keystore::open_in(dir).unwrap();
+    let verified = VerifiedStore::load(dir).unwrap();
+    Client::connect(address, keystore, invite, profile, None, verified).unwrap()
+}
+
+pub fn wait_for_state_within(
+    timeout: Duration,
+    client: &Client,
+    what: &str,
+    mut ready: impl FnMut(&State) -> bool,
+) {
+    let deadline = Instant::now() + timeout;
+    while !ready(&client.state()) {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {what}: {:?}",
+            client.state()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Says why a test checked nothing. Written past the test harness's capture, so a run
+/// without an encoder doesn't read as a quiet pass.
+pub fn skip(why: impl std::fmt::Display) {
+    let thread = std::thread::current();
+    let test = thread.name().unwrap_or("a test");
+    writeln!(std::io::stderr(), "{test}: skipped: {why}").ok();
 }
 
 pub async fn room_with_two(server: &TestServer) -> (Call, Call, RoomId) {

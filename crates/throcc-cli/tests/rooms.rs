@@ -780,8 +780,8 @@ async fn a_member_who_stops_reading_pictures_stops_being_read() {
     let requests = (0..FETCHES)
         .map(|_| Request::FetchAvatar(hash))
         .chain([Request::CreateInvite]);
-    for (id, req) in (0..).zip(requests) {
-        let message = ClientMessage::Request { id, request: req };
+    for (id, request) in (0..).zip(requests) {
+        let message = ClientMessage::Request { id, request };
         bob.send
             .write_all(&framing::encode(&message).unwrap())
             .await
@@ -806,8 +806,8 @@ async fn a_member_who_stops_reading_pictures_stops_being_read() {
                 response: Response::Avatar(_),
                 ..
             } => pictures += 1,
-            ServerMessage::Response { id, response: res } if id == FETCHES => {
-                assert!(matches!(res, Response::Invite { .. }), "{res:?}");
+            ServerMessage::Response { id, response } if id == FETCHES => {
+                assert!(matches!(response, Response::Invite { .. }), "{response:?}");
                 break;
             }
             _ => {}

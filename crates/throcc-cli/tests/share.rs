@@ -2,7 +2,6 @@
 
 mod common;
 
-use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -22,14 +21,6 @@ use common::*;
 
 const WANTED: ShareConfig = share_1080p60(Codec::H264, 8000);
 const WATCH_UNITS: usize = 256;
-
-/// Says why a test checked nothing. Written past the test harness's capture, so a run
-/// without an encoder doesn't read as a quiet pass.
-fn skip(why: impl std::fmt::Display) {
-    let thread = std::thread::current();
-    let test = thread.name().unwrap_or("a test");
-    writeln!(std::io::stderr(), "{test}: skipped: {why}").ok();
-}
 
 /// Starts Alice sharing a test pattern stamped with milliseconds since `epoch`, and
 /// forwards the server's keyframe requests to her encoder. `None`, reported as a skip,

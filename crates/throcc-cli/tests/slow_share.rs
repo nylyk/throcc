@@ -2,7 +2,6 @@
 
 mod common;
 
-use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -10,12 +9,9 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use throcc_client_core::call::{Call, CallEvent};
 use throcc_client_core::client::{Client, ClientApi, UiCommand};
-use throcc_client_core::keystore::Keystore;
 use throcc_client_core::media::capture::{CaptureConfig, TestPattern};
 use throcc_client_core::media::share::ShareSender;
-use throcc_client_core::profile::Profile;
 use throcc_client_core::state::{ConnectionStatus, State, TrackHealth};
-use throcc_client_core::verified::VerifiedStore;
 use throcc_proto::ids::UserId;
 use throcc_proto::messages::{Codec, Event, Request, Response, ShareConfig};
 use tokio::runtime::Runtime;
@@ -55,18 +51,13 @@ impl Watching {
         let sharer = call.me();
 
         let viewer_dir = tempfile::tempdir().unwrap();
-        let viewer = Client::connect(
+        let invite = server.admin_invite();
+        let viewer = client_as(
+            viewer_dir.path(),
             viewer_addr,
-            Keystore::open_in(viewer_dir.path()).unwrap(),
-            Some(&server.admin_invite()),
-            Profile {
-                name: "Viewer".into(),
-                picture: None,
-            },
-            None,
-            VerifiedStore::load(viewer_dir.path()).unwrap(),
-        )
-        .unwrap();
+            Some(&invite),
+            named("Viewer"),
+        );
         wait_for_state(&viewer, "connected", |s| {
             s.connection == ConnectionStatus::Connected
         });
@@ -115,9 +106,10 @@ impl Watching {
 
     /// The share's row in the viewer's health over the last refresh.
     fn screen_health(&self) -> Option<TrackHealth> {
-        let state = self.viewer.state();
-        let receiving = &state.health.receiving;
-        receiving
+        self.viewer
+            .state()
+            .health
+            .receiving
             .iter()
             .find(|t| t.label.ends_with("screen"))
             .cloned()
@@ -151,29 +143,8 @@ fn forward_keyframe_requests(call: &mut Call, sender: Arc<ShareSender>) {
     });
 }
 
-/// Says why a test checked nothing. Written past the test harness's capture, so a run
-/// without an encoder doesn't read as a quiet pass.
-fn skip(why: impl std::fmt::Display) {
-    let thread = std::thread::current();
-    let test = thread.name().unwrap_or("a test");
-    writeln!(std::io::stderr(), "{test}: skipped: {why}").ok();
-}
-
 fn wait_for_state(client: &Client, what: &str, ready: impl FnMut(&State) -> bool) {
     wait_for_state_within(Duration::from_secs(10), client, what, ready);
-}
-
-fn wait_for_state_within(
-    timeout: Duration,
-    client: &Client,
-    what: &str,
-    mut ready: impl FnMut(&State) -> bool,
-) {
-    let deadline = Instant::now() + timeout;
-    while !ready(&client.state()) {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
 }
 
 #[test]
