@@ -25,8 +25,8 @@ pub enum Part {
     FullscreenOverlay(UserId),
 }
 
-/// A part of the main window drawn from the app's state as a view of its own, so the window
-/// reuses it while only a share redraws. It redraws whenever the app is notified.
+/// A part of the main window drawn from the app's state as a view of its own. It redraws
+/// whenever the app is notified, and not when only a share does.
 pub struct AppPart {
     app: WeakEntity<ThroccApp>,
     draw: Draw,

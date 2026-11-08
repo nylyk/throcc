@@ -5,7 +5,7 @@ use gpui::{Styled, Svg, px, svg};
 
 use crate::theme;
 
-/// On the join screen before any server is known.
+/// On the onboarding screen, and on the join screen before any server is known.
 pub const WELCOMERS: &[&str] = &["mascot/cool.svg", "mascot/happy.svg", "mascot/love.svg"];
 
 /// On the join screen once a server is known.

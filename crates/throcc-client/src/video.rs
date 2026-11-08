@@ -16,8 +16,8 @@ use gpui_component::{Sizable, Size};
 use crate::theme;
 use crate::views::common::icon;
 
-/// How often a share on screen tells the core it is still drawn; under the core's one-second
-/// preview linger.
+/// How often a share on screen tells the core it is still drawn. It stays under the core's
+/// one-second preview linger.
 const STILL_DRAWN_EVERY: Duration = Duration::from_millis(500);
 /// How often a share on screen looks for its picture before the core has one.
 const PICTURE_WAIT: Duration = Duration::from_millis(100);
@@ -31,8 +31,8 @@ pub struct Feeds {
 }
 
 impl Feeds {
-    /// Lets go of the shares not drawn since the last sweep, so a share that left the window
-    /// holds no memory. Called at the start of each render of the window.
+    /// Lets go of the shares not drawn since the last sweep. Each render of the window starts
+    /// with it.
     pub fn sweep(&mut self) {
         let drawn = std::mem::take(&mut self.drawn);
         self.views.retain(|user, _| drawn.contains(user));

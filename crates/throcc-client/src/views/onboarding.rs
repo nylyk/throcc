@@ -9,7 +9,7 @@ use super::page::{field, picture_editor, save_line};
 use crate::app::{PictureFor, ThroccApp, typed_name};
 use crate::theme;
 
-/// The window before we have a name: asks for one, and optionally a picture.
+/// The window before we have a name. It asks for one, and optionally a picture.
 pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
     let typed = typed_name(&app.name, cx);
     let shown_name = typed.clone().ok().flatten().unwrap_or_default();

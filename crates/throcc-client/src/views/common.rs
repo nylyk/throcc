@@ -357,8 +357,8 @@ pub fn ghost_icon(
 /// Room the macOS traffic lights take at the left of a window's top bar.
 pub const TRAFFIC_LIGHTS: Pixels = px(if cfg!(target_os = "macos") { 76. } else { 0. });
 
-/// `options` with the titlebar drawn by the app on macOS: the traffic lights sit in our own
-/// views at `lights`, and a `blurred` window shows the desktop behind see-through views.
+/// `options` with the app's own titlebar on macOS, the traffic lights in our views at `lights`.
+/// A `blurred` window shows the desktop behind see-through views on macOS and Linux.
 pub fn app_titlebar(options: WindowOptions, lights: Point<Pixels>, blurred: bool) -> WindowOptions {
     let options = WindowOptions {
         window_background: if blurred && theme::SEES_DESKTOP {
