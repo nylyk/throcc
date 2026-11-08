@@ -312,7 +312,9 @@ impl Hub {
         else {
             return Ok(Err(AuthError::UnknownKey));
         };
-        self.db.mark_seen(user, unix_now())?;
+        if let Err(e) = self.db.mark_seen(user, unix_now()) {
+            warn!(user = user.0, "can't note the sign-in time: {e:#}");
+        }
         let full =
             self.sessions.len() >= MAX_SIGNED_IN || (row.role != Role::Admin && self.is_full());
         if full && !self.sessions.contains_key(&user) {
