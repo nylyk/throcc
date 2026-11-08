@@ -380,6 +380,14 @@ mod tests {
 
     use super::*;
 
+    /// Steps the xorshift32 `state` and returns white noise in -0.5..0.5.
+    fn next_noise(state: &mut u32) -> f32 {
+        *state ^= *state << 13;
+        *state ^= *state >> 17;
+        *state ^= *state << 5;
+        *state as f32 / u32::MAX as f32 - 0.5
+    }
+
     /// Speech-like test signal: a gliding voiced harmonic series, shaped into syllables.
     fn speech(seed: u32, seconds: f32) -> Vec<f32> {
         let n = (seconds * SAMPLE_RATE as f32) as usize;
@@ -392,10 +400,7 @@ mod tests {
                 let f0 = 135.0 + 35.0 * (2.0 * std::f32::consts::PI * (0.6 + offset) * t).sin();
                 phase += 2.0 * std::f32::consts::PI * f0 / SAMPLE_RATE as f32;
                 let voiced: f32 = (1..30).map(|k| (phase * k as f32).sin() / k as f32).sum();
-                noise ^= noise << 13;
-                noise ^= noise >> 17;
-                noise ^= noise << 5;
-                let hiss = (noise as f32 / u32::MAX as f32 - 0.5) * 0.3;
+                let hiss = next_noise(&mut noise) * 0.3;
                 let syllable = (2.0 * std::f32::consts::PI * (3.3 + offset) * t)
                     .sin()
                     .max(0.0)
@@ -598,15 +603,9 @@ mod tests {
         let mut noise = 0x9e37_79b9u32;
         (0..n)
             .map(|i| {
-                noise ^= noise << 13;
-                noise ^= noise >> 17;
-                noise ^= noise << 5;
+                let sample = next_noise(&mut noise) * 0.8;
                 let in_click = i % (SAMPLE_RATE as usize * 150 / 1000) < FRAME;
-                if in_click {
-                    (noise as f32 / u32::MAX as f32 - 0.5) * 0.8
-                } else {
-                    0.0
-                }
+                if in_click { sample } else { 0.0 }
             })
             .collect()
     }

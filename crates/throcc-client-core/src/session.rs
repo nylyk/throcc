@@ -1327,15 +1327,8 @@ impl Session {
         self.audio(CallCommand::Deafened(self.media.deafened));
         self.show_shares();
         let response = self.call.request(Request::SetMedia(media)).await;
-        if refuses_share_start(&response, media.share, self.server_share) {
-            let full = matches!(
-                response,
-                Ok(Response::Err {
-                    code: ErrorCode::Full,
-                    ..
-                })
-            );
-            self.undo_refused_share(full).await;
+        if let Some(code) = share_start_refusal(&response, media.share, self.server_share) {
+            self.undo_refused_share(code == ErrorCode::Full).await;
             return;
         }
         match response {
@@ -1966,22 +1959,21 @@ fn refusal(response: anyhow::Result<Response>) -> String {
     response.map_or_else(|e| e.to_string(), control::refusal)
 }
 
-/// Whether `response` to a `SetMedia` carrying `sent` refused to start that share, because
-/// of the share allowance or because the room has all the shares it holds. The server still
-/// applies the mic and deafen then, and keeps the share it had (`on_server`).
-fn refuses_share_start(
+/// The code with which `response` to a `SetMedia` carrying `sent` refused to start that
+/// share, for the share allowance or a room that has all the shares it holds. The server
+/// still applies the mic and deafen then, and keeps the share it had (`on_server`).
+fn share_start_refusal(
     response: &anyhow::Result<Response>,
     sent: Option<ShareConfig>,
     on_server: Option<ShareConfig>,
-) -> bool {
-    let refused = matches!(
-        response,
+) -> Option<ErrorCode> {
+    match response {
         Ok(Response::Err {
-            code: ErrorCode::RateLimited | ErrorCode::Full,
+            code: code @ (ErrorCode::RateLimited | ErrorCode::Full),
             ..
-        })
-    );
-    refused && sent.is_some() && sent != on_server
+        }) if sent.is_some() && sent != on_server => Some(*code),
+        _ => None,
+    }
 }
 
 /// How far `counter` has moved since `last`, which it then replaces.
@@ -2138,26 +2130,28 @@ mod tests {
                 message: "too many share starts".into(),
             })
         };
-        assert!(refuses_share_start(&limited(), share, None));
+        assert_eq!(
+            share_start_refusal(&limited(), share, None),
+            Some(ErrorCode::RateLimited)
+        );
         // A push-to-talk press while the server already has our share.
-        assert!(!refuses_share_start(&limited(), share, share));
-        assert!(!refuses_share_start(&limited(), None, None));
-        assert!(!refuses_share_start(&Ok(Response::Ok), share, None));
+        assert!(share_start_refusal(&limited(), share, share).is_none());
+        assert!(share_start_refusal(&limited(), None, None).is_none());
+        assert!(share_start_refusal(&Ok(Response::Ok), share, None).is_none());
         let forbidden = Ok(Response::Err {
             code: ErrorCode::Forbidden,
             message: "no".into(),
         });
-        assert!(!refuses_share_start(&forbidden, share, None));
+        assert!(share_start_refusal(&forbidden, share, None).is_none());
         let full = Ok(Response::Err {
             code: ErrorCode::Full,
             message: "this room already has 5 screen shares running".into(),
         });
-        assert!(refuses_share_start(&full, share, None));
-        assert!(!refuses_share_start(
-            &Err(anyhow::anyhow!("timed out")),
-            share,
-            None
-        ));
+        assert_eq!(
+            share_start_refusal(&full, share, None),
+            Some(ErrorCode::Full)
+        );
+        assert!(share_start_refusal(&Err(anyhow::anyhow!("timed out")), share, None).is_none());
     }
 
     #[test]

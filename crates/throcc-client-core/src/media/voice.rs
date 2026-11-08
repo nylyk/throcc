@@ -294,9 +294,12 @@ impl DeviceIo {
         }
     }
 
+    fn queued_samples(&self) -> usize {
+        self.devices.playback.buffer().capacity() - self.devices.playback.slots()
+    }
+
     fn queued_playback(&self) -> usize {
-        let capacity = self.devices.playback.buffer().capacity();
-        (capacity - self.devices.playback.slots()) / self.device_out.len().max(1)
+        self.queued_samples() / self.device_out.len().max(1)
     }
 
     fn wants_playback(&self) -> bool {
@@ -318,7 +321,7 @@ impl DeviceIo {
             self.device_in.len().saturating_sub(captured),
             self.device_in.len(),
         );
-        let queued = self.devices.playback.buffer().capacity() - self.devices.playback.slots();
+        let queued = self.queued_samples();
         let over_ahead = (queued + 1).saturating_sub(PLAYBACK_AHEAD * self.device_out.len());
         // The speakers drain the queue one device period at a time, so the queue sits just
         // over PLAYBACK_AHEAD pulls until the next period.
