@@ -170,18 +170,23 @@ struct Watched {
     last_bytes: u64,
     last_received: u64,
     last_lost: u64,
-    dropped_this_refresh: bool,
-    dropped_last_refresh: bool,
+    /// How many server reports in a row said it dropped units of this track for us.
+    reports_with_drops: u32,
 }
 
 impl Watched {
-    /// Ends one health refresh. The track is too slow for our connection when the server
-    /// dropped units for us in this refresh and the one before.
-    fn too_slow_this_refresh(&mut self) -> bool {
-        let dropped = std::mem::take(&mut self.dropped_this_refresh);
-        let too_slow = dropped && self.dropped_last_refresh;
-        self.dropped_last_refresh = dropped;
-        too_slow
+    fn server_reported(&mut self, dropped_units: u32) {
+        self.reports_with_drops = if dropped_units > 0 {
+            self.reports_with_drops.saturating_add(1)
+        } else {
+            0
+        };
+    }
+
+    /// Whether the track is too slow for our connection: the server dropped units of it for
+    /// us in its last two reports.
+    fn too_slow(&self) -> bool {
+        self.reports_with_drops >= 2
     }
 }
 
@@ -249,6 +254,9 @@ pub(crate) struct Session {
     profile: Profile,
     /// Our profile as the server has it.
     server_profile: UserProfile,
+    /// Our profile as the server refused it for coming too soon after the last change. Its
+    /// picture is uploaded, and the health refresh sets it again.
+    too_soon_profile: Option<UserProfile>,
     saved_playback: SavedPlayback,
     /// Each sound set for people who presented no identity key yet, saved under the key
     /// once they do.
@@ -375,6 +383,7 @@ impl Session {
             watched_shares: HashMap::new(),
             mic_before_deafen: false,
             server_profile: call.welcome.profile.clone(),
+            too_soon_profile: None,
             profile,
             saved_playback,
             unkeyed_playback: HashMap::new(),
@@ -394,24 +403,15 @@ impl Session {
     }
 
     /// Gives the server our profile, uploading the picture only if the server lacks it, and
-    /// tells the UI how that went. A push the closing connection cut off tells it nothing,
-    /// since the session pushes again once reconnected.
+    /// tells the UI how that went.
     async fn push_profile(&mut self) {
-        let event = match self.try_push_profile().await {
-            Ok(()) => UiEvent::ProfileSaved,
-            Err(_) if self.call.connection.close_reason().is_some() => return,
-            Err(reason) => UiEvent::ProfileRefused(reason),
-        };
-        self.shared.emit(event);
-    }
-
-    async fn try_push_profile(&mut self) -> Result<(), String> {
+        self.too_soon_profile = None;
         let wanted = UserProfile {
             name: self.profile.name.clone(),
             avatar: self.profile.avatar(),
         };
         if wanted == self.server_profile {
-            return Ok(());
+            return self.shared.emit(UiEvent::ProfileSaved);
         }
         if let Some(bytes) = &self.profile.picture
             && wanted.avatar != self.server_profile.avatar
@@ -422,9 +422,15 @@ impl Session {
                 .await
             {
                 Ok(Response::AvatarHash(hash)) if Some(hash) == wanted.avatar => {}
-                other => return Err(refusal(other)),
+                other => return self.profile_refused(other),
             }
         }
+        self.set_profile(wanted).await;
+    }
+
+    /// Puts `wanted`, whose picture the server holds, on our profile and tells the UI how that
+    /// went. A refusal for coming too soon tells it nothing until a later try settles it.
+    async fn set_profile(&mut self, wanted: UserProfile) {
         let request = Request::SetProfile {
             name: wanted.name.clone(),
             avatar: wanted.avatar,
@@ -432,9 +438,21 @@ impl Session {
         match self.call.request(request).await {
             Ok(Response::Ok) => {
                 self.server_profile = wanted;
-                Ok(())
+                self.shared.emit(UiEvent::ProfileSaved);
             }
-            other => Err(refusal(other)),
+            Ok(Response::Err {
+                code: ErrorCode::RateLimited,
+                ..
+            }) => self.too_soon_profile = Some(wanted),
+            other => self.profile_refused(other),
+        }
+    }
+
+    /// Tells the UI the server refused our profile. A push the closing connection cut off
+    /// tells it nothing, since the session pushes again once reconnected.
+    fn profile_refused(&self, response: anyhow::Result<Response>) {
+        if self.call.connection.close_reason().is_none() {
+            self.shared.emit(UiEvent::ProfileRefused(refusal(response)));
         }
     }
 
@@ -521,6 +539,9 @@ impl Session {
                 }
                 _ = health.tick() => {
                     self.refresh_health();
+                    if let Some(wanted) = self.too_soon_profile.take() {
+                        self.set_profile(wanted).await;
+                    }
                     let floors = self.call.floors.clone();
                     let saved = tokio::task::spawn_blocking(move || floors.save())
                         .await
@@ -1469,8 +1490,7 @@ impl Session {
             last_bytes: arrived.bytes,
             last_received: arrived.datagrams,
             last_lost: arrived.lost,
-            dropped_this_refresh: false,
-            dropped_last_refresh: false,
+            reports_with_drops: 0,
         }
     }
 
@@ -1674,6 +1694,9 @@ impl Session {
                 KeyNotice::TooManyPeers => self.shared.notice(format!(
                     "The server described the room with more than {MAX_ROOM_MEMBERS} people, so the call is paused until it sends a valid one."
                 )),
+                KeyNotice::TooManyShares => self.shared.notice(format!(
+                    "The server described the room with more than {MAX_ROOM_SHARES} screen shares for one person, so the call is paused until it sends a valid one."
+                )),
                 KeyNotice::OldEpoch => self.shared.notice(
                     "The server put this room back to keys older than ones you've used here, as a restored backup or a replayed call would. You won't hear anyone here until the room moves past them.",
                 ),
@@ -1754,10 +1777,14 @@ impl Session {
             ServerEvent::ReceiveStats { tracks } => {
                 for t in &tracks {
                     self.dropped_for_you = self.dropped_for_you.saturating_add(t.dropped_units);
-                    if let Some(watched) = self.tracks.get_mut(&t.media_id)
-                        && matches!(watched.carries, Carries::ShareVideo { .. })
-                    {
-                        watched.dropped_this_refresh |= t.dropped_units > 0;
+                }
+                for (media_id, watched) in self.tracks.iter_mut() {
+                    if matches!(watched.carries, Carries::ShareVideo { .. }) {
+                        let dropped = tracks
+                            .iter()
+                            .find(|t| t.media_id == *media_id)
+                            .map_or(0, |t| t.dropped_units);
+                        watched.server_reported(dropped);
                     }
                 }
             }
@@ -1843,7 +1870,7 @@ impl Session {
             let new_lost = advance(&mut track.last_lost, arrived.lost);
             received_total += new_received;
             lost_total += new_lost;
-            if track.too_slow_this_refresh() {
+            if track.too_slow() {
                 slow_shares.insert(track.user);
             }
             let name = state
@@ -2093,25 +2120,45 @@ fn receivers_of(audiences: &Audiences, video: MediaId) -> Option<&[UserId]> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_share_is_too_slow_only_while_the_server_drops_in_consecutive_refreshes() {
+    /// Whether the track counts as too slow at each health refresh, given the units each
+    /// server report between refreshes dropped.
+    fn too_slow_at_refreshes(reports: &[&[u32]]) -> Vec<bool> {
         let mut track = Watched {
             user: UserId(4),
             carries: Carries::ShareAudio,
             last_bytes: 0,
             last_received: 0,
             last_lost: 0,
-            dropped_this_refresh: false,
-            dropped_last_refresh: false,
+            reports_with_drops: 0,
         };
-        let slow: Vec<bool> = [true, false, true, true, true, false, true]
-            .into_iter()
-            .map(|dropped| {
-                track.dropped_this_refresh = dropped;
-                track.too_slow_this_refresh()
+        reports
+            .iter()
+            .map(|between| {
+                for &dropped in *between {
+                    track.server_reported(dropped);
+                }
+                track.too_slow()
             })
-            .collect();
-        assert_eq!(slow, [false, false, false, true, true, false, false]);
+            .collect()
+    }
+
+    #[test]
+    fn a_share_is_too_slow_only_while_consecutive_server_reports_carry_drops() {
+        assert_eq!(
+            too_slow_at_refreshes(&[&[3], &[0], &[1], &[2], &[5], &[0], &[4]]),
+            [false, false, false, true, true, false, false]
+        );
+        assert_eq!(too_slow_at_refreshes(&[&[1, 1]]), [true]);
+        assert_eq!(too_slow_at_refreshes(&[&[1, 0]]), [false]);
+        assert_eq!(too_slow_at_refreshes(&[&[1, 1], &[0, 1]]), [true, false]);
+    }
+
+    #[test]
+    fn a_refresh_without_a_server_report_keeps_the_slow_share_streak() {
+        assert_eq!(
+            too_slow_at_refreshes(&[&[1], &[], &[1], &[], &[0], &[]]),
+            [false, false, true, true, false, false]
+        );
     }
 
     #[test]

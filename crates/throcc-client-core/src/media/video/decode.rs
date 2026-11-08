@@ -102,6 +102,8 @@ pub struct Decoder {
     spare: Option<VideoFrame>,
     /// The timestamp of the first unit in the current run of hardware failures.
     failing_since: Option<u32>,
+    /// Whether reference pictures were dropped since [`Decoder::take_flushed`] last ran.
+    flushed: bool,
 }
 
 /// How long, in 90 kHz media time, a hardware decoder may keep failing before it is swapped
@@ -151,6 +153,7 @@ impl Decoder {
                 downloaded: None,
                 spare: None,
                 failing_since: None,
+                flushed: false,
             })
         })
     }
@@ -174,6 +177,7 @@ impl Decoder {
             downloaded: None,
             spare: None,
             failing_since: None,
+            flushed: false,
         })
     }
 
@@ -186,6 +190,12 @@ impl Decoder {
     /// Hands back a picture no longer needed, so the next one reuses its memory.
     pub fn recycle(&mut self, frame: VideoFrame) {
         self.spare = Some(frame);
+    }
+
+    /// Whether the decoder dropped its reference pictures since the last call, so only a
+    /// keyframe decodes cleanly again.
+    pub fn take_flushed(&mut self) -> bool {
+        std::mem::take(&mut self.flushed)
     }
 
     /// The hardware API or software decoder doing the work, as people see it named.
@@ -205,6 +215,7 @@ impl Decoder {
                 return self.decode_unit(unit, timestamp);
             }
             self.ctx.flush_buffers();
+            self.flushed = true;
             result = match self.decode_unit(unit, timestamp) {
                 Ok(None) => result,
                 retried => retried,

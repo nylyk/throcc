@@ -482,7 +482,7 @@ fn make_room(held: &mut VecDeque<Arc<Frame>>, incoming: usize) {
 }
 
 /// Decodes a share's `units` on its own thread into its newest picture due by `playout`, and
-/// returns what decodes them. `ask_idr` asks for a keyframe once per failure run or decoder.
+/// returns what decodes them. `ask_idr` asks for a keyframe once per failure run and reset.
 pub fn receive(
     mut units: mpsc::Receiver<Received>,
     config: ShareConfig,
@@ -517,8 +517,12 @@ pub fn receive(
                 };
                 if let Some(unit) = &unit {
                     let decoded = decoder.decode(&unit.data, unit.timestamp);
+                    let mut lost_references = decoder.take_flushed();
                     if *engine_tx.borrow() != decoder.engine() {
                         engine_tx.send_replace(decoder.engine());
+                        lost_references = true;
+                    }
+                    if lost_references {
                         ask_idr();
                         asked = true;
                     }

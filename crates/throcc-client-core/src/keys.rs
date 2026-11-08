@@ -7,7 +7,7 @@ use throcc_crypto::identity::{self, random};
 use throcc_crypto::media::TrackKey;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Epoch, MediaId, RoomId, UserId};
-use throcc_proto::limits::{MAX_ROOM_MEMBERS, MAX_SIGNED_IN};
+use throcc_proto::limits::{MAX_ROOM_MEMBERS, MAX_ROOM_SHARES, MAX_SIGNED_IN};
 use throcc_proto::messages::{Peer, PublicKey, Request, SignedEncryptionKey, Tracks};
 use tracing::warn;
 use zeroize::Zeroizing;
@@ -35,6 +35,9 @@ pub enum KeyNotice {
     /// The room state listed more than [`MAX_ROOM_MEMBERS`] people. Nobody gets our key until
     /// a valid one arrives.
     TooManyPeers,
+    /// The server gave someone, us included, more than [`MAX_ROOM_SHARES`] shares. Nobody
+    /// gets our key until a valid state arrives.
+    TooManyShares,
     /// We were placed in a room at an epoch no newer than one we took part in there
     /// before, which only a server restored from a backup or replaying an old call does.
     /// Keys and media are refused until the room's epoch passes it.
@@ -228,8 +231,12 @@ impl KeyManager {
             );
             notices.push(KeyNotice::OldEpoch);
         }
+        if tracks.as_ref().is_some_and(too_many_shares) {
+            warn!("placed with more shares than a room holds; sending nothing");
+            notices.push(KeyNotice::TooManyShares);
+        }
         self.room = room;
-        self.my_tracks = tracks;
+        self.my_tracks = tracks.filter(|tracks| !too_many_shares(tracks));
         self.my_secret = None;
         self.send_keys.clear();
         self.wrapped_to.clear();
@@ -279,6 +286,8 @@ impl KeyManager {
         }
         let invalid = if peers.len() > MAX_ROOM_MEMBERS {
             Some(KeyNotice::TooManyPeers)
+        } else if peers.iter().any(|p| too_many_shares(&p.tracks)) {
+            Some(KeyNotice::TooManyShares)
         } else if self.clashing_tracks(peers) {
             Some(KeyNotice::ClashingTracks)
         } else {
@@ -622,6 +631,10 @@ impl KeyManager {
         self.early
             .retain(|_, (arrived, _)| now.duration_since(*arrived) < OLD_KEY_GRACE);
     }
+}
+
+fn too_many_shares(tracks: &Tracks) -> bool {
+    tracks.shares.len() > MAX_ROOM_SHARES
 }
 
 fn track_ids(tracks: &Tracks) -> impl Iterator<Item = MediaId> + '_ {
@@ -1279,6 +1292,50 @@ pub(crate) mod tests {
             assert_eq!(a.keys.owner(stolen), None);
             assert!(a.keys.trusted_room_peers().is_empty());
         }
+    }
+
+    fn too_many_shares(first: u32) -> Vec<ShareTracks> {
+        (first..)
+            .step_by(2)
+            .take(MAX_ROOM_SHARES + 1)
+            .map(|id| ShareTracks {
+                video: MediaId(id),
+                audio: MediaId(id + 1),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_peer_with_too_many_shares_trusts_nobody() {
+        let now = Instant::now();
+        let (mut a, mut b, c) = (member(1), member(2), member(3));
+        rekey(&mut [&mut a, &mut b], 1, now);
+
+        let mut crowded = peer(&c);
+        crowded.tracks.shares = too_many_shares(1_000);
+        let peers = vec![peer(&a), peer(&b), crowded];
+        show(&mut a.keys, &peers);
+        let (request, notices) = a.keys.peers_changed(ROOM, Epoch(2), &peers, now);
+        assert_eq!(request, None);
+        assert_eq!(notices, [KeyNotice::TooManyShares]);
+        assert_eq!(a.keys.owner(b.tracks.mic), None);
+        assert!(a.keys.trusted_room_peers().is_empty());
+    }
+
+    #[test]
+    fn a_placement_with_too_many_shares_sends_nothing() {
+        let now = Instant::now();
+        let (mut a, b) = (member(1), member(2));
+        let peers = vec![peer(&a), peer(&b)];
+        show(&mut a.keys, &peers);
+        let mut tracks = a.tracks.clone();
+        tracks.shares = too_many_shares(1_000);
+        let (_, notices) = a
+            .keys
+            .apply_placement(Some(ROOM), Epoch(1), Some(tracks), &peers, now);
+        assert_eq!(notices, [KeyNotice::TooManyShares]);
+        assert!(a.keys.send_key(a.tracks.mic).is_none());
+        assert!(a.keys.send_key(MediaId(1_000)).is_none());
     }
 
     fn invented_peer(id: u64) -> Peer {
