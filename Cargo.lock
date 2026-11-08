@@ -7739,6 +7739,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ashpd",
+ "embed-resource",
  "global-hotkey",
  "gpui-component",
  "gpui-kit-assets",
