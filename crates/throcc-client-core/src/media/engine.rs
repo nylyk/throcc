@@ -147,7 +147,7 @@ impl MediaEngine {
     pub fn start(
         connection: quinn::Connection,
         me: UserId,
-        enc: EncryptionKeyPair,
+        encryption: EncryptionKeyPair,
         server: Fingerprint,
         floors: EpochFloors,
     ) -> (
@@ -155,7 +155,7 @@ impl MediaEngine {
         mpsc::UnboundedReceiver<Request>,
         mpsc::Receiver<MediaId>,
     ) {
-        let keys = Arc::new(Mutex::new(KeyManager::new(me, enc, server, floors)));
+        let keys = Arc::new(Mutex::new(KeyManager::new(me, encryption, server, floors)));
         let sinks: Sinks = Arc::default();
         let stats = Arc::new(Stats::default());
         let (requests, requests_rx) = mpsc::unbounded_channel();

@@ -1358,10 +1358,8 @@ impl Session {
         }
     }
 
-    /// Stops a share the server wouldn't start, because the room had all the shares it holds
-    /// (`full`) or because of the share allowance. Leaving it running would carry the refused
-    /// start in every later `SetMedia`, such as each push-to-talk press. A share the server
-    /// still holds from before is stopped there too, which it never refuses.
+    /// Stops a share the server wouldn't start, for a `full` room or the share allowance, and
+    /// stops there any share the server still holds from before.
     async fn undo_refused_share(&mut self, full: bool) {
         self.stop_share();
         self.shared.update(|s| {
@@ -1654,8 +1652,8 @@ impl Session {
                 return;
             }
         }
-        let enc = match self.keystore.encryption_key_pair() {
-            Ok(enc) => enc,
+        let encryption = match self.keystore.encryption_key_pair() {
+            Ok(encryption) => encryption,
             Err(e) => {
                 warn!("the renewed encryption key is unusable: {e:#}");
                 return;
@@ -1664,7 +1662,7 @@ impl Session {
         self.call
             .engine
             .keys()
-            .replace_encryption(enc, Instant::now());
+            .replace_encryption(encryption, Instant::now());
         let (server, me) = (self.call.server(), self.call.me());
         let published =
             account::publish_encryption_key(&self.keystore, &self.call.requester, &server, me);
@@ -1986,9 +1984,8 @@ fn refusal(response: anyhow::Result<Response>) -> String {
     response.map_or_else(|e| e.to_string(), control::refusal)
 }
 
-/// The code with which `response` to a `SetMedia` carrying `sent` refused to start that
-/// share, for the share allowance or a room that has all the shares it holds. The server
-/// still applies the mic and deafen then, and keeps the share it had (`on_server`).
+/// The code with which `response` to a `SetMedia` carrying `sent` refused to start that share.
+/// The server still applies the mic and deafen then, and keeps its share (`on_server`).
 fn share_start_refusal(
     response: &anyhow::Result<Response>,
     sent: Option<ShareConfig>,

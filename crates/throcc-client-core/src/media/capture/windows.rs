@@ -776,8 +776,8 @@ fn activate_loopback() -> windows::core::Result<IAudioClient> {
             },
         },
     };
-    // Never dropped: PROPVARIANT's Drop runs PropVariantClear, which would CoTaskMemFree
-    // `pBlobData`, and that points at `params` on this stack.
+    // The blob is never dropped: PROPVARIANT's Drop runs PropVariantClear, which would
+    // CoTaskMemFree `pBlobData`, and that points at `params` on this stack.
     let blob = ManuallyDrop::new(PROPVARIANT {
         Anonymous: PROPVARIANT_0 {
             Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {
@@ -917,7 +917,7 @@ mod tests {
         };
         let mut capture = primary_monitor(config);
         assert!(capture.captures_audio());
-        // Started through WMI so the player isn't in this process tree, which the loopback
+        // The player starts through WMI, outside this process tree, which the loopback
         // leaves out.
         let player = std::process::Command::new("powershell")
             .args([

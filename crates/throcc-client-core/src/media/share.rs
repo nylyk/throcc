@@ -21,9 +21,10 @@ use super::video::frame::{VideoFrame, share_size};
 use super::video::{Frame, Picture, PreviewDemand};
 
 const IDLE: Duration = Duration::from_millis(2);
-/// Self-view gets every Nth frame. Where the frame is in memory, it is shrunk to at most
-/// this wide, a thumbnail of what is sent; a macOS pixel buffer is shown whole.
+/// Self-view gets every Nth frame.
 const SELF_VIEW_EVERY: u32 = 2;
+/// The widest a self-view picture held in memory is shrunk to. A macOS pixel buffer is shown
+/// whole.
 const SELF_VIEW_WIDTH: usize = 960;
 
 /// Forced recoveries are at least this far apart, so a link too slow for whole keyframes
@@ -482,7 +483,7 @@ fn make_room(held: &mut VecDeque<Arc<Frame>>, incoming: usize) {
 }
 
 /// Decodes a share's `units` on its own thread into its newest picture due by `playout`, and
-/// returns what decodes them. `ask_idr` asks for a keyframe once per failure run and reset.
+/// returns what decodes them. `ask_idr` runs once per run of failures and after a reset.
 pub fn receive(
     mut units: mpsc::Receiver<Received>,
     config: ShareConfig,

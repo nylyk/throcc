@@ -661,13 +661,13 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn member(id: u64) -> Member {
-        let enc = EncryptionKeyPair::generate();
+        let encryption = EncryptionKeyPair::generate();
         let first = id as u32 * 10;
         Member {
             id: UserId(id),
             identity: IdentityKey::generate(),
-            encryption_public: enc.public(),
-            keys: KeyManager::new(UserId(id), enc, SERVER, EpochFloors::default()),
+            encryption_public: encryption.public(),
+            keys: KeyManager::new(UserId(id), encryption, SERVER, EpochFloors::default()),
             tracks: Tracks {
                 mic: MediaId(first),
                 shares: vec![ShareTracks {
@@ -848,8 +848,8 @@ pub(crate) mod tests {
         rekey(&mut [&mut a, &mut b], 9, now);
         let peers = [peer(&a), peer(&b)];
         let reconnect = |b: &mut Member, floors: EpochFloors| {
-            let enc = EncryptionKeyPair::from_secret(&b.keys.encryption.secret()).unwrap();
-            b.keys = KeyManager::new(b.id, enc, SERVER, floors);
+            let encryption = EncryptionKeyPair::from_secret(&b.keys.encryption.secret()).unwrap();
+            b.keys = KeyManager::new(b.id, encryption, SERVER, floors);
             place(b, Some(ROOM), 5, &peers, now);
             b.keys.sender_key(a.id, recorded.0, &recorded.1, now)
         };
@@ -888,8 +888,8 @@ pub(crate) mod tests {
         let recorded = blob(&rekey(&mut [&mut a, &mut b], 9, now), a.id, b.id);
         let datagram = mic_datagram(&a);
 
-        let enc = EncryptionKeyPair::from_secret(&b.keys.encryption.secret()).unwrap();
-        b.keys = KeyManager::new(b.id, enc, SERVER, b.keys.floors.clone());
+        let encryption = EncryptionKeyPair::from_secret(&b.keys.encryption.secret()).unwrap();
+        b.keys = KeyManager::new(b.id, encryption, SERVER, b.keys.floors.clone());
         let peers = [peer(&a), peer(&b)];
         place(&mut b, Some(ROOM), 10, &peers, now);
         assert_eq!(

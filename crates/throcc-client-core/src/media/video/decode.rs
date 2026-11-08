@@ -98,7 +98,7 @@ pub struct Decoder {
     max_size: MaxSize,
     /// Where hardware pictures are downloaded, kept while their size holds.
     downloaded: Option<AVFrame>,
-    /// A picture no longer shown, whose planes the next picture is written into.
+    /// A spent picture, whose planes the next picture is written into.
     spare: Option<VideoFrame>,
     /// The timestamp of the first unit in the current run of hardware failures.
     failing_since: Option<u32>,
@@ -187,7 +187,7 @@ impl Decoder {
         self.hardware
     }
 
-    /// Hands back a picture no longer needed, so the next one reuses its memory.
+    /// Hands back a spent picture, so the next one reuses its memory.
     pub fn recycle(&mut self, frame: VideoFrame) {
         self.spare = Some(frame);
     }

@@ -59,17 +59,17 @@ pub async fn sign_in(
     Ok(link)
 }
 
-/// Enrolls with an invite code, as `name` if the account is new, and pins the server the PAKE
-/// proved. The server may give us a user id that stood for an earlier account of ours, as on
-/// a server rebuilt with the same key, whose rooms now stand for others too. So we enroll with
-/// a new encryption key, which no sender key recorded for that account opens, and drop that
-/// user id's epoch floors.
+/// Enrolls with an invite code, as `name` if the account is new, under a new encryption key,
+/// and pins the server the PAKE proved.
 pub async fn enroll(
     keystore: &mut Keystore,
     address: &str,
     code: &InviteCode,
     name: &str,
 ) -> Result<ControlLink, SignInError> {
+    // The user id the server gives may have stood for an earlier account of ours, as on a
+    // server rebuilt with the same key. No sender key recorded for that account opens with a
+    // new encryption key.
     keystore.renew_encryption_key()?;
     let connected = connection::connect(address, None).await?;
     let link = control::enroll(connected, keystore.identity(), code, name).await?;

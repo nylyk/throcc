@@ -59,7 +59,7 @@ impl Call {
             events: mut server_events,
         } = link;
         let connection = connected.connection.clone();
-        let enc = keystore.encryption_key_pair()?;
+        let encryption = keystore.encryption_key_pair()?;
         let floors = match previous {
             Some(previous) => previous.floors.clone(),
             None => EpochFloors::load(keystore.dir(), &connected.fingerprint)?,
@@ -67,7 +67,7 @@ impl Call {
         let (engine, mut engine_requests, recovery) = MediaEngine::start(
             connection.clone(),
             welcome.me,
-            enc,
+            encryption,
             connected.fingerprint,
             floors.clone(),
         );

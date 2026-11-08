@@ -251,8 +251,8 @@ pub struct Health {
     pub upload_loss: f32,
     pub download_loss: f32,
     pub dropped_for_you: u32,
-    /// Sharers whose frames the server dropped for us in two health refreshes in a row: our
-    /// connection can't keep up with their share.
+    /// Sharers whose frames the server dropped for us in its last two reports: our connection
+    /// can't keep up with their share.
     pub slow_shares: BTreeSet<UserId>,
     pub receiving: Vec<TrackHealth>,
     pub sending: Vec<SentTrack>,
