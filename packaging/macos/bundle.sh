@@ -11,9 +11,10 @@ version=$(cargo metadata --no-deps --format-version 1 |
 out=target/macos
 app="$out/throcc.app"
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks" "$app/Contents/Resources"
 sed "s/VERSION/$version/g" packaging/macos/Info.plist >"$app/Contents/Info.plist"
 cp target/release/throcc-client "$app/Contents/MacOS/"
+cp packaging/macos/throcc.icns "$app/Contents/Resources/"
 
 # Copies every library outside the OS that `file` needs, and points it at the copy.
 bundle() {

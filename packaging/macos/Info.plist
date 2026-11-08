@@ -10,6 +10,8 @@
     <string>org.throcc.client</string>
     <key>CFBundleExecutable</key>
     <string>throcc-client</string>
+    <key>CFBundleIconFile</key>
+    <string>throcc</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
