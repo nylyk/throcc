@@ -10,4 +10,4 @@ A headless client for scripts, tests and network measurements. `throcc-cli --hel
 | `tests/common/` | A server in-process or on its own thread, UDP relays, and helpers to sign clients in |
 | `tests/*.rs` | The workspace's integration tests: transport, control, enrollment, rooms, media, share, slow share and client |
 
-The network scenarios in `tests/netem/` drive this binary across Linux network namespaces.
+The network scenarios in the repository root's `tests/netem/` drive this binary across Linux network namespaces.

@@ -87,11 +87,11 @@ async fn three_clients_see_consistent_presence() {
         View::from_welcome(&carol.link.welcome),
     ];
 
-    let bob_placed = bob.join(Some(general)).await;
-    assert_eq!(bob_placed.peers.len(), 1);
-    let carol_placed = carol.join(Some(general)).await;
-    assert_eq!(carol_placed.peers.len(), 2);
-    assert!(carol_placed.epoch > bob_placed.epoch);
+    let bob_placement = bob.join(Some(general)).await;
+    assert_eq!(bob_placement.peers.len(), 1);
+    let carol_placement = carol.join(Some(general)).await;
+    assert_eq!(carol_placement.peers.len(), 2);
+    assert!(carol_placement.epoch > bob_placement.epoch);
     let bob_state = bob
         .event(|e| match e {
             Event::PeersChanged { room, epoch, peers } if *room == general => {
@@ -100,7 +100,7 @@ async fn three_clients_see_consistent_presence() {
             _ => None,
         })
         .await;
-    assert_eq!(bob_state, (carol_placed.epoch, 2));
+    assert_eq!(bob_state, (carol_placement.epoch, 2));
 
     bob.join(Some(gaming)).await;
     let expected = View(BTreeMap::from([

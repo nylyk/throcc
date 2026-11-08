@@ -135,7 +135,7 @@ pub async fn send(call: &mut Call, room: RoomId, options: SendOptions) -> Result
                 next_audio += AUDIO_FRAME;
             }
             event = call.events.recv() => match event {
-                Some(CallEvent::Server(Event::KeyframeRequested { media_id: wanted, .. })) if wanted == media_id => {
+                Some(CallEvent::Server(Event::KeyframeRequested { media_id: requested, .. })) if requested == media_id => {
                     let now = Instant::now();
                     if let Some(last) = last_keyframe {
                         let gap = now.duration_since(last);

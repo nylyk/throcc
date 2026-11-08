@@ -105,12 +105,12 @@ async fn watching_a_share_asks_its_sender_for_an_idr() {
     let video_id = first_share(&bob, &alice).await.video;
     let watching = Request::SetWatched(vec![video_id]);
     assert_eq!(bob.request(watching).await.unwrap(), Response::Ok);
-    let wanted = server_event(&mut alice, |e| match e {
+    let requested = server_event(&mut alice, |e| match e {
         Event::KeyframeRequested { media_id, kind } => Some((media_id, kind)),
         _ => None,
     })
     .await;
-    assert_eq!(wanted, (video_id, throcc_proto::messages::Recovery::Idr));
+    assert_eq!(requested, (video_id, throcc_proto::messages::Recovery::Idr));
 }
 
 #[tokio::test]
@@ -387,7 +387,7 @@ async fn a_member_flooding_their_mic_is_held_to_its_allowance_and_stays_connecte
     let flooded_for = flooding.elapsed().as_secs_f64();
 
     let mut forwarded = 0;
-    // The server reports link stats every 2 s, so a second more without one means it is done.
+    // The server reports receive stats every 2 s, so a second more without one means it is done.
     let quiet = Duration::from_secs(3);
     while let Ok(Some(event)) = tokio::time::timeout(quiet, bob.link.events.recv()).await {
         if let Event::ReceiveStats { tracks } = event {
