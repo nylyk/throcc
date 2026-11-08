@@ -750,9 +750,6 @@ impl ThroccApp {
         match event {
             UiEvent::State(state) => {
                 self.state = state;
-                if self.connected_server().is_none() {
-                    self.settle_profile_save();
-                }
                 if let Some(Dialog::RoomPassword { room, .. }) = self.dialog
                     && self.state.current.as_ref().is_some_and(|c| c.room == room)
                 {
@@ -781,13 +778,7 @@ impl ThroccApp {
                 self.join_error = Some(reason);
             }
             UiEvent::AvatarReady(_) => {}
-            UiEvent::ProfileSaved if self.profile_form.saving() => {
-                self.profile_form.status = Some(SaveStatus::Saved)
-            }
             UiEvent::ProfileSaved => {}
-            UiEvent::ProfileRefused(reason) if self.profile_form.saving() => {
-                self.profile_form.status = Some(SaveStatus::Failed(reason))
-            }
             UiEvent::ProfileRefused(reason) => {
                 let notice = format!("This server refused your profile: {reason}");
                 window.push_notification(Notification::new().message(notice), cx)
@@ -1407,7 +1398,7 @@ impl ThroccApp {
     }
 
     /// The profile Save on the profile page, or Continue on the onboarding screen, would keep:
-    /// the typed name, if the server would take it, with the unsaved picture or the kept one.
+    /// the typed name, if valid, with the unsaved picture or the kept one.
     fn edited_profile(&self, cx: &App) -> Option<Profile> {
         let name = typed_name(&self.name, cx).ok()??;
         let picture = match self.profile_form.change() {
@@ -1421,7 +1412,7 @@ impl ThroccApp {
         Some(Profile { name, picture })
     }
 
-    /// Whether Save on the profile page has something to save that the server would take.
+    /// Whether Save on the profile page has a valid change to keep.
     pub fn profile_changed(&self, cx: &App) -> bool {
         self.edited_profile(cx)
             .is_some_and(|edited| self.settings.profile.as_ref() != Some(&edited))
@@ -1434,24 +1425,10 @@ impl ThroccApp {
         else {
             return;
         };
-        if self.joining {
-            return;
-        }
         self.keep_profile(profile.clone(), window, cx);
-        if self.connected_server().is_some() {
-            self.profile_form.status = Some(SaveStatus::Saving);
-            self.command(UiCommand::SetProfile(profile));
-        } else {
-            self.profile_form.status = Some(SaveStatus::Saved);
-        }
+        self.profile_form.status = Some(SaveStatus::Saved);
+        self.command(UiCommand::SetProfile(profile));
         cx.notify();
-    }
-
-    /// Counts a save still waiting on a server that is gone as saved.
-    fn settle_profile_save(&mut self) {
-        if self.profile_form.saving() {
-            self.profile_form.status = Some(SaveStatus::Saved);
-        }
     }
 
     /// Keeps the onboarding screen's profile and moves on to joining a server.
@@ -1727,6 +1704,7 @@ impl ThroccApp {
         self.join_error = None;
         let audio = Some(self.audio_engine.clone());
         let window_handle = window.window_handle();
+        let joined_as = profile.clone();
         let connecting = cx.background_executor().spawn({
             let address = address.clone();
             let verified = self.verified.clone();
@@ -1753,7 +1731,14 @@ impl ThroccApp {
                         return;
                     }
                     match result {
-                        Ok(client) => app.attach(Arc::new(client), window, cx),
+                        Ok(client) => {
+                            app.attach(Arc::new(client), window, cx);
+                            if let Some(kept) = app.settings.profile.clone()
+                                && kept != joined_as
+                            {
+                                app.command(UiCommand::SetProfile(kept));
+                            }
+                        }
                         Err(e) => {
                             app.joining = false;
                             match e.pin_mismatch() {
@@ -1858,7 +1843,6 @@ impl ThroccApp {
         self.space_talking = false;
         self.audio_engine.push_to_talk(false);
         self.server_form.reset();
-        self.settle_profile_save();
         if !matches!(self.screen, Screen::Settings(_)) {
             self.screen = Screen::Join;
         }
@@ -1908,8 +1892,8 @@ impl ThroccApp {
     /// alone, emptylobby, focus, fullscreen, popout, slow, slowpopout, slowfullscreen, share,
     /// connection, person, personverified, personchanged, keychange, ownprofile, pinmismatch,
     /// settings, appearance, verified, newroom, editroom, roompassword, deleteroom, profile,
-    /// server, keys, members, invites, removeuser, leaveserver, identitymissing, identityback or
-    /// startedover. Any other name leaves the lobby.
+    /// profileerror, server, keys, members, invites, removeuser, leaveserver, identitymissing,
+    /// identityback or startedover. Any other name leaves the lobby.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         let room = RoomId(1);
         let joined = |app: &mut Self| {
@@ -2070,10 +2054,16 @@ impl ThroccApp {
                 })
             }
             "deleteroom" => self.dialog = Some(Dialog::DeleteRoom(room)),
-            "profile" => {
+            "profile" | "profileerror" => {
                 self.screen = Screen::Settings(SettingsPage::Profile);
                 joined(self);
                 with_picture(self, cx);
+                if screen == "profileerror" {
+                    after_a_moment(cx, |app, _| {
+                        app.profile_form.status =
+                            crate::avatar::prepare(&[]).err().map(SaveStatus::Failed);
+                    });
+                }
             }
             "server" => self.screen = Screen::Server(ServerPage::Overview),
             "keys" => {

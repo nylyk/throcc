@@ -79,7 +79,7 @@ fn overview(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             let save = primary("save-server", "Save")
                 .disabled(app.server_form.saving() || !app.server_changed(cx))
                 .on_click(cx.listener(|app, _, _, cx| app.save_server(cx)));
-            save_line(app.server_form.status.as_ref(), str::to_owned, save)
+            save_line(app.server_form.status.as_ref(), save)
         }))
         .into_any_element()
 }

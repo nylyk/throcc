@@ -92,7 +92,6 @@ fn slide_voice(app: &mut ThroccApp, event: &SliderEvent, change: impl FnOnce(&mu
 }
 
 fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
-    let seed = app.state.me.map_or(0, |me| me.0);
     let name = app
         .settings
         .profile
@@ -100,16 +99,12 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .map(|p| p.name.clone())
         .unwrap_or_default();
     let saved = app.profile_avatar;
-    let picture = picture_editor(app, PictureFor::Profile, &name, seed, saved, true, cx);
+    let picture = picture_editor(app, PictureFor::Profile, &name, 0, saved, true, cx);
     let name_error = typed_name(&app.name, cx).err();
     let save = primary("save-profile", "Save")
-        .disabled(app.profile_form.saving() || app.joining || !app.profile_changed(cx))
+        .disabled(!app.profile_changed(cx))
         .on_click(cx.listener(|app, _, window, cx| app.save_profile(window, cx)));
-    let save = save_line(
-        app.profile_form.status.as_ref(),
-        |reason| format!("Kept on this computer, but this server refused it: {reason}"),
-        save,
-    );
+    let save = save_line(app.profile_form.status.as_ref(), save);
     div()
         .flex()
         .flex_col()

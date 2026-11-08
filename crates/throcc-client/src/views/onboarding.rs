@@ -17,7 +17,7 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
     let finish = primary("finish-onboarding", "Continue")
         .disabled(!matches!(typed, Ok(Some(_))))
         .on_click(cx.listener(|app, _, window, cx| app.finish_onboarding(window, cx)));
-    let finish = save_line(app.profile_form.status.as_ref(), str::to_owned, finish);
+    let finish = save_line(app.profile_form.status.as_ref(), finish);
     frame(app.mascot.pick(mascot::WELCOMERS))
         .child(div().typeset(theme::LARGE_TITLE).child("Welcome to throcc"))
         .child(description("Choose the name people see you as."))

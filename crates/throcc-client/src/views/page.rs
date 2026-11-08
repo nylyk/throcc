@@ -179,15 +179,11 @@ pub fn picture_editor(
 
 /// A card's Save button at the bottom right, with how the last save went beside it, a
 /// refusal worded by `refused`.
-pub fn save_line(
-    status: Option<&SaveStatus>,
-    refused: impl FnOnce(&str) -> String,
-    save: Button,
-) -> Div {
+pub fn save_line(status: Option<&SaveStatus>, save: Button) -> Div {
     let status = status.map(|status| match status {
         SaveStatus::Saving => caption("Saving…"),
         SaveStatus::Saved => caption("Saved").text_color(theme::ok_text()),
-        SaveStatus::Failed(reason) => caption(refused(reason)).text_color(theme::danger_text()),
+        SaveStatus::Failed(reason) => caption(reason.clone()).text_color(theme::danger_text()),
     });
     div()
         .flex()
