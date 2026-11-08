@@ -1,6 +1,3 @@
-//! The limits server and client share. The server enforces them; the client refuses server
-//! input that goes past them, so a hostile server can't make it hold or search more.
-
 /// The most people in one room.
 pub const MAX_ROOM_MEMBERS: usize = 30;
 /// The most screen shares running in one room at once.
