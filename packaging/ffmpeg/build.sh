@@ -31,7 +31,9 @@ have() { pkg-config --exists "$1" 2>/dev/null; }
 pkg-config --exists --print-errors dav1d ||
     { echo "dav1d not found by pkg-config; AV1 can't be decoded in software" >&2; exit 1; }
 flags+=(--enable-libdav1d)
-have vpx && flags+=(--enable-libvpx)
+pkg-config --exists --print-errors vpx ||
+    { echo "vpx not found by pkg-config; VP9 can't be encoded or decoded" >&2; exit 1; }
+flags+=(--enable-libvpx)
 case "$(uname -s)" in
     Darwin)
         flags+=(--enable-videotoolbox)
