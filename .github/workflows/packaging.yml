@@ -59,7 +59,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: deps
-          key: windows-deps-nv13.0.19.0-${{ hashFiles('packaging/ffmpeg/build.sh', 'packaging/ffmpeg/patches/*', 'packaging/ffmpeg/bindings.sh', 'packaging/windows/build-deps.sh', 'packaging/windows/requirements.txt') }}
+          key: windows-deps-nv13.0.19.0-${{ hashFiles('packaging/ffmpeg/build.sh', 'packaging/ffmpeg/patches/*', 'packaging/ffmpeg/bindings.sh', 'packaging/windows/build-deps.sh', 'packaging/windows/build-vpx.sh', 'packaging/windows/requirements.txt') }}
       - if: steps.deps.outputs.cache-hit != 'true'
         run: choco install nasm --no-progress -y
       - if: steps.deps.outputs.cache-hit != 'true'
@@ -75,13 +75,14 @@ jobs:
           path-type: inherit
           install: make diffutils nasm patch pkgconf git
       - if: steps.deps.outputs.cache-hit != 'true'
-        name: ffmpeg
+        name: libvpx and ffmpeg
         shell: msys2 {0}
         run: |
           rm -f /usr/bin/link.exe
           git clone --depth 1 --branch n13.0.19.0 https://github.com/FFmpeg/nv-codec-headers target/nv-codec-headers
           test "$(git -C target/nv-codec-headers rev-parse HEAD)" = e844e5b26f46bb77479f063029595293aa8f812d
           make -C target/nv-codec-headers install PREFIX="$(cygpath -m "$PWD/deps")"
+          ./scripts/ci-run.sh packaging/windows/build-vpx.sh
           # MSYS pkg-config splits this on ':', so it must not hold a C:/ path.
           export PKG_CONFIG_PATH="$PWD/deps/lib/pkgconfig"
           ./scripts/ci-run.sh packaging/ffmpeg/build.sh deps/ffmpeg-lgpl
