@@ -31,6 +31,8 @@ const SELF_VIEW_WIDTH: usize = 960;
 /// gets one a second rather than one every frame.
 const RECOVERY_SPACING: Duration = Duration::from_secs(1);
 const TALLY_EVERY: Duration = Duration::from_secs(5);
+/// A keyframe request still unanswered by a decoded picture is repeated after this long.
+const KEYFRAME_RETRY: Duration = Duration::from_secs(1);
 
 /// What the share thread encoded since `since`, logged every [`TALLY_EVERY`].
 struct Tally {
@@ -482,8 +484,34 @@ fn make_room(held: &mut VecDeque<Arc<Frame>>, incoming: usize) {
     }
 }
 
+/// When to ask the sender for a keyframe while decoding its share.
+#[derive(Default)]
+struct KeyframeAsks {
+    unanswered_since: Option<Instant>,
+}
+
+impl KeyframeAsks {
+    /// Whether to ask at `now`, after a decoder `reset` or a unit that `failed`.
+    fn ask(&mut self, now: Instant, reset: bool, failed: bool) -> bool {
+        let waiting = self
+            .unanswered_since
+            .is_some_and(|at| now.duration_since(at) < KEYFRAME_RETRY);
+        let ask = reset || (failed && !waiting);
+        if ask {
+            self.unanswered_since = Some(now);
+        }
+        ask
+    }
+
+    /// Notes a unit decoded with its references intact, which answers any request.
+    fn answered(&mut self) {
+        self.unanswered_since = None;
+    }
+}
+
 /// Decodes a share's `units` on its own thread into its newest picture due by `playout`, and
-/// returns what decodes them. `ask_idr` runs once per run of failures and after a reset.
+/// returns what decodes them. `ask_idr` runs after a reset, and on failures at most once per
+/// [`KEYFRAME_RETRY`] until a picture decodes.
 pub fn receive(
     mut units: mpsc::Receiver<Received>,
     config: ShareConfig,
@@ -498,7 +526,7 @@ pub fn receive(
         .spawn(move || {
             let mut held: VecDeque<Arc<Frame>> = VecDeque::new();
             let mut replaced: Option<Arc<Frame>> = None;
-            let mut asked = false;
+            let mut asks = KeyframeAsks::default();
             let mut oversized: u64 = 0;
             loop {
                 let unit = if held.is_empty() {
@@ -523,17 +551,20 @@ pub fn receive(
                     if engine_changed {
                         engine_tx.send_replace(decoder.engine());
                     }
-                    if engine_changed || (flushed && !asked) {
+                    let failed = flushed
+                        || matches!(&decoded, Err(e) if !matches!(e, DecodeError::TooLarge(..)));
+                    if asks.ask(Instant::now(), engine_changed, failed) {
                         ask_idr();
-                        asked = true;
                     }
                     match decoded {
                         Ok(Some(frame)) => {
-                            asked &= flushed;
+                            if !flushed {
+                                asks.answered();
+                            }
                             make_room(&mut held, frame_bytes(&frame));
                             held.push_back(Arc::new(frame));
                         }
-                        Ok(None) => asked = false,
+                        Ok(None) => {}
                         // A keyframe wouldn't help: the sender chose the size.
                         Err(DecodeError::TooLarge(width, height)) => {
                             oversized += 1;
@@ -546,13 +577,7 @@ pub fn receive(
                                 );
                             }
                         }
-                        Err(e) => {
-                            warn!("decoding failed: {e}");
-                            if !asked {
-                                ask_idr();
-                                asked = true;
-                            }
-                        }
+                        Err(e) => warn!("decoding failed: {e}"),
                     }
                 }
                 let heard = playout.as_ref().and_then(|p| p.heard());
@@ -631,6 +656,21 @@ mod receive_tests {
     use throcc_proto::messages::Codec;
 
     use super::*;
+
+    #[test]
+    fn failures_ask_again_only_once_a_keyframe_is_overdue() {
+        let start = Instant::now();
+        let after = |millis| start + Duration::from_millis(millis);
+        let mut asks = KeyframeAsks::default();
+        assert!(!asks.ask(start, false, false));
+        assert!(asks.ask(start, false, true));
+        assert!(!asks.ask(after(500), false, true));
+        assert!(asks.ask(after(500), true, false));
+        assert!(!asks.ask(after(1_400), false, true));
+        assert!(asks.ask(after(1_500), false, true));
+        asks.answered();
+        assert!(asks.ask(after(1_600), false, true));
+    }
 
     fn config(width: u16, height: u16) -> ShareConfig {
         ShareConfig {

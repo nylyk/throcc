@@ -35,8 +35,8 @@ pub enum KeyNotice {
     /// The room state listed more than [`MAX_ROOM_MEMBERS`] people. Nobody gets our key until
     /// a valid one arrives.
     TooManyPeers,
-    /// The server gave someone, us included, more than [`MAX_ROOM_SHARES`] shares. Nobody
-    /// gets our key until a valid state arrives.
+    /// The server gave someone more than [`MAX_ROOM_SHARES`] shares. Nobody gets our key
+    /// until a valid room state arrives, or, when it was us, until we are placed again.
     TooManyShares,
     /// We were placed in a room at an epoch no newer than one we took part in there
     /// before, which only a server restored from a backup or replaying an old call does.
@@ -255,7 +255,13 @@ impl KeyManager {
             requests.extend(later);
             notices.extend(more);
         }
-        (requests, notices)
+        let mut unique = Vec::new();
+        for notice in notices {
+            if !unique.contains(&notice) {
+                unique.push(notice);
+            }
+        }
+        (requests, unique)
     }
 
     /// Applies a `PeersChanged`. Our secret is replaced whenever the epoch moves or the set of
@@ -433,6 +439,12 @@ impl KeyManager {
                 self.floors.raise(self.me, room, epoch);
             }
         }
+        self.wrapped_to.clear();
+        if self.my_tracks.is_none() {
+            self.my_secret = None;
+            self.send_keys.clear();
+            return;
+        }
         let secret = Zeroizing::new(random::<32>());
         self.send_keys = self
             .my_tracks
@@ -441,7 +453,6 @@ impl KeyManager {
             .map(|id| (id, Arc::new(TrackKey::derive(&secret, id))))
             .collect();
         self.my_secret = Some(secret);
-        self.wrapped_to.clear();
     }
 
     fn context(&self, room: RoomId, epoch: Epoch, from: UserId, to: UserId) -> WrapContext {
@@ -1294,7 +1305,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn too_many_shares(first: u32) -> Vec<ShareTracks> {
+    fn shares_past_the_limit(first: u32) -> Vec<ShareTracks> {
         (first..)
             .step_by(2)
             .take(MAX_ROOM_SHARES + 1)
@@ -1312,7 +1323,7 @@ pub(crate) mod tests {
         rekey(&mut [&mut a, &mut b], 1, now);
 
         let mut crowded = peer(&c);
-        crowded.tracks.shares = too_many_shares(1_000);
+        crowded.tracks.shares = shares_past_the_limit(1_000);
         let peers = vec![peer(&a), peer(&b), crowded];
         show(&mut a.keys, &peers);
         let (request, notices) = a.keys.peers_changed(ROOM, Epoch(2), &peers, now);
@@ -1329,13 +1340,31 @@ pub(crate) mod tests {
         let peers = vec![peer(&a), peer(&b)];
         show(&mut a.keys, &peers);
         let mut tracks = a.tracks.clone();
-        tracks.shares = too_many_shares(1_000);
-        let (_, notices) = a
-            .keys
-            .apply_placement(Some(ROOM), Epoch(1), Some(tracks), &peers, now);
+        tracks.shares = shares_past_the_limit(1_000);
+        let (requests, notices) =
+            a.keys
+                .apply_placement(Some(ROOM), Epoch(1), Some(tracks), &peers, now);
+        assert_eq!(requests, []);
         assert_eq!(notices, [KeyNotice::TooManyShares]);
         assert!(a.keys.send_key(a.tracks.mic).is_none());
         assert!(a.keys.send_key(MediaId(1_000)).is_none());
+    }
+
+    #[test]
+    fn too_many_shares_in_our_placement_and_our_peer_entry_is_told_once() {
+        let now = Instant::now();
+        let (mut a, b) = (member(1), member(2));
+        let mut crowded = a.tracks.clone();
+        crowded.shares = shares_past_the_limit(1_000);
+        let mut us = peer(&a);
+        us.tracks = crowded.clone();
+        let peers = vec![us, peer(&b)];
+        show(&mut a.keys, &peers);
+        let (requests, notices) =
+            a.keys
+                .apply_placement(Some(ROOM), Epoch(1), Some(crowded), &peers, now);
+        assert_eq!(requests, []);
+        assert_eq!(notices, [KeyNotice::TooManyShares]);
     }
 
     fn invented_peer(id: u64) -> Peer {
