@@ -17,10 +17,10 @@ The server listens on UDP 8476 (QUIC). There is no TCP port.
 
 ### With Docker
 
-Every push to `main` publishes `ghcr.io/nylyk/throcc:latest` for amd64 and arm64, and tags publish `:<version>`.
+Docker is the supported way to run a server. Each server release publishes `ghcr.io/nylyk/throcc` for amd64 and arm64 as `:<version>`, `:<major>.<minor>` and `:latest`. Pin the minor version: a new one may need newer clients.
 
 ```sh
-docker run -d --name throcc --restart unless-stopped -p 8476:8476/udp -v throcc-data:/data ghcr.io/nylyk/throcc:latest
+docker run -d --name throcc --restart unless-stopped -p 8476:8476/udp -v throcc-data:/data ghcr.io/nylyk/throcc:0.1
 docker exec throcc /throcc-server admin-invite --data /data
 ```
 
@@ -38,14 +38,16 @@ docker exec throcc /throcc-server admin-invite --data /data
 
 ## Get the client
 
-- **Arch:** every push to `main` publishes a package to the `nightly` release.
+Download it from the [releases page](https://github.com/nylyk/throcc/releases), where client releases are tagged `client-v<version>`. Each release lists the SHA-256 of its files in `SHA256SUMS`.
 
-  ```sh
-  curl -LO https://github.com/nylyk/throcc/releases/download/nightly/throcc-x86_64.pkg.tar.zst && sudo pacman -U throcc-x86_64.pkg.tar.zst
-  ```
-
+- **macOS 14 or newer:** `throcc.dmg`, signed with a Developer ID and notarized.
+- **Windows:** `throcc-windows.zip`. Unzip it and run `throcc.exe`.
+- **Linux:** `throcc.flatpak`. Install it with `flatpak install --user throcc.flatpak`; its runtime comes from Flathub.
 - **Nix:** `nix run github:nylyk/throcc`. On macOS this needs the Xcode Command Line Tools.
-- **macOS and Windows:** the `packaging` workflow builds a `.dmg` and a zip on tags, weekly and on changes to packaging or video code, and keeps them for a week. The `.dmg` is not signed with a Developer ID, so open it the first time with right-click, Open.
+
+Outside the flatpak, the client checks GitHub for a newer release when it starts. Turn that off in Settings, About.
+
+A client works with any server that speaks its protocol version. If they differ, the client says which side needs an update.
 
 Start the client, enter the server's address and an invite code, and check that the fingerprint it shows matches the one `admin-invite` printed or the server logged.
 
@@ -63,8 +65,8 @@ Screen share needs ffmpeg 8 (`--features ffmpeg`). Without it the client still d
 
 The packages ship an LGPL ffmpeg built by `packaging/ffmpeg/build.sh <prefix>`.
 
-- **macOS:** `packaging/macos/bundle.sh` makes `target/macos/throcc.dmg` (needs `brew install dav1d libvpx pkgconf`).
-- **Arch:** `makepkg -si` in `packaging/arch/`. Running it again reuses the ffmpeg build and Cargo's `target/`.
+- **macOS:** `packaging/macos/bundle.sh` makes `target/macos/throcc.dmg` (needs `brew install dav1d libvpx pkgconf`). It signs ad hoc unless `MACOS_SIGN_IDENTITY` names a Developer ID Application identity, and notarizes with `NOTARY_KEY_FILE`, `NOTARY_KEY_ID` and `NOTARY_ISSUER`.
+- **Flatpak:** `packaging/flatpak/cargo-sources.sh`, then `flatpak-builder --user --install-deps-from=flathub --install build packaging/flatpak/cc.thro.throcc.yml`.
 - **Windows:** follow the `windows-app` job in `.github/workflows/packaging.yml`.
 
 `throcc-cli` is a headless client for scripts and testing (`throcc-cli --help`).

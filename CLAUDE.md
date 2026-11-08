@@ -16,6 +16,8 @@ cargo deny check
 throcc-server admin-invite --data <dir>   # single-use admin invite, works while the server runs
 throcc-client --mock --screen <name>   # sample data, no server; names in `ThroccApp::show_sample`
 ./scripts/screens.sh                   # macOS: README screenshots into docs/screens/
+packaging/macos/bundle.sh              # macOS: target/macos/throcc.dmg
+packaging/flatpak/cargo-sources.sh     # the flatpak's offline crates, before flatpak-builder
 ```
 
 On macOS, building with `--features ffmpeg` needs `FFMPEG_PKG_CONFIG_PATH=$PWD/deps/ffmpeg-lgpl/lib/pkgconfig` (built by `packaging/ffmpeg/build.sh deps/ffmpeg-lgpl`).
@@ -37,7 +39,7 @@ Each crate's `README.md` explains its modules and how they fit together. Update 
 
 ## Rules
 
-- Only the main agent changes `throcc-proto`. Any change to messages bumps `PROTOCOL` in `messages.rs`; new enum variants go last.
+- Only the main agent changes `throcc-proto`. From 0.1 on, any change to messages bumps `PROTOCOL` in `messages.rs`; new enum variants go last. 0.1 ships protocol 1.
 - Limits that server and client share live in `throcc_proto::limits` and nowhere else; anything sized by a room or a server derives from them.
 - The server never depends on codecs, capture, audio or media crypto. `check-server-deps.sh` enforces this.
 - The server never reads media past the 13-byte header and holds no media key.
@@ -49,6 +51,14 @@ Each crate's `README.md` explains its modules and how they fit together. Update 
 - No GPL or AGPL dependencies. `cargo deny` enforces this.
 - Crypto, protocol and SFU changes get reviewed by a subagent that didn't write them.
 - Released formats only change through a migration: the server schema (`MIGRATIONS` in `database.rs`) and every client JSON file (`json_file::Format::MIGRATIONS`). Version 1 of each is what 0.1 shipped; never edit it in place.
+
+## Releases
+
+- `main` only holds releases. Work happens on `develop`, and PRs target `develop`.
+- A release merges `develop` into `main`, and every side that changed since its last tag gets a new tag on that commit: `server-vX.Y.Z` publishes the Docker image, `client-vX.Y.Z` a draft GitHub release with the dmg, the Windows zip and the flatpak.
+- `throcc-server` and `throcc-client` have their own semver `version` in their `Cargo.toml`; the other crates keep the workspace version. A client release also adds a `<release>` to `packaging/flatpak/cc.thro.throcc.metainfo.xml`.
+- `PROTOCOL` alone decides compatibility. A server accepts `MIN_PROTOCOL..=PROTOCOL`, and a client checks its `PROTOCOL` is in the server's range. Both hellos stay decodable by every version. A protocol bump is a breaking server release, a minor one while 0.x.
+- Docker is the only supported server distribution. The app id is `cc.thro.throcc` everywhere.
 
 ## UI
 
