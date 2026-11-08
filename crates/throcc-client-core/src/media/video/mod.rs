@@ -58,10 +58,9 @@ impl Frame {
     }
 
     /// The picture in memory, copied out of GPU memory if it is there.
-    #[cfg(test)]
-    pub fn copied_to_memory(self) -> frame::VideoFrame {
+    pub fn copied_to_memory(&self) -> frame::VideoFrame {
         match self {
-            Frame::Planes(frame) => frame,
+            Frame::Planes(frame) => frame.clone(),
             #[cfg(target_os = "macos")]
             Frame::PixelBuffer(buffer) => buffer.copied_to_memory(),
         }
@@ -125,7 +124,6 @@ mod preview_tests {
 mod tests {
     use throcc_proto::messages::Recovery;
 
-    use super::Frame;
     use super::decode::{Decoder, MaxSize};
     use super::encode::{Encoder, EncoderConfig};
     use super::frame::{VideoFrame, luma_psnr};
@@ -158,7 +156,7 @@ mod tests {
                 if let Some(output) = decoder
                     .decode(&unit.data, unit.timestamp)
                     .unwrap()
-                    .map(Frame::copied_to_memory)
+                    .map(|frame| frame.copied_to_memory())
                 {
                     let number = output.read_test_number();
                     let psnr = luma_psnr(&output, &VideoFrame::test_pattern(1280, 720, number, 0));
@@ -220,7 +218,7 @@ mod tests {
                 if let Some(output) = decoder
                     .decode(&unit.data, unit.timestamp)
                     .unwrap()
-                    .map(Frame::copied_to_memory)
+                    .map(|frame| frame.copied_to_memory())
                 {
                     last = Some(output);
                 }
@@ -233,7 +231,7 @@ mod tests {
                 if let Some(output) = decoder
                     .decode(&unit.data, unit.timestamp)
                     .unwrap()
-                    .map(Frame::copied_to_memory)
+                    .map(|frame| frame.copied_to_memory())
                 {
                     last = Some(output);
                 }

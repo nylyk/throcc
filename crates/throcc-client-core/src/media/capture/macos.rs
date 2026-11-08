@@ -52,8 +52,7 @@ impl PixelBuffer {
     }
 
     /// The picture copied into memory.
-    #[cfg(test)]
-    pub(crate) fn copied_to_memory(&self) -> VideoFrame {
+    pub fn copied_to_memory(&self) -> VideoFrame {
         let mut out = VideoFrame::blank(self.width(), self.height());
         if let Ok(guard) = self.buffer.lock_read_only()
             && let (Some(y), Some(uv)) = (plane(&guard, 0), plane(&guard, 1))

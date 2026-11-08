@@ -1066,7 +1066,6 @@ mod failed_open {
 
 #[cfg(test)]
 mod round_trip {
-    use super::super::Frame;
     use super::super::decode::{Decoder, MaxSize};
     use super::super::frame::{VideoFrame, luma_psnr};
     use super::*;
@@ -1090,7 +1089,7 @@ mod round_trip {
                 if let Some(output) = decoder
                     .decode(&unit.data, unit.timestamp)
                     .unwrap()
-                    .map(Frame::copied_to_memory)
+                    .map(|frame| frame.copied_to_memory())
                 {
                     let number = output.read_test_number();
                     let reference = VideoFrame::test_pattern(1280, 720, number, 0);
@@ -1304,7 +1303,7 @@ mod gpu_input {
                 if let Some(output) = decoder
                     .decode(&unit.data, unit.timestamp)
                     .unwrap()
-                    .map(Frame::copied_to_memory)
+                    .map(|frame| frame.copied_to_memory())
                 {
                     last = Some(output);
                 }

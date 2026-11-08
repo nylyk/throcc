@@ -96,7 +96,11 @@ async fn a_shared_picture_arrives_within_a_few_frames() {
             .await
             .expect("pictures stopped arriving")
             .unwrap();
-        let frame = picture.borrow_and_update().clone().unwrap();
+        let frame = picture
+            .borrow_and_update()
+            .as_ref()
+            .unwrap()
+            .copied_to_memory();
         assert_eq!((frame.width, frame.height), (1920, 1080));
         latencies.push(millis_since(epoch).wrapping_sub(frame.read_test_number()));
     }
