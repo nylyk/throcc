@@ -570,6 +570,11 @@ impl ThroccApp {
         subscriptions.extend([
             cx.subscribe_in(&code, window, Self::on_code_input),
             cx.on_focus_lost(window, |app, window, cx| window.focus(&app.root_focus, cx)),
+            cx.observe_window_activation(window, |app, window, _| {
+                if !window.is_window_active() {
+                    app.release_space();
+                }
+            }),
             cx.subscribe_in(&name, window, Self::on_name_field),
             cx.subscribe(&server_name, Self::on_edit),
             cx.subscribe_in(&room_name, window, Self::on_room_field),
@@ -1850,6 +1855,8 @@ impl ThroccApp {
         self.person_menu = None;
         self.focus = None;
         self.preview_self = false;
+        self.space_talking = false;
+        self.audio_engine.push_to_talk(false);
         self.server_form.reset();
         self.settle_profile_save();
         if !matches!(self.screen, Screen::Settings(_)) {
@@ -1896,9 +1903,9 @@ impl ThroccApp {
         }
     }
 
-    /// Opens a screen of the mock client by name, for screenshots: onboarding, welcome, join,
-    /// joinfailed, lost, personmenu, addserver, removeserver, room, unwatched, alone,
-    /// emptylobby, focus, fullscreen, popout, slow, slowpopout, slowfullscreen, share,
+    /// Opens a screen of the mock client by name, for screenshots: onboarding, onboardingerror,
+    /// welcome, join, joinfailed, lost, personmenu, addserver, removeserver, room, unwatched,
+    /// alone, emptylobby, focus, fullscreen, popout, slow, slowpopout, slowfullscreen, share,
     /// connection, person, personverified, personchanged, keychange, ownprofile, pinmismatch,
     /// settings, appearance, verified, newroom, editroom, roompassword, deleteroom, profile,
     /// server, keys, members, invites, removeuser, leaveserver, identitymissing, identityback or
@@ -1930,12 +1937,18 @@ impl ThroccApp {
                 .insert(UserId(4));
         };
         match screen {
-            "onboarding" => {
+            "onboarding" | "onboardingerror" => {
                 offline(self);
                 self.known_servers.clear();
                 self.settings.profile = None;
                 self.profile_avatar = None;
                 self.show_screen(Screen::Onboarding, window, cx);
+                if screen == "onboardingerror" {
+                    after_a_moment(cx, |app, _| {
+                        app.profile_form.status =
+                            crate::avatar::prepare(&[]).err().map(SaveStatus::Failed);
+                    });
+                }
             }
             "welcome" => {
                 offline(self);
@@ -2141,6 +2154,12 @@ impl ThroccApp {
         self.dialog.is_none() && self.uses_push_to_talk() && self.root_focus.is_focused(window)
     }
 
+    fn release_space(&mut self) {
+        if std::mem::take(&mut self.space_talking) {
+            self.audio_engine.push_to_talk(false);
+        }
+    }
+
     /// Lists the devices, opens the ones the settings name and offers them on the audio page.
     /// Sample data opens none.
     pub fn change_devices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2267,8 +2286,8 @@ impl Render for ThroccApp {
                 }
             }))
             .on_key_up(cx.listener(|app, event: &gpui::KeyUpEvent, _, _| {
-                if event.keystroke.key == "space" && std::mem::take(&mut app.space_talking) {
-                    app.audio_engine.push_to_talk(false);
+                if event.keystroke.key == "space" {
+                    app.release_space();
                 }
             }))
             .size_full()
