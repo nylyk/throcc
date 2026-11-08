@@ -7,6 +7,7 @@ mod hotkey;
 mod keep_display_awake;
 mod popout;
 mod theme;
+mod updates;
 mod video;
 mod views;
 

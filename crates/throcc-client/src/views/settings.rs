@@ -19,13 +19,14 @@ use throcc_client_core::settings::{
 use throcc_proto::Fingerprint;
 
 use super::common::{
-    Typeset, caption, card, field_error, ghost_icon, key_cap, mono, primary, section, slider_gain,
-    slider_value, volume_slider,
+    Typeset, caption, card, description, field_error, ghost_icon, key_cap, mono, primary, section,
+    slider_gain, slider_value, update_notice, volume_slider,
 };
 use super::page::{field, frame, nav, picture_editor, row, save_line, segmented, switch_row};
 use crate::app::{DeviceNames, PictureFor, Screen, SettingsPage, ThroccApp, typed_name};
 use crate::hotkey::DEFAULT_KEY_LABEL;
 use crate::theme;
+use crate::updates;
 
 pub fn render(
     app: &mut ThroccApp,
@@ -43,6 +44,7 @@ pub fn render(
         SettingsPage::Audio => audio(app, cx),
         SettingsPage::Appearance => appearance(app, cx),
         SettingsPage::Verified => verified(app, cx),
+        SettingsPage::About => about(app, cx),
     };
     let content = match app.settings_problem.clone() {
         Some(problem) => div()
@@ -519,6 +521,36 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
 
 /// Everyone verified on this computer, on any server, each with the servers they were seen
 /// on and a way to take them off.
+fn about(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
+    let updates = card().flex().flex_col().gap_2().child(section("Updates"));
+    let updates = if updates::checked_here() {
+        updates
+            .child(switch_row(
+                Switch::new("check-for-updates")
+                    .checked(app.settings.check_for_updates)
+                    .label("Check for a new version when throcc starts")
+                    .on_click(cx.listener(|app, on: &bool, _, cx| app.use_update_check(*on, cx))),
+            ))
+            .children(app.newer_release.as_ref().map(update_notice))
+    } else {
+        updates.child(description("Flatpak keeps throcc up to date."))
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap_6()
+        .child(
+            card()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(section("throcc"))
+                .child(row("Version", div().child(env!("CARGO_PKG_VERSION")))),
+        )
+        .child(updates)
+        .into_any_element()
+}
+
 fn verified(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let address_of = |server: &Fingerprint| {
         app.known_servers

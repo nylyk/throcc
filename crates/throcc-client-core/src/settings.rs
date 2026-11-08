@@ -13,13 +13,26 @@ const FILE: &str = "settings.json";
 pub const DEFAULT_GATE_DBFS: f32 = -50.0;
 
 /// Everything the user sets for the app as a whole, kept in one file.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// `None` until onboarding keeps a name.
     pub profile: Option<Profile>,
     pub appearance: Appearance,
     pub audio: AudioSettings,
+    /// Whether the app asks GitHub for a newer release when it starts.
+    pub check_for_updates: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            profile: None,
+            appearance: Appearance::default(),
+            audio: AudioSettings::default(),
+            check_for_updates: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -156,6 +169,7 @@ mod tests {
                     cue_volume: 0.0,
                 },
             },
+            check_for_updates: false,
         }
     }
 
@@ -181,6 +195,13 @@ mod tests {
         };
         push_to_talk.save(dir.path()).unwrap();
         assert_eq!(Settings::load(dir.path()).unwrap(), push_to_talk);
+    }
+
+    #[test]
+    fn updates_are_checked_unless_turned_off() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(FILE), r#"{"version": 1}"#).unwrap();
+        assert!(Settings::load(dir.path()).unwrap().check_for_updates);
     }
 
     #[test]

@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use gpui::{
     Context, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton,
-    ObjectFit, ParentElement, Pixels, Point, RenderImage, SharedString, Styled, StyledImage, Task,
-    TitlebarOptions, WindowBackgroundAppearance, WindowOptions, div, img, px, relative,
+    ObjectFit, ParentElement, Pixels, Point, RenderImage, SharedString, Stateful,
+    StatefulInteractiveElement, Styled, StyledImage, Task, TitlebarOptions,
+    WindowBackgroundAppearance, WindowOptions, div, img, px, relative,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::PopupMenuItem;
@@ -14,6 +15,7 @@ use throcc_proto::Fingerprint;
 use throcc_proto::ids::UserId;
 
 use crate::theme;
+use crate::updates::Release;
 
 /// Sets text in a step of the type scale.
 pub trait Typeset: Styled + Sized {
@@ -222,6 +224,24 @@ pub fn caption(text: impl Into<SharedString>) -> Div {
         .typeset(theme::CAPTION)
         .text_color(theme::text_3())
         .child(text.into())
+}
+
+/// A quiet link to a newer release's page.
+pub fn update_notice(release: &Release) -> Stateful<Div> {
+    let url = release.url.clone();
+    div()
+        .id("update-notice")
+        .flex()
+        .items_center()
+        .gap_2()
+        .min_h(px(28.))
+        .cursor_pointer()
+        .typeset(theme::CALLOUT)
+        .text_color(theme::link())
+        .hover(|s| s.underline())
+        .child(icon("circle-arrow-up").size(px(16.)))
+        .child(format!("throcc {} is available", release.version))
+        .on_click(move |_, _, cx| cx.open_url(&url))
 }
 
 /// Explanatory text in a dialog or card.
