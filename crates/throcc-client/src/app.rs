@@ -2023,6 +2023,11 @@ impl ThroccApp {
                 joined(self);
                 after_a_moment(cx, move |app, _| show_overlay(app));
             }
+            "testpattern" => {
+                let client = MockClient::new(self.verified.clone());
+                self.attach(Arc::new(client), window, cx);
+                joined(self);
+            }
             "unwatched" => {
                 joined(self);
                 self.command(UiCommand::Unwatch(UserId(4)));

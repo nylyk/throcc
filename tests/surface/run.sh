@@ -29,7 +29,7 @@ done
 [ -n "${WAYLAND_DISPLAY:-}" ] || { echo "FAIL  sway did not start"; tail -20 "$out/sway.log"; exit 1; }
 export WAYLAND_DISPLAY
 
-RUST_LOG=gpui_wgpu=info ./target/debug/throcc-client --mock --screen room >"$out/client.log" 2>&1 &
+RUST_LOG=gpui_wgpu=info ./target/debug/throcc-client --mock --screen testpattern >"$out/client.log" 2>&1 &
 client_pid=$!
 adapter=
 for _ in $(seq 240); do
