@@ -20,7 +20,7 @@ use crate::media::voice::AudioEngine;
 use crate::profile::Profile;
 use crate::session::{AvatarSlot, Session, Shared};
 use crate::state::{
-    ConnectionStatus, CurrentRoom, Health, KeyWarning, MIC_KBPS, Person, Playback, RoomView,
+    ConnectionStatus, CurrentRoom, Health, MIC_KBPS, Person, Playback, RoomView,
     SHARE_AUDIO_DETAIL, SHARE_AUDIO_KBPS, SentTrack, ServerView, Sound, SoundLevel, State,
     TrackHealth, VOICE_DETAIL, share_detail,
 };
@@ -263,7 +263,7 @@ impl ClientApi for Client {
 pub struct MockClient {
     shared: Shared,
     verified: VerifiedStore,
-    /// A test pattern every share shows.
+    /// The picture every share shows.
     picture: watch::Sender<Option<Arc<Frame>>>,
 }
 
@@ -286,11 +286,22 @@ impl MockClient {
     pub fn new(verified: VerifiedStore) -> Self {
         let frame = VideoFrame::test_pattern(1280, 720, 1, 0);
         add_sample_verified(&verified);
-        Self {
+        let client = Self {
             shared: Shared::new(sample_state()),
             verified,
             picture: watch::Sender::new(Some(Arc::new(Frame::Planes(frame)))),
+        };
+        for (_, picture) in SAMPLE_PICTURES {
+            client.keep_avatar(picture.to_vec());
         }
+        client.keep_avatar(SAMPLE_SERVER_PICTURE.to_vec());
+        client
+    }
+
+    /// Makes every share show `frame`.
+    pub fn show_in_shares(&self, frame: VideoFrame) {
+        self.picture
+            .send_replace(Some(Arc::new(Frame::Planes(frame))));
     }
 
     /// The sample client, as if connected at `address`.
@@ -547,9 +558,28 @@ fn person(name: &str, room: Option<u64>) -> Person {
     }
 }
 
+const SAMPLE_PICTURES: [(u64, &[u8]); 7] = [
+    (1, include_bytes!("../assets/mock/nori.jpg")),
+    (2, include_bytes!("../assets/mock/kiwi.jpg")),
+    (3, include_bytes!("../assets/mock/mochi.jpg")),
+    (4, include_bytes!("../assets/mock/pixelmoth.png")),
+    (5, include_bytes!("../assets/mock/sleepyfox.jpg")),
+    (6, include_bytes!("../assets/mock/juno.jpg")),
+    (8, include_bytes!("../assets/mock/rook.jpg")),
+];
+pub const SAMPLE_SERVER_PICTURE: &[u8] = include_bytes!("../assets/mock/night-owls.jpg");
+
+/// The profile picture of the sample person `user`, if they have one.
+pub fn sample_picture(user: UserId) -> Option<&'static [u8]> {
+    SAMPLE_PICTURES
+        .iter()
+        .find(|(id, _)| UserId(*id) == user)
+        .map(|(_, picture)| *picture)
+}
+
 fn sample_state() -> State {
     let mut people = std::collections::BTreeMap::new();
-    let ilse_share = ShareConfig {
+    let pixelmoth_share = ShareConfig {
         audio: true,
         kbps: 10_000,
         codec: Codec::Av1,
@@ -558,16 +588,17 @@ fn sample_state() -> State {
         fps: 60,
     };
     for (id, name, room) in [
-        (1, "Felix", None),
-        (2, "Mara", Some(1)),
-        (3, "Jonas", Some(1)),
-        (4, "Ilse", Some(1)),
-        (5, "Teo", Some(2)),
-        (6, "Ren", Some(2)),
-        (7, "Kaya", Some(4)),
-        (8, "Noor", Some(4)),
+        (1, "nori", None),
+        (2, "Kiwi", Some(1)),
+        (3, "mochi", Some(1)),
+        (4, "pixelmoth", Some(1)),
+        (5, "sleepyfox", Some(2)),
+        (6, "Juno", Some(2)),
+        (7, "tobi_", Some(4)),
+        (8, "Rook", Some(4)),
     ] {
         let mut person = person(name, room);
+        person.avatar = sample_picture(UserId(id)).map(Hash::of);
         person.identity_key = Some(sample_key(id));
         person.verified = [2, 5, 6].contains(&id);
         people.insert(UserId(id), person);
@@ -583,7 +614,7 @@ fn sample_state() -> State {
         p.mic = false;
     }
     if let Some(p) = people.get_mut(&UserId(4)) {
-        p.sharing = Some(ilse_share);
+        p.sharing = Some(pixelmoth_share);
         p.audience = 2;
     }
     if let Some(p) = people.get_mut(&UserId(7)) {
@@ -591,32 +622,28 @@ fn sample_state() -> State {
     }
     State {
         server: Some(ServerView {
-            address: "voice.example.net".into(),
+            address: "owls.thro.cc".into(),
             fingerprint: Fingerprint([0x2c; 32]),
-            name: Some("Moss Co-op".into()),
-            avatar: None,
+            name: Some("Night Owls".into()),
+            avatar: Some(Hash::of(SAMPLE_SERVER_PICTURE)),
         }),
         connection: ConnectionStatus::Connected,
         me: Some(UserId(1)),
         role: Some(Role::Admin),
-        rooms: ["General", "Gaming", "Work", "AFK"]
+        rooms: ["Minecraft", "Lounge", "Study", "AFK"]
             .iter()
             .enumerate()
             .map(|(i, name)| RoomView {
                 id: RoomId(i as u64 + 1),
                 name: (*name).into(),
-                locked: *name == "Work",
+                locked: *name == "Study",
             })
             .collect(),
         people,
         current: None,
         mic: true,
         deafened: false,
-        key_warnings: vec![KeyWarning {
-            user: UserId(3),
-            verified: Fingerprint([0x7c; 32]),
-            now: Fingerprint(sample_key(3)),
-        }],
+        key_warnings: Vec::new(),
         health: Health {
             rtt_ms: 18.0,
             download_kbps: 10_480,
@@ -627,28 +654,28 @@ fn sample_state() -> State {
             slow_shares: Default::default(),
             receiving: vec![
                 TrackHealth {
-                    label: "Ilse, screen".into(),
-                    detail: share_detail(&ilse_share, "VideoToolbox"),
-                    set_kbps: Some(ilse_share.kbps),
+                    label: "pixelmoth, screen".into(),
+                    detail: share_detail(&pixelmoth_share, "VideoToolbox"),
+                    set_kbps: Some(pixelmoth_share.kbps),
                     arriving_kbps: Some(6_100),
                     loss: Some(4.2),
                 },
                 TrackHealth {
-                    label: "Ilse, screen audio".into(),
+                    label: "pixelmoth, screen audio".into(),
                     detail: SHARE_AUDIO_DETAIL.into(),
                     set_kbps: Some(SHARE_AUDIO_KBPS),
                     arriving_kbps: Some(128),
                     loss: Some(0.0),
                 },
                 TrackHealth {
-                    label: "Mara, mic".into(),
+                    label: "Kiwi, mic".into(),
                     detail: VOICE_DETAIL.into(),
                     set_kbps: Some(MIC_KBPS),
                     arriving_kbps: Some(61),
                     loss: Some(0.3),
                 },
                 TrackHealth {
-                    label: "Jonas, mic".into(),
+                    label: "mochi, mic".into(),
                     detail: VOICE_DETAIL.into(),
                     set_kbps: Some(MIC_KBPS),
                     arriving_kbps: None,
@@ -670,11 +697,11 @@ fn add_sample_verified(verified: &VerifiedStore) {
     let (here, elsewhere) = (Fingerprint([0x2c; 32]), Fingerprint([0x91; 32]));
     let mut keys = verified.lock();
     for (server, user, key, name) in [
-        (here, 2, sample_key(2), "Mara"),
-        (elsewhere, 2, sample_key(2), "Mara"),
-        (here, 3, [0x7c; 32], "Jonas"),
-        (here, 5, sample_key(5), "Teo"),
-        (here, 6, sample_key(6), "Ren"),
+        (here, 2, sample_key(2), "Kiwi"),
+        (elsewhere, 2, sample_key(2), "Kiwi"),
+        (here, 3, [0x7c; 32], "mochi"),
+        (here, 5, sample_key(5), "sleepyfox"),
+        (here, 6, sample_key(6), "Juno"),
     ] {
         let _ = keys.verify(&server, UserId(user), &key, name);
     }
@@ -687,12 +714,12 @@ fn sample_key(id: u64) -> PublicKey {
 
 fn sample_users() -> Vec<User> {
     [
-        (1, "Felix", Role::Admin, None),
-        (3, "Jonas", Role::Manager, Some(1)),
-        (2, "Mara", Role::User, Some(3)),
-        (4, "Ilse", Role::User, Some(3)),
-        (5, "Teo", Role::User, Some(2)),
-        (6, "Ren", Role::User, Some(5)),
+        (1, "nori", Role::Admin, None),
+        (3, "mochi", Role::Manager, Some(1)),
+        (2, "Kiwi", Role::User, Some(3)),
+        (4, "pixelmoth", Role::User, Some(3)),
+        (5, "sleepyfox", Role::User, Some(2)),
+        (6, "Juno", Role::User, Some(5)),
     ]
     .into_iter()
     .map(|(id, name, role, by)| User {

@@ -13,15 +13,16 @@ use gpui_component::slider::{SliderEvent, SliderState};
 use gpui_component::{Root, WindowExt};
 use throcc_client_core::account::SignInError;
 use throcc_client_core::avatars;
-use throcc_client_core::client::{Client, ClientApi, MockClient, UiCommand, UiEvent};
+use throcc_client_core::client::{self, Client, ClientApi, MockClient, UiCommand, UiEvent};
 use throcc_client_core::keystore::{self, Keystore, StartedOver};
 use throcc_client_core::media::devices;
+use throcc_client_core::media::video::frame::VideoFrame;
 use throcc_client_core::media::voice::AudioEngine;
 use throcc_client_core::profile::Profile;
 use throcc_client_core::server_look::ServerLook;
 use throcc_client_core::settings::{Appearance, AudioSettings, Settings, Transmit};
 use throcc_client_core::state::{
-    ConnectionStatus, ServerView, ShareChoice, Sound, SoundLevel, State,
+    ConnectionStatus, KeyWarning, ServerView, ShareChoice, Sound, SoundLevel, State,
 };
 use throcc_client_core::verified::VerifiedStore;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
@@ -298,6 +299,20 @@ fn after_a_moment(
         .ok();
     })
     .detach();
+}
+
+/// `client` with every share showing a game.
+fn with_sample_share(client: MockClient) -> Arc<MockClient> {
+    let game = image::load_from_memory_with_format(
+        include_bytes!("../assets/mock/share.jpg"),
+        image::ImageFormat::Jpeg,
+    );
+    if let Ok(game) = game {
+        let game = game.into_rgba8();
+        let (width, height) = (game.width() as usize, game.height() as usize);
+        client.show_in_shares(VideoFrame::from_rgba(width, height, game.as_raw()));
+    }
+    Arc::new(client)
 }
 
 /// The kept looks of `known` servers, by address.
@@ -592,21 +607,35 @@ impl ThroccApp {
         };
         let known_servers = if mock {
             vec![
-                ("voice.example.net".into(), Fingerprint([0x2c; 32])),
-                ("lan.example.org".into(), Fingerprint([0x5e; 32])),
+                ("owls.thro.cc".into(), Fingerprint([0x2c; 32])),
+                ("192.168.1.20".into(), Fingerprint([0x5e; 32])),
                 ("192.0.2.40".into(), Fingerprint([0x91; 32])),
             ]
         } else {
             known_servers()
         };
         let server_looks = if mock {
-            HashMap::from([(
-                "lan.example.org".to_owned(),
-                CachedLook {
-                    name: Some("LAN Party".into()),
-                    picture: None,
-                },
-            )])
+            let look = |name: &str, picture: &[u8]| CachedLook {
+                name: Some(name.into()),
+                picture: crate::avatar::decode(picture),
+            };
+            HashMap::from([
+                (
+                    "owls.thro.cc".to_owned(),
+                    look("Night Owls", client::SAMPLE_SERVER_PICTURE),
+                ),
+                (
+                    "192.168.1.20".to_owned(),
+                    look("LAN Party", include_bytes!("../assets/mock/lan-party.jpg")),
+                ),
+                (
+                    "192.0.2.40".to_owned(),
+                    look(
+                        "Survival SMP",
+                        include_bytes!("../assets/mock/survival-smp.jpg"),
+                    ),
+                ),
+            ])
         } else {
             cached_looks(&known_servers)
         };
@@ -684,11 +713,12 @@ impl ThroccApp {
         app.change_devices(window, cx);
         if mock {
             let profile = Profile {
-                name: "Felix".into(),
-                picture: None,
+                name: "nori".into(),
+                picture: client::sample_picture(UserId(1)).map(Arc::from),
             };
             app.set_profile(profile, cx);
-            app.attach(Arc::new(MockClient::new(app.verified.clone())), window, cx);
+            let client = MockClient::new(app.verified.clone());
+            app.attach(with_sample_share(client), window, cx);
         } else {
             match app.settings.profile.clone() {
                 Some(profile) => app.set_profile(profile, cx),
@@ -1705,7 +1735,7 @@ impl ThroccApp {
         }
         if self.mock {
             let client = MockClient::at(&address, self.verified.clone());
-            self.attach(Arc::new(client), window, cx);
+            self.attach(with_sample_share(client), window, cx);
             return;
         }
         let Some(profile) = self.settings.profile.clone() else {
@@ -1924,7 +1954,7 @@ impl ThroccApp {
         };
         let with_picture = |app: &mut Self, cx: &mut Context<Self>| {
             let profile = Profile {
-                name: "Felix".into(),
+                name: "nori".into(),
                 picture: Some(Arc::from(crate::avatar::sample())),
             };
             app.set_profile(profile.clone(), cx);
@@ -1936,6 +1966,9 @@ impl ThroccApp {
                 .health
                 .slow_shares
                 .insert(UserId(4));
+        };
+        let show_overlay = |app: &mut Self| {
+            app.overlay = Some((UserId(4), Some(Instant::now() + Duration::from_secs(60))));
         };
         match screen {
             "onboarding" | "onboardingerror" => {
@@ -1958,7 +1991,7 @@ impl ThroccApp {
             "join" => offline(self),
             "joinfailed" => {
                 offline(self);
-                self.join_error = Some(views::join::unreachable_hint("voice.example.net"));
+                self.join_error = Some(views::join::unreachable_hint("owls.thro.cc"));
             }
             "lost" => {
                 joined(self);
@@ -1984,9 +2017,12 @@ impl ThroccApp {
             }
             "removeserver" => {
                 offline(self);
-                self.dialog = Some(Dialog::RemoveServer("lan.example.org".into()));
+                self.dialog = Some(Dialog::RemoveServer("192.168.1.20".into()));
             }
-            "room" => joined(self),
+            "room" => {
+                joined(self);
+                after_a_moment(cx, move |app, _| show_overlay(app));
+            }
             "unwatched" => {
                 joined(self);
                 self.command(UiCommand::Unwatch(UserId(4)));
@@ -2002,6 +2038,7 @@ impl ThroccApp {
             "focus" => {
                 joined(self);
                 self.focus = Some(UserId(4));
+                after_a_moment(cx, move |app, _| show_overlay(app));
             }
             "fullscreen" | "slowfullscreen" => {
                 joined(self);
@@ -2025,7 +2062,7 @@ impl ThroccApp {
             "slow" => {
                 joined(self);
                 after_a_moment(cx, move |app, _| {
-                    app.overlay = Some((UserId(4), Some(Instant::now() + Duration::from_secs(60))));
+                    show_overlay(app);
                     make_slow(app);
                 });
             }
@@ -2045,7 +2082,19 @@ impl ThroccApp {
                     *key_changed = true;
                 }
             }
-            "keychange" => self.open_profile(UserId(3), cx),
+            "keychange" => {
+                self.open_profile(UserId(3), cx);
+                after_a_moment(cx, |app, _| {
+                    let state = Arc::make_mut(&mut app.state);
+                    if let Some(key) = state.person(UserId(3)).and_then(|p| p.identity_key) {
+                        state.key_warnings.push(KeyWarning {
+                            user: UserId(3),
+                            verified: Fingerprint([0x7c; 32]),
+                            now: Fingerprint(key),
+                        });
+                    }
+                });
+            }
             "ownprofile" => {
                 joined(self);
                 with_picture(self, cx);
@@ -2054,7 +2103,7 @@ impl ThroccApp {
             "pinmismatch" => {
                 offline(self);
                 self.dialog = Some(Dialog::PinMismatch {
-                    address: "voice.example.net".into(),
+                    address: "owls.thro.cc".into(),
                     expected: Fingerprint([0x2c; 32]),
                     actual: Fingerprint([0xb8; 32]),
                 });
@@ -2102,7 +2151,7 @@ impl ThroccApp {
                 self.screen = Screen::Server(ServerPage::Members);
                 self.dialog = Some(Dialog::Remove {
                     user: UserId(4),
-                    name: "Ilse".into(),
+                    name: "pixelmoth".into(),
                     cascade: false,
                 });
             }

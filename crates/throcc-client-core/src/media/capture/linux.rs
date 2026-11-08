@@ -43,7 +43,7 @@ use tracing::warn;
 use super::clock::ShareClock;
 use super::{Capture, CaptureConfig, CaptureError, copy_nv12, failed, resize};
 use crate::media::share_audio::STEREO_FRAME;
-use crate::media::video::frame::VideoFrame;
+use crate::media::video::frame::{VideoFrame, rgb_to_nv12};
 use desktop_audio::DesktopAudio;
 
 /// Frame buffers shared by the PipeWire thread and the share thread.
@@ -1154,70 +1154,6 @@ fn convert(bytes: &[u8], picture: &Picture, into: &mut VideoFrame) {
             resize(into, width, height);
             rgb_to_nv12(y.0, y.1, into, |[r, g, b, _]| [r, g, b]);
         }
-    }
-}
-
-/// Converts 4-byte pixels to full-range BT.709 NV12; `rgb` picks red, green and blue.
-fn rgb_to_nv12(
-    src: &[u8],
-    stride: usize,
-    into: &mut VideoFrame,
-    rgb: impl Fn([u8; 4]) -> [u8; 3] + Copy,
-) {
-    let width = into.width;
-    let row_bytes = width.saturating_mul(4);
-    if width == 0 || stride < row_bytes {
-        return;
-    }
-    let mut rows = src.chunks(stride).map(|row| {
-        row.get(..row_bytes)
-            .map_or(&[][..], |row| row.as_chunks::<4>().0)
-    });
-    let mut y_rows = into.y.chunks_exact_mut(width);
-    for uv_row in into.uv.chunks_exact_mut(width) {
-        let (Some(top), Some(top_y)) = (rows.next(), y_rows.next()) else {
-            return;
-        };
-        luma_row(top, top_y, rgb);
-        let bottom = match (rows.next(), y_rows.next()) {
-            (Some(bottom), Some(bottom_y)) => {
-                luma_row(bottom, bottom_y, rgb);
-                bottom
-            }
-            _ => top,
-        };
-        chroma_row(top, bottom, uv_row, rgb);
-    }
-}
-
-fn luma_row(pixels: &[[u8; 4]], out: &mut [u8], rgb: impl Fn([u8; 4]) -> [u8; 3]) {
-    for (pixel, y) in pixels.iter().zip(out) {
-        let [r, g, b] = rgb(*pixel).map(u32::from);
-        *y = ((54 * r + 183 * g + 19 * b + 128) >> 8) as u8;
-    }
-}
-
-/// Writes one interleaved U, V pair per 2×2 block of `top` and `bottom`, which are rows
-/// of the same width.
-fn chroma_row(
-    top: &[[u8; 4]],
-    bottom: &[[u8; 4]],
-    out: &mut [u8],
-    rgb: impl Fn([u8; 4]) -> [u8; 3],
-) {
-    let blocks = top.as_chunks::<2>().0.iter().zip(bottom.as_chunks::<2>().0);
-    for (([tl, tr], [bl, br]), uv) in blocks.zip(out.as_chunks_mut::<2>().0) {
-        let [r, g, b] = [*tl, *tr, *bl, *br]
-            .map(|pixel| rgb(pixel).map(i32::from))
-            .into_iter()
-            .fold([0; 3], |[r, g, b], [pr, pg, pb]| [r + pr, g + pg, b + pb])
-            .map(|sum| (sum + 2) >> 2);
-        let chroma = |kr: i32, kg: i32, kb: i32| {
-            ((kr * r + kg * g + kb * b + 128) >> 8)
-                .saturating_add(128)
-                .clamp(0, 255) as u8
-        };
-        *uv = [chroma(-29, -99, 128), chroma(128, -116, -12)];
     }
 }
 

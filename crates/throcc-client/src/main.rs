@@ -39,7 +39,9 @@ fn main() {
         .unwrap_or(size(px(1280.), px(800.)));
     let screen = value_of("--screen");
     let (mut settings, settings_problem) = if mock {
-        (Settings::default(), None)
+        let mut settings = Settings::default();
+        settings.appearance.translucent_sidebar = Some(false);
+        (settings, None)
     } else {
         saved_settings()
     };
