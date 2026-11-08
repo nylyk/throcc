@@ -270,6 +270,41 @@ fn a_changed_profile_reaches_others_and_the_next_session_renames_alone() {
 }
 
 #[test]
+fn a_profile_saved_again_too_soon_reaches_others_once_the_server_allows_it() {
+    let (address, admin_invite, _server) = server();
+    let (alice, _a) = client(&address, &admin_invite);
+    wait_connected(&alice, "connected");
+    let saved = UiCommand::SetProfile(named("Mara"));
+    command_then(&alice, saved, "the first profile wasn't saved", |e| {
+        matches!(e, UiEvent::ProfileSaved).then_some(())
+    });
+    let room = create_room(&alice);
+    let (bob, _b) = client(&address, &invite(&alice));
+    alice.command(UiCommand::Join(Some(room)));
+    bob.command(UiCommand::Join(Some(room)));
+    let alice_id = alice.state().me.unwrap();
+    wait_for(&bob, "alice's first name", |s| {
+        s.person(alice_id).is_some_and(|p| p.name == "Mara")
+    });
+
+    let mut events = alice.events();
+    alice.command(UiCommand::SetProfile(named("Alice")));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match events.try_recv() {
+            Ok(UiEvent::ProfileSaved) => break,
+            Ok(UiEvent::ProfileRefused(reason)) => panic!("the second save was refused: {reason}"),
+            _ => {}
+        }
+        assert!(Instant::now() < deadline, "the second profile wasn't saved");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    wait_for(&bob, "alice's second name", |s| {
+        s.person(alice_id).is_some_and(|p| p.name == "Alice")
+    });
+}
+
+#[test]
 fn a_share_started_mid_call_shows_and_stays_while_the_mic_changes() {
     let (address, admin_invite, _server) = server();
     let (alice, _a) = client(&address, &admin_invite);

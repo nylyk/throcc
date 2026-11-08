@@ -159,6 +159,8 @@ fn a_share_loading_on_a_good_link_never_shows_as_too_slow() {
         return;
     };
     watching.assert_never_too_slow(Duration::from_secs(10));
+    let arriving = watching.screen_health().and_then(|t| t.arriving_kbps);
+    assert!(arriving.is_some(), "the share never arrived");
 }
 
 #[test]
@@ -179,6 +181,7 @@ fn a_share_shows_as_too_slow_while_our_link_cant_carry_it() {
     watching.wait_for_slow_label(true, Duration::from_secs(8));
     relay.kbps.store(0, Ordering::Relaxed);
     watching.wait_for_slow_label(false, Duration::from_secs(8));
+    watching.assert_never_too_slow(Duration::from_secs(6));
 }
 
 #[test]

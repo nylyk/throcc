@@ -166,9 +166,10 @@ async fn run(cli: Cli) -> Result<()> {
             code,
             name,
         } => {
-            let profile = kept_profile(&keystore, name)?;
+            let profile = load_profile(&keystore, name)?;
             let code = invite_code(code).await?;
             let link = account::enroll(&mut keystore, &address, &code, &profile.name).await?;
+            save_profile(&keystore, profile)?;
             println!(
                 "enrolled as user {} ({:?})",
                 link.welcome.me.0, link.welcome.role
@@ -179,13 +180,13 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Connect { address } => {
             let link = sign_in(&keystore, &address).await?;
             print_rooms(&link.welcome.rooms, &link.welcome.presence);
-            interactive(link).await?;
+            interactive(&keystore, link).await?;
         }
         Command::Rooms { address } => one_shot(&keystore, &address, "rooms").await?,
         Command::Join { address, room } => {
             let link = sign_in(&keystore, &address).await?;
             run_command(&link.requester, &link.welcome, &format!("join {room}")).await?;
-            interactive(link).await?;
+            interactive(&keystore, link).await?;
         }
         Command::Leave { address } => one_shot(&keystore, &address, "leave").await?,
         Command::Invite { address } => one_shot(&keystore, &address, "invite").await?,
@@ -194,7 +195,7 @@ async fn run(cli: Cli) -> Result<()> {
             one_shot(&keystore, &address, &format!("create-room {name}")).await?
         }
         Command::Name { address, name } => {
-            let profile = kept_profile(&keystore, Some(name))?;
+            let profile = renamed_profile(&keystore, name)?;
             one_shot(&keystore, &address, &format!("name {}", profile.name)).await?
         }
         Command::Call {
@@ -261,14 +262,13 @@ async fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-/// The profile kept beside the keystore, first renamed to `name` and kept if one is given.
-fn kept_profile(keystore: &Keystore, name: Option<String>) -> Result<Profile> {
-    let mut settings = Settings::load(keystore.dir())?;
-    let kept = settings.profile.take();
+/// The profile kept beside the keystore, renamed to `name` if one is given.
+fn load_profile(keystore: &Keystore, name: Option<String>) -> Result<Profile> {
+    let kept = Settings::load(keystore.dir())?.profile;
     let Some(name) = name else {
         return kept.context("no name kept yet; give one with `enroll --name` or `name`");
     };
-    let profile = Profile {
+    Ok(Profile {
         name: valid_name(&name)
             .with_context(|| {
                 format!(
@@ -277,9 +277,19 @@ fn kept_profile(keystore: &Keystore, name: Option<String>) -> Result<Profile> {
             })?
             .to_owned(),
         picture: kept.and_then(|p| p.picture),
-    };
-    settings.profile = Some(profile.clone());
-    settings.save(keystore.dir())?;
+    })
+}
+
+fn save_profile(keystore: &Keystore, profile: Profile) -> Result<()> {
+    let mut settings = Settings::load(keystore.dir())?;
+    settings.profile = Some(profile);
+    settings.save(keystore.dir())
+}
+
+/// The kept profile renamed to `name`, saved beside the keystore.
+fn renamed_profile(keystore: &Keystore, name: String) -> Result<Profile> {
+    let profile = load_profile(keystore, Some(name))?;
+    save_profile(keystore, profile.clone())?;
     Ok(profile)
 }
 
@@ -310,7 +320,7 @@ fn voice_call(
         eprintln!("Couldn't read who you verified ({e:#}), so everyone shows as not verified.");
         VerifiedStore::empty(keystore.dir())
     });
-    let profile = kept_profile(&keystore, None)?;
+    let profile = load_profile(&keystore, None)?;
     let client = Client::connect(address, keystore, None, profile, audio, verified)?;
     let state = client.state();
     let rooms = state.rooms.iter().map(|r| (r.id, r.name.as_str()));
@@ -434,13 +444,13 @@ async fn one_shot(keystore: &Keystore, address: &str, command: &str) -> Result<(
     result
 }
 
-async fn interactive(mut link: ControlLink) -> Result<()> {
-    let result = read_commands(&mut link).await;
+async fn interactive(keystore: &Keystore, mut link: ControlLink) -> Result<()> {
+    let result = read_commands(keystore, &mut link).await;
     link.connected.close().await;
     result
 }
 
-async fn read_commands(link: &mut ControlLink) -> Result<()> {
+async fn read_commands(keystore: &Keystore, link: &mut ControlLink) -> Result<()> {
     println!(
         "commands: rooms, join <room>, leave, invite, users, create-room <name>, name <name>, quit"
     );
@@ -453,7 +463,7 @@ async fn read_commands(link: &mut ControlLink) -> Result<()> {
                 if line == "quit" {
                     return Ok(());
                 }
-                if !line.is_empty() && let Err(e) = run_command(&link.requester, &link.welcome, line).await {
+                if !line.is_empty() && let Err(e) = run_typed(keystore, link, line).await {
                     println!("error: {}", shown(&format!("{e:#}")));
                 }
             }
@@ -467,6 +477,17 @@ async fn read_commands(link: &mut ControlLink) -> Result<()> {
             }
         }
     }
+}
+
+/// Runs one typed command. A new name is also kept beside the keystore for later sessions.
+async fn run_typed(keystore: &Keystore, link: &ControlLink, line: &str) -> Result<()> {
+    let line = match line.split_once(' ') {
+        Some(("name", name)) => {
+            format!("name {}", renamed_profile(keystore, name.to_owned())?.name)
+        }
+        _ => line.to_owned(),
+    };
+    run_command(&link.requester, &link.welcome, &line).await
 }
 
 async fn run_command(requester: &Requester, welcome: &Welcome, line: &str) -> Result<()> {

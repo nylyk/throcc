@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use throcc_crypto::identity::encryption_key_message;
 use throcc_proto::framing;
 use throcc_proto::ids::{Epoch, Hash, Role, RoomId, UserId};
-use throcc_proto::limits::{MAX_ROOM_MEMBERS, MAX_ROOM_SHARES, MAX_ROOMS};
+use throcc_proto::limits::{MAX_ROOM_MEMBERS, MAX_ROOM_SHARES, MAX_ROOMS, MAX_WATCHED};
 use throcc_proto::messages::{
     ClientMessage, Codec, ErrorCode, Event, MAX_AVATAR_BYTES, MediaState, Presence, Request,
     Response, ServerMessage, SignedEncryptionKey, Welcome,
@@ -645,6 +645,25 @@ async fn a_room_runs_a_bounded_number_of_shares() {
         late.request(Request::SetMedia(sharing(share))).await,
         Response::Ok
     );
+}
+
+#[tokio::test]
+async fn watching_more_than_max_watched_tracks_is_refused() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let room = create_room(&mut alice, "General").await;
+    let tracks = alice.join(Some(room)).await.tracks.unwrap().shares[0];
+    let share = share_1080p60(Codec::H264, 8000);
+    assert_eq!(
+        alice.request(Request::SetMedia(sharing(share))).await,
+        Response::Ok
+    );
+    let bob = invited(&server, &alice).await;
+    bob.join(Some(room)).await;
+    let watching = Request::SetWatched(vec![tracks.video, tracks.audio]);
+    assert_eq!(bob.request(watching).await, Response::Ok);
+    let too_many = Request::SetWatched(vec![tracks.video; MAX_WATCHED + 1]);
+    assert_error(&bob.request(too_many).await, ErrorCode::TooLarge);
 }
 
 #[tokio::test]
