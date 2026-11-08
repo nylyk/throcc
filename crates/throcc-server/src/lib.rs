@@ -168,32 +168,14 @@ impl Server {
                 interval.tick().await;
             }
         });
-        let sweeper = Arc::downgrade(&self.shared);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(INACTIVE_SWEEP);
-            // Not at startup: everyone gets a sweep's time to sign in again first.
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                let Some(shared) = sweeper.upgrade() else {
-                    return;
-                };
-                if let Err(e) = shared.hub().remove_inactive(unix_now()) {
-                    warn!("removing inactive accounts: {e:#}");
-                }
+        // The first sweep waits a full period, so everyone gets that long to sign in again.
+        spawn_every(&self.shared, INACTIVE_SWEEP, |shared| {
+            if let Err(e) = shared.hub().remove_inactive(unix_now()) {
+                warn!("removing inactive accounts: {e:#}");
             }
         });
-        let reporter = Arc::downgrade(&self.shared);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(REFUSAL_REPORT);
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                let Some(shared) = reporter.upgrade() else {
-                    return;
-                };
-                shared.refusals.report();
-            }
+        spawn_every(&self.shared, REFUSAL_REPORT, |shared| {
+            shared.refusals.report()
         });
         while let Some(incoming) = self.endpoint.accept().await {
             let peer = incoming.remote_address();
@@ -296,6 +278,26 @@ fn not_the_servers_user(file: &Path, owner: u32, data_dir: &Path) -> anyhow::Err
         file.display(),
         data_dir.display()
     )
+}
+
+/// Runs `job` every `period`, starting one period from now, until the server is dropped.
+fn spawn_every(
+    shared: &Arc<ServerState>,
+    period: Duration,
+    job: impl Fn(&ServerState) + Send + 'static,
+) {
+    let shared = Arc::downgrade(shared);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(period);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let Some(shared) = shared.upgrade() else {
+                return;
+            };
+            job(&shared);
+        }
+    });
 }
 
 async fn handle(shared: Arc<ServerState>, connection: quinn::Connection, unauthenticated: Pass) {

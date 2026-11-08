@@ -249,11 +249,11 @@ async fn read_loop(
 ) -> Result<(), ReadError> {
     let pictures = Arc::new(Semaphore::new(QUEUED_PICTURE_BYTES));
     loop {
-        let ClientMessage::Request { id, request: req } = read_frame(recv).await?;
-        debug!(user = user.0, id, kind = request_kind(&req), "request");
-        let handled = shared.hub().handle(user, conn_id, req);
-        let res = match handled {
-            Handled::Done(res) => res,
+        let ClientMessage::Request { id, request } = read_frame(recv).await?;
+        debug!(user = user.0, id, kind = request_kind(&request), "request");
+        let handled = shared.hub().handle(user, conn_id, request);
+        let response = match handled {
+            Handled::Done(response) => response,
             Handled::Pending(work) => match run_password_work(shared, work).await {
                 Some(done) => shared.hub().resume(user, conn_id, done),
                 None => Response::Err {
@@ -262,17 +262,17 @@ async fn read_loop(
                 },
             },
         };
-        let response = match &res {
+        let outbound = match &response {
             Response::Avatar(bytes) => {
                 let cost = bytes.len().min(QUEUED_PICTURE_BYTES) as u32;
                 let Ok(queued) = pictures.clone().acquire_many_owned(cost).await else {
                     return Err(ReadError::Closed);
                 };
-                Outbound::Budgeted(ServerMessage::Response { id, response: res }, queued)
+                Outbound::Budgeted(ServerMessage::Response { id, response }, queued)
             }
-            _ => Outbound::Message(ServerMessage::Response { id, response: res }),
+            _ => Outbound::Message(ServerMessage::Response { id, response }),
         };
-        if outgoing.send(response).await.is_err() {
+        if outgoing.send(outbound).await.is_err() {
             return Err(ReadError::Closed);
         }
     }

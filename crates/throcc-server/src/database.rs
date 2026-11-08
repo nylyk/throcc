@@ -360,10 +360,8 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare("SELECT id FROM users WHERE last_seen < ?1 ORDER BY id")?;
-        let ids = stmt.query_map([before as i64], |r| r.get::<_, i64>(0))?;
-        Ok(ids
-            .map(|id| id.map(|id| UserId(id as u64)))
-            .collect::<rusqlite::Result<_>>()?)
+        let ids = stmt.query_map([before as i64], |r| Ok(UserId(r.get::<_, i64>(0)? as u64)))?;
+        Ok(ids.collect::<rusqlite::Result<_>>()?)
     }
 
     /// `user` and everyone they invited, transitively.

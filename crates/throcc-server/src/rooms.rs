@@ -666,9 +666,8 @@ impl Hub {
         // Checked before any password work, which a full room would only waste.
         if let Some(room) = target
             && self.session(user)?.room != target
-            && self.room_entry(room)?.members.len() >= MAX_ROOM_MEMBERS
         {
-            return Err(room_full());
+            self.check_room_space(room)?;
         }
         let needed = match target {
             Some(room) => self.password_to_enter(user, room)?.map(|hash| (room, hash)),
@@ -814,6 +813,13 @@ impl Hub {
             || self.last_joined.get(&user) == Some(&room)
     }
 
+    fn check_room_space(&self, room: RoomId) -> Result<(), Refusal> {
+        if self.room_entry(room)?.members.len() >= MAX_ROOM_MEMBERS {
+            return Err(room_full());
+        }
+        Ok(())
+    }
+
     /// Moves `user` to `target` in one step. On failure the user stays where they were.
     fn place(&mut self, user: UserId, target: Option<RoomId>) -> Result<Placement, Refusal> {
         let session = self.session(user)?;
@@ -822,9 +828,7 @@ impl Hub {
             return Ok(self.placement(user));
         }
         if let Some(room) = target {
-            if self.room_entry(room)?.members.len() >= MAX_ROOM_MEMBERS {
-                return Err(room_full());
-            }
+            self.check_room_space(room)?;
             let now = unix_now();
             if session
                 .row
@@ -1075,15 +1079,27 @@ impl Hub {
     fn set_media(&mut self, user: UserId, media: MediaState) -> Outcome {
         let room = self.current_room(user)?;
         let stored = self.session(user)?.media;
-        let starting = media.share.is_some() && stored.share.is_none();
-        let full = starting && self.shares_in(room) >= MAX_ROOM_SHARES;
-        let limited = media.share.is_some()
-            && media.share != stored.share
-            && !full
-            && !self.share_changes.take(user, 1.0, Instant::now());
-        let refused = full || limited;
+        let changing = media.share.is_some() && media.share != stored.share;
+        let refusal =
+            if changing && stored.share.is_none() && self.shares_in(room) >= MAX_ROOM_SHARES {
+                Some(Refusal::new(
+                    ErrorCode::Full,
+                    format!("this room already has {MAX_ROOM_SHARES} screen shares running"),
+                ))
+            } else if changing && !self.share_changes.take(user, 1.0, Instant::now()) {
+                Some(Refusal::new(
+                    ErrorCode::RateLimited,
+                    "too many share starts; the share stays as it was, try again in a moment",
+                ))
+            } else {
+                None
+            };
         let applied = MediaState {
-            share: if refused { stored.share } else { media.share },
+            share: if refusal.is_some() {
+                stored.share
+            } else {
+                media.share
+            },
             ..media
         };
         self.session_mut(user)?.media = applied;
@@ -1096,19 +1112,7 @@ impl Hub {
             self.rebuild_routes();
         }
         self.announce_presence(user);
-        if full {
-            return Err(Refusal::new(
-                ErrorCode::Full,
-                format!("this room already has {MAX_ROOM_SHARES} screen shares running"),
-            ));
-        }
-        if limited {
-            return Err(Refusal::new(
-                ErrorCode::RateLimited,
-                "too many share starts; the share stays as it was, try again in a moment",
-            ));
-        }
-        Ok(Response::Ok)
+        refusal.map_or(Ok(Response::Ok), Err)
     }
 
     /// Whether [`MAX_ONLINE`] people are signed in.
@@ -1358,12 +1362,7 @@ impl Hub {
             let row = self.stored_user(*id)?;
             require(leaving || permissions::can_remove(actor, row.role))?;
         }
-        self.db.remove_users(&removed).map_err(Refusal::internal)?;
-        for id in &removed {
-            self.last_joined.remove(id);
-            self.evict(*id, "you were removed from this server");
-            self.emit_user_list_change(Event::UserRemoved(*id));
-        }
+        self.remove_accounts(&removed).map_err(Refusal::internal)?;
         info!(?removed, "removed users");
         Ok(Response::Ok)
     }
@@ -1375,13 +1374,19 @@ impl Hub {
         if inactive.is_empty() {
             return Ok(());
         }
-        self.db.remove_users(&inactive)?;
-        for id in &inactive {
+        self.remove_accounts(&inactive)?;
+        info!(removed = ?inactive, "removed inactive accounts");
+        Ok(())
+    }
+
+    /// Deletes `users` and disconnects any of them still signed in.
+    fn remove_accounts(&mut self, users: &[UserId]) -> anyhow::Result<()> {
+        self.db.remove_users(users)?;
+        for id in users {
             self.last_joined.remove(id);
             self.evict(*id, "you were removed from this server");
             self.emit_user_list_change(Event::UserRemoved(*id));
         }
-        info!(removed = ?inactive, "removed inactive accounts");
         Ok(())
     }
 
