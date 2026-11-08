@@ -20,6 +20,9 @@ use throcc_client_core::media::voice::AudioEngine;
 use throcc_client_core::settings::Settings;
 use views::common;
 
+/// The id the desktop file, the flatpak and the macOS bundle go by.
+pub const APP_ID: &str = "cc.thro.throcc";
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(

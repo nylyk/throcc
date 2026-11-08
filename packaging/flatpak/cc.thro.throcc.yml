@@ -1,0 +1,63 @@
+id: cc.thro.throcc
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  # rusty_ffmpeg's bindgen 0.71 misreads ffmpeg's headers with libclang 21 and newer.
+  - org.freedesktop.Sdk.Extension.llvm20
+command: throcc
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  - --share=network
+  - --socket=pulseaudio
+  - --filesystem=xdg-run/pipewire-0
+  - --talk-name=org.freedesktop.secrets
+modules:
+  - name: ffmpeg
+    buildsystem: simple
+    build-commands:
+      - FFMPEG_TARBALL=ffmpeg-8.1.3.tar.xz ./build.sh /app
+    cleanup:
+      - /include
+      - /lib/pkgconfig
+      - /share
+    sources:
+      - type: dir
+        path: ../ffmpeg
+      - type: file
+        url: https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz
+        sha256: 7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3
+
+  - name: throcc
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm20/bin
+      env:
+        CARGO_HOME: /run/build/throcc/cargo
+        FFMPEG_PKG_CONFIG_PATH: /app/lib/pkgconfig
+        LIBCLANG_PATH: /usr/lib/sdk/llvm20/lib
+        # The SDK has an ffmpeg of its own, which the linker would otherwise find first.
+        RUSTFLAGS: -L native=/app/lib
+    build-commands:
+      - cargo --offline build --release --locked -p throcc-client --features ffmpeg
+      - install -Dm755 target/release/throcc-client /app/bin/throcc
+      - test -e "/app/lib/$(readelf -d /app/bin/throcc | grep -o 'libavcodec\.so\.[0-9]*' || echo none)"
+      - install -Dm644 -t /app/share/applications packaging/flatpak/cc.thro.throcc.desktop
+      - install -Dm644 -t /app/share/metainfo packaging/flatpak/cc.thro.throcc.metainfo.xml
+      - cp -r packaging/icons /app/share/
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .git
+          - deps
+          - design
+          - docs
+          - fuzz
+          - result
+          - target
+      - cargo-sources.json

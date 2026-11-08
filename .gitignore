@@ -7,3 +7,4 @@ ci-run.log
 /deps/
 /result
 .DS_Store
+/packaging/flatpak/cargo-sources.json
