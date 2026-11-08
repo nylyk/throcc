@@ -6,7 +6,7 @@ use throcc_crypto::pake::{ServerPake, Transcript};
 use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::invite::{self, ID_CHARS, SECRET_CHARS};
 use throcc_proto::messages::{
-    AuthError, ClientHello, Event, PakeFinish, PakeReply, PakeStep, PublicKey, valid_name,
+    AuthError, Event, PakeFinish, PakeReply, PakeStep, PublicKey, SignIn, valid_name,
 };
 use tracing::{debug, info, warn};
 
@@ -40,11 +40,11 @@ pub async fn authenticate(
     connection: &quinn::Connection,
     stream: &mut FrameStream,
     server_nonce: &[u8; 32],
-    hello: ClientHello,
+    sign_in: SignIn,
 ) -> Result<Authenticated, AuthRefusal> {
     let exporter = exporter(connection).map_err(AuthRefusal::Auth)?;
-    match hello {
-        ClientHello::Auth {
+    match sign_in {
+        SignIn::Auth {
             pubkey,
             client_nonce,
             want_room,
@@ -61,7 +61,7 @@ pub async fn authenticate(
                 .ok_or(AuthRefusal::Auth(AuthError::UnknownKey))?;
             Ok(Authenticated { row, want_room })
         }
-        ClientHello::Enroll {
+        SignIn::Enroll {
             code_id,
             pubkey,
             client_nonce,

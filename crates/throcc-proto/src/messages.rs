@@ -1,8 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+use crate::framing::FrameError;
 use crate::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
 
+/// The protocol this build speaks.
 pub const PROTOCOL: u16 = 1;
+/// The oldest protocol a server of this build accepts.
+pub const MIN_PROTOCOL: u16 = 1;
 pub const MAX_AVATAR_BYTES: usize = 64 * 1024;
 pub const MAX_NAME_CHARS: usize = 32;
 pub const MAX_PASSWORD_CHARS: usize = 128;
@@ -55,14 +59,32 @@ pub fn valid_password(password: &str) -> bool {
 pub type PublicKey = [u8; 32];
 pub type Signature = [u8; 64];
 
+// Both hellos stay decodable by every future version, since they tell mismatched peers which
+// of them is outdated. `ServerHello` never changes. `ClientHello` keeps `protocol` first, so a
+// server reads it before decoding a `SignIn` that another version may define differently.
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerHello {
     pub nonce: [u8; 32],
-    pub protocol: u16,
+    pub min_protocol: u16,
+    pub max_protocol: u16,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ClientHello {
+pub struct ClientHello {
+    pub protocol: u16,
+    pub sign_in: SignIn,
+}
+
+impl ClientHello {
+    /// Reads the protocol of an encoded hello from any version.
+    pub fn protocol_of(body: &[u8]) -> Result<u16, FrameError> {
+        Ok(postcard::take_from_bytes::<u16>(body)?.0)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SignIn {
     Auth {
         pubkey: PublicKey,
         client_nonce: [u8; 32],
@@ -86,7 +108,7 @@ pub struct PakeReply {
     pub confirm_b: [u8; 32],
 }
 
-/// The server's answer to `ClientHello::Enroll`: the PAKE reply, or a refusal before any PAKE.
+/// The server's answer to `SignIn::Enroll`: the PAKE reply, or a refusal before any PAKE.
 pub type PakeStep = Result<PakeReply, AuthError>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
