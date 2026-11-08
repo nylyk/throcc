@@ -321,6 +321,7 @@ fn voice_call(
         VerifiedStore::empty(keystore.dir())
     });
     let profile = load_profile(&keystore, None)?;
+    let profile = tokio::sync::watch::channel(profile).1;
     let client = Client::connect(address, keystore, None, profile, audio, verified)?;
     let state = client.state();
     let rooms = state.rooms.iter().map(|r| (r.id, r.name.as_str()));

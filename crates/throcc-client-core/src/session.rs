@@ -252,6 +252,8 @@ pub(crate) struct Session {
     /// Whether the mic was on when we deafened, so undeafening restores it.
     mic_before_deafen: bool,
     profile: Profile,
+    /// Our profile as saved while we joined, newer than `profile` once it changes.
+    kept_profile: watch::Receiver<Profile>,
     /// Our profile as the server has it.
     server_profile: UserProfile,
     /// Our profile as the server refused it for coming too soon after the last change. Its
@@ -349,11 +351,12 @@ impl Session {
         shared: Arc<Shared>,
         keystore: Keystore,
         address: String,
-        profile: Profile,
+        mut kept_profile: watch::Receiver<Profile>,
         audio: Option<Arc<AudioEngine>>,
         call: Call,
         verified: VerifiedStore,
     ) -> Self {
+        let profile = kept_profile.borrow_and_update().clone();
         let server = call.server();
         let saved_playback = SavedPlayback::load(keystore.dir()).unwrap_or_else(|e| {
             warn!("no saved playback: {e:#}");
@@ -385,6 +388,7 @@ impl Session {
             server_profile: call.welcome.profile.clone(),
             too_soon_profile: None,
             profile,
+            kept_profile,
             saved_playback,
             unkeyed_playback: HashMap::new(),
             server_look,
@@ -402,10 +406,19 @@ impl Session {
         session
     }
 
+    /// Takes the profile saved during the join, if one came since we last looked.
+    fn take_kept_profile(&mut self) {
+        let kept = self.kept_profile.borrow_and_update();
+        if kept.has_changed() {
+            self.profile = kept.clone();
+        }
+    }
+
     /// Gives the server our profile, uploading the picture only if the server lacks it, and
     /// tells the UI how that went.
     async fn push_profile(&mut self) {
         self.too_soon_profile = None;
+        self.take_kept_profile();
         let wanted = UserProfile {
             name: self.profile.name.clone(),
             avatar: self.profile.avatar(),
@@ -1152,6 +1165,7 @@ impl Session {
                 });
             }
             UiCommand::SetProfile(profile) => {
+                self.kept_profile.borrow_and_update();
                 self.profile = profile;
                 self.push_profile().await;
             }

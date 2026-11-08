@@ -177,8 +177,7 @@ pub fn picture_editor(
         .children(buttons)
 }
 
-/// A card's Save button at the bottom right, with how the last save went beside it, a
-/// refusal worded by `refused`.
+/// A card's Save button at the bottom right, with how the last save went beside it.
 pub fn save_line(status: Option<&SaveStatus>, save: Button) -> Div {
     let status = status.map(|status| match status {
         SaveStatus::Saving => caption("Saving…"),

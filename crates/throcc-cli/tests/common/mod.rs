@@ -303,6 +303,7 @@ pub fn client_as(
 ) -> Client {
     let keystore = Keystore::open_in(dir).unwrap();
     let verified = VerifiedStore::load(dir).unwrap();
+    let profile = tokio::sync::watch::channel(profile).1;
     Client::connect(address, keystore, invite, profile, None, verified).unwrap()
 }
 

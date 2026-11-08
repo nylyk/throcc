@@ -147,12 +147,12 @@ pub struct Client {
 
 impl Client {
     /// Signs in, or enrolls with `invite`, and blocks until the server has answered. The
-    /// server gets `profile` unless it has it already.
+    /// server gets the newest `profile` unless it has it already.
     pub fn connect(
         address: &str,
         mut keystore: Keystore,
         invite: Option<&InviteCode>,
-        profile: Profile,
+        profile: watch::Receiver<Profile>,
         audio: Option<Arc<AudioEngine>>,
         verified: VerifiedStore,
     ) -> Result<Self, SignInError> {
@@ -163,9 +163,10 @@ impl Client {
             .build()
             .map_err(|e| SignInError::Store(e.into()))?;
         keystore.renew_encryption_key_if_due()?;
+        let name = profile.borrow().name.clone();
         let link = runtime.block_on(async {
             match invite {
-                Some(code) => account::enroll(&mut keystore, address, code, &profile.name).await,
+                Some(code) => account::enroll(&mut keystore, address, code, &name).await,
                 None => account::sign_in(&keystore, address, None).await,
             }
         })?;
@@ -219,7 +220,7 @@ impl Drop for Client {
 
 impl ClientApi for Client {
     fn command(&self, command: UiCommand) {
-        if self.commands.try_send(command).is_err() {
+        if let Err(mpsc::error::TrySendError::Full(_)) = self.commands.try_send(command) {
             self.shared.notice("busy; try again");
         }
     }
