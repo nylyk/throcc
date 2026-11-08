@@ -15,15 +15,14 @@ use crate::sfu::MAX_INGRESS_BYTES_PER_SECOND;
 
 /// Queued video beyond this is dropped, in whole units that haven't started sending.
 pub const VIDEO_BUDGET: Duration = Duration::from_millis(150);
-const LINK_STATS_INTERVAL: Duration = Duration::from_secs(2);
+const RECEIVE_STATS_INTERVAL: Duration = Duration::from_secs(2);
 const INBOX: usize = 8192;
 /// The video budget of every share in a room at the ingress limit. Over this, even started
 /// units are dropped.
 const MAX_QUEUED_VIDEO_BYTES: usize =
     (MAX_ROOM_SHARES as f64 * MAX_INGRESS_BYTES_PER_SECOND * VIDEO_BUDGET.as_secs_f64()) as usize;
-/// Two seconds of every audio track a full room sends one receiver, at 50 frames/s: a cap
-/// against a receiver that stops reading, not a drop policy. Reaching it costs the longest
-/// track a packet.
+/// Two seconds of every audio track a full room sends one receiver, at 50 frames/s. Reaching
+/// it costs the longest track a packet.
 const MAX_QUEUED_AUDIO: usize = 2 * 50 * (MAX_ROOM_MEMBERS - 1 + MAX_ROOM_SHARES);
 /// A unit's fragment limit: a 1440p keyframe at 15 Mbps is well under 1000.
 const MAX_UNIT_FRAGMENTS: usize = 4096;
@@ -547,7 +546,7 @@ pub fn spawn(connection: quinn::Connection, control: mpsc::Sender<Outbound>) -> 
     let inbox_drops = handle.inbox_drops.clone();
     tokio::spawn(async move {
         let mut queues = Queues::default();
-        let mut next_stats = Instant::now() + LINK_STATS_INTERVAL;
+        let mut next_stats = Instant::now() + RECEIVE_STATS_INTERVAL;
         // Swapped with the shared list each round, so neither side regrows from empty.
         let mut lost = Vec::new();
         loop {
@@ -574,7 +573,7 @@ pub fn spawn(connection: quinn::Connection, control: mpsc::Sender<Outbound>) -> 
             let now = Instant::now();
             queues.enforce_budget(now);
             if now >= next_stats {
-                next_stats = now + LINK_STATS_INTERVAL;
+                next_stats = now + RECEIVE_STATS_INTERVAL;
                 queues.forget_quiet_tracks();
                 if let Ok(permit) = control.try_reserve() {
                     let tracks = queues.take_stats();

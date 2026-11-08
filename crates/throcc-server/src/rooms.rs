@@ -66,7 +66,7 @@ const REJOINS_PER_SECOND: f64 = 0.1;
 /// A new encryption key re-keys the user's room. Clients replace theirs once a month.
 const ENCRYPTION_KEY_CHANGE_BURST: f64 = 3.0;
 const ENCRYPTION_KEY_CHANGES_PER_SECOND: f64 = 1.0 / 60.0;
-/// Starting or changing a share sends the room's state to every member. Stopping is free.
+/// Starting or changing a share sends the room's peers to every member. Stopping is free.
 const SHARE_CHANGE_BURST: f64 = 5.0;
 const SHARE_CHANGES_PER_SECOND: f64 = 1.0;
 /// Sender keys a member may publish for one epoch outside the request allowance: one,
@@ -293,11 +293,8 @@ impl Hub {
         })
     }
 
-    /// Registers a connection that has authenticated as `row`, and notes that its user was
-    /// seen. A previous connection of the same user is kicked. Returns the connection id and
-    /// the welcome snapshot, or why the user can't connect: they were removed after
-    /// authenticating, or [`MAX_ONLINE`] others are signed in and they aren't an admin, or
-    /// [`MAX_SIGNED_IN`] are.
+    /// Registers a connection authenticated as `row`, notes the sign-in and kicks the user's
+    /// earlier connection. Refuses a removed user, and a newcomer past the sign-in limits.
     pub fn connect(
         &mut self,
         row: UserRow,
@@ -1073,11 +1070,8 @@ impl Hub {
         Ok(Response::Ok)
     }
 
-    /// Mic and deafen always apply, since push-to-talk sends `SetMedia`. Only starting or
-    /// changing a share counts against the share allowance, and a new share is refused once
-    /// the room has [`MAX_ROOM_SHARES`]; either way the rest still applies, the share stays
-    /// as it was, and the reply says so. Stopping is never refused: stops are bounded by
-    /// starts, and a stop shrinks fan-out.
+    /// Applies mic and deafen always. A share start or change past the share allowance or
+    /// [`MAX_ROOM_SHARES`] is refused; the share then stays as it was, and the reply says so.
     fn set_media(&mut self, user: UserId, media: MediaState) -> Outcome {
         let room = self.current_room(user)?;
         let stored = self.session(user)?.media;

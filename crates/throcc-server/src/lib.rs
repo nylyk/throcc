@@ -168,7 +168,6 @@ impl Server {
                 interval.tick().await;
             }
         });
-        // The first sweep waits a full period, so everyone gets that long to sign in again.
         spawn_every(&self.shared, INACTIVE_SWEEP, |shared| {
             if let Err(e) = shared.hub().remove_inactive(unix_now()) {
                 warn!("removing inactive accounts: {e:#}");

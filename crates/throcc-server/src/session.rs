@@ -22,7 +22,7 @@ use crate::rooms::{ConnectionHandle, Handled, Outbound, PasswordDone, PasswordWo
 /// How long a connection may wait for a handshake slot, and then how long it has to send
 /// its `ClientHello`.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
-/// Longest a sign-in or enrollment may take after ClientHello, PAKE included.
+/// Longest a sign-in or enrollment may take after `ClientHello`, PAKE included.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(40);
 pub const HANDSHAKE_FRAME_BYTES: usize = 4096;
 const EVENT_QUEUE: usize = 1024;
