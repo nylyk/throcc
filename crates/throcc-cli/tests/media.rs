@@ -8,7 +8,7 @@ use throcc_client_core::call::Call;
 use throcc_client_core::media::engine::{Kind, Outgoing};
 use throcc_proto::frame::{Flags, Header, TAG_BYTES, VIDEO_CLOCK_HZ};
 use throcc_proto::ids::{Epoch, MediaId, UserId};
-use throcc_proto::messages::{Audience, Codec, Event, MediaState, Request, Response};
+use throcc_proto::messages::{Audience, Codec, Event, MediaState, Recovery, Request, Response};
 use throcc_proto::transport::close;
 use throcc_server::{AUDIO_BURST_PACKETS, AUDIO_PACKETS_PER_SECOND};
 
@@ -325,6 +325,45 @@ async fn keyframes_arrive_whole_through_two_percent_loss() {
         whole >= KEYFRAMES * 8 / 10,
         "only {whole} of {KEYFRAMES} keyframes whole"
     );
+}
+
+#[tokio::test]
+async fn a_unit_lost_on_the_way_asks_its_sender_for_a_refresh() {
+    const UNITS: u32 = 3_000;
+    let server = start_server();
+    let relay = lossy_relay(&server.addr, Toward::Client, 5).await;
+    let (mut alice, bob, _) = room_with_two_at(&server, &relay.addr).await;
+    let share = sharing(share_1080p60(Codec::H264, 10_000));
+    assert_eq!(
+        alice.request(Request::SetMedia(share)).await.unwrap(),
+        Response::Ok
+    );
+    let video_id = first_share(&bob, &alice).await.video;
+    let _units = watch(&bob, video_id, UNITS as usize).await;
+    wait_for("both at one epoch with keys", || {
+        let epoch = alice.engine.keys().epoch();
+        epoch == bob.engine.keys().epoch() && bob.engine.keys().recv_key(video_id, epoch).is_some()
+    })
+    .await;
+
+    relay.lossy.store(true, Ordering::Relaxed);
+    let abandoned = || bob.engine.stats.abandoned_units.load(Ordering::Relaxed);
+    let mut index = 0;
+    while abandoned() == 0 {
+        assert!(index < UNITS, "no unit was abandoned in {UNITS} sent");
+        let unit = Outgoing::new(video_id, unit(index, 20 * 1100), index * 1500, false);
+        alice.engine.send(Kind::Video, unit);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        index += 1;
+    }
+    server_event(&mut alice, |e| match e {
+        Event::KeyframeRequested {
+            media_id,
+            kind: Recovery::Refresh,
+        } if media_id == video_id => Some(()),
+        _ => None,
+    })
+    .await;
 }
 
 #[tokio::test]

@@ -648,7 +648,7 @@ async fn a_room_runs_a_bounded_number_of_shares() {
 }
 
 #[tokio::test]
-async fn watching_more_than_max_watched_tracks_is_refused() {
+async fn watching_up_to_max_watched_tracks_is_allowed_and_more_refused() {
     let server = start_server();
     let mut alice = admin(&server).await;
     let room = create_room(&mut alice, "General").await;
@@ -662,6 +662,8 @@ async fn watching_more_than_max_watched_tracks_is_refused() {
     bob.join(Some(room)).await;
     let watching = Request::SetWatched(vec![tracks.video, tracks.audio]);
     assert_eq!(bob.request(watching).await, Response::Ok);
+    let at_the_limit = Request::SetWatched(vec![tracks.video; MAX_WATCHED]);
+    assert_eq!(bob.request(at_the_limit).await, Response::Ok);
     let too_many = Request::SetWatched(vec![tracks.video; MAX_WATCHED + 1]);
     assert_error(&bob.request(too_many).await, ErrorCode::TooLarge);
 }
