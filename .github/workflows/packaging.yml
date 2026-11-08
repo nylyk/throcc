@@ -40,8 +40,38 @@ jobs:
           key: macos-ffmpeg-${{ steps.dav1d.outputs.version }}-${{ hashFiles('packaging/ffmpeg/build.sh', 'packaging/ffmpeg/patches/*') }}
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Tags and manual runs sign with the Developer ID and notarize; every other run signs ad hoc.
+      - name: signing keychain
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password=$(openssl rand -hex 24)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          base64 --decode <<<"$MACOS_CERT_P12" >"$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity=$(security find-identity -v -p codesigning "$keychain" | awk -F'"' '/Developer ID Application/ { print $2; exit }')
+          [ -n "$identity" ] || { echo "::error::no Developer ID Application identity in MACOS_CERT_P12"; exit 1; }
+          echo "MACOS_SIGN_IDENTITY=$identity" >>"$GITHUB_ENV"
+          base64 --decode <<<"$NOTARY_KEY" >"$RUNNER_TEMP/notary.p8"
+          echo "NOTARY_KEY_FILE=$RUNNER_TEMP/notary.p8" >>"$GITHUB_ENV"
       - run: ./scripts/ci-run.sh packaging/macos/bundle.sh
         shell: bash
+        env:
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
+      - if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/notary.p8"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: throcc-macos
