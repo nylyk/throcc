@@ -776,7 +776,9 @@ fn activate_loopback() -> windows::core::Result<IAudioClient> {
             },
         },
     };
-    let blob = PROPVARIANT {
+    // Never dropped: PROPVARIANT's Drop runs PropVariantClear, which would CoTaskMemFree
+    // `pBlobData`, and that points at `params` on this stack.
+    let blob = ManuallyDrop::new(PROPVARIANT {
         Anonymous: PROPVARIANT_0 {
             Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {
                 vt: VT_BLOB,
@@ -791,7 +793,7 @@ fn activate_loopback() -> windows::core::Result<IAudioClient> {
                 },
             }),
         },
-    };
+    });
     let (done, activated) = mpsc::sync_channel(1);
     let handler: IActivateAudioInterfaceCompletionHandler = Activated(done).into();
     // SAFETY: `blob` points at `params`, and both live until activation has completed.
@@ -799,7 +801,7 @@ fn activate_loopback() -> windows::core::Result<IAudioClient> {
         ActivateAudioInterfaceAsync(
             VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
             &IAudioClient::IID,
-            Some(&blob),
+            Some(&*blob),
             &handler,
         )
     }?;
@@ -915,14 +917,19 @@ mod tests {
         };
         let mut capture = primary_monitor(config);
         assert!(capture.captures_audio());
-        let mut player = std::process::Command::new("powershell")
+        // Started through WMI so the player isn't in this process tree, which the loopback
+        // leaves out.
+        let player = std::process::Command::new("powershell")
             .args([
                 "-NoProfile",
                 "-Command",
-                "(New-Object Media.SoundPlayer 'C:\\Windows\\Media\\Alarm01.wav').PlaySync()",
+                "(Invoke-CimMethod Win32_Process -MethodName Create -Arguments @{CommandLine = \
+                 'powershell -NoProfile -Command (New-Object Media.SoundPlayer \
+                 ''C:\\Windows\\Media\\Alarm01.wav'').PlaySync()'}).ProcessId",
             ])
-            .spawn()
+            .output()
             .unwrap();
+        let player = String::from_utf8_lossy(&player.stdout).trim().to_owned();
         let mut frame = VideoFrame::blank(640, 360);
         let mut sound = [0.0f32; STEREO_FRAME];
         let (mut timestamps, mut loudest) = (Vec::new(), 0.0f32);
@@ -937,8 +944,10 @@ mod tests {
                 None => std::thread::sleep(Duration::from_millis(5)),
             }
         }
-        player.kill().ok();
-        player.wait().ok();
+        std::process::Command::new("taskkill")
+            .args(["/F", "/PID", &player])
+            .output()
+            .ok();
         assert!(
             timestamps.len() > 100,
             "{} audio frames in 4 s",
