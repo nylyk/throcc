@@ -79,7 +79,7 @@ pub const PRESETS: [(&str, Palette); 7] = [
             panel: 0x14161D,
             text: 0xECEDF3,
             muted: 0x8E92A6,
-            accent: 0x8C7BFF,
+            accent: 0xD07A93,
             warning: 0xFFB86B,
             good: 0x5BE3A4,
             bad: 0xFF6B85,
