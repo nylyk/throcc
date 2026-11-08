@@ -130,6 +130,7 @@ const fn rung(name: &'static CStr, codec: Codec, backend: Backend) -> Candidate 
 
 const LADDER: &[Candidate] = &[
     rung(c"av1_nvenc", Codec::Av1, Backend::Nvenc),
+    rung(c"av1_mf", Codec::Av1, Backend::MediaFoundation),
     rung(c"av1_vaapi", Codec::Av1, Backend::Vaapi),
     rung(c"hevc_nvenc", Codec::Hevc, Backend::Nvenc),
     rung(c"hevc_mf", Codec::Hevc, Backend::MediaFoundation),
@@ -1169,6 +1170,7 @@ mod round_trip {
     #[test]
     fn every_codec_this_machine_encodes_decodes_back() {
         for (encoder, codec) in [
+            (c"av1_mf", Codec::Av1),
             (c"hevc_videotoolbox", Codec::Hevc),
             (c"h264_videotoolbox", Codec::H264),
             (c"hevc_vaapi", Codec::Hevc),
