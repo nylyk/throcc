@@ -211,10 +211,7 @@ impl Element for Surface {
                     crate::DevicePixels(frame.height as i32),
                 );
                 let new_bounds = self.object_fit.get_bounds(bounds, size);
-                #[cfg(any(target_os = "macos", target_os = "ios"))]
                 window.paint_surface(new_bounds, corner_radii, self.source.clone());
-                #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-                window.paint_surface(new_bounds, corner_radii, frame.clone());
             }
         }
     }

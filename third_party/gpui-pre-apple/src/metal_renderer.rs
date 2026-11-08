@@ -1285,13 +1285,7 @@ impl MetalRenderer {
         for (index, surface) in surfaces.iter().enumerate() {
             let textures = match &surface.source {
                 SurfaceSource::Surface(image_buffer) => self.map_pixel_buffer(image_buffer),
-                SurfaceSource::Nv12(frame) => self.nv12_textures(frame).map(|(y, cb_cr)| {
-                    let frame_size = size(
-                        DevicePixels(frame.width as i32),
-                        DevicePixels(frame.height as i32),
-                    );
-                    (frame_size, y, cb_cr)
-                }),
+                SurfaceSource::Nv12(frame) => self.nv12_textures(frame),
             };
             let Some((texture_size, y_texture, cb_cr_texture)) = textures else {
                 continue;
@@ -1352,43 +1346,43 @@ impl MetalRenderer {
         let cb_cr = plane_texture(1, objc2_metal::MTLPixelFormat::RG8Unorm)?;
         let metal_texture = |texture: &CVMetalTexture| {
             let texture = CVMetalTextureGetTexture(texture)?;
-            // SAFETY: the pointer is a live MTLTexture, which the owned handle retains.
-            Some(
-                unsafe {
-                    metal::TextureRef::from_ptr(objc2::rc::Retained::as_ptr(&texture) as *mut _)
-                }
-                .to_owned(),
-            )
+            // SAFETY: the pointer is a retained MTLTexture whose ownership moves to the handle.
+            Some(unsafe {
+                metal::Texture::from_ptr(objc2::rc::Retained::into_raw(texture) as *mut _)
+            })
         };
-        let textures = (metal_texture(&y)?, metal_texture(&cb_cr)?);
+        let (y_texture, cb_cr_texture) = (metal_texture(&y)?, metal_texture(&cb_cr)?);
         self.pixel_buffer_textures.extend([y, cb_cr]);
         let buffer_size = size(
             DevicePixels::from(CVPixelBufferGetWidth(image_buffer) as i32),
             DevicePixels::from(CVPixelBufferGetHeight(image_buffer) as i32),
         );
-        Some((buffer_size, textures.0, textures.1))
+        Some((buffer_size, y_texture, cb_cr_texture))
     }
 
-    /// The Y and CbCr textures holding `frame`, uploaded into a slot the GPU is done reading
-    /// when the frame is new. `None` for an empty frame or one whose planes are too short.
-    fn nv12_textures(&mut self, frame: &Nv12Frame) -> Option<(metal::Texture, metal::Texture)> {
+    /// Size of `frame` and the Y and CbCr textures holding it, uploaded into a slot the GPU is
+    /// done reading when the frame is new. `None` for an empty frame or too short planes.
+    fn nv12_textures(
+        &mut self,
+        frame: &Nv12Frame,
+    ) -> Option<(Size<DevicePixels>, metal::Texture, metal::Texture)> {
         if frame.width == 0 || frame.height == 0 {
             return None;
         }
         let (y, cb_cr) = frame.planes()?;
-        let size = (frame.width, frame.height);
+        let frame_size = (frame.width, frame.height);
         let chroma = frame.chroma_size();
         let completed = self.frames_completed.load(Ordering::Acquire);
         let shared_storage = cfg!(target_os = "ios") || self.is_apple_gpu;
         let stream = self
             .nv12_streams
             .entry(frame.id)
-            .or_insert_with(|| Nv12Stream::new(size, frame.generation));
-        if stream.size != size {
-            *stream = Nv12Stream::new(size, frame.generation);
+            .or_insert_with(|| Nv12Stream::new(frame_size));
+        if stream.size != frame_size {
+            *stream = Nv12Stream::new(frame_size);
         }
         let shown = match stream.shown {
-            Some(shown) if stream.generation == frame.generation => shown,
+            Some((generation, slot)) if generation == frame.generation => slot,
             _ => {
                 let free = stream
                     .slots
@@ -1398,13 +1392,13 @@ impl MetalRenderer {
                     Some(free) => free,
                     None if stream.slots.len() < NV12_SLOTS => {
                         stream.slots.push(Nv12Slot {
-                            y: plane_texture(
+                            y: new_plane_texture(
                                 &self.device,
-                                size,
+                                frame_size,
                                 MTLPixelFormat::R8Unorm,
                                 shared_storage,
                             ),
-                            cb_cr: plane_texture(
+                            cb_cr: new_plane_texture(
                                 &self.device,
                                 chroma,
                                 MTLPixelFormat::RG8Unorm,
@@ -1421,33 +1415,34 @@ impl MetalRenderer {
                         .min_by_key(|(_, slot)| slot.read_in)
                         .map(|(index, _)| index)?,
                 };
-                upload_plane(&stream.slots[slot].y, size, 1, y);
+                upload_plane(&stream.slots[slot].y, frame_size, 1, y);
                 upload_plane(&stream.slots[slot].cb_cr, chroma, 2, cb_cr);
-                stream.shown = Some(slot);
-                stream.generation = frame.generation;
+                stream.shown = Some((frame.generation, slot));
                 slot
             }
         };
         let slot = &mut stream.slots[shown];
         slot.read_in = self.frames_encoded;
-        Some((slot.y.clone(), slot.cb_cr.clone()))
+        let texture_size = size(
+            DevicePixels(frame.width as i32),
+            DevicePixels(frame.height as i32),
+        );
+        Some((texture_size, slot.y.clone(), slot.cb_cr.clone()))
     }
 }
 
 /// The textures of one NV12 stream. A new frame goes into a slot no frame in flight reads.
 struct Nv12Stream {
     size: (u32, u32),
-    generation: u64,
     slots: Vec<Nv12Slot>,
-    /// The slot holding the frame of `generation`.
-    shown: Option<usize>,
+    /// The generation of the frame uploaded last, and the slot holding it.
+    shown: Option<(u64, usize)>,
 }
 
 impl Nv12Stream {
-    fn new(size: (u32, u32), generation: u64) -> Self {
+    fn new(size: (u32, u32)) -> Self {
         Self {
             size,
-            generation,
             slots: Vec::new(),
             shown: None,
         }
@@ -1461,7 +1456,7 @@ struct Nv12Slot {
     read_in: u64,
 }
 
-fn plane_texture(
+fn new_plane_texture(
     device: &metal::Device,
     (width, height): (u32, u32),
     format: MTLPixelFormat,
