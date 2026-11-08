@@ -30,7 +30,8 @@ use crate::sfu::{ForwardingTable, KeyframeAggregator, Route, Sfu};
 use crate::unix_now;
 
 const INVITE_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
-/// An account not signed in to for this long is removed. Whoever it invited stays.
+/// An account not signed in to for this long is removed, unless it is an admin's. Whoever it
+/// invited stays.
 pub const INACTIVE_ACCOUNT_LIFETIME: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 const PROFILE_INTERVAL: Duration = Duration::from_secs(10);
 const TRACKS_PER_MEMBERSHIP: u32 = 3;

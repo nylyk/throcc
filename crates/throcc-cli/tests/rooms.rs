@@ -667,7 +667,7 @@ async fn watching_more_than_max_watched_tracks_is_refused() {
 }
 
 #[tokio::test]
-async fn accounts_unseen_for_a_year_are_removed() {
+async fn accounts_unseen_for_a_year_are_removed_unless_admin() {
     let server = start_server();
     let mut alice = admin(&server).await;
     let room = create_room(&mut alice, "General").await;
@@ -685,6 +685,7 @@ async fn accounts_unseen_for_a_year_are_removed() {
     let long_ago = unix_now() - INACTIVE_ACCOUNT_LIFETIME.as_secs() - 60;
     {
         let hub = server.shared.hub();
+        hub.db.mark_seen(alice.link.welcome.me, long_ago).unwrap();
         hub.db.mark_seen(bob_id, long_ago).unwrap();
         hub.db.mark_seen(carol_id, long_ago).unwrap();
     }
@@ -706,6 +707,10 @@ async fn accounts_unseen_for_a_year_are_removed() {
         panic!("expected the user list");
     };
     let ids: Vec<UserId> = users.iter().map(|u| u.id).collect();
+    assert!(
+        ids.contains(&alice.link.welcome.me),
+        "alice is an admin: {ids:?}"
+    );
     assert!(ids.contains(&bob_id), "bob signed in again: {ids:?}");
     assert!(
         !ids.contains(&carol_id),

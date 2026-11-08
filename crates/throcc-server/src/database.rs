@@ -352,12 +352,14 @@ impl Database {
         Ok(())
     }
 
-    /// Everyone last seen before `before`.
+    /// Everyone but admins last seen before `before`.
     pub fn unseen_since(&self, before: u64) -> Result<Vec<UserId>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id FROM users WHERE last_seen < ?1 ORDER BY id")?;
-        let ids = stmt.query_map([before as i64], |r| Ok(UserId(r.get::<_, i64>(0)? as u64)))?;
+            .prepare("SELECT id FROM users WHERE last_seen < ?1 AND role != ?2 ORDER BY id")?;
+        let ids = stmt.query_map(params![before as i64, Role::Admin.rank()], |r| {
+            Ok(UserId(r.get::<_, i64>(0)? as u64))
+        })?;
         Ok(ids.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -696,16 +698,19 @@ mod tests {
     }
 
     #[test]
-    fn enrolling_counts_as_seen_and_signing_in_moves_it() {
+    fn enrolling_counts_as_seen_signing_in_moves_it_and_admins_are_never_unseen() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = Database::open(&dir.path().join("db")).unwrap();
-        let mara = enroll(&mut db, 1, None);
-        let teo = enroll(&mut db, 2, Some(mara));
+        let admin = enroll(&mut db, 1, None);
+        let mara = enroll(&mut db, 2, Some(admin));
+        let teo = enroll(&mut db, 3, Some(admin));
         assert_eq!(db.unseen_since(100).unwrap(), []);
         assert_eq!(db.unseen_since(101).unwrap(), [mara, teo]);
         db.mark_seen(teo, 500).unwrap();
         assert_eq!(db.unseen_since(501).unwrap(), [mara, teo]);
         assert_eq!(db.unseen_since(500).unwrap(), [mara]);
+        db.set_role(mara, Role::Admin).unwrap();
+        assert_eq!(db.unseen_since(1_000).unwrap(), [teo]);
     }
 
     #[test]
