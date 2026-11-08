@@ -247,6 +247,8 @@ pub struct Hub {
     last_joined: HashMap<UserId, RoomId>,
     /// Who receives each share of every room where anyone does, as last announced to it.
     audiences: HashMap<RoomId, Vec<Audience>>,
+    /// Sign-in times the database refused to store, by user, kept until a write succeeds.
+    unwritten_sign_ins: HashMap<UserId, u64>,
     pub invite_runs: InviteRuns,
 }
 
@@ -290,6 +292,7 @@ impl Hub {
             share_changes: Buckets::new(SHARE_CHANGE_BURST, SHARE_CHANGES_PER_SECOND),
             last_joined: HashMap::new(),
             audiences: HashMap::new(),
+            unwritten_sign_ins: HashMap::new(),
             invite_runs: InviteRuns::default(),
         })
     }
@@ -310,8 +313,15 @@ impl Hub {
         else {
             return Ok(Err(AuthError::UnknownKey));
         };
-        if let Err(e) = self.db.mark_seen(user, unix_now()) {
-            warn!(user = user.0, "can't note the sign-in time: {e:#}");
+        let now = unix_now();
+        match self.db.mark_seen(user, now) {
+            Ok(()) => {
+                self.unwritten_sign_ins.remove(&user);
+            }
+            Err(e) => {
+                warn!(user = user.0, "can't note the sign-in time: {e:#}");
+                self.unwritten_sign_ins.insert(user, now);
+            }
         }
         let full =
             self.sessions.len() >= MAX_SIGNED_IN || (row.role != Role::Admin && self.is_full());
@@ -1364,10 +1374,14 @@ impl Hub {
         Ok(Response::Ok)
     }
 
-    /// Removes every account not signed in to for [`INACTIVE_ACCOUNT_LIFETIME`].
+    /// Removes every account but admins' not signed in to for [`INACTIVE_ACCOUNT_LIFETIME`].
     pub fn remove_inactive(&mut self, now: u64) -> anyhow::Result<()> {
+        let db = &self.db;
+        self.unwritten_sign_ins
+            .retain(|user, signed_in| db.mark_seen(*user, *signed_in).is_err());
         let before = now.saturating_sub(INACTIVE_ACCOUNT_LIFETIME.as_secs());
-        let inactive = self.db.unseen_since(before)?;
+        let mut inactive = self.db.unseen_since(before)?;
+        inactive.retain(|user| !self.unwritten_sign_ins.contains_key(user));
         if inactive.is_empty() {
             return Ok(());
         }

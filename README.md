@@ -32,7 +32,7 @@ docker exec throcc /throcc-server admin-invite --data /data
 
 1. Allow UDP 8476 in the firewall, and forward it if the server is behind NAT. Clients only need outbound UDP.
 2. Once the server is running, `throcc-server admin-invite --data <data directory>` prints an invite code, its expiry and the server's fingerprint. Whoever joins with that code becomes an admin, or is promoted to one if they are already a member. Run it again whenever you need one, for instance after losing your identity or admin role. Run it as the user the server runs as; in Docker, plain `docker exec throcc /throcc-server admin-invite --data /data` already does.
-3. Anyone can make more invites from Server Settings: admins without limit, everyone else 3 a day. Each code works once and expires after a day. An account nobody signs in to for a year is removed; whoever it invited stays.
+3. Anyone can make more invites from Server Settings: admins without limit, everyone else 3 a day. Each code works once and expires after a day. An account nobody signs in to for a year is removed, unless it is an admin's; whoever it invited stays.
 
 **Back up** the data directory: `server_key` and the SQLite database. Stop the server and copy it, or run `sqlite3 throcc.sqlite '.backup copy.sqlite'` and copy `server_key`. Losing `server_key` gives the server a new identity, and every client has to rejoin.
 
