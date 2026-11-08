@@ -32,7 +32,10 @@ use throcc_proto::{Fingerprint, permissions};
 use crate::keep_display_awake::KeepDisplayAwake;
 use crate::theme;
 use crate::views;
-use crate::views::common::{Typeset, slider_gain, slider_value, volume_slider};
+use crate::views::common::{
+    CONTROLS_LINGER, OVERLAY_LINGER, Typeset, notify_after, slider_gain, slider_value,
+    volume_slider,
+};
 
 actions!(throcc, [ToggleMic, ToggleDeafen, CloseDialog]);
 
@@ -1057,27 +1060,18 @@ impl ThroccApp {
 
     /// Shows `user`'s tile overlay while the pointer is over it, and for a moment after.
     pub fn hover_tile(&mut self, user: UserId, hovered: bool, cx: &mut Context<Self>) {
-        let linger = crate::views::common::OVERLAY_LINGER;
         if hovered {
             self.overlay = Some((user, None));
         } else if self.overlay.is_some_and(|(shown, _)| shown == user) {
-            self.overlay = Some((user, Some(Instant::now() + linger)));
-            cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(linger).await;
-                this.update(cx, |_, cx| cx.notify()).ok();
-            })
-            .detach();
+            self.overlay = Some((user, Some(Instant::now() + OVERLAY_LINGER)));
+            notify_after(OVERLAY_LINGER, cx).detach();
         }
         cx.notify();
     }
 
     pub fn show_controls(&mut self, cx: &mut Context<Self>) {
-        let linger = crate::views::common::CONTROLS_LINGER;
-        self.controls_until = Instant::now() + linger;
-        self.hide_controls = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(linger).await;
-            this.update(cx, |_, cx| cx.notify()).ok();
-        }));
+        self.controls_until = Instant::now() + CONTROLS_LINGER;
+        self.hide_controls = Some(notify_after(CONTROLS_LINGER, cx));
         cx.notify();
     }
 
@@ -1411,8 +1405,8 @@ impl ThroccApp {
     /// the typed name, if the server would take it, with the unsaved picture or the kept one.
     fn edited_profile(&self, cx: &App) -> Option<Profile> {
         let name = typed_name(&self.name, cx).ok()??;
-        let picture = match &self.profile_form.edit {
-            Some(edit) => edit.bytes.clone().map(Arc::from),
+        let picture = match self.profile_form.change() {
+            Some(bytes) => bytes.map(Arc::from),
             None => self
                 .settings
                 .profile
@@ -1448,8 +1442,7 @@ impl ThroccApp {
         cx.notify();
     }
 
-    /// Counts a save still waiting on a server that is gone as saved, since it is kept on this
-    /// computer and the next server we join gets it.
+    /// Counts a save still waiting on a server that is gone as saved.
     fn settle_profile_save(&mut self) {
         if self.profile_form.saving() {
             self.profile_form.status = Some(SaveStatus::Saved);

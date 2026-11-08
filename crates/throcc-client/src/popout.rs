@@ -14,6 +14,7 @@ use crate::theme;
 use crate::video::Feeds;
 use crate::views::common::{
     CONTROLS_LINGER, TRAFFIC_LIGHTS, Typeset, app_titlebar, caption, ghost_icon, moves_window,
+    notify_after,
 };
 use crate::views::overlay::{self, ShareOverlay};
 
@@ -104,10 +105,7 @@ impl PopOut {
 
     fn show_controls_for(&mut self, linger: Duration, cx: &mut Context<Self>) {
         self.controls_until = Instant::now() + linger;
-        self.hide_controls = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(linger).await;
-            this.update(cx, |_, cx| cx.notify()).ok();
-        }));
+        self.hide_controls = Some(notify_after(linger, cx));
         cx.notify();
     }
 }

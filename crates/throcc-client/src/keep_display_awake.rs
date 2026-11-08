@@ -1,15 +1,5 @@
 /// Keeps the display from sleeping while the user is idle, until dropped.
-pub struct KeepDisplayAwake {
-    _hold: platform::Hold,
-}
-
-impl KeepDisplayAwake {
-    pub fn new(cx: &gpui::App) -> Self {
-        Self {
-            _hold: platform::Hold::new(cx),
-        }
-    }
-}
+pub use platform::KeepDisplayAwake;
 
 #[cfg(not(windows))]
 const REASON: &str = "Watching a screen share";
@@ -20,9 +10,9 @@ mod platform {
     use objc2::runtime::{NSObjectProtocol, ProtocolObject};
     use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
 
-    pub struct Hold(Retained<ProtocolObject<dyn NSObjectProtocol>>);
+    pub struct KeepDisplayAwake(Retained<ProtocolObject<dyn NSObjectProtocol>>);
 
-    impl Hold {
+    impl KeepDisplayAwake {
         pub fn new(_: &gpui::App) -> Self {
             let activity = NSProcessInfo::processInfo().beginActivityWithOptions_reason(
                 NSActivityOptions::IdleDisplaySleepDisabled,
@@ -32,7 +22,7 @@ mod platform {
         }
     }
 
-    impl Drop for Hold {
+    impl Drop for KeepDisplayAwake {
         fn drop(&mut self) {
             // SAFETY: the activity is the one `beginActivityWithOptions_reason` returned.
             unsafe { NSProcessInfo::processInfo().endActivity(&self.0) };
@@ -48,9 +38,9 @@ mod platform {
 
     // The execution state belongs to the thread that set it, so a hold is made and dropped
     // on gpui's main thread.
-    pub struct Hold;
+    pub struct KeepDisplayAwake;
 
-    impl Hold {
+    impl KeepDisplayAwake {
         pub fn new(_: &gpui::App) -> Self {
             // SAFETY: plain flags, no pointers.
             unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED) };
@@ -58,7 +48,7 @@ mod platform {
         }
     }
 
-    impl Drop for Hold {
+    impl Drop for KeepDisplayAwake {
         fn drop(&mut self) {
             // SAFETY: plain flags, no pointers.
             unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
@@ -72,11 +62,11 @@ mod platform {
     use gpui::AppContext;
     use tokio::sync::oneshot;
 
-    pub struct Hold {
+    pub struct KeepDisplayAwake {
         _release: oneshot::Sender<()>,
     }
 
-    impl Hold {
+    impl KeepDisplayAwake {
         pub fn new(cx: &gpui::App) -> Self {
             let (release, released) = oneshot::channel();
             cx.background_spawn(async move {

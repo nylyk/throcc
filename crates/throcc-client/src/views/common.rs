@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, ObjectFit,
-    ParentElement, Pixels, Point, RenderImage, SharedString, Styled, StyledImage, TitlebarOptions,
-    WindowBackgroundAppearance, WindowOptions, div, img, px, relative,
+    Context, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton,
+    ObjectFit, ParentElement, Pixels, Point, RenderImage, SharedString, Styled, StyledImage, Task,
+    TitlebarOptions, WindowBackgroundAppearance, WindowOptions, div, img, px, relative,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::PopupMenuItem;
@@ -428,6 +428,13 @@ pub fn moves_window<E: InteractiveElement>(element: E) -> E {
 pub const CONTROLS_LINGER: std::time::Duration = std::time::Duration::from_secs(2);
 /// How long a tile's overlay stays after the pointer leaves the tile.
 pub const OVERLAY_LINGER: std::time::Duration = std::time::Duration::from_secs(1);
+
+pub fn notify_after<T: 'static>(delay: std::time::Duration, cx: &mut Context<T>) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        cx.background_executor().timer(delay).await;
+        this.update(cx, |_, cx| cx.notify()).ok();
+    })
+}
 
 #[cfg(test)]
 mod tests {

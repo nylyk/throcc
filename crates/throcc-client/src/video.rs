@@ -63,8 +63,7 @@ struct ShareView {
     radius: Pixels,
     client: Option<Arc<dyn ClientApi>>,
     shown: Option<Shown>,
-    /// Redraws this view whenever the share's picture changes.
-    watcher: Option<Task<()>>,
+    redraw_on_new_pictures: Option<Task<()>>,
 }
 
 impl ShareView {
@@ -74,7 +73,7 @@ impl ShareView {
             radius: px(0.),
             client: None,
             shown: None,
-            watcher: None,
+            redraw_on_new_pictures: None,
         }
     }
 
@@ -97,7 +96,7 @@ impl ShareView {
         self.client = client.cloned();
         self.shown = None;
         let user = self.user;
-        self.watcher = client.cloned().map(|client| {
+        self.redraw_on_new_pictures = client.cloned().map(|client| {
             cx.spawn(async move |view, cx| redraw_on_new_pictures(view, client, user, cx).await)
         });
     }

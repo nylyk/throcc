@@ -38,9 +38,8 @@ pub fn render(
     if let Some(user) = app.fullscreen_stream() {
         return fullscreen(app, user, cx).into_any_element();
     }
-    let pictures = app.pictures_of_people(cx);
     let content = match app.state.current.as_ref().map(|c| c.room) {
-        Some(current) => room(app, current, &pictures, window, cx).into_any_element(),
+        Some(current) => room(app, current, window, cx).into_any_element(),
         None => lobby(app, cx).into_any_element(),
     };
     div()
@@ -73,6 +72,14 @@ pub fn render(
         .into_any_element()
 }
 
+fn over_share_layout() -> StyleRefinement {
+    StyleRefinement::default()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+}
+
 /// One share filling the window. Its controls show while the pointer moves.
 fn fullscreen(app: &mut ThroccApp, user: UserId, cx: &mut Context<ThroccApp>) -> impl IntoElement {
     let overlay = app
@@ -81,13 +88,7 @@ fn fullscreen(app: &mut ThroccApp, user: UserId, cx: &mut Context<ThroccApp>) ->
             move |app, window, cx| fullscreen_overlay(app, user, window, cx),
             cx,
         )
-        .cached(
-            StyleRefinement::default()
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full(),
-        );
+        .cached(over_share_layout());
     let stream = app.feeds.surface(app.client.as_ref(), user, px(0.), cx);
     div()
         .id("fullscreen")
@@ -538,7 +539,6 @@ fn lobby(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElement {
 fn room(
     app: &mut ThroccApp,
     room: RoomId,
-    pictures: &Pictures,
     window: &mut Window,
     cx: &mut Context<ThroccApp>,
 ) -> impl IntoElement {
@@ -548,7 +548,7 @@ fn room(
         .map(|(user, person)| Tile {
             user,
             person: person.clone(),
-            picture: pictures.get(&user).cloned(),
+            picture: app.picture(person.avatar, cx),
             mine: Some(user) == state.me,
             shows_stream: app.shows_stream(user),
             popped: app.popouts.contains_key(&user),
@@ -966,13 +966,7 @@ fn tile(
             move |app, _, cx| tile_overlay(app, &tile, width, compact, cx),
             cx,
         )
-        .cached(
-            StyleRefinement::default()
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full(),
-        );
+        .cached(over_share_layout());
     let radius = theme::RADIUS_TILE - px(1.);
     let picture = app.feeds.surface(app.client.as_ref(), user, radius, cx);
     frame
