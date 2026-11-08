@@ -481,12 +481,8 @@ fn make_room(held: &mut VecDeque<Arc<Frame>>, incoming: usize) {
     }
 }
 
-/// Decodes one remote share's `units` on a thread of its own and keeps its newest due
-/// picture. With `playout`, a frame is due once the share audio reaching the speakers has
-/// caught up with it. After a unit fails to decode, `ask_idr` is called once, and again only
-/// after a unit has decoded since; it is also called when what decodes the share changes.
-/// Pictures larger than `config` announces are dropped. Also returns what decodes the share,
-/// which changes when hardware decoding fails.
+/// Decodes a share's `units` on its own thread into its newest picture due by `playout`, and
+/// returns what decodes them. `ask_idr` asks for a keyframe once per failure run or decoder.
 pub fn receive(
     mut units: mpsc::Receiver<Received>,
     config: ShareConfig,

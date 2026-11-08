@@ -25,7 +25,6 @@ use crate::settings::VoiceSettings;
 const PLAYBACK_AHEAD: usize = 4;
 /// One pull of audio.
 const PULL_TIME: Duration = Duration::from_millis(10);
-/// The shortest wait between pulls.
 const LEAST_WAIT: Duration = Duration::from_millis(1);
 const LEVELS_EVERY: Duration = Duration::from_millis(100);
 /// How long the mic is processed outside a call after the UI last read its level.

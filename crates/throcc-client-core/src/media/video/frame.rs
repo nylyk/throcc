@@ -97,7 +97,6 @@ impl VideoFrame {
         out
     }
 
-    /// The same picture as BGRA, the reference the surface tests compare against.
     pub fn to_bgra(&self) -> Vec<u8> {
         let mut out = vec![0u8; self.width * self.height * 4];
         let width = self.width.max(1);

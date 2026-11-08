@@ -1284,7 +1284,7 @@ impl MetalRenderer {
 
         for (index, surface) in surfaces.iter().enumerate() {
             let textures = match &surface.source {
-                SurfaceSource::Surface(image_buffer) => self.pixel_buffer_textures(image_buffer),
+                SurfaceSource::Surface(image_buffer) => self.map_pixel_buffer(image_buffer),
                 SurfaceSource::Nv12(frame) => self.nv12_textures(frame).map(|(y, cb_cr)| {
                     let frame_size = size(
                         DevicePixels(frame.width as i32),
@@ -1317,9 +1317,9 @@ impl MetalRenderer {
 }
 
 impl MetalRenderer {
-    /// The size of a full-range NV12 pixel buffer and Metal textures over its Y and CbCr
-    /// planes, kept mapped until the GPU finishes this frame. `None` for any other buffer.
-    fn pixel_buffer_textures(
+    /// Size of a full-range NV12 pixel buffer and Metal textures over its planes, mapped until
+    /// the GPU finishes this frame. `None` for other formats or a buffer CoreVideo can't map.
+    fn map_pixel_buffer(
         &mut self,
         image_buffer: &CVPixelBuffer,
     ) -> Option<(Size<DevicePixels>, metal::Texture, metal::Texture)> {
