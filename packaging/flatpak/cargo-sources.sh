@@ -11,5 +11,5 @@ curl -fsSL --retry 5 -o "$work/flatpak-cargo-generator.py" \
 actual=$( (sha256sum 2>/dev/null || shasum -a 256) <"$work/flatpak-cargo-generator.py" | cut -d' ' -f1)
 [ "$actual" = "$sha256" ] || { echo "flatpak-cargo-generator.py has checksum $actual" >&2; exit 1; }
 python3 -m venv "$work/venv"
-"$work/venv/bin/pip" install -q 'aiohttp==3.13.5' 'PyYAML==6.0.3' 'tomlkit==0.13.3'
+"$work/venv/bin/python" -I -m pip install -q 'aiohttp==3.13.5' 'PyYAML==6.0.3' 'tomlkit==0.13.3'
 "$work/venv/bin/python" -I "$work/flatpak-cargo-generator.py" Cargo.lock -o packaging/flatpak/cargo-sources.json
