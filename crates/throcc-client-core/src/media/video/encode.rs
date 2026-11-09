@@ -193,6 +193,8 @@ pub struct Encoder {
     idr_next: bool,
     /// The frame pictures are copied into, reused once the encoder lets go of it.
     staging: Option<AVFrame>,
+    /// The frame submitted last, kept for [`Encoder::repeat_as_keyframe`].
+    last: Option<AVFrame>,
     /// Fits pictures of another size into the encoder's.
     fitter: Option<Fitter>,
     /// The VA-API device of a VA-API encoder.
@@ -286,6 +288,7 @@ impl Encoder {
                     height: config.height,
                     idr_next: true,
                     staging: None,
+                    last: None,
                     fitter: None,
                     #[cfg(target_os = "linux")]
                     device,
@@ -322,6 +325,8 @@ impl Encoder {
     }
 
     pub fn encode(&mut self, picture: &VideoFrame) -> Result<Vec<EncodedUnit>, EncodeError> {
+        // The last frame may share the staging frame's buffers, which keeps it unwritable.
+        self.last = None;
         let input = self.backend.input();
         let mut frame = match self.staging.take() {
             Some(frame) if frame.is_writable()? => frame,
@@ -341,6 +346,17 @@ impl Encoder {
         self.submit(submitted, picture.timestamp)
     }
 
+    /// Encodes the last picture again as a keyframe stamped one tick after it. Empty
+    /// before the first picture.
+    pub fn repeat_as_keyframe(&mut self) -> Result<Vec<EncodedUnit>, EncodeError> {
+        let Some(frame) = self.last.take() else {
+            return Ok(Vec::new());
+        };
+        let timestamp = (frame.pts as u32).wrapping_add(1);
+        self.idr_next = true;
+        self.submit(frame, timestamp)
+    }
+
     fn submit(
         &mut self,
         mut frame: AVFrame,
@@ -358,6 +374,7 @@ impl Encoder {
             }
             sent => sent?,
         }
+        self.last = Some(frame);
         self.drain(&mut units)?;
         Ok(units)
     }
@@ -1164,6 +1181,40 @@ mod round_trip {
                     candidate.name
                 );
             }
+        }
+    }
+
+    #[test]
+    fn every_encoder_this_machine_opens_repeats_its_last_picture_as_a_keyframe() {
+        let config = EncoderConfig {
+            width: 1280,
+            height: 720,
+            fps: 30,
+            kbps: 4000,
+        };
+        for candidate in LADDER {
+            let Some(mut encoder) = Encoder::open_with(candidate, config) else {
+                eprintln!("skipped: {:?} doesn't open here", candidate.name);
+                continue;
+            };
+            for n in 0..3u16 {
+                let input = VideoFrame::test_pattern(1280, 720, n, u32::from(n) * 3000);
+                encoder.encode(&input).unwrap();
+            }
+            let keyframe = std::iter::repeat_with(|| encoder.repeat_as_keyframe().unwrap())
+                .take(5)
+                .flatten()
+                .find(|unit| unit.keyframe)
+                .unwrap_or_else(|| panic!("{:?}: no keyframe in five repeats", candidate.name));
+            assert!(keyframe.timestamp > 6000, "{:?}", candidate.name);
+
+            let mut decoder = Decoder::new(candidate.codec, MaxSize::ANY).unwrap();
+            let shown = decoder
+                .decode(&keyframe.data, keyframe.timestamp)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{:?}: the keyframe shows nothing", candidate.name))
+                .copied_to_memory();
+            assert_eq!(shown.read_test_number(), 2, "{:?}", candidate.name);
         }
     }
 

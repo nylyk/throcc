@@ -33,6 +33,12 @@ const RECOVERY_SPACING: Duration = Duration::from_secs(1);
 const TALLY_EVERY: Duration = Duration::from_secs(5);
 /// A keyframe request still unanswered by a decoded picture is repeated after this long.
 const KEYFRAME_RETRY: Duration = Duration::from_secs(1);
+/// A recovery still unanswered after this long without a new picture is answered by
+/// encoding the last picture again.
+const STILL: Duration = Duration::from_millis(100);
+/// Repeats of the last picture one recovery gets at most. An encoder that holds each
+/// picture until the next one arrives needs two.
+const STILL_REPEATS: u8 = 3;
 
 /// What the share thread encoded since `since`, logged every [`TALLY_EVERY`].
 struct Tally {
@@ -196,6 +202,8 @@ impl ShareSender {
             tracks,
             frame,
             unsent: first == Some(First::Copied),
+            repeats_left: 0,
+            last_encoded: Instant::now(),
             self_view: self_tx,
             admission: Admission {
                 limiter: FrameLimiter::new(capture_config.fps),
@@ -253,6 +261,10 @@ struct Sending {
     frame: VideoFrame,
     /// Whether `frame` holds a captured picture that has not been sent yet.
     unsent: bool,
+    /// Repeats of the last picture left for a recovery no keyframe has answered yet.
+    repeats_left: u8,
+    /// When the encoder was last given a picture.
+    last_encoded: Instant,
     self_view: watch::Sender<Option<Arc<Frame>>>,
     admission: Admission,
     tally: Tally,
@@ -271,6 +283,7 @@ impl Sending {
             }
             if let Some(kind) = pacer.due(Instant::now()) {
                 self.encoder.recover(kind);
+                self.repeats_left = STILL_REPEATS;
             }
             self.send_audio(&mut sound);
             self.tally.report_if_due(self.capture.dropped());
@@ -285,7 +298,11 @@ impl Sending {
             let fresh =
                 std::mem::take(&mut self.unsent) || self.capture.next_frame(&mut self.frame);
             if !fresh {
-                std::thread::sleep(IDLE);
+                if self.repeats_left > 0 && self.last_encoded.elapsed() >= STILL {
+                    self.send_last_picture_as_keyframe();
+                } else {
+                    std::thread::sleep(IDLE);
+                }
                 continue;
             }
             let Some(self_view) = self.admission.admit(self.frame.timestamp) else {
@@ -377,6 +394,15 @@ impl Sending {
         }
     }
 
+    fn send_last_picture_as_keyframe(&mut self) {
+        self.repeats_left -= 1;
+        self.last_encoded = Instant::now();
+        match self.encoder.repeat_as_keyframe() {
+            Ok(units) => self.send_units(units),
+            Err(e) => warn!("encoding the last picture again failed: {e}"),
+        }
+    }
+
     fn send_video(&mut self) {
         match self.encoder.encode(&self.frame) {
             Ok(units) => self.send_units(units),
@@ -385,8 +411,12 @@ impl Sending {
     }
 
     fn send_units(&mut self, units: Vec<EncodedUnit>) {
+        self.last_encoded = Instant::now();
         self.tally.add(&units);
         for unit in units {
+            if unit.keyframe {
+                self.repeats_left = 0;
+            }
             let outgoing =
                 Outgoing::new(self.tracks.video, unit.data, unit.timestamp, unit.keyframe);
             self.engine.send(Kind::Video, outgoing);
