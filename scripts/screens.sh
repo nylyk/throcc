@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 cargo build -q --release -p throcc-client
 mkdir -p docs/screens
-[ $# -gt 0 ] || set -- join lobby room focus share connection settings appearance members person keychange
+[ $# -gt 0 ] || set -- focus share person
 for name in "$@"; do
     ./target/release/throcc-client --mock --screen "$name" >/dev/null 2>&1 &
     pid=$!
