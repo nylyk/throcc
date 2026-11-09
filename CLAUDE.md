@@ -55,11 +55,18 @@ Each crate's `README.md` explains its modules and how they fit together. Update 
 
 ## Releases
 
-- `main` only holds releases. Work happens on `develop`, and PRs target `develop`.
-- A release merges `develop` into `main`, and every side that changed since its last tag gets a new tag on that commit: `server-vX.Y.Z` publishes the Docker image, `client-vX.Y.Z` a draft GitHub release with the dmg, the Windows installer and the flatpak.
-- `throcc-server` and `throcc-client` have their own semver `version` in their `Cargo.toml`; the other crates keep the workspace version. A client release also adds a `<release>` to `packaging/flatpak/cc.thro.throcc.metainfo.xml`.
-- `PROTOCOL` alone decides compatibility. A server accepts `MIN_PROTOCOL..=PROTOCOL`, and a client checks its `PROTOCOL` is in the server's range. Both hellos stay decodable by every version. A protocol bump is a breaking server release, a minor one while 0.x.
+- `main` only holds releases. Work happens on `develop`, and PRs target `develop`. `main` takes changes only through a PR with green `ci`; neither branch accepts force pushes, and release tags can't be moved or deleted.
+- `throcc-server` and `throcc-client` have their own semver `version` in their `Cargo.toml`; the other crates keep the workspace version. Patch for fixes, minor for features or a protocol bump while 0.x.
+- `PROTOCOL` alone decides compatibility. A server accepts `MIN_PROTOCOL..=PROTOCOL`, and a client checks its `PROTOCOL` is in the server's range. Both hellos stay decodable by every version. A protocol bump is a breaking server release.
 - Docker is the only supported server distribution. The app id is `cc.thro.throcc` everywhere.
+
+A release, for each side that changed since its last tag (`git log <side>-vX.Y.Z..develop -- crates/`):
+
+1. On `develop`, bump that side's `version` and run `cargo build` for `Cargo.lock`. A client release also adds a `<release>` at the top of `packaging/flatpak/cc.thro.throcc.metainfo.xml`.
+2. Optionally test a signed build: `gh workflow run packaging.yml --ref develop`.
+3. Merge `develop` into `main` through a PR, with a merge commit.
+4. Tag the merge commit `server-vX.Y.Z` and/or `client-vX.Y.Z` (annotated) and push the tags. The server tag publishes the image as `:X.Y.Z`, `:X.Y` and `:latest`; the client tag drafts a GitHub release with the signed dmg, the Windows installer, the flatpak and `SHA256SUMS`.
+5. Edit the draft's notes and publish it; running clients then show the update notice.
 
 ## UI
 
