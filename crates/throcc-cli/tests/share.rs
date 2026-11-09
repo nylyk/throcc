@@ -3,6 +3,7 @@
 mod common;
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use throcc_client_core::call::{Call, CallEvent};
@@ -197,6 +198,40 @@ async fn a_viewer_who_starts_watching_late_sees_a_still_screen() {
 
     let units = watch(&bob, tracks.video, WATCH_UNITS).await;
     let (mut picture, _) = share::receive(units, sender.config, None, || {}).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), picture.changed())
+        .await
+        .expect("no picture of the still screen")
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_still_screen_shows_after_its_keyframe_lost_a_packet() {
+    let server = start_server();
+    let relay = lossy_relay(&server.addr, Toward::Client, 4).await;
+    let (mut alice, bob, _) = room_with_two_at(&server, &relay.addr).await;
+    let wanted = ShareConfig {
+        width: 1280,
+        height: 720,
+        ..WANTED
+    };
+    let pattern = TestPattern::new(CaptureConfig::for_share(&wanted), Instant::now());
+    let capture = Box::new(StillAfter { pattern, moving: 5 });
+    let Some((sender, tracks)) = share_capture(&mut alice, &bob, wanted, capture).await else {
+        return;
+    };
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    relay.lossy.store(true, Ordering::Relaxed);
+    let units = watch(&bob, tracks.video, WATCH_UNITS).await;
+    let ask_idr = bob.engine.idr_requester(tracks.video);
+    let (mut picture, _) = share::receive(units, sender.config, None, ask_idr).unwrap();
+    wait_for("the keyframe on its way", || {
+        bob.engine.arrived(tracks.video).datagrams > 0
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    relay.lossy.store(false, Ordering::Relaxed);
+    assert!(relay.dropped.load(Ordering::Relaxed) > 0);
     tokio::time::timeout(Duration::from_secs(5), picture.changed())
         .await
         .expect("no picture of the still screen")

@@ -523,6 +523,29 @@ struct KeyframeAsks {
 }
 
 impl KeyframeAsks {
+    /// Waits for the keyframe asked for at `now`, as starting to watch does.
+    fn asked_at(now: Instant) -> Self {
+        Self {
+            unanswered_since: Some(now),
+        }
+    }
+
+    /// Whether a request is still unanswered by a decoded picture.
+    fn waiting(&self) -> bool {
+        self.unanswered_since.is_some()
+    }
+
+    /// Whether to ask again at `now`, for a request unanswered for [`KEYFRAME_RETRY`].
+    fn overdue(&mut self, now: Instant) -> bool {
+        let overdue = self
+            .unanswered_since
+            .is_some_and(|at| now.duration_since(at) >= KEYFRAME_RETRY);
+        if overdue {
+            self.unanswered_since = Some(now);
+        }
+        overdue
+    }
+
     /// Whether to ask at `now`, after a decoder `reset` or a unit that `failed`.
     fn ask(&mut self, now: Instant, reset: bool, failed: bool) -> bool {
         let waiting = self
@@ -542,8 +565,8 @@ impl KeyframeAsks {
 }
 
 /// Decodes a share's `units` on its own thread into its newest picture due by `playout`, and
-/// returns what decodes them. `ask_idr` runs after a reset, and on failures at most once per
-/// [`KEYFRAME_RETRY`] until a picture decodes.
+/// returns what decodes them. `ask_idr` runs after a reset, on failures, and while no picture
+/// answers watching or the last ask, at most once per [`KEYFRAME_RETRY`] until one decodes.
 pub fn receive(
     mut units: mpsc::Receiver<Received>,
     config: ShareConfig,
@@ -558,10 +581,10 @@ pub fn receive(
         .spawn(move || {
             let mut held: VecDeque<Arc<Frame>> = VecDeque::new();
             let mut replaced: Option<Arc<Frame>> = None;
-            let mut asks = KeyframeAsks::default();
+            let mut asks = KeyframeAsks::asked_at(Instant::now());
             let mut oversized: u64 = 0;
             loop {
-                let unit = if held.is_empty() {
+                let unit = if held.is_empty() && !asks.waiting() {
                     let Some(unit) = units.blocking_recv() else {
                         return;
                     };
@@ -570,6 +593,9 @@ pub fn receive(
                     match units.try_recv() {
                         Ok(unit) => Some(unit),
                         Err(mpsc::error::TryRecvError::Empty) => {
+                            if asks.overdue(Instant::now()) {
+                                ask_idr();
+                            }
                             std::thread::sleep(IDLE);
                             None
                         }
@@ -599,6 +625,7 @@ pub fn receive(
                         Ok(None) => {}
                         // A keyframe wouldn't help: the sender chose the size.
                         Err(DecodeError::TooLarge(width, height)) => {
+                            asks.answered();
                             oversized += 1;
                             if oversized.is_power_of_two() {
                                 warn!(
@@ -702,6 +729,21 @@ mod receive_tests {
         assert!(asks.ask(after(1_500), false, true));
         asks.answered();
         assert!(asks.ask(after(1_600), false, true));
+    }
+
+    #[test]
+    fn watching_asks_again_each_second_until_a_picture_decodes() {
+        let start = Instant::now();
+        let after = |millis| start + Duration::from_millis(millis);
+        let mut asks = KeyframeAsks::asked_at(start);
+        assert!(asks.waiting());
+        assert!(!asks.overdue(after(999)));
+        assert!(asks.overdue(after(1_000)));
+        assert!(!asks.overdue(after(1_500)));
+        assert!(asks.overdue(after(2_000)));
+        asks.answered();
+        assert!(!asks.waiting());
+        assert!(!asks.overdue(after(5_000)));
     }
 
     fn config(width: u16, height: u16) -> ShareConfig {
