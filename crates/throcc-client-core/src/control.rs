@@ -11,7 +11,7 @@ use throcc_proto::ids::RoomId;
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
     AuthError, AuthResult, ClientHello, ClientMessage, Event, PROTOCOL, PakeFinish, PakeStep,
-    Request, Response, ServerHello, ServerMessage, Welcome,
+    Request, Response, ServerHello, ServerMessage, SignIn, Welcome,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{mpsc, oneshot};
@@ -33,8 +33,10 @@ pub enum LoginError {
     Refused(#[from] AuthError),
     #[error(transparent)]
     Pake(#[from] PakeError),
-    #[error("the server speaks protocol {0}; this client speaks {PROTOCOL}")]
-    Protocol(u16),
+    #[error("this server needs a newer throcc; update throcc")]
+    ClientOutdated,
+    #[error("this server runs an older throcc; ask its host to update")]
+    ServerOutdated,
     #[error("the server closed the connection during login")]
     Closed,
     #[error("the server sent a malformed message: {0}")]
@@ -70,11 +72,14 @@ pub async fn login(
     let (mut send, recv, hello) = greet(&connected).await?;
     let client_nonce: [u8; 32] = random();
     let message = identity::auth_message(&hello.nonce, &client_nonce, &connected.exporter);
-    let auth = ClientHello::Auth {
-        pubkey: identity.public(),
-        client_nonce,
-        want_room,
-        signature: identity.sign(&message),
+    let auth = ClientHello {
+        protocol: PROTOCOL,
+        sign_in: SignIn::Auth {
+            pubkey: identity.public(),
+            client_nonce,
+            want_room,
+            signature: identity.sign(&message),
+        },
     };
     write(&mut send, &auth).await?;
     finish_login(connected, send, recv).await
@@ -92,12 +97,15 @@ pub async fn enroll(
     let client_nonce: [u8; 32] = random();
     let pubkey = identity.public();
     let (pake, pake_a) = ClientPake::start(&code.id, &code.secret);
-    let enroll = ClientHello::Enroll {
-        code_id: code.id.clone(),
-        pubkey,
-        client_nonce,
-        pake_a: pake_a.clone(),
-        name: name.to_owned(),
+    let enroll = ClientHello {
+        protocol: PROTOCOL,
+        sign_in: SignIn::Enroll {
+            code_id: code.id.clone(),
+            pubkey,
+            client_nonce,
+            pake_a: pake_a.clone(),
+            name: name.to_owned(),
+        },
     };
     write(&mut send, &enroll).await?;
 
@@ -130,8 +138,8 @@ pub async fn enroll(
     finish_login(connected, send, recv).await
 }
 
-/// Accepts the control stream the server opens and reads its hello, which must speak our
-/// protocol.
+/// Accepts the control stream the server opens and reads its hello, whose protocol range must
+/// include ours.
 async fn greet(
     connected: &Connected,
 ) -> Result<(quinn::SendStream, quinn::RecvStream, ServerHello), LoginError> {
@@ -141,13 +149,24 @@ async fn greet(
             .map_err(|_| LoginError::Closed)?
             .map_err(|_| LoginError::Closed)?;
     let hello: ServerHello = read(&mut recv).await?;
-    if hello.protocol != PROTOCOL {
+    if let Some(outdated) = outdated(&hello) {
         connected
             .connection
             .close(close::PROTOCOL_ERROR.into(), b"protocol mismatch");
-        return Err(LoginError::Protocol(hello.protocol));
+        return Err(outdated);
     }
     Ok((send, recv, hello))
+}
+
+/// Which side needs an update when the server doesn't accept our protocol.
+fn outdated(hello: &ServerHello) -> Option<LoginError> {
+    if PROTOCOL < hello.min_protocol {
+        Some(LoginError::ClientOutdated)
+    } else if PROTOCOL > hello.max_protocol {
+        Some(LoginError::ServerOutdated)
+    } else {
+        None
+    }
 }
 
 async fn finish_login(
@@ -374,6 +393,25 @@ fn spawn_link(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_protocol_outside_the_servers_range_names_the_outdated_side() {
+        let hello = |min_protocol, max_protocol| ServerHello {
+            nonce: [0; 32],
+            min_protocol,
+            max_protocol,
+        };
+        assert!(outdated(&hello(PROTOCOL, PROTOCOL)).is_none());
+        assert!(outdated(&hello(1, u16::MAX)).is_none());
+        assert!(matches!(
+            outdated(&hello(PROTOCOL + 1, PROTOCOL + 2)),
+            Some(LoginError::ClientOutdated)
+        ));
+        assert!(matches!(
+            outdated(&hello(0, PROTOCOL - 1)),
+            Some(LoginError::ServerOutdated)
+        ));
+    }
 
     #[test]
     fn a_closed_stream_fails_waiting_and_later_requests() {

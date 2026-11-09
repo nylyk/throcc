@@ -6,8 +6,8 @@ use serde::de::DeserializeOwned;
 use throcc_crypto::identity::random;
 use throcc_proto::framing::{self, FrameError, LEN_BYTES};
 use throcc_proto::messages::{
-    AuthResult, ClientHello, ClientMessage, ErrorCode, Event, PROTOCOL, PakeStep, Request,
-    Response, ServerHello, ServerMessage,
+    AuthResult, ClientHello, ClientMessage, ErrorCode, Event, MIN_PROTOCOL, PROTOCOL, PakeStep,
+    Request, Response, ServerHello, ServerMessage,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{Semaphore, mpsc};
@@ -60,6 +60,11 @@ async fn read_capped<T: DeserializeOwned>(
     recv: &mut quinn::RecvStream,
     cap: usize,
 ) -> Result<T, ReadError> {
+    Ok(framing::decode(&read_body(recv, cap).await?)?)
+}
+
+/// Reads one frame's body. The body is allocated only after its length passes `cap`.
+async fn read_body(recv: &mut quinn::RecvStream, cap: usize) -> Result<Vec<u8>, ReadError> {
     let mut header = [0u8; LEN_BYTES];
     recv.read_exact(&mut header)
         .await
@@ -72,7 +77,7 @@ async fn read_capped<T: DeserializeOwned>(
     recv.read_exact(&mut body)
         .await
         .map_err(|_| ReadError::Closed)?;
-    Ok(framing::decode(&body)?)
+    Ok(body)
 }
 
 pub async fn write_frame<T: Serialize>(
@@ -129,6 +134,14 @@ async fn serve(
         return Ok(());
     };
     let (mut stream, server_nonce, hello) = greeted?;
+    let protocol = ClientHello::protocol_of(&hello)?;
+    if !(MIN_PROTOCOL..=PROTOCOL).contains(&protocol) {
+        debug!(%peer, protocol, "refusing an unsupported protocol");
+        shared.refusals.count("refused: unsupported protocol");
+        connection.close(close::PROTOCOL_ERROR.into(), b"unsupported protocol");
+        return Ok(());
+    }
+    let hello: ClientHello = framing::decode(&hello)?;
     let Some(_signed_in) = shared.connections.try_enter(source) else {
         debug!(%peer, "refusing sign-in: its network is full");
         shared
@@ -141,7 +154,13 @@ async fn serve(
         return Ok(());
     };
 
-    let signing_in = auth::authenticate(shared, connection, &mut stream, &server_nonce, hello);
+    let signing_in = auth::authenticate(
+        shared,
+        connection,
+        &mut stream,
+        &server_nonce,
+        hello.sign_in,
+    );
     let authenticated = match tokio::time::timeout(SIGN_IN_TIMEOUT, signing_in).await {
         Ok(Ok(authenticated)) => authenticated,
         Ok(Err(refused)) => {
@@ -220,10 +239,11 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// Opens the control stream, sends `ServerHello` and reads the client's `ClientHello`.
+/// Opens the control stream, sends `ServerHello` and reads the body of the client's
+/// `ClientHello`, which may come from another version.
 async fn greet(
     connection: &quinn::Connection,
-) -> Result<(FrameStream, [u8; 32], ClientHello), ReadError> {
+) -> Result<(FrameStream, [u8; 32], Vec<u8>), ReadError> {
     let (send, recv) = connection.open_bi().await.map_err(|_| ReadError::Closed)?;
     let mut stream = FrameStream { send, recv };
     let server_nonce: [u8; 32] = random();
@@ -231,12 +251,13 @@ async fn greet(
         &mut stream.send,
         &ServerHello {
             nonce: server_nonce,
-            protocol: PROTOCOL,
+            min_protocol: MIN_PROTOCOL,
+            max_protocol: PROTOCOL,
         },
     )
     .await
     .map_err(|_| ReadError::Closed)?;
-    let hello = read_handshake(&mut stream.recv).await?;
+    let hello = read_body(&mut stream.recv, HANDSHAKE_FRAME_BYTES).await?;
     Ok((stream, server_nonce, hello))
 }
 

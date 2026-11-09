@@ -13,7 +13,7 @@ The server: sign-in, rooms and presence, the key relay, and an SFU that forwards
 | `main.rs`, `lib.rs` | Command-line arguments, binding, the accept loop and connection caps, and `admin_invite` behind `throcc-server admin-invite` |
 | `files.rs` | The data directory and its private files: created at 0700 and 0600, tightened if they are looser, refused if another user owns them |
 | `identity.rs`, `tls.rs` | `server_key`, the certificate derived from it, and the QUIC configuration |
-| `session.rs` | One connection: handshake, control-stream read and write loops |
+| `session.rs` | One connection: handshake, which refuses a protocol outside `MIN_PROTOCOL..=PROTOCOL` before reading the sign-in, and the control-stream read and write loops |
 | `auth.rs` | Sign-in for known keys, and enrollment with an invite through the PAKE |
 | `rooms.rs` | The `Hub`: rooms, membership, presence, invites, profiles, key relay, request handling |
 | `room_password.rs` | Argon2id hashes of room passwords, which run on the blocking pool, a few at a time, never under the hub lock; and the backoff for wrong guesses |

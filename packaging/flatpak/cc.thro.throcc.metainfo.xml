@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>cc.thro.throcc</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>AGPL-3.0-or-later</project_license>
+  <name>throcc</name>
+  <summary>Self-hosted voice and screen share</summary>
+  <developer id="cc.thro">
+    <name>nylyk</name>
+  </developer>
+  <description>
+    <p>
+      throcc is voice and screen share for a server you host yourself. All media is end-to-end
+      encrypted: the server relays it but holds no key.
+    </p>
+    <ul>
+      <li>Persistent rooms of up to 30 people with low-latency voice</li>
+      <li>Push-to-talk or voice activation, echo cancellation and noise suppression</li>
+      <li>Screen share up to 1440p60 with its system audio</li>
+      <li>Safety numbers to verify the people you talk to</li>
+      <li>Roles, invites and password-protected rooms</li>
+    </ul>
+    <p>Joining a server takes its address and an invite code.</p>
+  </description>
+  <launchable type="desktop-id">cc.thro.throcc.desktop</launchable>
+  <url type="homepage">https://github.com/nylyk/throcc</url>
+  <url type="bugtracker">https://github.com/nylyk/throcc/issues</url>
+  <url type="vcs-browser">https://github.com/nylyk/throcc</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Watching a share in a room</caption>
+      <image>https://raw.githubusercontent.com/nylyk/throcc/client-v0.1.0/docs/screens/room.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Joining a server</caption>
+      <image>https://raw.githubusercontent.com/nylyk/throcc/client-v0.1.0/docs/screens/join.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>A profile with its safety number</caption>
+      <image>https://raw.githubusercontent.com/nylyk/throcc/client-v0.1.0/docs/screens/person.png</image>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1">
+    <content_attribute id="social-audio">intense</content_attribute>
+    <content_attribute id="social-info">mild</content_attribute>
+  </content_rating>
+  <requires>
+    <display_length compare="ge">720</display_length>
+  </requires>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <releases>
+    <release version="0.1.0" date="2026-11-09"/>
+  </releases>
+</component>

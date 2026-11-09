@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use gpui::{
     Context, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton,
-    ObjectFit, ParentElement, Pixels, Point, RenderImage, SharedString, Styled, StyledImage, Task,
-    TitlebarOptions, WindowBackgroundAppearance, WindowOptions, div, img, px, relative,
+    ObjectFit, ParentElement, Pixels, Point, RenderImage, SharedString, Stateful,
+    StatefulInteractiveElement, Styled, StyledImage, Task, TitlebarOptions,
+    WindowBackgroundAppearance, WindowOptions, div, img, px, relative,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::PopupMenuItem;
@@ -14,6 +15,7 @@ use throcc_proto::Fingerprint;
 use throcc_proto::ids::UserId;
 
 use crate::theme;
+use crate::updates::Release;
 
 /// Sets text in a step of the type scale.
 pub trait Typeset: Styled + Sized {
@@ -224,6 +226,24 @@ pub fn caption(text: impl Into<SharedString>) -> Div {
         .child(text.into())
 }
 
+/// A quiet link to a newer release's page.
+pub fn update_notice(release: &Release) -> Stateful<Div> {
+    let url = release.url.clone();
+    div()
+        .id("update-notice")
+        .flex()
+        .items_center()
+        .gap_2()
+        .min_h(px(28.))
+        .cursor_pointer()
+        .typeset(theme::CALLOUT)
+        .text_color(theme::link())
+        .hover(|s| s.underline())
+        .child(icon("circle-arrow-up").size(px(16.)))
+        .child(format!("throcc {} is available", release.version))
+        .on_click(move |_, _, cx| cx.open_url(&url))
+}
+
 /// Explanatory text in a dialog or card.
 pub fn description(text: impl Into<SharedString>) -> Div {
     div()
@@ -357,7 +377,8 @@ pub fn ghost_icon(
 /// Room the macOS traffic lights take at the left of a window's top bar.
 pub const TRAFFIC_LIGHTS: Pixels = px(if cfg!(target_os = "macos") { 76. } else { 0. });
 
-/// `options` with the app's own titlebar on macOS, the traffic lights in our views at `lights`.
+/// `options` with the app id, and the app's own titlebar on macOS with the traffic lights in
+/// our views at `lights`.
 /// A `blurred` window shows the desktop behind see-through views on macOS and Linux.
 pub fn app_titlebar(options: WindowOptions, lights: Point<Pixels>, blurred: bool) -> WindowOptions {
     let options = WindowOptions {
@@ -366,6 +387,7 @@ pub fn app_titlebar(options: WindowOptions, lights: Point<Pixels>, blurred: bool
         } else {
             WindowBackgroundAppearance::Opaque
         },
+        app_id: Some(crate::APP_ID.to_owned()),
         ..options
     };
     if !cfg!(target_os = "macos") {

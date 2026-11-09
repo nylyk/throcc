@@ -8,8 +8,8 @@ use throcc_crypto::identity::IdentityKey;
 use throcc_proto::framing;
 use throcc_proto::ids::{Epoch, Hash, Role, UserId};
 use throcc_proto::messages::{
-    AuthResult, ClientHello, PROTOCOL, Placement, Request, Response, ServerHello, ServerMessage,
-    ServerProfile, UserProfile, Welcome,
+    AuthResult, ClientHello, MIN_PROTOCOL, PROTOCOL, Placement, Request, Response, ServerHello,
+    ServerMessage, ServerProfile, UserProfile, Welcome,
 };
 use throcc_proto::transport::{IDLE_TIMEOUT, close};
 use throcc_server::{Congestion, tls};
@@ -67,6 +67,31 @@ async fn oversized_frame_closes_the_connection() {
 }
 
 #[tokio::test]
+async fn a_hello_for_an_unsupported_protocol_is_refused_before_its_sign_in_is_read() {
+    let server = start_server();
+    for protocol in [MIN_PROTOCOL - 1, PROTOCOL + 1] {
+        let connected = connection::connect(&server.addr, None).await.unwrap();
+        let (mut send, mut recv) = connected.connection.accept_bi().await.unwrap();
+        let hello: ServerHello = read_message(&mut recv).await;
+        assert_eq!(
+            (hello.min_protocol, hello.max_protocol),
+            (MIN_PROTOCOL, PROTOCOL)
+        );
+
+        let undecodable_sign_in = [0xff_u8; 8];
+        let hello = framing::encode(&(protocol, undecodable_sign_in)).unwrap();
+        send.write_all(&hello).await.unwrap();
+        match connected.connection.closed().await {
+            quinn::ConnectionError::ApplicationClosed(frame) => {
+                assert_eq!(frame.error_code, close::PROTOCOL_ERROR.into());
+                assert_eq!(&frame.reason[..], b"unsupported protocol");
+            }
+            other => panic!("expected an application close, got {other}"),
+        }
+    }
+}
+
+#[tokio::test]
 async fn unknown_reply_id_closes_the_connection() {
     let dir = tempfile::tempdir().unwrap();
     let endpoint = bare_endpoint(
@@ -79,7 +104,8 @@ async fn unknown_reply_id_closes_the_connection() {
         let (mut send, mut recv) = connection.open_bi().await.unwrap();
         let hello = ServerHello {
             nonce: [0; 32],
-            protocol: PROTOCOL,
+            min_protocol: PROTOCOL,
+            max_protocol: PROTOCOL,
         };
         send.write_all(&framing::encode(&hello).unwrap())
             .await

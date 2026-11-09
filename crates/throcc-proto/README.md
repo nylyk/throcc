@@ -5,7 +5,7 @@ The wire types that the server and clients share. It is plain data and pure func
 | Module | Holds |
 | --- | --- |
 | `lib.rs` | ALPN `throcc/1`, the default port 8476 and the SNI placeholder |
-| `messages.rs` | The control protocol: handshake, requests, responses, events, `PROTOCOL`, its version, and the name and password rules |
+| `messages.rs` | The control protocol: handshake, requests, responses, events, `PROTOCOL` and the oldest one a server accepts, `MIN_PROTOCOL`, and the name and password rules. Both hellos stay decodable by every version, so mismatched peers can tell which of them is outdated |
 | `framing.rs` | Control-stream framing: a `u32` length and a postcard body, capped at 1 MiB |
 | `frame.rs` | The 13-byte media header, its flags and the datagram size budget |
 | `ids.rs` | `UserId`, `RoomId`, `MediaId`, `Epoch`, `Hash` and `Role` |

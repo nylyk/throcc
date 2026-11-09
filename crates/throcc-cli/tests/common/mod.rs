@@ -29,8 +29,9 @@ use throcc_proto::framing;
 use throcc_proto::ids::{MediaId, RoomId};
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
-    AuthResult, ClientHello, Codec, ErrorCode, Event, MediaState, PakeFinish, PakeReply, PakeStep,
-    Placement, Request, Response, ServerHello, ShareConfig, ShareTracks, Tracks, Welcome,
+    AuthResult, ClientHello, Codec, ErrorCode, Event, MediaState, PROTOCOL, PakeFinish, PakeReply,
+    PakeStep, Placement, Request, Response, ServerHello, ShareConfig, ShareTracks, SignIn, Tracks,
+    Welcome,
 };
 use throcc_server::database::Database;
 use throcc_server::identity::ServerIdentity;
@@ -630,12 +631,15 @@ pub async fn raw_enroll_start(
     let identity = IdentityKey::generate();
     let client_nonce = [7; 32];
     let (pake, pake_a) = ClientPake::start(&code.id, &code.secret);
-    let enroll = ClientHello::Enroll {
-        code_id: code.id.clone(),
-        pubkey: identity.public(),
-        client_nonce,
-        pake_a: pake_a.clone(),
-        name: "Ilse".into(),
+    let enroll = ClientHello {
+        protocol: PROTOCOL,
+        sign_in: SignIn::Enroll {
+            code_id: code.id.clone(),
+            pubkey: identity.public(),
+            client_nonce,
+            pake_a: pake_a.clone(),
+            name: "Ilse".into(),
+        },
     };
     send.write_all(&framing::encode(&enroll).unwrap())
         .await

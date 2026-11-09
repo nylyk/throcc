@@ -679,6 +679,9 @@ impl Session {
                         {
                             Some(format!("The server refused you: {reason}"))
                         }
+                        SignInError::Login(
+                            outdated @ (LoginError::ClientOutdated | LoginError::ServerOutdated),
+                        ) => Some(outdated.to_string()),
                         _ => e.pin_mismatch().map(|(expected, actual)| {
                             format!(
                                 "The server's key changed from {} to {}",

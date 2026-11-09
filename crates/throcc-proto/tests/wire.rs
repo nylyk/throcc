@@ -22,13 +22,24 @@ fn pinned<T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::f
 #[test]
 fn control_messages_encode_to_pinned_bytes() {
     pinned(
-        ClientHello::Auth {
-            pubkey: [1; 32],
-            client_nonce: [2; 32],
-            want_room: Some(RoomId(3)),
-            signature: [4; 64],
+        ServerHello {
+            nonce: [5; 32],
+            min_protocol: 1,
+            max_protocol: 300,
         },
-        "000101010101010101010101010101010101010101010101010101010101010101020202020202020202020202020202020202020202020202020202020202020201034004040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404",
+        "050505050505050505050505050505050505050505050505050505050505050501ac02",
+    );
+    pinned(
+        ClientHello {
+            protocol: 1,
+            sign_in: SignIn::Auth {
+                pubkey: [1; 32],
+                client_nonce: [2; 32],
+                want_room: Some(RoomId(3)),
+                signature: [4; 64],
+            },
+        },
+        "01000101010101010101010101010101010101010101010101010101010101010101020202020202020202020202020202020202020202020202020202020202020201034004040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404",
     );
     pinned(
         ClientMessage::Request {
@@ -140,6 +151,14 @@ fn control_messages_encode_to_pinned_bytes() {
         },
         "060102010304010506000707070707070707070707070707070707070707070707070707070707070707080808080808080808080808080808080808080808080808080808080808080880e2cfaa064009090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909",
     );
+}
+
+#[test]
+fn a_hello_from_any_version_shows_its_protocol() {
+    let future = [0xac, 0x02, 0xff, 0xff, 0xff];
+    assert_eq!(ClientHello::protocol_of(&future).unwrap(), 300);
+    assert!(framing::decode::<ClientHello>(&future).is_err());
+    assert!(ClientHello::protocol_of(&[]).is_err());
 }
 
 #[test]

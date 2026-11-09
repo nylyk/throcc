@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+notices=packaging/licenses/client-notices.txt
+[ -f "$notices" ] || { echo "no $notices; run packaging/licenses/notices.sh client first" >&2; exit 1; }
 ffmpeg=${FFMPEG_PREFIX:-deps/ffmpeg-lgpl}
 [ -f "$ffmpeg/lib/pkgconfig/libavcodec.pc" ] || packaging/ffmpeg/build.sh "$ffmpeg"
 ffmpeg=$(cd "$ffmpeg" && pwd)
@@ -14,7 +16,8 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks" "$app/Contents/Resources"
 sed "s/VERSION/$version/g" packaging/macos/Info.plist >"$app/Contents/Info.plist"
 cp target/release/throcc-client "$app/Contents/MacOS/"
-cp packaging/macos/throcc.icns "$app/Contents/Resources/"
+cp packaging/macos/throcc.icns LICENSE "$app/Contents/Resources/"
+cp "$notices" "$app/Contents/Resources/THIRD-PARTY-NOTICES.txt"
 
 # Copies every library outside the OS that `file` needs, and points it at the copy.
 bundle() {
@@ -38,8 +41,32 @@ for lib in "$app"/Contents/Frameworks/*.dylib; do
     install_name_tool -add_rpath "@loader_path" "$lib" 2>/dev/null || true
 done
 
-codesign --force --sign - "$app"/Contents/Frameworks/*.dylib
-codesign --force --sign - "$app"
-rm -f "$out/throcc.dmg"
-hdiutil create -quiet -volname throcc -srcfolder "$app" -format UDZO "$out/throcc.dmg"
-echo "built $app and $out/throcc.dmg"
+# MACOS_SIGN_IDENTITY names a Developer ID Application identity in the keychain; without it the
+# app is signed ad hoc. NOTARY_KEY_FILE (an App Store Connect API key), NOTARY_KEY_ID and
+# NOTARY_ISSUER have the dmg notarized and stapled.
+identity=${MACOS_SIGN_IDENTITY:--}
+sign=(codesign --force --sign "$identity")
+# The hardened runtime loads only libraries of the app's own team, which ad-hoc signatures lack.
+[ "$identity" = - ] || sign+=(--options runtime --timestamp)
+"${sign[@]}" "$app"/Contents/Frameworks/*.dylib
+"${sign[@]}" --entitlements packaging/macos/throcc.entitlements "$app"
+codesign --verify --strict --deep "$app"
+dmg="$out/throcc.dmg"
+rm -f "$dmg"
+hdiutil create -quiet -volname throcc -srcfolder "$app" -format UDZO "$dmg"
+[ "$identity" = - ] || codesign --force --timestamp --sign "$identity" "$dmg"
+
+if [ -n "${NOTARY_KEY_FILE:-}" ]; then
+    notary=(--key "$NOTARY_KEY_FILE" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER")
+    submitted=$(xcrun notarytool submit "$dmg" "${notary[@]}" --wait --output-format json)
+    status=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' <<<"$submitted")
+    if [ "$status" != Accepted ]; then
+        id=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$submitted")
+        xcrun notarytool log "$id" "${notary[@]}" >&2
+        echo "notarization ended $status" >&2
+        exit 1
+    fi
+    xcrun stapler staple "$dmg"
+    xcrun stapler validate "$dmg"
+fi
+echo "built $app and $dmg"

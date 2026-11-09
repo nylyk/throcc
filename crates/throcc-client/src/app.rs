@@ -33,6 +33,7 @@ use tokio::sync::watch;
 
 use crate::keep_display_awake::KeepDisplayAwake;
 use crate::theme;
+use crate::updates::{self, Release};
 use crate::views;
 use crate::views::common::{
     CONTROLS_LINGER, OVERLAY_LINGER, Typeset, notify_after, slider_gain, slider_value,
@@ -66,10 +67,17 @@ pub enum SettingsPage {
     Audio,
     Appearance,
     Verified,
+    About,
 }
 
 impl SettingsPage {
-    pub const ALL: [Self; 4] = [Self::Profile, Self::Audio, Self::Appearance, Self::Verified];
+    pub const ALL: [Self; 5] = [
+        Self::Profile,
+        Self::Audio,
+        Self::Appearance,
+        Self::Verified,
+        Self::About,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -77,6 +85,7 @@ impl SettingsPage {
             Self::Audio => "Audio",
             Self::Appearance => "Appearance",
             Self::Verified => "Verified People",
+            Self::About => "About",
         }
     }
 
@@ -86,6 +95,7 @@ impl SettingsPage {
             Self::Audio => "audio-lines",
             Self::Appearance => "palette",
             Self::Verified => "shield-check",
+            Self::About => "info",
         }
     }
 }
@@ -491,6 +501,8 @@ pub struct ThroccApp {
     pub settings: Settings,
     /// Why the settings couldn't be read or kept, the last time that failed.
     pub settings_problem: Option<String>,
+    /// A newer client release, once the update check found one.
+    pub newer_release: Option<Release>,
     /// The audio thread, from launch to exit.
     pub audio_engine: Arc<AudioEngine>,
     /// Why the audio devices don't work, if they don't.
@@ -674,6 +686,7 @@ impl ThroccApp {
             invite: None,
             settings,
             settings_problem,
+            newer_release: None,
             audio_engine,
             audio_problem: None,
             changing_devices: None,
@@ -724,8 +737,43 @@ impl ThroccApp {
                 Some(profile) => app.set_profile(profile, cx),
                 None => app.show_screen(Screen::Onboarding, window, cx),
             }
+            app.look_for_update(cx);
         }
         app
+    }
+
+    /// Asks GitHub for a newer release in the background, if the user wants that here.
+    fn look_for_update(&mut self, cx: &mut Context<Self>) {
+        if !self.settings.check_for_updates || !updates::checked_here() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async { updates::newer_release() })
+                .await;
+            match found {
+                Ok(newer) => {
+                    this.update(cx, |app, cx| {
+                        app.newer_release = newer.filter(|_| app.settings.check_for_updates);
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(e) => tracing::info!("could not check for updates: {e:#}"),
+            }
+        })
+        .detach();
+    }
+
+    /// Turns the update check on or off and keeps the choice.
+    pub fn use_update_check(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.change_settings(|s| s.check_for_updates = on);
+        self.newer_release = None;
+        if on && !self.mock {
+            self.look_for_update(cx);
+        }
+        cx.notify();
     }
 
     /// Keeps the invite field upper-case, Crockford-normalized and dashed as you type.
@@ -2116,6 +2164,11 @@ impl ThroccApp {
             "settings" => self.screen = Screen::Settings(SettingsPage::Audio),
             "appearance" => self.screen = Screen::Settings(SettingsPage::Appearance),
             "verified" => self.screen = Screen::Settings(SettingsPage::Verified),
+            "about" => {
+                self.screen = Screen::Settings(SettingsPage::About);
+                self.newer_release = Some(Release::sample());
+            }
+            "update" => self.newer_release = Some(Release::sample()),
             "newroom" => self.dialog = Some(Dialog::NewRoom),
             "editroom" => self.dialog = Some(Dialog::EditRoom(room)),
             "roompassword" => {

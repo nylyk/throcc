@@ -24,6 +24,7 @@
         pkgs:
         let
           inherit (pkgs) lib stdenv;
+          inherit (stdenv.hostPlatform) isLinux isDarwin;
           toolchain = fenix.packages.${stdenv.hostPlatform.system}.fromToolchainFile {
             file = ./rust-toolchain.toml;
             sha256 = "sha256-p8h3Sl/YRByZfZTAKXdsvF6xEenXKrXSVvpphmZENH4=";
@@ -33,16 +34,27 @@
             rustc = toolchain;
           };
 
-          ffmpeg = stdenv.mkDerivation {
+          workspaceVersion = (lib.importTOML ./Cargo.toml).workspace.package.version;
+          versionOf =
+            crate:
+            let
+              version = (lib.importTOML ./crates/${crate}/Cargo.toml).package.version;
+            in
+            if lib.isString version then version else workspaceVersion;
+
+          ffmpegScript = builtins.readFile ./packaging/ffmpeg/build.sh;
+          ffmpegScriptVar = name: builtins.head (builtins.match ".*\n${name}=([^\n]+)\n.*" ffmpegScript);
+
+          ffmpeg = stdenv.mkDerivation rec {
             pname = "ffmpeg-lgpl";
-            version = "8.1.3";
+            version = ffmpegScriptVar "version";
             src = lib.fileset.toSource {
               root = ./packaging/ffmpeg;
               fileset = ./packaging/ffmpeg;
             };
             tarball = pkgs.fetchurl {
-              url = "https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz";
-              hash = "sha256-cTjSjJbZ0+OvTuPYytcnQfj/tA2pDBESI13qPs0xeKM=";
+              url = "https://ffmpeg.org/releases/ffmpeg-${version}.tar.xz";
+              sha256 = ffmpegScriptVar "sha256";
             };
             nativeBuildInputs =
               with pkgs;
@@ -52,14 +64,14 @@
                 rust-bindgen
               ]
               # ffmpeg's configure calls the C compiler gcc, which Xcode provides on macOS.
-              ++ lib.optionals stdenv.hostPlatform.isDarwin [ (writeShellScriptBin "gcc" ''exec cc "$@"'') ];
+              ++ lib.optionals isDarwin [ (writeShellScriptBin "gcc" ''exec cc "$@"'') ];
             buildInputs =
               with pkgs;
               [
                 dav1d
                 libvpx
               ]
-              ++ lib.optionals stdenv.hostPlatform.isLinux [
+              ++ lib.optionals isLinux [
                 libva
                 nv-codec-headers-13
               ];
@@ -108,7 +120,7 @@
             xorg.libxcb
           ];
 
-          workspace =
+          crate =
             {
               pname,
               package,
@@ -125,8 +137,17 @@
                 env
                 postInstall
                 ;
-              version = "0.1.0";
-              src = self;
+              version = versionOf package;
+              src = lib.fileset.toSource {
+                root = ./.;
+                fileset = lib.fileset.unions [
+                  ./Cargo.toml
+                  ./Cargo.lock
+                  ./.cargo
+                  ./crates
+                  ./third_party
+                ];
+              };
               cargoLock.lockFile = ./Cargo.lock;
               cargoBuildFlags = [
                 "-p"
@@ -140,46 +161,70 @@
               doCheck = false;
               meta.mainProgram = package;
             };
+
+          # Everything that builds throcc-client-core: audio, capture and the keyring.
+          clientCore =
+            args:
+            crate (
+              args
+              // {
+                nativeBuildInputs = [
+                  pkgs.rustPlatform.bindgenHook
+                ]
+                ++ lib.optionals isDarwin [ xcode ]
+                ++ args.nativeBuildInputs or [ ];
+                buildInputs =
+                  lib.optionals isLinux (
+                    with pkgs;
+                    [
+                      alsa-lib
+                      dbus
+                      pipewire
+                    ]
+                  )
+                  ++ args.buildInputs or [ ];
+                env =
+                  lib.optionalAttrs isDarwin {
+                    # RUSTFLAGS replaces .cargo/config.toml's rustflags, so this repeats its Swift rpath.
+                    RUSTFLAGS = "-C linker=${xcode}/bin/apple-cc -C link-arg=-Wl,-rpath,/usr/lib/swift";
+                  }
+                  // args.env or { };
+              }
+            );
         in
         rec {
           default = client;
 
-          client = workspace {
+          client = clientCore {
             pname = "throcc";
             package = "throcc-client";
             features = [ "ffmpeg" ];
-            nativeBuildInputs =
-              [ pkgs.rustPlatform.bindgenHook ]
-              ++ lib.optionals stdenv.hostPlatform.isLinux [ pkgs.makeWrapper ]
-              ++ lib.optionals stdenv.hostPlatform.isDarwin [ xcode ];
-            buildInputs =
+            nativeBuildInputs = lib.optionals isLinux [ pkgs.makeWrapper ];
+            buildInputs = lib.optionals isLinux (
               with pkgs;
-              lib.optionals stdenv.hostPlatform.isLinux (
-                [
-                  alsa-lib
-                  dbus
-                  fontconfig
-                  freetype
-                  libva
-                  pipewire
-                ]
-                ++ linuxRuntime
-              );
+              [
+                fontconfig
+                freetype
+                libva
+              ]
+              ++ linuxRuntime
+            );
             env = {
               FFMPEG_DLL_PATH = "${ffmpeg}/lib";
               FFMPEG_BINDING_PATH = "${ffmpeg}/binding.rs";
-            }
-            // lib.optionalAttrs stdenv.hostPlatform.isDarwin {
-              # RUSTFLAGS replaces .cargo/config.toml's rustflags, so this repeats its Swift rpath.
-              RUSTFLAGS = "-C linker=${xcode}/bin/apple-cc -C link-arg=-Wl,-rpath,/usr/lib/swift";
             };
-            postInstall = lib.optionalString stdenv.hostPlatform.isLinux ''
+            postInstall = lib.optionalString isLinux ''
               wrapProgram $out/bin/throcc-client \
                 --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath linuxRuntime}
             '';
           };
 
-          server = workspace {
+          cli = clientCore {
+            pname = "throcc-cli";
+            package = "throcc-cli";
+          };
+
+          server = crate {
             pname = "throcc-server";
             package = "throcc-server";
           };

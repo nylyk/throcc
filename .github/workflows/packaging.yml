@@ -2,16 +2,24 @@ name: packaging
 
 on:
   push:
-    branches: [main]
-    tags: ['v*']
+    branches: [develop]
+    tags: ['client-v*']
     paths:
       - 'packaging/**'
+      - 'crates/throcc-client/build.rs'
       - 'crates/throcc-client-core/src/media/video/**'
       - 'crates/throcc-client-core/src/media/capture/**'
       - 'scripts/ci-run.sh'
       - '.github/workflows/packaging.yml'
-  schedule:
-    - cron: '0 4 * * 1'
+  pull_request:
+    branches: [develop]
+    paths:
+      - 'packaging/**'
+      - 'crates/throcc-client/build.rs'
+      - 'crates/throcc-client-core/src/media/video/**'
+      - 'crates/throcc-client-core/src/media/capture/**'
+      - 'scripts/ci-run.sh'
+      - '.github/workflows/packaging.yml'
   workflow_dispatch:
 
 concurrency:
@@ -25,12 +33,34 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  notices:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo install cargo-about --locked --version 0.9.3 --features cli
+      - run: ./scripts/ci-run.sh packaging/licenses/notices.sh client
+        shell: bash
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: notices
+          path: packaging/licenses/client-notices.txt
+          retention-days: 7
+
   macos-app:
+    needs: notices
     runs-on: macos-26
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: notices
+          path: packaging/licenses
       - run: brew install dav1d libvpx pkgconf
       - id: dav1d
         run: echo "version=$(brew list --versions dav1d libvpx | tr ' \n' '--')" >>"$GITHUB_OUTPUT"
@@ -40,8 +70,38 @@ jobs:
           key: macos-ffmpeg-${{ steps.dav1d.outputs.version }}-${{ hashFiles('packaging/ffmpeg/build.sh', 'packaging/ffmpeg/patches/*') }}
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Tags and manual runs sign with the Developer ID and notarize; every other run signs ad hoc.
+      - name: signing keychain
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password=$(openssl rand -hex 24)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          base64 --decode <<<"$MACOS_CERT_P12" >"$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity=$(security find-identity -v -p codesigning "$keychain" | awk '/Developer ID Application/ { print $2; exit }')
+          [ -n "$identity" ] || { echo "::error::no Developer ID Application identity in MACOS_CERT_P12"; exit 1; }
+          echo "MACOS_SIGN_IDENTITY=$identity" >>"$GITHUB_ENV"
+          base64 --decode <<<"$NOTARY_KEY" >"$RUNNER_TEMP/notary.p8"
+          echo "NOTARY_KEY_FILE=$RUNNER_TEMP/notary.p8" >>"$GITHUB_ENV"
       - run: ./scripts/ci-run.sh packaging/macos/bundle.sh
         shell: bash
+        env:
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
+      - if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/notary.p8"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: throcc-macos
@@ -49,12 +109,28 @@ jobs:
           retention-days: 7
 
   windows-app:
+    needs: notices
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: notices
+          path: packaging/licenses
+      - name: MSVC environment
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $before = @{}
+          Get-ChildItem env: | ForEach-Object { $before[$_.Name] = $_.Value }
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set" | ForEach-Object {
+            $name, $value = $_ -split '=', 2
+            if ($value -and $before[$name] -ne $value) { "$name=$value" >> $env:GITHUB_ENV }
+          }
+          if ($LASTEXITCODE -ne 0) { throw "vcvars64.bat failed" }
       - id: deps
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -108,7 +184,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: throcc-windows
-          path: target/windows/throcc-windows.zip
+          path: target/windows/throcc-setup.exe
           retention-days: 7
       - name: video tests
         shell: bash
@@ -117,3 +193,55 @@ jobs:
           export FFMPEG_DLL_PATH="$(cygpath -w "$PWD/deps/ffmpeg-lgpl/bin")"
           export FFMPEG_BINDING_PATH="$(cygpath -w "$PWD/deps/ffmpeg-lgpl/binding.rs")"
           ./scripts/ci-run.sh cargo test --release -p throcc-client-core --features ffmpeg --lib video:: -- --test-threads=1 --nocapture
+
+  flatpak:
+    needs: notices
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: notices
+          path: packaging/licenses
+      - run: ./scripts/ci-run.sh packaging/flatpak/cargo-sources.sh
+        shell: bash
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6.8
+        with:
+          manifest-path: packaging/flatpak/cc.thro.throcc.yml
+          bundle: throcc.flatpak
+          cache-key: flatpak-${{ hashFiles('Cargo.lock', 'packaging/ffmpeg/**', 'packaging/flatpak/cc.thro.throcc.yml') }}
+          upload-artifact: false
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: throcc-flatpak
+          path: throcc.flatpak
+          retention-days: 7
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/client-v')
+    needs: [macos-app, windows-app, flatpak]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: throcc-*
+          merge-multiple: true
+          path: out
+      - name: Draft the release
+        working-directory: out
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          files=(throcc.dmg throcc-setup.exe throcc.flatpak)
+          sha256sum "${files[@]}" >SHA256SUMS
+          gh release create "$TAG" --draft --verify-tag --generate-notes \
+            --title "throcc ${TAG#client-v}" "${files[@]}" SHA256SUMS

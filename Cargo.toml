@@ -25,6 +25,7 @@ async-io = "2.6.0"
 bytes = "1.12.1"
 clap = { version = "4.6.7", features = ["derive"] }
 cpal = "0.18.2"
+embed-resource = "3.0.12"
 ed25519-dalek = { version = "3.0.0", features = ["zeroize"] }
 directories = "6.0.0"
 futures-core = "0.3.34"
@@ -52,6 +53,7 @@ quinn = { version = "0.11.12", default-features = false, features = ["log", "run
 # The version spake2 0.4 takes for its seeded starts.
 rand_core = "0.6.4"
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }
+rustls-native-certs = "0.8.5"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 ring = "0.17.14"
 ropus = "0.12.18"
@@ -75,6 +77,7 @@ tempfile = "3.27.0"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1.44"
+ureq = { version = "3.5.1", default-features = false, features = ["rustls-no-provider"] }
 windows = { version = "0.62.2", features = [
     "Foundation",
     "Graphics_Capture",
