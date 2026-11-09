@@ -63,6 +63,13 @@ pub struct Devices {
 
 /// Names of the available input and output devices.
 pub fn list() -> (Vec<String>, Vec<String>) {
+    // On Windows, cpal puts the calling thread in a single-threaded COM apartment until the
+    // thread exits. On a thread-pool thread that breaks process loopback activation later
+    // run there (RPC_E_CHANGED_MODE), so the listing gets a thread of its own.
+    std::thread::scope(|scope| scope.spawn(list_here).join()).unwrap_or_default()
+}
+
+fn list_here() -> (Vec<String>, Vec<String>) {
     let host = cpal::default_host();
     let names = |devices: Result<Vec<Device>, _>| -> Vec<String> {
         devices
@@ -416,5 +423,18 @@ mod tests {
             open_rate(&config(2, 22_050, SampleFormat::F32)),
             SAMPLE_RATE
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn listing_leaves_the_calling_thread_free_to_join_the_multithreaded_apartment() {
+        use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
+
+        list();
+        // SAFETY: called on this test's own thread, paired with `CoUninitialize` on success.
+        let joined = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        assert!(joined.is_ok(), "{joined:?}");
+        // SAFETY: COM was initialised on this thread just above.
+        unsafe { CoUninitialize() };
     }
 }
