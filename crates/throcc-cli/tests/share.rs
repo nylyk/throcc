@@ -205,9 +205,9 @@ async fn a_viewer_who_starts_watching_late_sees_a_still_screen() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_still_screen_shows_after_its_keyframe_lost_a_packet() {
+async fn a_still_screen_shows_after_its_keyframe_was_lost() {
     let server = start_server();
-    let relay = lossy_relay(&server.addr, Toward::Client, 4).await;
+    let relay = lossy_relay(&server.addr, Toward::Client, 1).await;
     let (mut alice, bob, _) = room_with_two_at(&server, &relay.addr).await;
     let wanted = ShareConfig {
         width: 1280,
@@ -222,7 +222,7 @@ async fn a_still_screen_shows_after_its_keyframe_lost_a_packet() {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     relay.lossy.store(true, Ordering::Relaxed);
-    let units = watch(&bob, tracks.video, WATCH_UNITS).await;
+    let units = bob.engine.subscribe(tracks.video, Kind::Video, WATCH_UNITS);
     let asks = Arc::new(AtomicUsize::new(0));
     let ask_idr = {
         let (asks, request) = (asks.clone(), bob.engine.idr_requester(tracks.video));
@@ -232,21 +232,23 @@ async fn a_still_screen_shows_after_its_keyframe_lost_a_packet() {
         }
     };
     let (mut picture, _) = share::receive(units, sender.config, None, ask_idr).unwrap();
-    wait_for("the keyframe on its way", || {
-        bob.engine.arrived(tracks.video).datagrams > 0
-    })
-    .await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    relay.lossy.store(false, Ordering::Relaxed);
+    let (watched, ()) = tokio::join!(
+        bob.request(Request::SetWatched(vec![tracks.video])),
+        async {
+            wait_for("the viewer to ask again", || {
+                asks.load(Ordering::Relaxed) > 0
+            })
+            .await;
+            assert_eq!(bob.engine.arrived(tracks.video).datagrams, 0);
+            relay.lossy.store(false, Ordering::Relaxed);
+        }
+    );
+    assert_eq!(watched.unwrap(), Response::Ok);
     assert!(relay.dropped.load(Ordering::Relaxed) > 0);
     tokio::time::timeout(Duration::from_secs(10), picture.changed())
         .await
         .expect("no picture of the still screen")
         .unwrap();
-    assert!(
-        asks.load(Ordering::Relaxed) > 0,
-        "the viewer never asked again"
-    );
 }
 
 #[tokio::test]
