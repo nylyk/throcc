@@ -1,0 +1,13 @@
+These are the Rust crates in this build, grouped by license, with each license's text.
+{{#each licenses}}
+
+================================================================================
+{{{name}}}
+
+Used by:
+{{#each used_by}}
+- {{{crate.name}}} {{crate.version}}{{#if crate.repository}}, {{{crate.repository}}}{{/if}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

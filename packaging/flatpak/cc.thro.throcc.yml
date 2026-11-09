@@ -49,6 +49,8 @@ modules:
       - install -Dm644 -t /app/share/applications packaging/flatpak/cc.thro.throcc.desktop
       - install -Dm644 -t /app/share/metainfo packaging/flatpak/cc.thro.throcc.metainfo.xml
       - cp -r packaging/icons /app/share/
+      - install -Dm644 -t /app/share/licenses/cc.thro.throcc LICENSE
+      - install -Dm644 packaging/licenses/client-notices.txt /app/share/licenses/cc.thro.throcc/THIRD-PARTY-NOTICES.txt
     sources:
       - type: dir
         path: ../..

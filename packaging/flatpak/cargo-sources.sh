@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Writes packaging/flatpak/cargo-sources.json, the crates the flatpak builds offline from.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 tools=41c20aa10819cdb2a4f3ca171758a96d1955c018

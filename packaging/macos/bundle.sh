@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+notices=packaging/licenses/client-notices.txt
+[ -f "$notices" ] || { echo "no $notices; run packaging/licenses/notices.sh client first" >&2; exit 1; }
 ffmpeg=${FFMPEG_PREFIX:-deps/ffmpeg-lgpl}
 [ -f "$ffmpeg/lib/pkgconfig/libavcodec.pc" ] || packaging/ffmpeg/build.sh "$ffmpeg"
 ffmpeg=$(cd "$ffmpeg" && pwd)
@@ -14,7 +16,8 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks" "$app/Contents/Resources"
 sed "s/VERSION/$version/g" packaging/macos/Info.plist >"$app/Contents/Info.plist"
 cp target/release/throcc-client "$app/Contents/MacOS/"
-cp packaging/macos/throcc.icns "$app/Contents/Resources/"
+cp packaging/macos/throcc.icns LICENSE "$app/Contents/Resources/"
+cp "$notices" "$app/Contents/Resources/THIRD-PARTY-NOTICES.txt"
 
 # Copies every library outside the OS that `file` needs, and points it at the copy.
 bundle() {

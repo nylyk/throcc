@@ -16,6 +16,7 @@ cargo deny check
 throcc-server admin-invite --data <dir>   # single-use admin invite, works while the server runs
 throcc-client --mock --screen <name>   # sample data, no server; names in `ThroccApp::show_sample`
 ./scripts/screens.sh                   # macOS: README screenshots into docs/screens/
+packaging/licenses/notices.sh client   # third-party notices the packages ship; needs cargo-about
 packaging/macos/bundle.sh              # macOS: target/macos/throcc.dmg
 packaging/flatpak/cargo-sources.sh     # the flatpak's offline crates, before flatpak-builder
 ```

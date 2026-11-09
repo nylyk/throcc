@@ -63,7 +63,7 @@ Screen share needs ffmpeg 8 (`--features ffmpeg`). Without it the client still d
 - **Linux:** the packages in `.github/workflows/ci.yml`, plus ffmpeg 8 development files. With clang 21 or newer, generate the bindings with `packaging/ffmpeg/bindings.sh <ffmpeg prefix> binding.rs` (needs `bindgen` 0.72) and build with `FFMPEG_DLL_PATH=<prefix>/lib FFMPEG_BINDING_PATH=binding.rs`.
 - **Windows:** ffmpeg 8 development files found through `FFMPEG_PKG_CONFIG_PATH` or vcpkg.
 
-The packages ship an LGPL ffmpeg built by `packaging/ffmpeg/build.sh <prefix>`.
+The packages ship an LGPL ffmpeg built by `packaging/ffmpeg/build.sh <prefix>`, and the third-party license notices from `packaging/licenses/notices.sh client`. Run that first; it needs `cargo install cargo-about --features cli`.
 
 - **macOS:** `packaging/macos/bundle.sh` makes `target/macos/throcc.dmg` (needs `brew install dav1d libvpx pkgconf`). It signs ad hoc unless `MACOS_SIGN_IDENTITY` names a Developer ID Application identity, and notarizes with `NOTARY_KEY_FILE`, `NOTARY_KEY_ID` and `NOTARY_ISSUER`.
 - **Flatpak:** `packaging/flatpak/cargo-sources.sh`, then `flatpak-builder --user --install-deps-from=flathub --install build packaging/flatpak/cc.thro.throcc.yml`.

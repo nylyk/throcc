@@ -8,3 +8,4 @@ ci-run.log
 /result
 .DS_Store
 /packaging/flatpak/cargo-sources.json
+/packaging/licenses/*-notices.txt
