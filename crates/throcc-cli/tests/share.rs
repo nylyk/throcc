@@ -3,7 +3,7 @@
 mod common;
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use throcc_client_core::call::{Call, CallEvent};
@@ -223,7 +223,14 @@ async fn a_still_screen_shows_after_its_keyframe_lost_a_packet() {
 
     relay.lossy.store(true, Ordering::Relaxed);
     let units = watch(&bob, tracks.video, WATCH_UNITS).await;
-    let ask_idr = bob.engine.idr_requester(tracks.video);
+    let asks = Arc::new(AtomicUsize::new(0));
+    let ask_idr = {
+        let (asks, request) = (asks.clone(), bob.engine.idr_requester(tracks.video));
+        move || {
+            asks.fetch_add(1, Ordering::Relaxed);
+            request();
+        }
+    };
     let (mut picture, _) = share::receive(units, sender.config, None, ask_idr).unwrap();
     wait_for("the keyframe on its way", || {
         bob.engine.arrived(tracks.video).datagrams > 0
@@ -232,10 +239,14 @@ async fn a_still_screen_shows_after_its_keyframe_lost_a_packet() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     relay.lossy.store(false, Ordering::Relaxed);
     assert!(relay.dropped.load(Ordering::Relaxed) > 0);
-    tokio::time::timeout(Duration::from_secs(5), picture.changed())
+    tokio::time::timeout(Duration::from_secs(10), picture.changed())
         .await
         .expect("no picture of the still screen")
         .unwrap();
+    assert!(
+        asks.load(Ordering::Relaxed) > 0,
+        "the viewer never asked again"
+    );
 }
 
 #[tokio::test]

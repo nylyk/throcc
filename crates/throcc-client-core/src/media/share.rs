@@ -21,6 +21,8 @@ use super::video::frame::{VideoFrame, share_size};
 use super::video::{Frame, Picture, PreviewDemand};
 
 const IDLE: Duration = Duration::from_millis(2);
+/// How often a decoder holding no picture checks for units while it waits for a keyframe.
+const KEYFRAME_POLL: Duration = Duration::from_millis(20);
 /// Self-view gets every Nth frame.
 const SELF_VIEW_EVERY: u32 = 2;
 /// The widest a self-view picture held in memory is shrunk to. A macOS pixel buffer is shown
@@ -548,10 +550,10 @@ impl KeyframeAsks {
 
     /// Whether to ask at `now`, after a decoder `reset` or a unit that `failed`.
     fn ask(&mut self, now: Instant, reset: bool, failed: bool) -> bool {
-        let waiting = self
+        let recently_asked = self
             .unanswered_since
             .is_some_and(|at| now.duration_since(at) < KEYFRAME_RETRY);
-        let ask = reset || (failed && !waiting);
+        let ask = reset || (failed && !recently_asked);
         if ask {
             self.unanswered_since = Some(now);
         }
@@ -596,7 +598,7 @@ pub fn receive(
                             if asks.overdue(Instant::now()) {
                                 ask_idr();
                             }
-                            std::thread::sleep(IDLE);
+                            std::thread::sleep(if held.is_empty() { KEYFRAME_POLL } else { IDLE });
                             None
                         }
                         Err(mpsc::error::TryRecvError::Disconnected) => return,
