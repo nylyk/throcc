@@ -41,7 +41,7 @@ docker exec throcc /throcc-server admin-invite --data /data
 Download it from the [releases page](https://github.com/nylyk/throcc/releases), where client releases are tagged `client-v<version>`. Each release lists the SHA-256 of its files in `SHA256SUMS`.
 
 - **macOS 14 or newer:** `throcc.dmg`, signed with a Developer ID and notarized.
-- **Windows:** `throcc-windows.zip`. Unzip it and run `throcc.exe`.
+- **Windows:** `throcc-setup.exe`. It installs for your user without admin rights, and a newer one upgrades in place. It isn't code-signed yet, so SmartScreen asks first: More info, Run anyway.
 - **Linux:** `throcc.flatpak`. Install it with `flatpak install --user throcc.flatpak`; its runtime comes from Flathub.
 - **Nix:** `nix run github:nylyk/throcc`. On macOS this needs the Xcode Command Line Tools.
 
@@ -67,7 +67,7 @@ The packages ship an LGPL ffmpeg built by `packaging/ffmpeg/build.sh <prefix>`.
 
 - **macOS:** `packaging/macos/bundle.sh` makes `target/macos/throcc.dmg` (needs `brew install dav1d libvpx pkgconf`). It signs ad hoc unless `MACOS_SIGN_IDENTITY` names a Developer ID Application identity, and notarizes with `NOTARY_KEY_FILE`, `NOTARY_KEY_ID` and `NOTARY_ISSUER`.
 - **Flatpak:** `packaging/flatpak/cargo-sources.sh`, then `flatpak-builder --user --install-deps-from=flathub --install build packaging/flatpak/cc.thro.throcc.yml`.
-- **Windows:** follow the `windows-app` job in `.github/workflows/packaging.yml`.
+- **Windows:** follow the `windows-app` job in `.github/workflows/packaging.yml`. `packaging/windows/package.ps1` makes `target/windows/throcc-setup.exe` with Inno Setup 6.
 
 `throcc-cli` is a headless client for scripts and testing (`throcc-cli --help`).
 

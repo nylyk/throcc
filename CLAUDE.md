@@ -55,7 +55,7 @@ Each crate's `README.md` explains its modules and how they fit together. Update 
 ## Releases
 
 - `main` only holds releases. Work happens on `develop`, and PRs target `develop`.
-- A release merges `develop` into `main`, and every side that changed since its last tag gets a new tag on that commit: `server-vX.Y.Z` publishes the Docker image, `client-vX.Y.Z` a draft GitHub release with the dmg, the Windows zip and the flatpak.
+- A release merges `develop` into `main`, and every side that changed since its last tag gets a new tag on that commit: `server-vX.Y.Z` publishes the Docker image, `client-vX.Y.Z` a draft GitHub release with the dmg, the Windows installer and the flatpak.
 - `throcc-server` and `throcc-client` have their own semver `version` in their `Cargo.toml`; the other crates keep the workspace version. A client release also adds a `<release>` to `packaging/flatpak/cc.thro.throcc.metainfo.xml`.
 - `PROTOCOL` alone decides compatibility. A server accepts `MIN_PROTOCOL..=PROTOCOL`, and a client checks its `PROTOCOL` is in the server's range. Both hellos stay decodable by every version. A protocol bump is a breaking server release, a minor one while 0.x.
 - Docker is the only supported server distribution. The app id is `cc.thro.throcc` everywhere.
