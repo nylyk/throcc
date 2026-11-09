@@ -190,6 +190,8 @@ pub struct Encoder {
     backend: Backend,
     width: usize,
     height: usize,
+    /// One frame's duration in video clock ticks.
+    frame_ticks: u32,
     idr_next: bool,
     /// The frame pictures are copied into, reused once the encoder lets go of it.
     staging: Option<AVFrame>,
@@ -286,6 +288,7 @@ impl Encoder {
                     backend: candidate.backend,
                     width: config.width,
                     height: config.height,
+                    frame_ticks: VIDEO_CLOCK_HZ / config.fps.max(1),
                     idr_next: true,
                     staging: None,
                     last: None,
@@ -324,6 +327,11 @@ impl Encoder {
         }
     }
 
+    /// Whether the next picture is to be encoded as a keyframe.
+    pub fn keyframe_pending(&self) -> bool {
+        self.idr_next
+    }
+
     pub fn encode(&mut self, picture: &VideoFrame) -> Result<Vec<EncodedUnit>, EncodeError> {
         // The last frame may share the staging frame's buffers, which keeps it unwritable.
         self.last = None;
@@ -346,13 +354,13 @@ impl Encoder {
         self.submit(submitted, picture.timestamp)
     }
 
-    /// Encodes the last picture again as a keyframe stamped one tick after it. Empty
+    /// Encodes the last picture again as a keyframe stamped one frame after it. Empty
     /// before the first picture.
     pub fn repeat_as_keyframe(&mut self) -> Result<Vec<EncodedUnit>, EncodeError> {
         let Some(frame) = self.last.take() else {
             return Ok(Vec::new());
         };
-        let timestamp = (frame.pts as u32).wrapping_add(1);
+        let timestamp = (frame.pts as u32).wrapping_add(self.frame_ticks);
         self.idr_next = true;
         self.submit(frame, timestamp)
     }
@@ -1208,14 +1216,52 @@ mod round_trip {
                 .unwrap_or_else(|| panic!("{:?}: no keyframe in five repeats", candidate.name));
             assert!(keyframe.timestamp > 6000, "{:?}", candidate.name);
 
-            let mut decoder = Decoder::new(candidate.codec, MaxSize::ANY).unwrap();
-            let shown = decoder
-                .decode(&keyframe.data, keyframe.timestamp)
-                .unwrap()
-                .unwrap_or_else(|| panic!("{:?}: the keyframe shows nothing", candidate.name))
-                .copied_to_memory();
+            let shown = decoded_alone(candidate, &keyframe);
             assert_eq!(shown.read_test_number(), 2, "{:?}", candidate.name);
+
+            let mut reference = Encoder::open_with(candidate, config).unwrap();
+            let mut units = Vec::new();
+            for n in 0..3u16 {
+                if n == 2 {
+                    reference.recover(Recovery::Idr);
+                }
+                let input = VideoFrame::test_pattern(1280, 720, n, u32::from(n) * 3000);
+                units.extend(reference.encode(&input).unwrap());
+            }
+            let fresh = units
+                .into_iter()
+                .chain(
+                    std::iter::repeat_with(|| reference.repeat_as_keyframe().unwrap())
+                        .flatten()
+                        .take(5),
+                )
+                .find(|unit| unit.keyframe && unit.timestamp == 6000)
+                .unwrap_or_else(|| panic!("{:?}: no fresh keyframe", candidate.name));
+            let original = VideoFrame::test_pattern(1280, 720, 2, 0);
+            let repeated_db = luma_psnr(&shown, &original);
+            let fresh_db = luma_psnr(&decoded_alone(candidate, &fresh), &original);
+            eprintln!(
+                "{:?}: repeated {} bytes at {repeated_db:.1} dB, fresh {} bytes at {fresh_db:.1} dB",
+                candidate.name,
+                keyframe.data.len(),
+                fresh.data.len()
+            );
+            assert!(
+                repeated_db > fresh_db - 2.0,
+                "{:?}: repeated keyframe at {repeated_db:.1} dB, a fresh one at {fresh_db:.1} dB",
+                candidate.name
+            );
         }
+    }
+
+    /// The picture a fresh decoder shows for `keyframe` from `candidate`.
+    fn decoded_alone(candidate: &Candidate, keyframe: &EncodedUnit) -> VideoFrame {
+        let mut decoder = Decoder::new(candidate.codec, MaxSize::ANY).unwrap();
+        decoder
+            .decode(&keyframe.data, keyframe.timestamp)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{:?}: the keyframe shows nothing", candidate.name))
+            .copied_to_memory()
     }
 
     #[test]

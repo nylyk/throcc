@@ -283,7 +283,9 @@ impl Sending {
             }
             if let Some(kind) = pacer.due(Instant::now()) {
                 self.encoder.recover(kind);
-                self.repeats_left = STILL_REPEATS;
+                if self.encoder.keyframe_pending() {
+                    self.repeats_left = STILL_REPEATS;
+                }
             }
             self.send_audio(&mut sound);
             self.tally.report_if_due(self.capture.dropped());
