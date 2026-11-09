@@ -3,13 +3,15 @@
 mod common;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use throcc_client_core::call::{Call, CallEvent};
-use throcc_client_core::media::capture::{self, CaptureConfig, TestPattern};
+use throcc_client_core::media::capture::{self, Capture, CaptureConfig, TestPattern};
 use throcc_client_core::media::engine::Kind;
 use throcc_client_core::media::share::{self, ShareSender};
 use throcc_client_core::media::share_audio::audio_to_video;
+use throcc_client_core::media::video::frame::VideoFrame;
 use throcc_proto::frame::VIDEO_CLOCK_HZ;
 use throcc_proto::messages::{Codec, Event, Request, Response, ShareConfig, ShareTracks};
 use tokio::sync::mpsc;
@@ -28,8 +30,19 @@ async fn share_pattern(
     wanted: ShareConfig,
     epoch: Instant,
 ) -> Option<(Arc<ShareSender>, ShareTracks)> {
-    let tracks = first_share(bob, alice).await;
     let capture = Box::new(TestPattern::new(CaptureConfig::for_share(&wanted), epoch));
+    share_capture(alice, bob, wanted, capture).await
+}
+
+/// Starts Alice sharing what `capture` delivers, and forwards the server's keyframe
+/// requests to her encoder. `None`, reported as a skip, without an encoder.
+async fn share_capture(
+    alice: &mut Call,
+    bob: &Call,
+    wanted: ShareConfig,
+    capture: Box<dyn Capture>,
+) -> Option<(Arc<ShareSender>, ShareTracks)> {
+    let tracks = first_share(bob, alice).await;
     let sender = match ShareSender::start(alice.engine.clone(), tracks, wanted, capture) {
         Ok(sender) => Arc::new(sender),
         Err(e) => {
@@ -57,6 +70,23 @@ async fn share_pattern(
         }
     });
     Some((sender, tracks))
+}
+
+/// A screen that shows `moving` frames of the test pattern, then stands still, so its
+/// capture delivers nothing more.
+struct StillAfter {
+    pattern: TestPattern,
+    moving: usize,
+}
+
+impl Capture for StillAfter {
+    fn next_frame(&mut self, into: &mut VideoFrame) -> bool {
+        if self.moving == 0 || !self.pattern.next_frame(into) {
+            return false;
+        }
+        self.moving -= 1;
+        true
+    }
 }
 
 fn millis_since(epoch: Instant) -> u16 {
@@ -148,6 +178,77 @@ async fn share_audio_and_video_arrive_on_one_clock() {
         (audio_ms - video_ms).abs() < 40,
         "audio {audio_ms} ms, video {video_ms} ms"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_viewer_who_starts_watching_late_sees_a_still_screen() {
+    let server = start_server();
+    let (mut alice, bob, _) = room_with_two(&server).await;
+    let wanted = ShareConfig {
+        width: 1280,
+        height: 720,
+        ..WANTED
+    };
+    let pattern = TestPattern::new(CaptureConfig::for_share(&wanted), Instant::now());
+    let capture = Box::new(StillAfter { pattern, moving: 5 });
+    let Some((sender, tracks)) = share_capture(&mut alice, &bob, wanted, capture).await else {
+        return;
+    };
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let units = watch(&bob, tracks.video, WATCH_UNITS).await;
+    let (mut picture, _) = share::receive(units, sender.config, None, || {}).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), picture.changed())
+        .await
+        .expect("no picture of the still screen")
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_still_screen_shows_after_its_keyframe_was_lost() {
+    let server = start_server();
+    let relay = lossy_relay(&server.addr, Toward::Client, 1).await;
+    let (mut alice, bob, _) = room_with_two_at(&server, &relay.addr).await;
+    let wanted = ShareConfig {
+        width: 1280,
+        height: 720,
+        ..WANTED
+    };
+    let pattern = TestPattern::new(CaptureConfig::for_share(&wanted), Instant::now());
+    let capture = Box::new(StillAfter { pattern, moving: 5 });
+    let Some((sender, tracks)) = share_capture(&mut alice, &bob, wanted, capture).await else {
+        return;
+    };
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    relay.lossy.store(true, Ordering::Relaxed);
+    let units = bob.engine.subscribe(tracks.video, Kind::Video, WATCH_UNITS);
+    let asks = Arc::new(AtomicUsize::new(0));
+    let ask_idr = {
+        let (asks, request) = (asks.clone(), bob.engine.idr_requester(tracks.video));
+        move || {
+            asks.fetch_add(1, Ordering::Relaxed);
+            request();
+        }
+    };
+    let (mut picture, _) = share::receive(units, sender.config, None, ask_idr).unwrap();
+    let (watched, ()) = tokio::join!(
+        bob.request(Request::SetWatched(vec![tracks.video])),
+        async {
+            wait_for("the viewer to ask again", || {
+                asks.load(Ordering::Relaxed) > 0
+            })
+            .await;
+            assert_eq!(bob.engine.arrived(tracks.video).datagrams, 0);
+            relay.lossy.store(false, Ordering::Relaxed);
+        }
+    );
+    assert_eq!(watched.unwrap(), Response::Ok);
+    assert!(relay.dropped.load(Ordering::Relaxed) > 0);
+    tokio::time::timeout(Duration::from_secs(10), picture.changed())
+        .await
+        .expect("no picture of the still screen")
+        .unwrap();
 }
 
 #[tokio::test]

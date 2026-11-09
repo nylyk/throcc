@@ -29,15 +29,15 @@
   <screenshots>
     <screenshot type="default">
       <caption>Watching a share in a room</caption>
-      <image>https://raw.githubusercontent.com/nylyk/throcc/client-v0.1.0/docs/screens/room.png</image>
+      <image>https://raw.githubusercontent.com/nylyk/throcc/main/docs/screens/focus.png</image>
     </screenshot>
     <screenshot>
-      <caption>Joining a server</caption>
-      <image>https://raw.githubusercontent.com/nylyk/throcc/client-v0.1.0/docs/screens/join.png</image>
+      <caption>Sharing a screen with its audio</caption>
+      <image>https://raw.githubusercontent.com/nylyk/throcc/main/docs/screens/share.png</image>
     </screenshot>
     <screenshot>
-      <caption>A profile with its safety number</caption>
-      <image>https://raw.githubusercontent.com/nylyk/throcc/client-v0.1.0/docs/screens/person.png</image>
+      <caption>A safety number to verify someone</caption>
+      <image>https://raw.githubusercontent.com/nylyk/throcc/main/docs/screens/person.png</image>
     </screenshot>
   </screenshots>
   <content_rating type="oars-1.1">
@@ -52,6 +52,7 @@
     <control>pointing</control>
   </supports>
   <releases>
+    <release version="0.1.1" date="2026-11-09"/>
     <release version="0.1.0" date="2026-11-09"/>
   </releases>
 </component>

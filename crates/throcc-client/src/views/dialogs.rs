@@ -354,7 +354,7 @@ fn share(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .child(
             Switch::new("share-audio")
                 .checked(audio)
-                .label("Share audio: everything except throcc itself")
+                .label("Share computer audio")
                 .on_click(cx.listener(|app, checked: &bool, _, cx| {
                     app.share_audio = *checked;
                     cx.notify();
