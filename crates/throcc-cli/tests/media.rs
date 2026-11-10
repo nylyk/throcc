@@ -110,7 +110,7 @@ async fn watching_a_share_asks_its_sender_for_an_idr() {
         _ => None,
     })
     .await;
-    assert_eq!(requested, (video_id, throcc_proto::messages::Recovery::Idr));
+    assert_eq!(requested, (video_id, Recovery::Idr));
 }
 
 #[tokio::test]
