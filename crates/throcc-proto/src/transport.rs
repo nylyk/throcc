@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::frame::DATAGRAM_PAYLOAD_FLOOR;
 
 pub const KEEP_ALIVE: Duration = Duration::from_secs(5);
-pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 pub const SERVER_DATAGRAM_SEND_BUFFER: usize = 64 * 1024;
 /// Reordering tolerated before a packet counts as lost. Media datagrams are never
 /// retransmitted, so a spurious loss only shrinks the congestion window.
