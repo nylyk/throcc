@@ -36,8 +36,8 @@ use crate::theme;
 use crate::updates::{self, Release};
 use crate::views;
 use crate::views::common::{
-    CONTROLS_LINGER, OVERLAY_LINGER, Typeset, notify_after, slider_gain, slider_value,
-    update_notification, volume_slider,
+    CONTROLS_LINGER, OVERLAY_LINGER, Typeset, UpdateNotification, notify_after, slider_gain,
+    slider_value, update_notification, volume_slider,
 };
 
 actions!(throcc, [ToggleMic, ToggleDeafen, CloseDialog]);
@@ -783,9 +783,12 @@ impl ThroccApp {
     }
 
     /// Turns the update check on or off and keeps the choice.
-    pub fn use_update_check(&mut self, on: bool, window: &Window, cx: &mut Context<Self>) {
+    pub fn use_update_check(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.change_settings(|s| s.check_for_updates = Some(on));
         self.newer_release = None;
+        if !on {
+            window.remove_notification::<UpdateNotification>(cx);
+        }
         self.look_for_update(window, cx);
         cx.notify();
     }

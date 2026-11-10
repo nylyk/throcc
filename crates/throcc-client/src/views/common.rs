@@ -245,9 +245,11 @@ pub fn update_notice(release: &Release) -> Stateful<Div> {
         .on_click(move |_, _, cx| cx.open_url(&url))
 }
 
+/// Identifies the update notification among a window's notifications.
+pub struct UpdateNotification;
+
 /// The update notice as a notification that stays until closed.
 pub fn update_notification(release: &Release) -> Notification {
-    struct UpdateNotification;
     let release = release.clone();
     Notification::new()
         .id::<UpdateNotification>()
