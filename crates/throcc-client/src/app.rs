@@ -481,7 +481,7 @@ pub struct ThroccApp {
     pub joining: bool,
     /// Our profile as the join in progress pushes it, updated by saves until the join ends.
     joining_profile: Option<watch::Sender<Profile>>,
-    /// Whether the join in progress was last asked for on a settings page, so it leaves them.
+    /// Whether the join in progress was asked for on a settings page, so it leaves them.
     join_asked_in_settings: bool,
     pub mascot: views::mascot::Shown,
     /// Counts joins started, so a join that was overtaken by a newer one is ignored.
@@ -1740,13 +1740,12 @@ impl ThroccApp {
             cx.notify();
             return;
         }
-        if self.joining && self.address.read(cx).value() == address {
-            self.join_asked_in_settings = matches!(self.screen, Screen::Settings(_));
-            return;
+        self.screen = Screen::Join;
+        if !self.joining || self.address.read(cx).value() != address {
+            set_field(&self.address, address, false, window, cx);
+            set_field(&self.code, "", false, window, cx);
+            self.join(window, cx);
         }
-        set_field(&self.address, address, false, window, cx);
-        set_field(&self.code, "", false, window, cx);
-        self.join(window, cx);
         cx.notify();
     }
 
