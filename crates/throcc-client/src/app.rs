@@ -481,8 +481,8 @@ pub struct ThroccApp {
     pub joining: bool,
     /// Our profile as the join in progress pushes it, updated by saves until the join ends.
     joining_profile: Option<watch::Sender<Profile>>,
-    /// Whether the join in progress was started from a settings page, so it leaves them.
-    joined_from_settings: bool,
+    /// Whether the join in progress was last asked for on a settings page, so it leaves them.
+    join_asked_in_settings: bool,
     pub mascot: views::mascot::Shown,
     /// Counts joins started, so a join that was overtaken by a newer one is ignored.
     join_attempt: u64,
@@ -671,7 +671,7 @@ impl ThroccApp {
             pictures: HashMap::new(),
             joining: false,
             joining_profile: None,
-            joined_from_settings: false,
+            join_asked_in_settings: false,
             mascot: views::mascot::Shown::default(),
             join_attempt: 0,
             join_error: None,
@@ -809,7 +809,7 @@ impl ThroccApp {
         self.joining_profile = None;
         self.join_error = None;
         self.dialog = None;
-        if self.joined_from_settings || !matches!(self.screen, Screen::Settings(_)) {
+        if self.join_asked_in_settings || !matches!(self.screen, Screen::Settings(_)) {
             self.screen = Screen::Main;
             window.focus(&self.root_focus, cx);
         }
@@ -1741,7 +1741,7 @@ impl ThroccApp {
             return;
         }
         if self.joining && self.address.read(cx).value() == address {
-            self.joined_from_settings = matches!(self.screen, Screen::Settings(_));
+            self.join_asked_in_settings = matches!(self.screen, Screen::Settings(_));
             return;
         }
         set_field(&self.address, address, false, window, cx);
@@ -1760,7 +1760,7 @@ impl ThroccApp {
     /// Connects to the server in the address field, leaving the one we are on first and
     /// abandoning any join still under way.
     pub fn join(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.joined_from_settings = matches!(self.screen, Screen::Settings(_));
+        self.join_asked_in_settings = matches!(self.screen, Screen::Settings(_));
         let address = self.address.read(cx).value().trim().to_owned();
         let code_text = self.code.read(cx).value().to_string();
         if address.is_empty() {
@@ -1985,12 +1985,13 @@ impl ThroccApp {
     }
 
     /// Opens a screen of the mock client by name, for screenshots: onboarding, onboardingerror,
-    /// welcome, join, joinfailed, lost, personmenu, addserver, removeserver, room, unwatched,
-    /// alone, emptylobby, focus, fullscreen, popout, slow, slowpopout, slowfullscreen, share,
-    /// connection, person, personverified, personchanged, keychange, ownprofile, pinmismatch,
-    /// settings, appearance, verified, newroom, editroom, roompassword, deleteroom, profile,
-    /// profileerror, server, keys, members, invites, removeuser, leaveserver, identitymissing,
-    /// identityback or startedover. Any other name leaves the lobby.
+    /// welcome, join, joinfailed, lost, personmenu, addserver, removeserver, room, testpattern,
+    /// unwatched, alone, emptylobby, focus, fullscreen, popout, slow, slowpopout, slowfullscreen,
+    /// share, connection, person, personverified, personchanged, keychange, ownprofile,
+    /// pinmismatch, settings, appearance, verified, about, update, newroom, editroom,
+    /// roompassword, deleteroom, profile, profileerror, server, keys, members, invites,
+    /// removeuser, leaveserver, identitymissing, identityback or startedover. Any other name
+    /// leaves the lobby.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         let room = RoomId(1);
         let joined = |app: &mut Self| {
