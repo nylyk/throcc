@@ -1374,11 +1374,10 @@ impl Hub {
         Ok(Response::Ok)
     }
 
-    /// Removes every account but admins' not signed in to for [`INACTIVE_ACCOUNT_LIFETIME`].
+    /// Removes every non-admin account not signed in to for [`INACTIVE_ACCOUNT_LIFETIME`].
     pub fn remove_inactive(&mut self, now: u64) -> anyhow::Result<()> {
-        let db = &self.db;
         self.unwritten_sign_ins
-            .retain(|user, signed_in| db.mark_seen(*user, *signed_in).is_err());
+            .retain(|user, signed_in| self.db.mark_seen(*user, *signed_in).is_err());
         let before = now.saturating_sub(INACTIVE_ACCOUNT_LIFETIME.as_secs());
         let mut inactive = self.db.unseen_since(before)?;
         inactive.retain(|user| !self.unwritten_sign_ins.contains_key(user));

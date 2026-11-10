@@ -44,23 +44,19 @@ pub enum ReadError {
     Frame(#[from] FrameError),
 }
 
-/// Reads one frame. The body is allocated only after its length passes the cap.
 pub async fn read_frame<T: DeserializeOwned>(recv: &mut quinn::RecvStream) -> Result<T, ReadError> {
-    read_capped(recv, framing::MAX_FRAME_BYTES).await
+    Ok(framing::decode(
+        &read_body(recv, framing::MAX_FRAME_BYTES).await?,
+    )?)
 }
 
 /// Reads one handshake frame, which is never larger than [`HANDSHAKE_FRAME_BYTES`].
 pub async fn read_handshake<T: DeserializeOwned>(
     recv: &mut quinn::RecvStream,
 ) -> Result<T, ReadError> {
-    read_capped(recv, HANDSHAKE_FRAME_BYTES).await
-}
-
-async fn read_capped<T: DeserializeOwned>(
-    recv: &mut quinn::RecvStream,
-    cap: usize,
-) -> Result<T, ReadError> {
-    Ok(framing::decode(&read_body(recv, cap).await?)?)
+    Ok(framing::decode(
+        &read_body(recv, HANDSHAKE_FRAME_BYTES).await?,
+    )?)
 }
 
 /// Reads one frame's body. The body is allocated only after its length passes `cap`.
@@ -141,7 +137,7 @@ async fn serve(
         connection.close(close::PROTOCOL_ERROR.into(), b"unsupported protocol");
         return Ok(());
     }
-    let hello: ClientHello = framing::decode(&hello)?;
+    let ClientHello { sign_in, .. } = framing::decode(&hello)?;
     let Some(_signed_in) = shared.connections.try_enter(source) else {
         debug!(%peer, "refusing sign-in: its network is full");
         shared
@@ -154,13 +150,7 @@ async fn serve(
         return Ok(());
     };
 
-    let signing_in = auth::authenticate(
-        shared,
-        connection,
-        &mut stream,
-        &server_nonce,
-        hello.sign_in,
-    );
+    let signing_in = auth::authenticate(shared, connection, &mut stream, &server_nonce, sign_in);
     let authenticated = match tokio::time::timeout(SIGN_IN_TIMEOUT, signing_in).await {
         Ok(Ok(authenticated)) => authenticated,
         Ok(Err(refused)) => {
