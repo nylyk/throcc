@@ -79,8 +79,8 @@ async fn a_hello_for_an_unsupported_protocol_is_refused_before_its_sign_in_is_re
         );
 
         let undecodable_sign_in = [0xff_u8; 8];
-        let hello = framing::encode(&(protocol, undecodable_sign_in)).unwrap();
-        send.write_all(&hello).await.unwrap();
+        let client_hello = framing::encode(&(protocol, undecodable_sign_in)).unwrap();
+        send.write_all(&client_hello).await.unwrap();
         match connected.connection.closed().await {
             quinn::ConnectionError::ApplicationClosed(frame) => {
                 assert_eq!(frame.error_code, close::PROTOCOL_ERROR.into());
