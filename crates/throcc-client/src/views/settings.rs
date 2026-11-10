@@ -528,7 +528,9 @@ fn about(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             Switch::new("check-for-updates")
                 .checked(app.checks_for_updates())
                 .label("Check for a new version when throcc starts")
-                .on_click(cx.listener(|app, on: &bool, _, cx| app.use_update_check(*on, cx))),
+                .on_click(
+                    cx.listener(|app, on: &bool, window, cx| app.use_update_check(*on, window, cx)),
+                ),
         ))
         .children(app.newer_release.as_ref().map(update_notice));
     div()

@@ -37,7 +37,7 @@ use crate::updates::{self, Release};
 use crate::views;
 use crate::views::common::{
     CONTROLS_LINGER, OVERLAY_LINGER, Typeset, notify_after, slider_gain, slider_value,
-    volume_slider,
+    update_notification, volume_slider,
 };
 
 actions!(throcc, [ToggleMic, ToggleDeafen, CloseDialog]);
@@ -738,7 +738,7 @@ impl ThroccApp {
                 None => app.show_screen(Screen::Onboarding, window, cx),
             }
             if app.settings_problem.is_none() {
-                app.look_for_update(cx);
+                app.look_for_update(window, cx);
             }
         }
         app
@@ -751,11 +751,12 @@ impl ThroccApp {
     }
 
     /// Asks GitHub for a newer release in the background, if the user wants that here, unless
-    /// running on sample data.
-    fn look_for_update(&mut self, cx: &mut Context<Self>) {
+    /// running on sample data, and announces one found in `window`.
+    fn look_for_update(&mut self, window: &Window, cx: &mut Context<Self>) {
         if self.mock || !self.checks_for_updates() {
             return;
         }
+        let window_handle = window.window_handle();
         cx.spawn(async move |this, cx| {
             let found = cx
                 .background_executor()
@@ -763,9 +764,15 @@ impl ThroccApp {
                 .await;
             match found {
                 Ok(newer) => {
-                    this.update(cx, |app, cx| {
-                        app.newer_release = newer.filter(|_| app.checks_for_updates());
-                        cx.notify();
+                    cx.update_window(window_handle, |_, window, cx| {
+                        this.update(cx, |app, cx| {
+                            app.newer_release = newer.filter(|_| app.checks_for_updates());
+                            if let Some(release) = &app.newer_release {
+                                window.push_notification(update_notification(release), cx);
+                            }
+                            cx.notify();
+                        })
+                        .ok();
                     })
                     .ok();
                 }
@@ -776,10 +783,10 @@ impl ThroccApp {
     }
 
     /// Turns the update check on or off and keeps the choice.
-    pub fn use_update_check(&mut self, on: bool, cx: &mut Context<Self>) {
+    pub fn use_update_check(&mut self, on: bool, window: &Window, cx: &mut Context<Self>) {
         self.change_settings(|s| s.check_for_updates = Some(on));
         self.newer_release = None;
-        self.look_for_update(cx);
+        self.look_for_update(window, cx);
         cx.notify();
     }
 
@@ -2176,7 +2183,17 @@ impl ThroccApp {
                 self.screen = Screen::Settings(SettingsPage::About);
                 self.newer_release = Some(Release::sample());
             }
-            "update" => self.newer_release = Some(Release::sample()),
+            "update" => {
+                let release = Release::sample();
+                self.newer_release = Some(release.clone());
+                cx.spawn_in(window, async move |_, cx| {
+                    cx.update(|window, cx| {
+                        window.push_notification(update_notification(&release), cx)
+                    })
+                    .ok();
+                })
+                .detach();
+            }
             "newroom" => self.dialog = Some(Dialog::NewRoom),
             "editroom" => self.dialog = Some(Dialog::EditRoom(room)),
             "roompassword" => {
