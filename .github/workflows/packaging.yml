@@ -41,6 +41,8 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
       - run: cargo install cargo-about --locked --version 0.9.3 --features cli
       - run: ./scripts/ci-run.sh packaging/licenses/notices.sh client
         shell: bash
@@ -70,6 +72,8 @@ jobs:
           key: macos-ffmpeg-${{ steps.dav1d.outputs.version }}-${{ hashFiles('packaging/ffmpeg/build.sh', 'packaging/ffmpeg/patches/*') }}
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
       # Tags and manual runs sign with the Developer ID and notarize; every other run signs ad hoc.
       - name: signing keychain
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
@@ -164,6 +168,8 @@ jobs:
           ./scripts/ci-run.sh packaging/ffmpeg/build.sh deps/ffmpeg-lgpl
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
       - if: steps.deps.outputs.cache-hit != 'true'
         name: bindings
         shell: bash
