@@ -84,4 +84,4 @@ A release, for each side that changed since its last tag (`git log <side>-vX.Y.Z
 
 ## Review baseline
 
-The whole workspace was simplified, deep-reviewed line by line and security-reviewed through commit `3cb05d744207c879f580fa625ffba6ed975d3abd` (2026-11-08), including the owner's follow-up decisions. Later deep reviews start from there: `git diff 3cb05d7..HEAD`. Run them with the `deep-review` skill, which moves this baseline when it finishes.
+The whole workspace was simplified, deep-reviewed line by line and security-reviewed through commit `6f5286e0a72f3f2b32425c5c0974fce01c5a13ea` (2026-11-10). Later deep reviews start from there: `git diff 6f5286e..HEAD`. Run them with the `deep-review` skill, which moves this baseline when it finishes.
