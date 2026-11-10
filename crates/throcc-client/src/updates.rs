@@ -32,8 +32,9 @@ impl Release {
     }
 }
 
-/// Whether this copy looks for updates itself. A flatpak gets them from flatpak.
-pub fn checked_here() -> bool {
+/// Whether this copy looks for updates until the user says otherwise. A flatpak gets them
+/// from flatpak.
+pub fn checked_by_default() -> bool {
     !Path::new("/.flatpak-info").exists()
 }
 

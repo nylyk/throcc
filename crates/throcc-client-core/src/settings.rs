@@ -13,26 +13,16 @@ const FILE: &str = "settings.json";
 pub const DEFAULT_GATE_DBFS: f32 = -50.0;
 
 /// Everything the user sets for the app as a whole, kept in one file.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// `None` until onboarding keeps a name.
     pub profile: Option<Profile>,
     pub appearance: Appearance,
     pub audio: AudioSettings,
-    /// Whether the app asks GitHub for a newer release when it starts.
-    pub check_for_updates: bool,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            profile: None,
-            appearance: Appearance::default(),
-            audio: AudioSettings::default(),
-            check_for_updates: true,
-        }
-    }
+    /// Whether the app asks GitHub for a newer release when it starts, unset for the build's
+    /// default.
+    pub check_for_updates: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -105,7 +95,13 @@ impl Default for VoiceSettings {
     }
 }
 
-impl json_file::Format for Settings {}
+impl json_file::Format for Settings {
+    const MIGRATIONS: &'static [json_file::Migration] = &[|v1| {
+        if v1.get("check_for_updates") == Some(&true.into()) {
+            v1.remove("check_for_updates");
+        }
+    }];
+}
 
 impl Settings {
     /// The settings kept in `dir`, the defaults where there are none. A name a server would
@@ -169,7 +165,7 @@ mod tests {
                     cue_volume: 0.0,
                 },
             },
-            check_for_updates: false,
+            check_for_updates: Some(false),
         }
     }
 
@@ -198,10 +194,19 @@ mod tests {
     }
 
     #[test]
-    fn updates_are_checked_unless_turned_off() {
+    fn a_version_1_update_check_follows_the_build_unless_it_was_turned_off() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(FILE), r#"{"version": 1}"#).unwrap();
-        assert!(Settings::load(dir.path()).unwrap().check_for_updates);
+        for (v1, loaded) in [
+            (r#"{"version": 1}"#, None),
+            (r#"{"version": 1, "check_for_updates": true}"#, None),
+            (r#"{"version": 1, "check_for_updates": false}"#, Some(false)),
+        ] {
+            std::fs::write(dir.path().join(FILE), v1).unwrap();
+            assert_eq!(
+                Settings::load(dir.path()).unwrap().check_for_updates,
+                loaded
+            );
+        }
     }
 
     #[test]

@@ -744,10 +744,16 @@ impl ThroccApp {
         app
     }
 
+    pub fn checks_for_updates(&self) -> bool {
+        self.settings
+            .check_for_updates
+            .unwrap_or_else(updates::checked_by_default)
+    }
+
     /// Asks GitHub for a newer release in the background, if the user wants that here, unless
     /// running on sample data.
     fn look_for_update(&mut self, cx: &mut Context<Self>) {
-        if self.mock || !self.settings.check_for_updates || !updates::checked_here() {
+        if self.mock || !self.checks_for_updates() {
             return;
         }
         cx.spawn(async move |this, cx| {
@@ -758,7 +764,7 @@ impl ThroccApp {
             match found {
                 Ok(newer) => {
                     this.update(cx, |app, cx| {
-                        app.newer_release = newer.filter(|_| app.settings.check_for_updates);
+                        app.newer_release = newer.filter(|_| app.checks_for_updates());
                         cx.notify();
                     })
                     .ok();
@@ -771,7 +777,7 @@ impl ThroccApp {
 
     /// Turns the update check on or off and keeps the choice.
     pub fn use_update_check(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.change_settings(|s| s.check_for_updates = on);
+        self.change_settings(|s| s.check_for_updates = Some(on));
         self.newer_release = None;
         self.look_for_update(cx);
         cx.notify();
