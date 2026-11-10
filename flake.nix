@@ -41,6 +41,16 @@
               version = (lib.importTOML ./crates/${crate}/Cargo.toml).package.version;
             in
             if lib.isString version then version else workspaceVersion;
+          workspaceSrc = lib.fileset.toSource {
+            root = ./.;
+            fileset = lib.fileset.unions [
+              ./Cargo.toml
+              ./Cargo.lock
+              ./.cargo
+              ./crates
+              ./third_party
+            ];
+          };
 
           ffmpegScript = builtins.readFile ./packaging/ffmpeg/build.sh;
           ffmpegScriptVar = name: builtins.head (builtins.match ".*\n${name}=([^\n]+)\n.*" ffmpegScript);
@@ -122,8 +132,8 @@
 
           crate =
             {
-              pname,
               package,
+              pname ? package,
               features ? [ ],
               buildInputs ? [ ],
               nativeBuildInputs ? [ ],
@@ -138,16 +148,7 @@
                 postInstall
                 ;
               version = versionOf package;
-              src = lib.fileset.toSource {
-                root = ./.;
-                fileset = lib.fileset.unions [
-                  ./Cargo.toml
-                  ./Cargo.lock
-                  ./.cargo
-                  ./crates
-                  ./third_party
-                ];
-              };
+              src = workspaceSrc;
               cargoLock.lockFile = ./Cargo.lock;
               cargoBuildFlags = [
                 "-p"
@@ -220,12 +221,10 @@
           };
 
           cli = clientCore {
-            pname = "throcc-cli";
             package = "throcc-cli";
           };
 
           server = crate {
-            pname = "throcc-server";
             package = "throcc-server";
           };
         }
