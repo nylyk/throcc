@@ -737,7 +737,9 @@ impl ThroccApp {
                 Some(profile) => app.set_profile(profile, cx),
                 None => app.show_screen(Screen::Onboarding, window, cx),
             }
-            app.look_for_update(cx);
+            if app.settings_problem.is_none() {
+                app.look_for_update(cx);
+            }
         }
         app
     }
@@ -1739,6 +1741,7 @@ impl ThroccApp {
             return;
         }
         if self.joining && self.address.read(cx).value() == address {
+            self.joined_from_settings = matches!(self.screen, Screen::Settings(_));
             return;
         }
         set_field(&self.address, address, false, window, cx);
