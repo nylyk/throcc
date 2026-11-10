@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends tini
 
 FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
 COPY --from=init /usr/bin/tini-static /tini
+COPY --from=init /usr/share/doc/tini/copyright /licenses/tini.txt
 COPY --from=build /src/target/release/throcc-server /throcc-server
 COPY --from=build /src/LICENSE /licenses/LICENSE
 COPY --from=build /src/packaging/licenses/server-notices.txt /licenses/THIRD-PARTY-NOTICES.txt
