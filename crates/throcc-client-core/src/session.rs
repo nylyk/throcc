@@ -713,15 +713,7 @@ impl Session {
                     self.audio = self.audio.as_ref().map(CallAudio::renew);
                     self.cue(Cue::Reconnected);
                     let welcome = self.call.welcome.clone();
-                    let wanted = want_room.map(|room| (room, self.room_name(room)));
                     self.apply_welcome(&welcome);
-                    if let Some((room, name)) = wanted
-                        && welcome.placement.room != Some(room)
-                    {
-                        self.shared.notice(format!(
-                            "Reconnected, but not back into {name}; you're in the lobby."
-                        ));
-                    }
                     self.push_media().await;
                     if self.room.is_some() && self.room == room_before {
                         self.watching = watching_before;
@@ -733,13 +725,6 @@ impl Session {
             }
         }
         None
-    }
-
-    fn room_name(&self, room: RoomId) -> String {
-        let state = self.shared.state();
-        state
-            .room(room)
-            .map_or("your room".to_owned(), |r| r.name.clone())
     }
 
     /// Leaves our room here after the server took us out of it.
