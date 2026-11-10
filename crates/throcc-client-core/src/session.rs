@@ -1168,7 +1168,7 @@ impl Session {
                 });
             }
             UiCommand::SetProfile(profile) => {
-                self.kept_profile.borrow_and_update();
+                self.kept_profile.mark_unchanged();
                 self.profile = profile;
                 self.push_profile().await;
             }

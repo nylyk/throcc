@@ -551,8 +551,8 @@ pub fn receive(
                     if engine_changed {
                         engine_tx.send_replace(decoder.engine());
                     }
-                    let failed = flushed
-                        || matches!(&decoded, Err(e) if !matches!(e, DecodeError::TooLarge(..)));
+                    let failed =
+                        flushed || !matches!(decoded, Ok(_) | Err(DecodeError::TooLarge(..)));
                     if asks.ask(Instant::now(), engine_changed, failed) {
                         ask_idr();
                     }

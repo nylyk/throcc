@@ -440,16 +440,13 @@ impl KeyManager {
             }
         }
         self.wrapped_to.clear();
-        if self.my_tracks.is_none() {
+        let Some(tracks) = &self.my_tracks else {
             self.my_secret = None;
             self.send_keys.clear();
             return;
-        }
+        };
         let secret = Zeroizing::new(random::<32>());
-        self.send_keys = self
-            .my_tracks
-            .iter()
-            .flat_map(track_ids)
+        self.send_keys = track_ids(tracks)
             .map(|id| (id, Arc::new(TrackKey::derive(&secret, id))))
             .collect();
         self.my_secret = Some(secret);
