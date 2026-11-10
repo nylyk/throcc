@@ -144,9 +144,15 @@
               inherit
                 pname
                 buildInputs
-                env
                 postInstall
                 ;
+              env =
+                lib.optionalAttrs (stdenv.hostPlatform.system == "x86_64-linux") {
+                  # Rust's bundled lld, the default linker on this target, bypasses the nixpkgs
+                  # linker wrapper, which adds the store interpreter and rpath.
+                  RUSTFLAGS = "-C linker-features=-lld";
+                }
+                // env;
               version = versionOf package;
               src = workspaceSrc;
               cargoLock.lockFile = ./Cargo.lock;
