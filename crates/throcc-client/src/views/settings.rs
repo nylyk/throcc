@@ -519,8 +519,6 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .into_any_element()
 }
 
-/// Everyone verified on this computer, on any server, each with the servers they were seen
-/// on and a way to take them off.
 fn about(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let updates = card().flex().flex_col().gap_2().child(section("Updates"));
     let updates = if updates::checked_here() {
@@ -551,6 +549,8 @@ fn about(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .into_any_element()
 }
 
+/// Everyone verified on this computer, on any server, each with the servers they were seen
+/// on and a way to take them off.
 fn verified(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let address_of = |server: &Fingerprint| {
         app.known_servers

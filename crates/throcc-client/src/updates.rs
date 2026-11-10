@@ -39,14 +39,14 @@ pub fn checked_here() -> bool {
 
 /// Asks GitHub for the newest client release, if it is newer than this build.
 pub fn newer_release() -> Result<Option<Release>> {
-    let mut roots = rustls_native_certs::load_native_certs();
+    let roots = rustls_native_certs::load_native_certs();
     if roots.certs.is_empty() {
         anyhow::bail!("no root certificates: {:?}", roots.errors);
     }
     let roots: Vec<_> = roots
         .certs
-        .drain(..)
-        .map(|cert| Certificate::from_der(&cert).to_owned())
+        .iter()
+        .map(|cert| Certificate::from_der(cert).to_owned())
         .collect();
     let tls = TlsConfig::builder()
         .provider(TlsProvider::Rustls)

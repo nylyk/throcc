@@ -742,9 +742,10 @@ impl ThroccApp {
         app
     }
 
-    /// Asks GitHub for a newer release in the background, if the user wants that here.
+    /// Asks GitHub for a newer release in the background, if the user wants that here, unless
+    /// running on sample data.
     fn look_for_update(&mut self, cx: &mut Context<Self>) {
-        if !self.settings.check_for_updates || !updates::checked_here() {
+        if self.mock || !self.settings.check_for_updates || !updates::checked_here() {
             return;
         }
         cx.spawn(async move |this, cx| {
@@ -770,9 +771,7 @@ impl ThroccApp {
     pub fn use_update_check(&mut self, on: bool, cx: &mut Context<Self>) {
         self.change_settings(|s| s.check_for_updates = on);
         self.newer_release = None;
-        if on && !self.mock {
-            self.look_for_update(cx);
-        }
+        self.look_for_update(cx);
         cx.notify();
     }
 
@@ -2018,6 +2017,9 @@ impl ThroccApp {
         let show_overlay = |app: &mut Self| {
             app.overlay = Some((UserId(4), Some(Instant::now() + Duration::from_secs(60))));
         };
+        let refuse_picture = |app: &mut Self| {
+            app.profile_form.status = crate::avatar::prepare(&[]).err().map(SaveStatus::Failed);
+        };
         match screen {
             "onboarding" | "onboardingerror" => {
                 offline(self);
@@ -2026,10 +2028,7 @@ impl ThroccApp {
                 self.profile_avatar = None;
                 self.show_screen(Screen::Onboarding, window, cx);
                 if screen == "onboardingerror" {
-                    after_a_moment(cx, |app, _| {
-                        app.profile_form.status =
-                            crate::avatar::prepare(&[]).err().map(SaveStatus::Failed);
-                    });
+                    after_a_moment(cx, move |app, _| refuse_picture(app));
                 }
             }
             "welcome" => {
@@ -2183,10 +2182,7 @@ impl ThroccApp {
                 joined(self);
                 with_picture(self, cx);
                 if screen == "profileerror" {
-                    after_a_moment(cx, |app, _| {
-                        app.profile_form.status =
-                            crate::avatar::prepare(&[]).err().map(SaveStatus::Failed);
-                    });
+                    after_a_moment(cx, move |app, _| refuse_picture(app));
                 }
             }
             "server" => self.screen = Screen::Server(ServerPage::Overview),
