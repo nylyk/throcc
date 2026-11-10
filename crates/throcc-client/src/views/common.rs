@@ -8,6 +8,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::PopupMenuItem;
+use gpui_component::notification::Notification;
 use gpui_component::slider::{SliderEvent, SliderState};
 use gpui_component::{Icon, Sizable, Size};
 use throcc_client_core::state::{MAX_VOLUME, Person, State, VerifiedIdentity};
@@ -242,6 +243,18 @@ pub fn update_notice(release: &Release) -> Stateful<Div> {
         .child(icon("circle-arrow-up").size(px(16.)))
         .child(format!("throcc {} is available", release.version))
         .on_click(move |_, _, cx| cx.open_url(&url))
+}
+
+/// Identifies the update notification among a window's notifications.
+pub struct UpdateNotification;
+
+/// The update notice as a notification that stays until closed.
+pub fn update_notification(release: &Release) -> Notification {
+    let release = release.clone();
+    Notification::new()
+        .id::<UpdateNotification>()
+        .content(move |_, _, _| update_notice(&release).into_any_element())
+        .autohide(false)
 }
 
 /// Explanatory text in a dialog or card.

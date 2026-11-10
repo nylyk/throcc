@@ -110,7 +110,7 @@ async fn watching_a_share_asks_its_sender_for_an_idr() {
         _ => None,
     })
     .await;
-    assert_eq!(requested, (video_id, throcc_proto::messages::Recovery::Idr));
+    assert_eq!(requested, (video_id, Recovery::Idr));
 }
 
 #[tokio::test]
@@ -333,11 +333,7 @@ async fn a_unit_lost_on_the_way_asks_its_sender_for_a_refresh() {
     let server = start_server();
     let relay = lossy_relay(&server.addr, Toward::Client, 5).await;
     let (mut alice, bob, _) = room_with_two_at(&server, &relay.addr).await;
-    let share = sharing(share_1080p60(Codec::H264, 10_000));
-    assert_eq!(
-        alice.request(Request::SetMedia(share)).await.unwrap(),
-        Response::Ok
-    );
+    start_sharing(&alice).await;
     let video_id = first_share(&bob, &alice).await.video;
     let _units = watch(&bob, video_id, UNITS as usize).await;
     wait_for("both at one epoch with keys", || {
@@ -351,19 +347,16 @@ async fn a_unit_lost_on_the_way_asks_its_sender_for_a_refresh() {
     let mut index = 0;
     while abandoned() == 0 {
         assert!(index < UNITS, "no unit was abandoned in {UNITS} sent");
-        let unit = Outgoing::new(video_id, unit(index, 20 * 1100), index * 1500, false);
-        alice.engine.send(Kind::Video, unit);
+        let sent = Outgoing::new(video_id, unit(index, 20 * 1100), index * 1500, false);
+        alice.engine.send(Kind::Video, sent);
         tokio::time::sleep(Duration::from_millis(10)).await;
         index += 1;
     }
-    server_event(&mut alice, |e| match e {
-        Event::KeyframeRequested {
-            media_id,
-            kind: Recovery::Refresh,
-        } if media_id == video_id => Some(()),
-        _ => None,
-    })
-    .await;
+    let refresh = Event::KeyframeRequested {
+        media_id: video_id,
+        kind: Recovery::Refresh,
+    };
+    server_event(&mut alice, |e| (e == refresh).then_some(())).await;
 }
 
 #[tokio::test]

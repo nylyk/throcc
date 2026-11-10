@@ -1168,7 +1168,7 @@ impl Session {
                 });
             }
             UiCommand::SetProfile(profile) => {
-                self.kept_profile.borrow_and_update();
+                self.kept_profile.mark_unchanged();
                 self.profile = profile;
                 self.push_profile().await;
             }
@@ -1895,7 +1895,7 @@ impl Session {
                 label: format!("{name}, {}", track.carries.label()),
                 detail: track.carries.detail(),
                 set_kbps: Some(track.carries.set_kbps()),
-                arriving_kbps: (new_received > 0).then_some(kbps(new_bytes)),
+                arriving_kbps: kbps(new_bytes),
                 loss: (new_received + new_lost > 0)
                     .then(|| percent(new_lost, new_received + new_lost)),
             });

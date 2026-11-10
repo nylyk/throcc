@@ -21,8 +21,6 @@ use super::video::frame::{VideoFrame, share_size};
 use super::video::{Frame, Picture, PreviewDemand};
 
 const IDLE: Duration = Duration::from_millis(2);
-/// How often a decoder holding no picture checks for units while it waits for a keyframe.
-const KEYFRAME_POLL: Duration = Duration::from_millis(20);
 /// Self-view gets every Nth frame.
 const SELF_VIEW_EVERY: u32 = 2;
 /// The widest a self-view picture held in memory is shrunk to. A macOS pixel buffer is shown
@@ -35,12 +33,6 @@ const RECOVERY_SPACING: Duration = Duration::from_secs(1);
 const TALLY_EVERY: Duration = Duration::from_secs(5);
 /// A keyframe request still unanswered by a decoded picture is repeated after this long.
 const KEYFRAME_RETRY: Duration = Duration::from_secs(1);
-/// A recovery still unanswered after this long without a new picture is answered by
-/// encoding the last picture again.
-const STILL: Duration = Duration::from_millis(100);
-/// Repeats of the last picture one recovery gets at most. An encoder that holds each
-/// picture until the next one arrives needs two.
-const STILL_REPEATS: u8 = 3;
 
 /// What the share thread encoded since `since`, logged every [`TALLY_EVERY`].
 struct Tally {
@@ -204,8 +196,6 @@ impl ShareSender {
             tracks,
             frame,
             unsent: first == Some(First::Copied),
-            repeats_left: 0,
-            last_encoded: Instant::now(),
             self_view: self_tx,
             admission: Admission {
                 limiter: FrameLimiter::new(capture_config.fps),
@@ -263,10 +253,6 @@ struct Sending {
     frame: VideoFrame,
     /// Whether `frame` holds a captured picture that has not been sent yet.
     unsent: bool,
-    /// Repeats of the last picture left for a recovery no keyframe has answered yet.
-    repeats_left: u8,
-    /// When the encoder was last given a picture.
-    last_encoded: Instant,
     self_view: watch::Sender<Option<Arc<Frame>>>,
     admission: Admission,
     tally: Tally,
@@ -285,9 +271,6 @@ impl Sending {
             }
             if let Some(kind) = pacer.due(Instant::now()) {
                 self.encoder.recover(kind);
-                if self.encoder.keyframe_pending() {
-                    self.repeats_left = STILL_REPEATS;
-                }
             }
             self.send_audio(&mut sound);
             self.tally.report_if_due(self.capture.dropped());
@@ -302,11 +285,7 @@ impl Sending {
             let fresh =
                 std::mem::take(&mut self.unsent) || self.capture.next_frame(&mut self.frame);
             if !fresh {
-                if self.repeats_left > 0 && self.last_encoded.elapsed() >= STILL {
-                    self.send_last_picture_as_keyframe();
-                } else {
-                    std::thread::sleep(IDLE);
-                }
+                std::thread::sleep(IDLE);
                 continue;
             }
             let Some(self_view) = self.admission.admit(self.frame.timestamp) else {
@@ -398,15 +377,6 @@ impl Sending {
         }
     }
 
-    fn send_last_picture_as_keyframe(&mut self) {
-        self.repeats_left -= 1;
-        self.last_encoded = Instant::now();
-        match self.encoder.repeat_as_keyframe() {
-            Ok(units) => self.send_units(units),
-            Err(e) => warn!("encoding the last picture again failed: {e}"),
-        }
-    }
-
     fn send_video(&mut self) {
         match self.encoder.encode(&self.frame) {
             Ok(units) => self.send_units(units),
@@ -415,12 +385,8 @@ impl Sending {
     }
 
     fn send_units(&mut self, units: Vec<EncodedUnit>) {
-        self.last_encoded = Instant::now();
         self.tally.add(&units);
         for unit in units {
-            if unit.keyframe {
-                self.repeats_left = 0;
-            }
             let outgoing =
                 Outgoing::new(self.tracks.video, unit.data, unit.timestamp, unit.keyframe);
             self.engine.send(Kind::Video, outgoing);
@@ -525,35 +491,12 @@ struct KeyframeAsks {
 }
 
 impl KeyframeAsks {
-    /// Waits for the keyframe asked for at `now`, as starting to watch does.
-    fn asked_at(now: Instant) -> Self {
-        Self {
-            unanswered_since: Some(now),
-        }
-    }
-
-    /// Whether a request is still unanswered by a decoded picture.
-    fn waiting(&self) -> bool {
-        self.unanswered_since.is_some()
-    }
-
-    /// Whether to ask again at `now`, for a request unanswered for [`KEYFRAME_RETRY`].
-    fn overdue(&mut self, now: Instant) -> bool {
-        let overdue = self
-            .unanswered_since
-            .is_some_and(|at| now.duration_since(at) >= KEYFRAME_RETRY);
-        if overdue {
-            self.unanswered_since = Some(now);
-        }
-        overdue
-    }
-
     /// Whether to ask at `now`, after a decoder `reset` or a unit that `failed`.
     fn ask(&mut self, now: Instant, reset: bool, failed: bool) -> bool {
-        let recently_asked = self
+        let waiting = self
             .unanswered_since
             .is_some_and(|at| now.duration_since(at) < KEYFRAME_RETRY);
-        let ask = reset || (failed && !recently_asked);
+        let ask = reset || (failed && !waiting);
         if ask {
             self.unanswered_since = Some(now);
         }
@@ -567,8 +510,8 @@ impl KeyframeAsks {
 }
 
 /// Decodes a share's `units` on its own thread into its newest picture due by `playout`, and
-/// returns what decodes them. `ask_idr` runs after a reset, on failures, and while no picture
-/// answers watching or the last ask, at most once per [`KEYFRAME_RETRY`] until one decodes.
+/// returns what decodes them. `ask_idr` runs after a reset, and on failures at most once per
+/// [`KEYFRAME_RETRY`] until a picture decodes.
 pub fn receive(
     mut units: mpsc::Receiver<Received>,
     config: ShareConfig,
@@ -583,10 +526,10 @@ pub fn receive(
         .spawn(move || {
             let mut held: VecDeque<Arc<Frame>> = VecDeque::new();
             let mut replaced: Option<Arc<Frame>> = None;
-            let mut asks = KeyframeAsks::asked_at(Instant::now());
+            let mut asks = KeyframeAsks::default();
             let mut oversized: u64 = 0;
             loop {
-                let unit = if held.is_empty() && !asks.waiting() {
+                let unit = if held.is_empty() {
                     let Some(unit) = units.blocking_recv() else {
                         return;
                     };
@@ -595,10 +538,7 @@ pub fn receive(
                     match units.try_recv() {
                         Ok(unit) => Some(unit),
                         Err(mpsc::error::TryRecvError::Empty) => {
-                            if asks.overdue(Instant::now()) {
-                                ask_idr();
-                            }
-                            std::thread::sleep(if held.is_empty() { KEYFRAME_POLL } else { IDLE });
+                            std::thread::sleep(IDLE);
                             None
                         }
                         Err(mpsc::error::TryRecvError::Disconnected) => return,
@@ -611,8 +551,9 @@ pub fn receive(
                     if engine_changed {
                         engine_tx.send_replace(decoder.engine());
                     }
-                    let failed = flushed
-                        || matches!(&decoded, Err(e) if !matches!(e, DecodeError::TooLarge(..)));
+                    // A keyframe wouldn't help a picture too large: the sender chose the size.
+                    let failed =
+                        flushed || !matches!(decoded, Ok(_) | Err(DecodeError::TooLarge(..)));
                     if asks.ask(Instant::now(), engine_changed, failed) {
                         ask_idr();
                     }
@@ -625,9 +566,7 @@ pub fn receive(
                             held.push_back(Arc::new(frame));
                         }
                         Ok(None) => {}
-                        // A keyframe wouldn't help: the sender chose the size.
                         Err(DecodeError::TooLarge(width, height)) => {
-                            asks.answered();
                             oversized += 1;
                             if oversized.is_power_of_two() {
                                 warn!(
@@ -731,21 +670,6 @@ mod receive_tests {
         assert!(asks.ask(after(1_500), false, true));
         asks.answered();
         assert!(asks.ask(after(1_600), false, true));
-    }
-
-    #[test]
-    fn watching_asks_again_each_second_until_a_picture_decodes() {
-        let start = Instant::now();
-        let after = |millis| start + Duration::from_millis(millis);
-        let mut asks = KeyframeAsks::asked_at(start);
-        assert!(asks.waiting());
-        assert!(!asks.overdue(after(999)));
-        assert!(asks.overdue(after(1_000)));
-        assert!(!asks.overdue(after(1_500)));
-        assert!(asks.overdue(after(2_000)));
-        asks.answered();
-        assert!(!asks.waiting());
-        assert!(!asks.overdue(after(5_000)));
     }
 
     fn config(width: u16, height: u16) -> ShareConfig {

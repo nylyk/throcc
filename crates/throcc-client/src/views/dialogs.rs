@@ -433,7 +433,7 @@ fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             row.detail.clone(),
             [
                 row.set_kbps.map_or("–".to_owned(), rate),
-                row.arriving_kbps.map_or("Muted".to_owned(), rate),
+                rate(row.arriving_kbps),
                 row.loss.map_or("–".to_owned(), |l| format!("{l:.1}%")),
             ],
             i + 1 < health.receiving.len(),

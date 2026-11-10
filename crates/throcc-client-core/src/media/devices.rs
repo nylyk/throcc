@@ -66,7 +66,7 @@ pub fn list() -> (Vec<String>, Vec<String>) {
     // On Windows, cpal puts the calling thread in a single-threaded COM apartment until the
     // thread exits. On a thread-pool thread that breaks process loopback activation later
     // run there (RPC_E_CHANGED_MODE), so the listing gets a thread of its own.
-    std::thread::scope(|scope| scope.spawn(list_here).join()).unwrap_or_default()
+    std::thread::spawn(list_here).join().unwrap_or_default()
 }
 
 fn list_here() -> (Vec<String>, Vec<String>) {

@@ -13,7 +13,7 @@ The desktop app, built with gpui and gpui-component on top of `throcc-client-cor
 | `popout.rs` | A watched share in a window of its own |
 | `avatar.rs` | Profile pictures: scaled to send, decoded to draw (PNG and JPEG only, shrunk to 128 px) |
 | `hotkey.rs` | The global push-to-talk key |
-| `updates.rs` | The update check: the newest `client-v` release on GitHub, if newer than this build. A flatpak skips it, since flatpak updates it |
+| `updates.rs` | The update check: the newest `client-v` release on GitHub, if newer than this build. It is off in a flatpak, which flatpak updates, until the user turns it on |
 | `keep_display_awake.rs` | Keeps the display on while someone else's share is watched |
 
 `tests/surface.rs` (wgpu on Linux, Metal on macOS) and `tests/surface_windows.rs` check that NV12 surfaces render through the vendored gpui in `third_party/`.

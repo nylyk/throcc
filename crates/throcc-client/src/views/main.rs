@@ -18,7 +18,7 @@ use throcc_proto::ids::{RoomId, UserId};
 use super::common::{
     CONTROLS_LINGER, TRAFFIC_LIGHTS, Trust, Typeset, audience, avatar, bottom_bar, caption,
     danger_menu_item, description, ghost_icon, icon, primary, rate, section, sharing_icon,
-    toggle_icon, top_bar, trust, update_notice,
+    toggle_icon, top_bar, trust,
 };
 use super::mascot;
 use super::overlay::ShareOverlay;
@@ -339,11 +339,6 @@ fn sidebar(
                         .is_empty()
                         .then(|| div().px_2().child(caption("No rooms yet."))),
                 ),
-        )
-        .children(
-            app.newer_release
-                .as_ref()
-                .map(|release| div().px_4().pb_2().child(update_notice(release))),
         )
         .child(
             bottom_bar().child(profile).child(

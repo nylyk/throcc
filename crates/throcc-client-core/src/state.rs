@@ -264,7 +264,7 @@ pub struct TrackHealth {
     /// The codec, and for video its size, frame rate and decoder.
     pub detail: String,
     pub set_kbps: Option<u32>,
-    pub arriving_kbps: Option<u32>,
+    pub arriving_kbps: u32,
     pub loss: Option<f32>,
 }
 

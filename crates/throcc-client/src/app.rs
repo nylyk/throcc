@@ -36,8 +36,8 @@ use crate::theme;
 use crate::updates::{self, Release};
 use crate::views;
 use crate::views::common::{
-    CONTROLS_LINGER, OVERLAY_LINGER, Typeset, notify_after, slider_gain, slider_value,
-    volume_slider,
+    CONTROLS_LINGER, OVERLAY_LINGER, Typeset, UpdateNotification, notify_after, slider_gain,
+    slider_value, update_notification, volume_slider,
 };
 
 actions!(throcc, [ToggleMic, ToggleDeafen, CloseDialog]);
@@ -481,8 +481,8 @@ pub struct ThroccApp {
     pub joining: bool,
     /// Our profile as the join in progress pushes it, updated by saves until the join ends.
     joining_profile: Option<watch::Sender<Profile>>,
-    /// Whether the join in progress was started from a settings page, so it leaves them.
-    joined_from_settings: bool,
+    /// Whether the join in progress was asked for on a settings page, so it leaves them.
+    join_asked_in_settings: bool,
     pub mascot: views::mascot::Shown,
     /// Counts joins started, so a join that was overtaken by a newer one is ignored.
     join_attempt: u64,
@@ -671,7 +671,7 @@ impl ThroccApp {
             pictures: HashMap::new(),
             joining: false,
             joining_profile: None,
-            joined_from_settings: false,
+            join_asked_in_settings: false,
             mascot: views::mascot::Shown::default(),
             join_attempt: 0,
             join_error: None,
@@ -737,16 +737,26 @@ impl ThroccApp {
                 Some(profile) => app.set_profile(profile, cx),
                 None => app.show_screen(Screen::Onboarding, window, cx),
             }
-            app.look_for_update(cx);
+            if app.settings_problem.is_none() {
+                app.look_for_update(window, cx);
+            }
         }
         app
     }
 
-    /// Asks GitHub for a newer release in the background, if the user wants that here.
-    fn look_for_update(&mut self, cx: &mut Context<Self>) {
-        if !self.settings.check_for_updates || !updates::checked_here() {
+    pub fn checks_for_updates(&self) -> bool {
+        self.settings
+            .check_for_updates
+            .unwrap_or_else(updates::checked_by_default)
+    }
+
+    /// Asks GitHub for a newer release in the background, if the user wants that here, unless
+    /// running on sample data, and announces one found in `window`.
+    fn look_for_update(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.mock || !self.checks_for_updates() {
             return;
         }
+        let window_handle = window.window_handle();
         cx.spawn(async move |this, cx| {
             let found = cx
                 .background_executor()
@@ -754,9 +764,15 @@ impl ThroccApp {
                 .await;
             match found {
                 Ok(newer) => {
-                    this.update(cx, |app, cx| {
-                        app.newer_release = newer.filter(|_| app.settings.check_for_updates);
-                        cx.notify();
+                    cx.update_window(window_handle, |_, window, cx| {
+                        this.update(cx, |app, cx| {
+                            app.newer_release = newer.filter(|_| app.checks_for_updates());
+                            if let Some(release) = &app.newer_release {
+                                window.push_notification(update_notification(release), cx);
+                            }
+                            cx.notify();
+                        })
+                        .ok();
                     })
                     .ok();
                 }
@@ -767,12 +783,13 @@ impl ThroccApp {
     }
 
     /// Turns the update check on or off and keeps the choice.
-    pub fn use_update_check(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.change_settings(|s| s.check_for_updates = on);
+    pub fn use_update_check(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.change_settings(|s| s.check_for_updates = Some(on));
         self.newer_release = None;
-        if on && !self.mock {
-            self.look_for_update(cx);
+        if !on {
+            window.remove_notification::<UpdateNotification>(cx);
         }
+        self.look_for_update(window, cx);
         cx.notify();
     }
 
@@ -808,7 +825,7 @@ impl ThroccApp {
         self.joining_profile = None;
         self.join_error = None;
         self.dialog = None;
-        if self.joined_from_settings || !matches!(self.screen, Screen::Settings(_)) {
+        if self.join_asked_in_settings || !matches!(self.screen, Screen::Settings(_)) {
             self.screen = Screen::Main;
             window.focus(&self.root_focus, cx);
         }
@@ -1739,12 +1756,12 @@ impl ThroccApp {
             cx.notify();
             return;
         }
-        if self.joining && self.address.read(cx).value() == address {
-            return;
+        self.screen = Screen::Join;
+        if !self.joining || self.address.read(cx).value() != address {
+            set_field(&self.address, address, false, window, cx);
+            set_field(&self.code, "", false, window, cx);
+            self.join(window, cx);
         }
-        set_field(&self.address, address, false, window, cx);
-        set_field(&self.code, "", false, window, cx);
-        self.join(window, cx);
         cx.notify();
     }
 
@@ -1758,7 +1775,7 @@ impl ThroccApp {
     /// Connects to the server in the address field, leaving the one we are on first and
     /// abandoning any join still under way.
     pub fn join(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.joined_from_settings = matches!(self.screen, Screen::Settings(_));
+        self.join_asked_in_settings = matches!(self.screen, Screen::Settings(_));
         let address = self.address.read(cx).value().trim().to_owned();
         let code_text = self.code.read(cx).value().to_string();
         if address.is_empty() {
@@ -1983,12 +2000,13 @@ impl ThroccApp {
     }
 
     /// Opens a screen of the mock client by name, for screenshots: onboarding, onboardingerror,
-    /// welcome, join, joinfailed, lost, personmenu, addserver, removeserver, room, unwatched,
-    /// alone, emptylobby, focus, fullscreen, popout, slow, slowpopout, slowfullscreen, share,
-    /// connection, person, personverified, personchanged, keychange, ownprofile, pinmismatch,
-    /// settings, appearance, verified, newroom, editroom, roompassword, deleteroom, profile,
-    /// profileerror, server, keys, members, invites, removeuser, leaveserver, identitymissing,
-    /// identityback or startedover. Any other name leaves the lobby.
+    /// welcome, join, joinfailed, lost, personmenu, addserver, removeserver, room, testpattern,
+    /// unwatched, alone, emptylobby, focus, fullscreen, popout, slow, slowpopout, slowfullscreen,
+    /// share, connection, person, personverified, personchanged, keychange, ownprofile,
+    /// pinmismatch, settings, appearance, verified, about, update, newroom, editroom,
+    /// roompassword, deleteroom, profile, profileerror, server, keys, members, invites,
+    /// removeuser, leaveserver, identitymissing, identityback or startedover. Any other name
+    /// leaves the lobby.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         let room = RoomId(1);
         let joined = |app: &mut Self| {
@@ -2018,6 +2036,9 @@ impl ThroccApp {
         let show_overlay = |app: &mut Self| {
             app.overlay = Some((UserId(4), Some(Instant::now() + Duration::from_secs(60))));
         };
+        let refuse_picture = |app: &mut Self| {
+            app.profile_form.status = crate::avatar::prepare(&[]).err().map(SaveStatus::Failed);
+        };
         match screen {
             "onboarding" | "onboardingerror" => {
                 offline(self);
@@ -2026,10 +2047,7 @@ impl ThroccApp {
                 self.profile_avatar = None;
                 self.show_screen(Screen::Onboarding, window, cx);
                 if screen == "onboardingerror" {
-                    after_a_moment(cx, |app, _| {
-                        app.profile_form.status =
-                            crate::avatar::prepare(&[]).err().map(SaveStatus::Failed);
-                    });
+                    after_a_moment(cx, move |app, _| refuse_picture(app));
                 }
             }
             "welcome" => {
@@ -2168,7 +2186,17 @@ impl ThroccApp {
                 self.screen = Screen::Settings(SettingsPage::About);
                 self.newer_release = Some(Release::sample());
             }
-            "update" => self.newer_release = Some(Release::sample()),
+            "update" => {
+                let release = Release::sample();
+                self.newer_release = Some(release.clone());
+                cx.spawn_in(window, async move |_, cx| {
+                    cx.update(|window, cx| {
+                        window.push_notification(update_notification(&release), cx)
+                    })
+                    .ok();
+                })
+                .detach();
+            }
             "newroom" => self.dialog = Some(Dialog::NewRoom),
             "editroom" => self.dialog = Some(Dialog::EditRoom(room)),
             "roompassword" => {
@@ -2183,10 +2211,7 @@ impl ThroccApp {
                 joined(self);
                 with_picture(self, cx);
                 if screen == "profileerror" {
-                    after_a_moment(cx, |app, _| {
-                        app.profile_form.status =
-                            crate::avatar::prepare(&[]).err().map(SaveStatus::Failed);
-                    });
+                    after_a_moment(cx, move |app, _| refuse_picture(app));
                 }
             }
             "server" => self.screen = Screen::Server(ServerPage::Overview),
