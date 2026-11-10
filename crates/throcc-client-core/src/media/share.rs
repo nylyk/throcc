@@ -551,6 +551,7 @@ pub fn receive(
                     if engine_changed {
                         engine_tx.send_replace(decoder.engine());
                     }
+                    // A keyframe wouldn't help a picture too large: the sender chose the size.
                     let failed =
                         flushed || !matches!(decoded, Ok(_) | Err(DecodeError::TooLarge(..)));
                     if asks.ask(Instant::now(), engine_changed, failed) {
@@ -565,7 +566,6 @@ pub fn receive(
                             held.push_back(Arc::new(frame));
                         }
                         Ok(None) => {}
-                        // A keyframe wouldn't help: the sender chose the size.
                         Err(DecodeError::TooLarge(width, height)) => {
                             oversized += 1;
                             if oversized.is_power_of_two() {
