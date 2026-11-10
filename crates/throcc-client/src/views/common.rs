@@ -245,18 +245,14 @@ pub fn update_notice(release: &Release) -> Stateful<Div> {
         .on_click(move |_, _, cx| cx.open_url(&url))
 }
 
-/// The update notice as a notification that stays until dismissed.
+/// The update notice as a notification that stays until closed.
 pub fn update_notification(release: &Release) -> Notification {
     struct UpdateNotification;
     let release = release.clone();
     Notification::new()
         .id::<UpdateNotification>()
         .content(move |_, _, _| update_notice(&release).into_any_element())
-        .action(|_, _, cx| {
-            secondary("dismiss-update", "Dismiss").on_click(
-                cx.listener(|notification, _, window, cx| notification.dismiss(window, cx)),
-            )
-        })
+        .autohide(false)
 }
 
 /// Explanatory text in a dialog or card.
