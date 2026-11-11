@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
-use throcc_proto::frame::Header;
+use throcc_proto::frame::{DATAGRAM_PAYLOAD_FLOOR, Header};
 use throcc_proto::ids::MediaId;
 use throcc_proto::messages::Recovery;
 use throcc_proto::transport::close;
@@ -57,10 +57,10 @@ impl Sfu {
     /// Forwards datagrams from one connection until it closes. Never reads past the header.
     ///
     /// A connection that sends more bytes than [`MAX_INGRESS_BYTES_PER_SECOND`] is closed.
-    /// Datagrams over [`MAX_INGRESS_PACKETS_PER_SECOND`], or over an audio track's
-    /// [`AudioAllowance`], are dropped and counted: admission policing of a sender that
-    /// doesn't conform, which a well-behaved client never reaches. Egress itself never
-    /// drops audio by policy.
+    /// Datagrams over [`MAX_INGRESS_PACKETS_PER_SECOND`], over an audio track's
+    /// [`AudioAllowance`] or larger than [`DATAGRAM_PAYLOAD_FLOOR`] are dropped and
+    /// counted: admission policing of a sender that doesn't conform, which a well-behaved
+    /// client never reaches. Egress itself never drops audio by policy.
     pub async fn ingress(self: Arc<Self>, conn_id: u64, connection: quinn::Connection) {
         let start = Instant::now();
         let mut bytes = TokenBucket::full(INGRESS_BURST_BYTES, MAX_INGRESS_BYTES_PER_SECOND, start);
@@ -75,7 +75,9 @@ impl Sfu {
                 connection.close(close::PROTOCOL_ERROR.into(), b"sent media too fast");
                 break;
             }
-            if !packets.take(1.0, now) {
+            // No client seals a larger one, and a receiver whose path carries no more than
+            // the floor could not be sent it.
+            if !packets.take(1.0, now) || datagram.len() > DATAGRAM_PAYLOAD_FLOOR {
                 policed.count(conn_id, now);
                 continue;
             }

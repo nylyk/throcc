@@ -96,8 +96,9 @@ pub struct Decoder {
     hardware: bool,
     engine: &'static str,
     max_size: MaxSize,
-    /// Where hardware pictures are downloaded, kept while their size holds.
-    downloaded: Option<AVFrame>,
+    /// Where hardware pictures are downloaded, with the pixel format the decoder had them
+    /// in, kept while that format and their size hold.
+    downloaded: Option<(ffi::AVPixelFormat, AVFrame)>,
     /// A spent picture, whose planes the next picture is written into.
     spare: Option<VideoFrame>,
     /// The timestamp of the first unit in the current run of hardware failures.
@@ -268,11 +269,20 @@ impl Decoder {
         let frame = if frame.hw_frames_ctx.is_null() {
             &frame
         } else {
-            let same_size = |d: &AVFrame| d.width == frame.width && d.height == frame.height;
-            if !self.downloaded.as_ref().is_some_and(same_size) {
+            // A transfer into a frame that is already allocated writes the decoder's planes
+            // without checking that the frame has room for them, so the frame is kept only
+            // for pictures a transfer would allocate the same frame for: ones of the format
+            // and size it was allocated for.
+            let format = decoded_format(&frame);
+            let fits = |(of, d): &(ffi::AVPixelFormat, AVFrame)| {
+                *of == format && d.width == frame.width && d.height == frame.height
+            };
+            if !self.downloaded.as_ref().is_some_and(fits) {
                 self.downloaded = None;
             }
-            let downloaded = self.downloaded.get_or_insert_with(AVFrame::new);
+            let (_, downloaded) = self
+                .downloaded
+                .get_or_insert_with(|| (format, AVFrame::new()));
             downloaded.hwframe_transfer_data(&frame)?;
             &*downloaded
         };
@@ -280,6 +290,13 @@ impl Decoder {
             .ok_or(DecodeError::Format(frame.format))?;
         Ok(Some(Frame::Planes(picture)))
     }
+}
+
+/// The pixel format the decoder holds the picture of a hardware `frame` in.
+fn decoded_format(frame: &AVFrame) -> ffi::AVPixelFormat {
+    // SAFETY: a hardware frame holds a reference to its frames context for as long as it
+    // lives, and that buffer's data is the `AVHWFramesContext`.
+    unsafe { (*(*frame.hw_frames_ctx).data.cast::<ffi::AVHWFramesContext>()).sw_format }
 }
 
 /// The pixel buffer a VideoToolbox frame was decoded into, when renderers can draw it as it

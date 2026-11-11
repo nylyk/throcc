@@ -792,6 +792,12 @@ impl Session {
             }
             s.current = None;
         });
+        // The key manager hears of people only from what is shown, here and as presences
+        // change, so it can trust nobody the state leaves out.
+        let state = self.shared.state();
+        let shown = state.people.iter().map(|(user, p)| (*user, p.room));
+        let notices = self.call.engine.set_presences(shown);
+        self.notices(notices);
         self.refresh_trust();
         if welcome.placement.room.is_some() {
             self.after_join(&welcome.placement);
@@ -839,9 +845,13 @@ impl Session {
     /// Follows the peers our key is wrapped to: hears every mic, notes shares, drops who
     /// left. True when they changed.
     fn sync_peers(&mut self) -> bool {
-        let trusted = self.call.engine.keys().trusted_room_peers();
+        let (earlier, trusted) = {
+            let mut keys = self.call.engine.keys();
+            (keys.take_newly_trusted(), keys.trusted_room_peers())
+        };
         let current: BTreeMap<UserId, Peer> = trusted.into_iter().map(|p| (p.user, p)).collect();
         let changed = current != self.peers;
+        self.note_trusted(earlier);
         self.note_identities(&current);
         let arrived: Vec<UserId> = current
             .iter()
@@ -889,6 +899,19 @@ impl Session {
         self.peers = current;
         self.show_shares();
         changed
+    }
+
+    /// Notes every identity key our secret was wrapped to, oldest first. The room is only
+    /// looked at now and then, and a key the server showed and took back in between still
+    /// has to count as presented, so a verified person's key can't change unseen.
+    fn note_trusted(&mut self, keys: Vec<(UserId, PublicKey)>) {
+        let mut noted = false;
+        for key in keys {
+            noted |= self.trust.note(&[key]);
+        }
+        if noted {
+            self.refresh_trust();
+        }
     }
 
     /// Notes the identity keys `peers` present, saves playback set before under them, then
@@ -1708,6 +1731,12 @@ impl Session {
         match event {
             CallEvent::Key(notice) => self.notices(vec![notice]),
             CallEvent::Server(event) => self.server_event(event).await,
+            CallEvent::Trusted(keys) => {
+                self.note_trusted(keys);
+                // Noting may have dropped the keys of people here to stay under its limit.
+                let peers = self.peers.clone();
+                self.note_identities(&peers);
+            }
         }
     }
 
@@ -1740,11 +1769,19 @@ impl Session {
                     };
                     s.add_person(p.user, updated);
                 });
+                // The key manager counts as here only who is shown, where they are shown.
+                let notices = match self.shared.state().person(p.user) {
+                    Some(shown) => self.call.engine.set_presence(p.user, shown.room),
+                    None => self.call.engine.end_presence(p.user),
+                };
+                self.notices(notices);
                 self.refresh_trust();
                 self.follow_room().await;
             }
             ServerEvent::PresenceEnded(user) => {
                 self.room_cue(user, None);
+                let notices = self.call.engine.end_presence(user);
+                self.notices(notices);
                 self.shared.update(|s| {
                     s.people.remove(&user);
                 });

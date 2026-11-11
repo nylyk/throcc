@@ -181,7 +181,8 @@ impl Client {
         let (commands, commands_rx) = mpsc::channel(COMMANDS);
         let session = {
             let _guard = runtime.enter();
-            let call = Call::start(link, &keystore).map_err(SignInError::Store)?;
+            let call =
+                Call::start_shown(link, &keystore, verified.clone()).map_err(SignInError::Store)?;
             Session::new(
                 shared.clone(),
                 keystore,

@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use throcc_client_core::call::Call;
 use throcc_client_core::media::engine::{Kind, Outgoing};
-use throcc_proto::frame::{Flags, Header, TAG_BYTES, VIDEO_CLOCK_HZ};
+use throcc_client_core::verified::VerifiedStore;
+use throcc_proto::frame::{DATAGRAM_PAYLOAD_FLOOR, Flags, Header, TAG_BYTES, VIDEO_CLOCK_HZ};
 use throcc_proto::ids::{Epoch, MediaId, UserId};
 use throcc_proto::messages::{Audience, Codec, Event, MediaState, Recovery, Request, Response};
 use throcc_proto::transport::close;
@@ -389,6 +390,95 @@ async fn a_member_who_sends_too_fast_is_disconnected() {
     };
     assert_eq!(closed.error_code, close::PROTOCOL_ERROR.into());
     assert_eq!(&closed.reason[..], b"sent media too fast");
+}
+
+#[tokio::test]
+async fn a_client_that_shows_people_gives_its_key_to_nobody_it_has_not_shown() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let room = create_room(&mut alice, "General").await;
+    let bob = invited(&server, &alice).await;
+    let verified = VerifiedStore::in_memory();
+    let mut alice = Call::start_shown(alice.link, &alice.keystore, verified).unwrap();
+    let bob = Call::start(bob.link, &bob.keystore).unwrap();
+    alice.join(Some(room), None).await.unwrap();
+    bob.join(Some(room), None).await.unwrap();
+
+    // The room state names Bob and his presence has arrived, but nothing has shown him.
+    let (mut named, mut present) = (false, false);
+    while !(named && present) {
+        let is_room_state = server_event(&mut alice, |event| match event {
+            Event::PeersChanged { peers, .. } if peers.iter().any(|p| p.user == bob.me()) => {
+                Some(true)
+            }
+            Event::PresenceChanged(p) if (p.user, p.room) == (bob.me(), Some(room)) => Some(false),
+            _ => None,
+        })
+        .await;
+        named |= is_room_state;
+        present |= !is_room_state;
+    }
+    assert!(alice.engine.keys().trusted_room_peers().is_empty());
+
+    alice.engine.set_presence(bob.me(), Some(room));
+    let trusted = alice.engine.keys().trusted_room_peers();
+    assert_eq!(
+        trusted.iter().map(|p| p.user).collect::<Vec<_>>(),
+        [bob.me()]
+    );
+
+    alice.engine.end_presence(bob.me());
+    assert!(alice.engine.keys().trusted_room_peers().is_empty());
+}
+
+#[tokio::test]
+async fn a_datagram_larger_than_any_client_seals_is_not_forwarded() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let general = create_room(&mut alice, "General").await;
+    let mut bob = invited(&server, &alice).await;
+    let mic = alice.join(Some(general)).await.tracks.unwrap().mic;
+    bob.join(Some(general)).await;
+
+    let connection = &alice.link.connected.connection;
+    let too_large = DATAGRAM_PAYLOAD_FLOOR + 1;
+    let grown = || {
+        connection
+            .max_datagram_size()
+            .is_some_and(|max| max >= too_large)
+    };
+    let waited = Instant::now();
+    while !grown() {
+        if waited.elapsed() > Duration::from_secs(5) {
+            return skip("the path to the server carries no larger datagram");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    for (seq, len) in [(0, too_large), (1, DATAGRAM_PAYLOAD_FLOOR)] {
+        let header = Header {
+            media_id: mic,
+            epoch: Epoch(0),
+            seq,
+            flags: Flags::FIRST | Flags::LAST,
+        };
+        let mut datagram = header.encode().to_vec();
+        datagram.resize(len, 0);
+        connection
+            .send_datagram_wait(datagram.into())
+            .await
+            .unwrap();
+    }
+
+    let forwarded = bob
+        .event(|event| match event {
+            Event::ReceiveStats { tracks } => tracks
+                .iter()
+                .find(|t| t.media_id == mic)
+                .map(|t| t.forwarded),
+            _ => None,
+        })
+        .await;
+    assert_eq!(forwarded, 1);
 }
 
 #[tokio::test]

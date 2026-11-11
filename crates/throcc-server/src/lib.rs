@@ -54,6 +54,10 @@ pub const HANDSHAKES: Caps = Caps {
     per_network: 16,
     total: 128,
 };
+/// The most accounts a server keeps before it refuses to enroll another with a member's
+/// invite. `ListUsers` answers with all of them in one frame, which this many fit in with
+/// the longest names, with room for the admins enrolled past it.
+pub const MAX_ACCOUNTS: usize = 5000;
 /// A real handshake takes a few round trips; this leaves room for several lost packets.
 pub const TLS_TIMEOUT: Duration = Duration::from_secs(5);
 /// Room-password Argon2 runs allowed at once; each takes 19 MiB.
@@ -69,6 +73,8 @@ pub struct Config {
     /// How long a connection may go without a packet before it is closed; QUIC uses the
     /// shorter of this and the client's. At least a second. Tests shorten it.
     pub idle_timeout: Duration,
+    /// [`MAX_ACCOUNTS`]. Tests lower it.
+    pub max_accounts: usize,
 }
 
 impl Config {
@@ -78,6 +84,7 @@ impl Config {
             listen,
             congestion: Congestion::default(),
             idle_timeout: transport::IDLE_TIMEOUT,
+            max_accounts: MAX_ACCOUNTS,
         }
     }
 }
@@ -94,6 +101,7 @@ pub struct ServerState {
     connections: Arc<Gate>,
     handshakes: Arc<Gate>,
     password_work: Semaphore,
+    max_accounts: usize,
 }
 
 impl ServerState {
@@ -142,6 +150,7 @@ impl Server {
             connections: Gate::new(CONNECTIONS),
             handshakes: Gate::new(HANDSHAKES),
             password_work: Semaphore::new(PASSWORD_WORKERS),
+            max_accounts: config.max_accounts,
         });
         Ok(Self { endpoint, shared })
     }
@@ -206,7 +215,7 @@ impl Server {
             let shared = self.shared.clone();
             tokio::spawn(async move {
                 match tokio::time::timeout(TLS_TIMEOUT, incoming).await {
-                    Ok(Ok(connection)) => handle(shared, connection, pass).await,
+                    Ok(Ok(connection)) => handle(shared, connection, source, pass).await,
                     Ok(Err(e)) => {
                         debug!(%peer, "handshake failed: {e}");
                         shared.refusals.count("TLS handshake failed");
@@ -299,7 +308,13 @@ fn spawn_every(
     });
 }
 
-async fn handle(shared: Arc<ServerState>, connection: quinn::Connection, unauthenticated: Pass) {
+/// Serves a connection whose address was validated as `source`.
+async fn handle(
+    shared: Arc<ServerState>,
+    connection: quinn::Connection,
+    source: SourceKey,
+    unauthenticated: Pass,
+) {
     let peer = connection.remote_address();
     if let Err(e) = check_datagrams(connection.max_datagram_size()) {
         debug!(%peer, "refusing connection: {e}");
@@ -308,7 +323,7 @@ async fn handle(shared: Arc<ServerState>, connection: quinn::Connection, unauthe
         return;
     }
     debug!(%peer, "connected");
-    session::run(shared, connection, unauthenticated).await;
+    session::run(shared, connection, source, unauthenticated).await;
 }
 
 /// Locks `mutex`, carrying on past a panic of an earlier holder.
@@ -330,6 +345,28 @@ mod tests {
     fn the_server_times_out_idle_connections_as_clients_do() {
         let config = Config::new(PathBuf::from("data"), "[::]:8476".parse().unwrap());
         assert_eq!(config.idle_timeout, transport::IDLE_TIMEOUT);
+    }
+
+    #[test]
+    fn every_account_a_server_keeps_fits_one_user_list() {
+        use throcc_proto::framing;
+        use throcc_proto::ids::{Role, UserId};
+        use throcc_proto::messages::{MAX_NAME_CHARS, Response, ServerMessage, User};
+
+        let longest = User {
+            id: UserId(u64::MAX),
+            name: "\u{1F600}".repeat(MAX_NAME_CHARS),
+            role: Role::Admin,
+            invited_by: Some(UserId(u64::MAX)),
+            identity_key: [0xff; 32],
+            created_at: u64::MAX,
+        };
+        let admins_past_it = 100;
+        let message = ServerMessage::Response {
+            id: u32::MAX,
+            response: Response::Users(vec![longest; MAX_ACCOUNTS + admins_past_it]),
+        };
+        assert!(framing::encode(&message).is_ok());
     }
 
     #[test]

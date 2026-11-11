@@ -205,26 +205,28 @@ impl MediaEngine {
 
     /// Applies our placement after `JoinRoom` or `LeaveRoom`.
     pub fn apply_placement(&self, placement: &Placement) -> Vec<KeyNotice> {
-        let (room_changed, (requests, notices)) = {
+        let (room_changed, notices) = {
             let mut keys = self.keys();
             let room_changed = keys.room() != placement.room;
-            let applied = keys.apply_placement(
+            let (requests, notices) = keys.apply_placement(
                 placement.room,
                 placement.epoch,
                 placement.tracks.clone(),
                 &placement.peers,
                 Instant::now(),
             );
-            (room_changed, applied)
+            self.send_requests(requests);
+            (room_changed, notices)
         };
         if room_changed {
             lock(&self.sinks).clear();
         }
-        self.send_requests(requests);
         notices
     }
 
-    /// Applies a control event that concerns media. Returns key warnings for the user.
+    /// Applies a control event that concerns media, other than a presence, which
+    /// [`Self::set_presence`] and [`Self::end_presence`] take. Returns key warnings for the
+    /// user.
     pub fn event(&self, event: &Event) -> Vec<KeyNotice> {
         match event {
             Event::PeersChanged { room, epoch, peers } => {
@@ -243,8 +245,6 @@ impl MediaEngine {
                 }
                 Vec::new()
             }
-            Event::PresenceChanged(p) => self.set_presence(p.user, p.room),
-            Event::PresenceEnded(user) => self.set_presence(*user, None),
             _ => Vec::new(),
         }
     }
@@ -252,8 +252,31 @@ impl MediaEngine {
     /// Notes where `user` is, and applies the room state again when that changes who is
     /// in our room.
     pub fn set_presence(&self, user: UserId, room: Option<RoomId>) -> Vec<KeyNotice> {
+        self.presence(|keys| keys.set_presence(user, room))
+    }
+
+    /// Notes where each of `people` is, then applies the room state again, once.
+    pub fn set_presences(
+        &self,
+        people: impl IntoIterator<Item = (UserId, Option<RoomId>)>,
+    ) -> Vec<KeyNotice> {
         self.rekey(|keys, now| {
-            if keys.set_presence(user, room) {
+            for (user, room) in people {
+                keys.set_presence(user, room);
+            }
+            keys.reapply_peers(now)
+        })
+    }
+
+    /// Forgets `user`, whose presence ended, and applies the room state again when that
+    /// changes who is in our room.
+    pub fn end_presence(&self, user: UserId) -> Vec<KeyNotice> {
+        self.presence(|keys| keys.end_presence(user))
+    }
+
+    fn presence(&self, change: impl FnOnce(&mut KeyManager) -> bool) -> Vec<KeyNotice> {
+        self.rekey(|keys, now| {
+            if change(keys) {
                 keys.reapply_peers(now)
             } else {
                 (None, Vec::new())
@@ -266,11 +289,15 @@ impl MediaEngine {
         &self,
         f: impl FnOnce(&mut KeyManager, Instant) -> (Option<Request>, Vec<KeyNotice>),
     ) -> Vec<KeyNotice> {
-        let (request, notices) = f(&mut self.keys(), Instant::now());
+        let mut keys = self.keys();
+        let (request, notices) = f(&mut keys, Instant::now());
         self.send_requests(request);
         notices
     }
 
+    /// Queues requests the key manager made. Called with the keys still locked: the session
+    /// and the call's event pump both re-key, and peers keep the secret that reaches them
+    /// last, so the requests must leave in the order the secrets were made.
     fn send_requests(&self, requests: impl IntoIterator<Item = Request>) {
         for request in requests {
             self.requests.send(request).ok();

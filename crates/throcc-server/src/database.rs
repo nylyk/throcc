@@ -222,6 +222,13 @@ impl Database {
         )? as u64)
     }
 
+    pub fn user_count(&self) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?;
+        Ok(count as usize)
+    }
+
     pub fn user_by_pubkey(&self, pubkey: &PublicKey) -> Result<Option<UserRow>> {
         Ok(self
             .conn
@@ -376,7 +383,9 @@ impl Database {
             .collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Removes these users in one transaction, clearing `invited_by` on anyone they invited.
+    /// Removes these users in one transaction. Whoever one of them invited passes to that
+    /// one's own inviter, so they stay in an invite tree a cascade reaches and still count
+    /// against an invite allowance: leaving frees neither.
     pub fn remove_users(&mut self, users: &[UserId]) -> Result<()> {
         let tx = self.write()?;
         for user in users {
@@ -479,6 +488,14 @@ impl Database {
     pub fn consume_invite_try(&self, code_id: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE invites SET failures = failures + 1 WHERE code_id = ?1",
+            [code_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn return_invite_try(&self, code_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE invites SET failures = failures - 1 WHERE code_id = ?1 AND failures > 0",
             [code_id],
         )?;
         Ok(())
@@ -665,7 +682,8 @@ fn fixed<const N: usize>(bytes: Vec<u8>) -> rusqlite::Result<[u8; N]> {
 
 fn remove_one(tx: &Transaction, id: i64) -> rusqlite::Result<()> {
     tx.execute(
-        "UPDATE users SET invited_by = NULL WHERE invited_by = ?1",
+        "UPDATE users SET invited_by = (SELECT invited_by FROM users WHERE id = ?1)
+         WHERE invited_by = ?1",
         [id],
     )?;
     tx.execute("DELETE FROM invites WHERE minted_by = ?1", [id])?;
@@ -880,6 +898,26 @@ mod tests {
 
         db.remove_users(&[root]).unwrap();
         assert_eq!(db.user(other).unwrap().unwrap().invited_by, None);
+    }
+
+    #[test]
+    fn whoever_a_removed_user_invited_passes_to_that_users_inviter() {
+        let mut db = Database::open_in_memory().unwrap();
+        let root = enroll(&mut db, 1, None);
+        let between = enroll(&mut db, 2, Some(root));
+        let invited: Vec<UserId> = (3..6)
+            .map(|key| enroll(&mut db, key, Some(between)))
+            .collect();
+        assert_eq!(db.invites_used(root, 100, 0).unwrap(), 1);
+
+        db.remove_users(&[between]).unwrap();
+        for user in &invited {
+            assert_eq!(db.user(*user).unwrap().unwrap().invited_by, Some(root));
+        }
+        assert_eq!(db.invites_used(root, 100, 0).unwrap(), 3);
+        let mut tree = db.invite_tree(root).unwrap();
+        tree.sort();
+        assert_eq!(tree, [vec![root], invited].concat());
     }
 
     #[test]

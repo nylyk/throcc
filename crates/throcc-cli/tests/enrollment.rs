@@ -1,5 +1,6 @@
 mod common;
 
+use std::net::{Ipv4Addr, UdpSocket};
 use std::time::Duration;
 
 use throcc_client_core::account::{self, SignInError};
@@ -11,9 +12,10 @@ use throcc_proto::framing;
 use throcc_proto::ids::Role;
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
-    AuthError, ClientHello, ErrorCode, Event, PROTOCOL, Request, Response, ServerHello, SignIn,
+    AuthError, ClientHello, ErrorCode, Event, PROTOCOL, PakeStep, Request, Response, ServerHello,
+    SignIn,
 };
-use throcc_proto::transport;
+use throcc_proto::{SERVER_NAME, transport};
 use throcc_server::{Congestion, HANDSHAKES, UNAUTHENTICATED, tls};
 
 use common::*;
@@ -196,6 +198,35 @@ async fn unknown_invite_ids_fail_like_wrong_secrets() {
 }
 
 #[tokio::test]
+async fn a_server_keeping_all_its_accounts_enrolls_only_through_an_admin_invite() {
+    let server = start_server_with(|config| config.max_accounts = 2);
+    let alice = admin(&server).await;
+    let bob = invited(&server, &alice).await;
+
+    // More refusals than an invite has tries: a right code on a full server costs none.
+    let code = invite(&alice).await;
+    for _ in 0..4 {
+        let err = try_enroll(&server.addr, &code).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SignInError::Login(LoginError::Refused(AuthError::ServerFull))
+            ),
+            "{err}"
+        );
+    }
+    let leave = Request::RemoveUser {
+        user: bob.link.welcome.me,
+        cascade: false,
+    };
+    assert_eq!(alice.request(leave).await, Response::Ok);
+    try_enroll(&server.addr, &code).await.unwrap();
+
+    let recovery = mint_admin_invite(server.dir.path());
+    try_enroll(&server.addr, &recovery).await.unwrap();
+}
+
+#[tokio::test]
 async fn repeated_failures_from_one_source_are_rate_limited() {
     let server = start_server();
     let unknown: InviteCode = "ZZZ-ZZZZZ".parse().unwrap();
@@ -210,6 +241,46 @@ async fn repeated_failures_from_one_source_are_rate_limited() {
         ),
         "{err}"
     );
+}
+
+#[tokio::test]
+async fn a_run_counts_against_the_address_its_connection_was_accepted_from() {
+    let server = start_server();
+    let unknown: InviteCode = "ZZZ-ZZZZZ".parse().unwrap();
+    let mut refused = None;
+    // One run more than a source gets, each on a connection that moved to an address of
+    // its own once it was accepted.
+    for host in 2..=12 {
+        let Ok(elsewhere) = UdpSocket::bind((Ipv4Addr::new(127, 0, 0, host), 0)) else {
+            return skip("this machine has a single loopback address");
+        };
+        let (config, _) = connection::client_config(None, connection::transport_config()).unwrap();
+        let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        endpoint.set_default_client_config(config);
+        let connecting = endpoint.connect(server.addr.parse().unwrap(), SERVER_NAME);
+        let connection = connecting.unwrap().await.unwrap();
+        let (mut send, mut recv) = connection.accept_bi().await.unwrap();
+        let _: ServerHello = read_message(&mut recv).await;
+
+        endpoint.rebind(elsewhere).unwrap();
+        let (_, pake_a) = ClientPake::start(&unknown.id, &unknown.secret);
+        let enroll = ClientHello {
+            protocol: PROTOCOL,
+            sign_in: SignIn::Enroll {
+                code_id: unknown.id.clone(),
+                pubkey: IdentityKey::generate().public(),
+                client_nonce: [7; 32],
+                pake_a,
+                name: "Ilse".into(),
+            },
+        };
+        send.write_all(&framing::encode(&enroll).unwrap())
+            .await
+            .unwrap();
+        let step: PakeStep = read_message(&mut recv).await;
+        refused = step.err();
+    }
+    assert_eq!(refused, Some(AuthError::RateLimited));
 }
 
 #[tokio::test]
