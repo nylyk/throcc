@@ -373,7 +373,14 @@ impl KeyManager {
                 .map(|user| KeyNotice::BadEncryptionKey { user }),
         );
         for ((from, early_epoch), (arrived, wrapped)) in std::mem::take(&mut self.early) {
-            if now.duration_since(arrived) < OLD_KEY_GRACE {
+            if keeps_early(
+                &self.room_peers,
+                self.epoch,
+                from,
+                early_epoch,
+                arrived,
+                now,
+            ) {
                 self.sender_key_at(from, early_epoch, wrapped, arrived, now)
                     .ok();
             }
@@ -538,7 +545,8 @@ impl KeyManager {
     }
 
     /// Stores a peer's sender secret. One that arrives before its room state is held for
-    /// up to [`OLD_KEY_GRACE`]. One for an earlier epoch is accepted only within the grace
+    /// up to [`OLD_KEY_GRACE`], and one from someone the room state names but who isn't
+    /// trusted yet for as long as it names them at that epoch. One for an earlier epoch is accepted only within the grace
     /// period after our epoch moved on, and expires with it.
     pub fn sender_key(
         &mut self,
@@ -663,9 +671,26 @@ impl KeyManager {
         let received = &self.received;
         self.recv_keys
             .retain(|(_, epoch), (owner, _)| received.contains_key(&(*owner, *epoch)));
-        self.early
-            .retain(|_, (arrived, _)| now.duration_since(*arrived) < OLD_KEY_GRACE);
+        let (room_peers, epoch) = (&self.room_peers, self.epoch);
+        self.early.retain(|(from, early_epoch), (arrived, _)| {
+            keeps_early(room_peers, epoch, *from, *early_epoch, *arrived, now)
+        });
     }
+}
+
+/// Whether a sender key that came early is still kept: for [`OLD_KEY_GRACE`], and past it
+/// while the room state names its sender at our epoch. Such a sender may only be waiting
+/// for a client that shows people to show them, and sends its key just once.
+fn keeps_early(
+    room_peers: &[Peer],
+    epoch: Epoch,
+    from: UserId,
+    early_epoch: Epoch,
+    arrived: Instant,
+    now: Instant,
+) -> bool {
+    now.duration_since(arrived) < OLD_KEY_GRACE
+        || (early_epoch == epoch && room_peers.iter().any(|p| p.user == from))
 }
 
 fn too_many_shares(tracks: &Tracks) -> bool {
@@ -1544,5 +1569,51 @@ pub(crate) mod tests {
             Err(KeyError::Stale)
         );
         assert!(!can_read(&mut b, &a, 0));
+    }
+
+    #[test]
+    fn a_key_from_someone_the_room_names_waits_until_they_are_shown() {
+        let now = Instant::now();
+        let (mut a, mut b) = (member(1), member(2));
+        let peers = [peer(&a), peer(&b)];
+        show(&mut b.keys, &peers);
+        let tracks = Some(b.tracks.clone());
+        let (requests, _) = b
+            .keys
+            .apply_placement(Some(ROOM), Epoch(1), tracks, &peers, now);
+        let Some(Request::PublishSenderKey { epoch, wrapped }) = requests.into_iter().next() else {
+            panic!()
+        };
+
+        // Alice has the room state and Bob's key, but nothing has shown her Bob yet.
+        let tracks = Some(a.tracks.clone());
+        a.keys
+            .apply_placement(Some(ROOM), Epoch(1), tracks, &peers, now);
+        a.keys.sender_key(b.id, epoch, &wrapped[0].1, now).unwrap();
+        let later = now + 10 * OLD_KEY_GRACE;
+        a.keys.tick(later);
+        assert!(!can_read(&mut a, &b, 1));
+
+        assert!(a.keys.set_presence(b.id, Some(ROOM)));
+        a.keys.reapply_peers(later);
+        assert!(can_read(&mut a, &b, 1));
+    }
+
+    #[test]
+    fn an_early_key_from_nobody_the_room_names_is_dropped_after_a_while() {
+        let now = Instant::now();
+        let mut a = member(1);
+        let tracks = Some(a.tracks.clone());
+        let peers = [peer(&a)];
+        a.keys
+            .apply_placement(Some(ROOM), Epoch(1), tracks, &peers, now);
+        for epoch in [1, 2] {
+            a.keys
+                .sender_key(UserId(9), Epoch(epoch), &[0; WRAPPED_BYTES], now)
+                .unwrap();
+        }
+        assert_eq!(a.keys.early.len(), 2);
+        a.keys.tick(now + OLD_KEY_GRACE);
+        assert!(a.keys.early.is_empty());
     }
 }
