@@ -21,9 +21,10 @@ const EVENTS: usize = 1024;
 pub enum CallEvent {
     Server(Event),
     Key(KeyNotice),
-    /// The identity keys the server event that follows made the key manager trust, oldest
-    /// first. They are told apart from the room as it stands once that event is handled,
-    /// because a later event may have replaced them by then.
+    /// The identity keys the key manager came to trust since the last of these, oldest
+    /// first, ahead of the server event applied last. They are told apart from the room as
+    /// it stands once that event is handled, because a later event may have replaced them
+    /// by then.
     Trusted(Vec<(UserId, PublicKey)>),
 }
 
@@ -51,9 +52,10 @@ impl Call {
     }
 
     /// Starts a call for a client that shows who is in a room. The key manager then learns
-    /// where someone is from whoever reads `events`, through the engine's `set_presence`
-    /// and `end_presence`, once that reader shows them there. A reader that is behind
-    /// shows nobody new, so nobody gets our key before they are shown.
+    /// where someone is only from whoever reads `events`, through the engine's
+    /// `set_presences`, `set_presence` and `end_presence`: the welcome's people and every
+    /// presence after, each once that reader shows them. A reader that is behind shows
+    /// nobody new, so nobody gets our key before they are shown.
     ///
     /// Every identity key our secret is wrapped to is noted in `verified` as soon as an
     /// event makes it trusted, so a key that replaces a verified one is written down even
@@ -99,8 +101,11 @@ impl Call {
         );
         let engine = Arc::new(engine);
 
-        for p in &welcome.presence {
-            engine.set_presence(p.user, p.room);
+        // A client that shows people tells the key manager of them itself, as it shows them.
+        if shown.is_none() {
+            for p in &welcome.presence {
+                engine.set_presence(p.user, p.room);
+            }
         }
         let placement_notices = match welcome.placement.room {
             Some(_) => engine.apply_placement(&welcome.placement),

@@ -792,6 +792,12 @@ impl Session {
             }
             s.current = None;
         });
+        // The key manager hears of people only from what is shown, here and as presences
+        // change, so it can trust nobody the state leaves out.
+        let state = self.shared.state();
+        let shown = state.people.iter().map(|(user, p)| (*user, p.room));
+        let notices = self.call.engine.set_presences(shown);
+        self.notices(notices);
         self.refresh_trust();
         if welcome.placement.room.is_some() {
             self.after_join(&welcome.placement);
@@ -1763,8 +1769,11 @@ impl Session {
                     };
                     s.add_person(p.user, updated);
                 });
-                // Only now that they are shown may the key manager count them as here.
-                let notices = self.call.engine.set_presence(p.user, p.room);
+                // The key manager counts as here only who is shown, where they are shown.
+                let notices = match self.shared.state().person(p.user) {
+                    Some(shown) => self.call.engine.set_presence(p.user, shown.room),
+                    None => self.call.engine.end_presence(p.user),
+                };
                 self.notices(notices);
                 self.refresh_trust();
                 self.follow_room().await;

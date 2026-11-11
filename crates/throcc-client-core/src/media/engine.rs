@@ -255,6 +255,19 @@ impl MediaEngine {
         self.presence(|keys| keys.set_presence(user, room))
     }
 
+    /// Notes where each of `people` is, then applies the room state again, once.
+    pub fn set_presences(
+        &self,
+        people: impl IntoIterator<Item = (UserId, Option<RoomId>)>,
+    ) -> Vec<KeyNotice> {
+        self.rekey(|keys, now| {
+            for (user, room) in people {
+                keys.set_presence(user, room);
+            }
+            keys.reapply_peers(now)
+        })
+    }
+
     /// Forgets `user`, whose presence ended, and applies the room state again when that
     /// changes who is in our room.
     pub fn end_presence(&self, user: UserId) -> Vec<KeyNotice> {

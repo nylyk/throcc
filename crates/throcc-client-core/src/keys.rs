@@ -75,9 +75,9 @@ pub struct KeyManager {
     /// Our encryption key before the last renewal, until the time it is dropped.
     retired_encryption: Option<(EncryptionKeyPair, Instant)>,
     server: Fingerprint,
-    /// Everyone whose presence the server sent, with the room it shows them in. It takes a
-    /// presence by the rule `State::add_person` shows people by, so it holds exactly the
-    /// people the UI shows and nobody the UI leaves out is trusted.
+    /// The people we were told are signed in, with the room each is in, at most
+    /// [`MAX_SIGNED_IN`]. A client that shows people tells us of exactly those it shows, so
+    /// nobody it leaves out is trusted.
     present: HashMap<UserId, Option<RoomId>>,
     /// The peers of the room state last applied, as the server sent them.
     room_peers: Vec<Peer>,
