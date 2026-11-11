@@ -2,17 +2,33 @@ import SwiftUI
 
 @main
 struct ThroccApp: App {
+    private let launch: Result<AppModel, Error>
+    private let sample: Sample?
+
     init() {
-        do {
+        let arguments = ProcessInfo.processInfo.arguments
+        let mock = arguments.contains("--mock")
+        let sample = arguments.drop { $0 != "--screen" }.dropFirst().first.flatMap(Sample.init(rawValue:))
+        self.sample = mock ? sample : nil
+        launch = Result {
             try setAppDirs()
-        } catch {
-            fatalError("no directories to keep throcc's data in: \(error)")
+            return AppModel(core: mock ? .mock(onboarded: sample != .onboarding) : try Core())
         }
     }
 
     var body: some Scene {
         WindowGroup {
-            IdentityView()
+            switch launch {
+            case .success(let model):
+                RootView(sample: sample)
+                    .environment(model)
+            case .failure(let error):
+                ContentUnavailableView(
+                    "throcc can’t start",
+                    systemImage: "exclamationmark.triangle",
+                    description: Text(error.explanation)
+                )
+            }
         }
     }
 }

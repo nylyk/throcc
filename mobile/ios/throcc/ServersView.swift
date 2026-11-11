@@ -1,0 +1,125 @@
+import SwiftUI
+
+struct ServersView: View {
+    @Environment(AppModel.self) private var model
+    @State private var removed: KnownServer?
+    @State private var confirmsRemoval = false
+
+    var body: some View {
+        List(model.servers, id: \.address) { server in
+            Button { model.open(server.address) } label: { row(for: server) }
+                .swipeActions {
+                    Button("Remove") {
+                        removed = server
+                        confirmsRemoval = true
+                    }
+                    .tint(.red)
+                }
+        }
+        .overlay {
+            if model.servers.isEmpty {
+                ContentUnavailableView {
+                    Label("No Servers", systemImage: "server.rack")
+                } description: {
+                    Text("Add your first server to get started.")
+                } actions: {
+                    Button("Add Server") { model.sheet = .addServer }
+                }
+            }
+        }
+        .navigationTitle("Servers")
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Settings", systemImage: "gearshape") { model.sheet = .settings }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button("Add Server", systemImage: "plus") { model.sheet = .addServer }
+            }
+        }
+        .confirmationDialog(
+            "Remove “\(removed?.title ?? "")”?",
+            isPresented: $confirmsRemoval,
+            titleVisibility: .visible,
+            presenting: removed
+        ) { server in
+            Button("Remove from List", role: .destructive) { model.forget(server.address) }
+        } message: { _ in
+            Text("It leaves your list, but you stay a member. Adding it again needs an invite. To end your membership, connect and choose Leave Server.")
+        }
+    }
+
+    private func row(for server: KnownServer) -> some View {
+        HStack(spacing: 12) {
+            Avatar(picture: model.picture(in: server.picture), name: server.title, size: 40)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(server.title).foregroundStyle(Color.primary)
+                if server.name != nil {
+                    Text(server.address)
+                        .font(.subheadline)
+                        .foregroundStyle(Color.secondary)
+                }
+            }
+            Spacer()
+            if model.connecting == server.address {
+                ProgressView()
+            } else if model.connectedAddress == server.address {
+                Text("Connected")
+                    .font(.caption)
+                    .foregroundStyle(Color.secondary)
+            }
+        }
+    }
+}
+
+struct AddServerView: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    @State private var address = ""
+    @State private var code = ""
+    @State private var problem: String?
+
+    var body: some View {
+        let address = address.trimmingCharacters(in: .whitespaces)
+        let joinable = !address.isEmpty && (code.isEmpty || isInviteCode(typed: code))
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Address", text: $address)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                    TextField("Invite code", text: $code)
+                        .monospaced()
+                        .textInputAutocapitalization(.characters)
+                } footer: {
+                    Text("The code also proves you reached the real server. Leave it empty for a server you’ve joined before.")
+                }
+                .autocorrectionDisabled()
+                if let problem {
+                    Text(problem).foregroundStyle(.red)
+                }
+            }
+            .navigationTitle("Add Server")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(role: .cancel) { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Join") { join(address) }
+                        .disabled(!joinable || model.connecting != nil)
+                }
+            }
+        }
+    }
+
+    private func join(_ address: String) {
+        Task {
+            do {
+                try await model.connect(to: address, code: code.isEmpty ? nil : code)
+                dismiss()
+            } catch {
+                problem = error.explanation
+            }
+        }
+    }
+}
