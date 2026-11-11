@@ -3,61 +3,62 @@ package cc.thro.throcc
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import cc.thro.throcc.core.identityKey
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
+import cc.thro.throcc.core.Command
+import cc.thro.throcc.core.Core
+import cc.thro.throcc.core.CoreException
 
-class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        val identity = runCatching { identityKey() }
-        setContent {
-            MaterialTheme {
-                Surface(Modifier.fillMaxSize()) {
-                    IdentityScreen(identity)
-                }
-            }
+/** Why the core couldn't open what this install keeps. */
+@Composable
+private fun StartFailure(reason: String) {
+    MaterialTheme(if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
+        Surface(Modifier.fillMaxSize()) {
+            Text(reason, Modifier.safeDrawingPadding().padding(24.dp))
         }
     }
 }
 
-@Composable
-private fun IdentityScreen(identity: Result<ByteArray>) {
-    Column(
-        modifier = Modifier.fillMaxSize().padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Text("Identity key", style = MaterialTheme.typography.titleMedium)
-        identity.fold(
-            onSuccess = { key ->
-                SelectionContainer {
-                    Text(
-                        key.joinToString("") { "%02x".format(it) },
-                        fontFamily = FontFamily.Monospace,
-                        textAlign = TextAlign.Center,
-                    )
-                }
-            },
-            onFailure = { error ->
-                Text(
-                    error.message ?: error.toString(),
-                    color = MaterialTheme.colorScheme.error,
-                    textAlign = TextAlign.Center,
-                )
-            },
-        )
+class MainActivity : ComponentActivity() {
+    private var model: AppModel? = null
+
+    /** Opens the core, or with the `mock` extra the sample one at the page the `screen` extra names. */
+    private val models = viewModelFactory {
+        initializer {
+            val mock = intent.getBooleanExtra("mock", false)
+            val sample = intent.getStringExtra("screen").takeIf { mock }
+            AppModel(if (mock) Core.mock(onboarded = sample != "onboarding") else Core(), sample)
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        try {
+            val model = ViewModelProvider(this, models)[AppModel::class]
+            this.model = model
+            setContent { App(model) }
+        } catch (failure: CoreException) {
+            setContent { StartFailure(failure.message.orEmpty()) }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        model?.core?.command(Command.Reconnect)
     }
 }
