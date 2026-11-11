@@ -71,4 +71,4 @@ The release packages come from the scripts in `packaging/`, run the way `.github
 
 ## License
 
-[AGPL-3.0-or-later](LICENSE)
+[AGPL-3.0-or-later](LICENSE), with an [additional permission](LICENSE-APP-STORES.md) for distribution through app stores.
