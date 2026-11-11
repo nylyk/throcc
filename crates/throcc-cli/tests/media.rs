@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use throcc_client_core::call::Call;
 use throcc_client_core::media::engine::{Kind, Outgoing};
+use throcc_client_core::verified::VerifiedStore;
 use throcc_proto::frame::{DATAGRAM_PAYLOAD_FLOOR, Flags, Header, TAG_BYTES, VIDEO_CLOCK_HZ};
 use throcc_proto::ids::{Epoch, MediaId, UserId};
 use throcc_proto::messages::{Audience, Codec, Event, MediaState, Recovery, Request, Response};
@@ -397,7 +398,8 @@ async fn a_client_that_shows_people_gives_its_key_to_nobody_it_has_not_shown() {
     let mut alice = admin(&server).await;
     let room = create_room(&mut alice, "General").await;
     let bob = invited(&server, &alice).await;
-    let mut alice = Call::start_shown(alice.link, &alice.keystore).unwrap();
+    let verified = VerifiedStore::in_memory();
+    let mut alice = Call::start_shown(alice.link, &alice.keystore, verified).unwrap();
     let bob = Call::start(bob.link, &bob.keystore).unwrap();
     alice.join(Some(room), None).await.unwrap();
     bob.join(Some(room), None).await.unwrap();

@@ -13,6 +13,7 @@ use crate::floors::EpochFloors;
 use crate::keys::KeyNotice;
 use crate::keystore::Keystore;
 use crate::media::engine::MediaEngine;
+use crate::verified::VerifiedStore;
 
 const EVENTS: usize = 1024;
 
@@ -38,35 +39,44 @@ pub struct Call {
     /// The newest epochs we took part in, which the session saves now and then.
     pub floors: EpochFloors,
     connected: Connected,
-    shows_people: bool,
+    /// The verified keys of a client that shows who is in a room.
+    shown: Option<VerifiedStore>,
 }
 
 impl Call {
     /// Starts a call that tells the key manager itself where people are, as their
     /// presences arrive. For a client that shows nobody.
     pub fn start(link: ControlLink, keystore: &Keystore) -> Result<Self> {
-        Self::start_after(link, keystore, None, false)
+        Self::start_after(link, keystore, None, None)
     }
 
     /// Starts a call for a client that shows who is in a room. The key manager then learns
     /// where someone is from whoever reads `events`, through the engine's `set_presence`
     /// and `end_presence`, once that reader shows them there. A reader that is behind
     /// shows nobody new, so nobody gets our key before they are shown.
-    pub fn start_shown(link: ControlLink, keystore: &Keystore) -> Result<Self> {
-        Self::start_after(link, keystore, None, true)
+    ///
+    /// Every identity key our secret is wrapped to is noted in `verified` as soon as an
+    /// event makes it trusted, so a key that replaces a verified one is written down even
+    /// if the reader never gets to it.
+    pub fn start_shown(
+        link: ControlLink,
+        keystore: &Keystore,
+        verified: VerifiedStore,
+    ) -> Result<Self> {
+        Self::start_after(link, keystore, None, Some(verified))
     }
 
     /// Starts the call that replaces `previous` after a reconnect, keeping the epoch floors
     /// it raised even where they never reached the file.
     pub fn restart(link: ControlLink, keystore: &Keystore, previous: &Call) -> Result<Self> {
-        Self::start_after(link, keystore, Some(previous), previous.shows_people)
+        Self::start_after(link, keystore, Some(previous), previous.shown.clone())
     }
 
     fn start_after(
         link: ControlLink,
         keystore: &Keystore,
         previous: Option<&Call>,
-        shows_people: bool,
+        shown: Option<VerifiedStore>,
     ) -> Result<Self> {
         let ControlLink {
             welcome,
@@ -102,10 +112,11 @@ impl Call {
             events_tx.try_send(CallEvent::Key(notice)).ok();
         }
         let pump_engine = engine.clone();
+        let (verified, server) = (shown.clone(), connected.fingerprint);
         tokio::spawn(async move {
             while let Some(event) = server_events.recv().await {
                 let notices = match &event {
-                    Event::PresenceChanged(_) | Event::PresenceEnded(_) if shows_people => {
+                    Event::PresenceChanged(_) | Event::PresenceEnded(_) if verified.is_some() => {
                         Vec::new()
                     }
                     Event::PresenceChanged(p) => pump_engine.set_presence(p.user, p.room),
@@ -114,6 +125,9 @@ impl Call {
                 };
                 let trusted = pump_engine.keys().take_newly_trusted();
                 if !trusted.is_empty() {
+                    if let Some(verified) = &verified {
+                        note_presented(verified, &server, &trusted);
+                    }
                     events_tx.send(CallEvent::Trusted(trusted)).await.ok();
                 }
                 events_tx.send(CallEvent::Server(event)).await.ok();
@@ -145,7 +159,7 @@ impl Call {
             connection,
             floors,
             connected,
-            shows_people,
+            shown,
         })
     }
 
@@ -186,6 +200,17 @@ impl Call {
                 Ok((placement, notices))
             }
             other => bail!("{}", control::refusal(other)),
+        }
+    }
+}
+
+/// Notes in `verified` that `server` presented `keys`, which writes down any that replaces a
+/// verified key.
+fn note_presented(verified: &VerifiedStore, server: &Fingerprint, keys: &[(UserId, PublicKey)]) {
+    let mut verified = verified.lock();
+    for (user, key) in keys {
+        if let Err(e) = verified.presented(server, *user, key) {
+            warn!("noting where a verified key was seen: {e:#}");
         }
     }
 }
