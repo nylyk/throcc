@@ -1,5 +1,6 @@
 package cc.thro.throcc
 
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -16,8 +17,10 @@ import cc.thro.throcc.core.CoreState
 import cc.thro.throcc.core.Event
 import cc.thro.throcc.core.KnownServer
 import cc.thro.throcc.core.Listener
+import cc.thro.throcc.core.Palette
 import cc.thro.throcc.core.Profile
 import cc.thro.throcc.core.User
+import cc.thro.throcc.core.customThemeName
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -34,6 +37,9 @@ enum class Screen {
 
 const val SAVING = "Saving…"
 
+/** The name of the theme made of the user's own colours. */
+val CUSTOM = customThemeName()
+
 class AppModel(val core: Core, sample: String?) : ViewModel(), Listener {
     private val shown = MutableStateFlow(core.state())
     val state = shown.asStateFlow()
@@ -49,8 +55,7 @@ class AppModel(val core: Core, sample: String?) : ViewModel(), Listener {
 
     var profile by mutableStateOf(core.profile())
         private set
-    var accent by mutableStateOf(core.accent())
-    var palette by mutableStateOf(core.palette())
+    var theme by mutableStateOf(core.theme())
         private set
     var servers by mutableStateOf(emptyList<KnownServer>())
         private set
@@ -68,6 +73,7 @@ class AppModel(val core: Core, sample: String?) : ViewModel(), Listener {
     var serverSaved by mutableStateOf<String?>(null)
 
     val notices = Channel<String>(Channel.BUFFERED)
+    val snackbars = SnackbarHostState()
 
     private val pictures = mutableStateMapOf<String, ImageBitmap>()
 
@@ -149,16 +155,15 @@ class AppModel(val core: Core, sample: String?) : ViewModel(), Listener {
         return saved
     }
 
-    fun pickAccent(name: String) {
-        tell { core.setAccent(name) }
-        accent = core.accent()
-        palette = core.palette()
+    /** Picks the preset called `name`, or with `CUSTOM` the user's own colours. */
+    fun pickTheme(name: String) {
+        tell { if (name == CUSTOM) core.setCustomTheme(core.customPalette()) else core.setTheme(name) }
+        theme = core.theme()
     }
 
-    fun pickCustomAccent(rgb: UInt) {
-        tell { core.setCustomAccent(rgb) }
-        accent = core.accent()
-        palette = core.palette()
+    fun pickCustomTheme(palette: Palette) {
+        tell { core.setCustomTheme(palette) }
+        theme = core.theme()
     }
 
     /** Whether `action` on the core worked. A failure shows as a notice. */

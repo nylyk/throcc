@@ -2,24 +2,30 @@ package cc.thro.throcc
 
 import android.content.ClipData
 import android.content.Intent
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ButtonGroup
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.ListItem
+import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -36,6 +42,7 @@ import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import cc.thro.throcc.core.Command
 import cc.thro.throcc.core.CoreState
@@ -54,26 +61,27 @@ import kotlinx.coroutines.launch
 @Composable
 fun ServerOverview(model: AppModel, state: CoreState) {
     val server = state.server
-    Scaffold(topBar = { TopBar("Server", model::back) }) { padding ->
-        if (server == null) return@Scaffold
+    Page(model, "Server") { padding ->
+        if (server == null) return@Page
         Form(padding) {
             if (state.role?.let(::permissionsOf)?.editServer == true) {
                 EditServer(model, server)
             } else {
-                Avatar(model.picture(server.avatar), server.name ?: server.address, 72.dp)
-                server.name?.let { Field("Name", it) }
+                val name = server.name ?: server.address
+                Row(Modifier, Arrangement.spacedBy(16.dp), Alignment.CenterVertically) {
+                    Avatar(model.picture(server.avatar), name, 80.dp)
+                    Text(name, style = MaterialTheme.typography.headlineSmallEmphasized)
+                }
             }
-            Field("Address", server.address)
-            Field("Fingerprint", fingerprintText(server.fingerprint), FontFamily.Monospace)
+            Column {
+                GroupRow(0, 2, supporting = { Text(server.address) }) { Text("Address") }
+                GroupRow(
+                    1,
+                    2,
+                    supporting = { Text(fingerprintText(server.fingerprint), fontFamily = FontFamily.Monospace) },
+                ) { Text("Fingerprint") }
+            }
         }
-    }
-}
-
-@Composable
-private fun Field(label: String, value: String, font: FontFamily? = null) {
-    Column {
-        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelMedium)
-        Text(value, fontFamily = font)
     }
 }
 
@@ -86,30 +94,36 @@ private fun EditServer(model: AppModel, server: Server) {
     val renamed = named != server.name
     val repainted = !picture.contentEquals(kept)
     LaunchedEffect(Unit) { model.serverSaved = null }
-    PictureField(model, picture, name.ifBlank { server.address }) { picture = it }
-    NameField(name) { name = it }
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-        Button(
-            {
-                model.serverSaved = SAVING
-                val name = if (renamed) NameChange.Set(named) else NameChange.Keep
-                val picture = if (repainted) PictureChange.Set(picture) else PictureChange.Keep
-                model.core.command(Command.SetServerProfile(name, picture))
-            },
-            enabled = (renamed || repainted) && nameError(name) == null && model.serverSaved != SAVING,
-        ) { Text("Save") }
-        model.serverSaved?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+    Panel {
+        PictureField(model, picture, name.ifBlank { server.address }) { picture = it }
+        NameField(name) { name = it }
     }
+    MainButton("Save", (renamed || repainted) && nameError(name) == null, model.serverSaved == SAVING) {
+        model.serverSaved = SAVING
+        val name = if (renamed) NameChange.Set(named) else NameChange.Keep
+        val picture = if (repainted) PictureChange.Set(picture) else PictureChange.Keep
+        model.core.command(Command.SetServerProfile(name, picture))
+    }
+    model.serverSaved?.takeIf { it != SAVING }?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant) }
 }
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun Members(model: AppModel, state: CoreState) {
     var removing by remember { mutableStateOf<User?>(null) }
     LaunchedEffect(Unit) { model.core.command(Command.ListUsers) }
-    Scaffold(topBar = { TopBar("Members", model::back) }) { padding ->
-        LazyColumn(contentPadding = padding) {
-            item { SectionTitle("${model.users.size} People") }
-            items(model.users, { it.id.toLong() }) { user -> Member(model, state, user) { removing = user } }
+    Page(model, "Members") { padding ->
+        LazyColumn(Modifier.pageWidth(), contentPadding = padding) {
+            item {
+                if (model.users.isEmpty()) {
+                    Box(Modifier.fillMaxWidth().padding(24.dp), Alignment.Center) { LoadingIndicator() }
+                } else {
+                    GroupTitle(people(model.users.size))
+                }
+            }
+            itemsIndexed(model.users, { _, user -> user.id.toLong() }) { index, user ->
+                Member(model, state, user, index) { removing = user }
+            }
         }
     }
     removing?.let { user ->
@@ -120,41 +134,48 @@ fun Members(model: AppModel, state: CoreState) {
 }
 
 @Composable
-private fun Member(model: AppModel, state: CoreState, user: User, onRemove: () -> Unit) {
+private fun Member(model: AppModel, state: CoreState, user: User, index: Int, onRemove: () -> Unit) {
     val role = state.role.takeIf { user.id != state.me }
     val roles = listOf(Role.MANAGER, Role.USER).filter { role != null && canSetRole(role, user.role, it) }
     val inviter = model.users.find { it.id == user.invitedBy }
-    ListItem(
-        { Text(if (user.id == state.me) "${user.name} (you)" else user.name) },
-        supportingContent = {
+    GroupRow(
+        index,
+        model.users.size,
+        leading = { Avatar(model.picture(state.people.find { it.user == user.id }?.avatar), user.name, 40.dp) },
+        trailing = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (roles.isEmpty()) {
+                    Text(user.role.label, style = MaterialTheme.typography.labelLarge)
+                } else {
+                    RoleMenu(user.role, roles) { model.core.command(Command.SetRole(user.id, it)) }
+                }
+                if (role != null && canRemove(role, user.role)) {
+                    OverflowMenu { close ->
+                        DangerItem("Remove from Server") {
+                            close()
+                            onRemove()
+                        }
+                    }
+                }
+            }
+        },
+        supporting = {
             Column {
                 inviter?.let { Text("Invited by ${it.name}") }
                 Text(fingerprintShort(user.identityKey), fontFamily = FontFamily.Monospace)
             }
         },
-        leadingContent = {
-            Avatar(model.picture(state.people.find { it.user == user.id }?.avatar), user.name, 40.dp)
-        },
-        trailingContent = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (roles.isEmpty()) {
-                    Text(user.role.label)
-                } else {
-                    RoleMenu(user.role, roles) { model.core.command(Command.SetRole(user.id, it)) }
-                }
-                if (role != null && canRemove(role, user.role)) {
-                    IconButton(onRemove) { Icon(Icons.Default.Close, "Remove") }
-                }
-            }
-        },
-    )
+    ) { Text(if (user.id == state.me) "${user.name} (you)" else user.name) }
 }
 
 @Composable
 private fun RoleMenu(current: Role, roles: List<Role>, onPick: (Role) -> Unit) {
     var open by remember { mutableStateOf(false) }
     Box {
-        TextButton({ open = true }) { Text(current.label) }
+        TextButton({ open = true }, contentPadding = ButtonDefaults.TextButtonWithIconContentPadding) {
+            Text(current.label)
+            Icon(Icons.Default.ArrowDropDown, "Change role", tint = MaterialTheme.colorScheme.onSurface)
+        }
         DropdownMenu(open, { open = false }) {
             roles.forEach { role ->
                 DropdownMenuItem({ Text(role.label) }, {
@@ -173,57 +194,93 @@ fun Invites(model: AppModel, state: CoreState) {
     val scope = rememberCoroutineScope()
     val code = model.invite
     val cap = state.role?.let(::permissionsOf)?.inviteCap
-    Scaffold(topBar = { TopBar("Invite People", model::back) }) { padding ->
+    val create = { model.core.command(Command.CreateInvite) }
+    Page(model, "Invite People") { padding ->
         Form(padding) {
-            if (code != null) {
-                Text(code, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.headlineMedium)
+            if (code == null) {
+                Text(
+                    "An invite code lets one person join this server. Send it to them with the server’s address.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                MainButton("Create Code", onClick = create)
+                return@Form
+            }
+            Panel {
+                Text(
+                    code,
+                    Modifier.fillMaxWidth(),
+                    fontFamily = FontFamily.Monospace,
+                    textAlign = TextAlign.Center,
+                    style = MaterialTheme.typography.headlineMedium,
+                )
                 Text(
                     "Single use, expires in 24 hours." + cap?.let { " You can make $it a day." }.orEmpty(),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton({
-                        scope.launch { clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("Invite code", code))) }
-                    }) { Text("Copy") }
-                    OutlinedButton({
-                        val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, code)
-                        context.startActivity(Intent.createChooser(send, null))
-                    }) { Text("Share") }
+                ButtonGroup({}, Modifier.fillMaxWidth()) {
+                    customItem({
+                        val presses = remember { MutableInteractionSource() }
+                        FilledTonalButton(
+                            {
+                                val copied = ClipEntry(ClipData.newPlainText("Invite code", code))
+                                scope.launch { clipboard.setClipEntry(copied) }
+                            },
+                            Modifier.weight(1f).animateWidth(presses),
+                            interactionSource = presses,
+                        ) {
+                            Icon(Icons.Default.ContentCopy, null, Modifier.padding(end = 8.dp).size(18.dp))
+                            Text("Copy")
+                        }
+                    }, {})
+                    customItem({
+                        val presses = remember { MutableInteractionSource() }
+                        Button(
+                            {
+                                val send = Intent(Intent.ACTION_SEND).setType("text/plain")
+                                send.putExtra(Intent.EXTRA_TEXT, code)
+                                context.startActivity(Intent.createChooser(send, null))
+                            },
+                            Modifier.weight(1f).animateWidth(presses),
+                            interactionSource = presses,
+                        ) {
+                            Icon(Icons.Default.Share, null, Modifier.padding(end = 8.dp).size(18.dp))
+                            Text("Share")
+                        }
+                    }, {})
                 }
             }
-            Button({ model.core.command(Command.CreateInvite) }) {
-                Text(if (code == null) "Create Code" else "New Code")
-            }
+            TextButton(create, Modifier.align(Alignment.CenterHorizontally)) { Text("New Code") }
         }
     }
 }
 
 @Composable
 fun Keys(model: AppModel, state: CoreState) {
-    Scaffold(topBar = { TopBar("Privacy and Keys", model::back) }) { padding ->
-        LazyColumn(contentPadding = padding) {
+    val others = state.people.filter { it.user != state.me }
+    Page(model, "Privacy and Keys") { padding ->
+        LazyColumn(Modifier.pageWidth(), contentPadding = padding) {
             state.server?.let { server ->
                 item {
-                    SectionTitle("This Server")
-                    ListItem(
-                        { Text(server.address) },
-                        supportingContent = {
-                            Text(fingerprintText(server.fingerprint), fontFamily = FontFamily.Monospace)
-                        },
-                    )
-                    SectionTitle("People Here")
+                    GroupTitle("This Server")
+                    GroupRow(
+                        0,
+                        1,
+                        supporting = { Text(fingerprintText(server.fingerprint), fontFamily = FontFamily.Monospace) },
+                    ) { Text(server.address) }
+                    GroupTitle("People Here")
                 }
             }
-            items(state.people.filter { it.user != state.me }, { it.user.toLong() }) { person ->
-                ListItem(
-                    { Text(person.name) },
-                    Modifier.clickable { model.sheet = person.user },
-                    supportingContent = person.identityKey?.let { key ->
+            itemsIndexed(others, { _, person -> person.user.toLong() }) { index, person ->
+                GroupRow(
+                    index,
+                    others.size,
+                    { model.sheet = person.user },
+                    leading = { PersonPicture(model, person, 40.dp) },
+                    trailing = { if (!person.blocked) TrustLabel(state.trust(person)) },
+                    supporting = person.identityKey?.let { key ->
                         { Text(fingerprintShort(key), fontFamily = FontFamily.Monospace) }
                     },
-                    leadingContent = { PersonPicture(model, person, 40.dp) },
-                    trailingContent = { if (!person.blocked) TrustLabel(state.trust(person)) },
-                )
+                ) { Text(person.name) }
             }
         }
     }

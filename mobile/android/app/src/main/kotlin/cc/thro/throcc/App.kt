@@ -2,19 +2,19 @@ package cc.thro.throcc
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.adaptive.currentWindowAdaptiveInfoV2
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -26,16 +26,12 @@ import cc.thro.throcc.core.CoreState
 @Composable
 fun App(model: AppModel) {
     val state by model.state.collectAsStateWithLifecycle()
-    val snackbars = remember { SnackbarHostState() }
     LaunchedEffect(model) {
-        for (notice in model.notices) snackbars.showSnackbar(notice)
+        for (notice in model.notices) model.snackbars.showSnackbar(notice)
     }
-    ThroccTheme(model.palette) {
-        Surface {
-            Box(Modifier.fillMaxSize()) {
-                if (model.profile == null) Onboarding(model) else Panes(model, state)
-                SnackbarHost(snackbars, Modifier.align(Alignment.BottomCenter).safeDrawingPadding())
-            }
+    ThroccTheme(model.theme.palette) {
+        Surface(Modifier.fillMaxSize()) {
+            if (model.profile == null) Onboarding(model) else Panes(model, state)
         }
         state.people.find { it.user == model.sheet }?.let { PersonSheet(model, state, it) }
     }
@@ -47,24 +43,26 @@ private fun Panes(model: AppModel, state: CoreState) {
     val wide = currentWindowAdaptiveInfoV2().windowSizeClass
         .isWidthAtLeastBreakpoint(WindowSizeClass.WIDTH_DP_EXPANDED_LOWER_BOUND)
     val roomInFront = !wide && model.roomInFront && state.current != null
+    val pagesEnd = WindowInsets.safeDrawing.only(WindowInsetsSides.End)
+    val roomStart = WindowInsets.safeDrawing.only(WindowInsetsSides.Start)
     Row(Modifier.fillMaxSize()) {
         val scheme = MaterialTheme.colorScheme
-        MaterialTheme(colorScheme = if (wide) sidePane(scheme) else scheme) {
+        MaterialTheme(colorScheme = if (wide) raised(scheme) else scheme) {
             NavDisplay(
                 backStack = if (roomInFront) model.stack + Screen.Room else model.stack,
-                modifier = if (wide) Modifier.width(360.dp) else Modifier.weight(1f),
+                modifier = if (wide) Modifier.width(360.dp).consumeWindowInsets(pagesEnd) else Modifier.weight(1f),
                 onBack = { if (roomInFront) model.roomInFront = false else model.back() },
                 // NavDisplay keeps an entry until the stack changes, so an entry that captured the
                 // state would show a stale one.
-                entryProvider = { screen -> NavEntry(screen) { Page(model, screen) } },
+                entryProvider = { screen -> NavEntry(screen) { Shown(model, screen) } },
             )
         }
-        if (wide) Box(Modifier.weight(1f)) { RoomPane(model, state, null) }
+        if (wide) Box(Modifier.weight(1f).consumeWindowInsets(roomStart)) { RoomPane(model, state, null) }
     }
 }
 
 @Composable
-private fun Page(model: AppModel, screen: Screen) {
+private fun Shown(model: AppModel, screen: Screen) {
     val state by model.state.collectAsStateWithLifecycle()
     when (screen) {
         Screen.Servers -> Servers(model, state)

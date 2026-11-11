@@ -12,11 +12,12 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
-import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
@@ -26,23 +27,44 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.HeadsetOff
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.outlined.GppMaybe
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.FabPosition
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LargeFlexibleTopAppBar
+import androidx.compose.material3.ListItemDefaults
+import androidx.compose.material3.LoadingIndicator
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedListItem
+import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.adaptive.currentWindowAdaptiveInfoV2
+import androidx.compose.material3.toShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -53,14 +75,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role as Semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.window.core.layout.WindowSizeClass
 import cc.thro.throcc.core.Connection
 import cc.thro.throcc.core.CoreState
 import cc.thro.throcc.core.NameCheck
@@ -70,49 +95,165 @@ import cc.thro.throcc.core.checkName
 import cc.thro.throcc.core.limits
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+/** The width and side margins of a page's content, kept narrow in a wide window. */
+fun Modifier.pageWidth() = widthIn(max = 640.dp).padding(horizontal = 16.dp)
+
+/** A page under a large title that shrinks as the content scrolls. A short window gets the small title. */
 @Composable
-fun TopBar(title: String, onBack: (() -> Unit)? = null, actions: @Composable RowScope.() -> Unit = {}) {
-    TopAppBar(
-        title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-        navigationIcon = {
-            if (onBack != null) IconButton(onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+fun Page(
+    model: AppModel,
+    title: String,
+    onBack: (() -> Unit)? = model::back,
+    subtitle: String? = null,
+    notices: Boolean = true,
+    actions: @Composable RowScope.() -> Unit = {},
+    floatingButton: @Composable () -> Unit = {},
+    buttonPosition: FabPosition = FabPosition.End,
+    content: @Composable (PaddingValues) -> Unit,
+) {
+    val scroll = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+    val tall = currentWindowAdaptiveInfoV2().windowSizeClass
+        .isHeightAtLeastBreakpoint(WindowSizeClass.HEIGHT_DP_MEDIUM_LOWER_BOUND)
+    val name = @Composable {
+        Text(title, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+    }
+    val back = @Composable {
+        if (onBack != null) IconButton(onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+    }
+    val colors = TopAppBarDefaults.topAppBarColors(actionIconContentColor = MaterialTheme.colorScheme.onSurface)
+    Scaffold(
+        Modifier.nestedScroll(scroll.nestedScrollConnection),
+        topBar = {
+            if (tall) {
+                LargeFlexibleTopAppBar(
+                    name,
+                    subtitle = subtitle?.let { { Text(it, maxLines = 1, overflow = TextOverflow.Ellipsis) } },
+                    navigationIcon = back,
+                    actions = actions,
+                    colors = colors,
+                    scrollBehavior = scroll,
+                )
+            } else {
+                TopAppBar(name, navigationIcon = back, actions = actions, colors = colors, scrollBehavior = scroll)
+            }
         },
-        actions = actions,
+        snackbarHost = { if (notices) SnackbarHost(model.snackbars) },
+        floatingActionButton = floatingButton,
+        floatingActionButtonPosition = buttonPosition,
+        contentWindowInsets = WindowInsets.safeDrawing,
+        content = content,
     )
 }
 
-/** A scrolling column of fields, kept narrow in a wide window. */
+/** A scrolling column of fields. */
 @Composable
 fun Form(padding: PaddingValues, content: @Composable ColumnScope.() -> Unit) {
     Column(
-        Modifier
-            .padding(padding)
-            .consumeWindowInsets(padding)
-            .imePadding()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp)
-            .widthIn(max = 480.dp),
+        Modifier.padding(padding).verticalScroll(rememberScrollState()).pageWidth().padding(vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
         content = content,
     )
 }
 
 @Composable
-fun Hint(text: String, modifier: Modifier = Modifier) {
-    Box(modifier.fillMaxSize().padding(24.dp), Alignment.Center) {
-        Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+fun panelColors(selected: Boolean = false) = CardDefaults.cardColors(
+    if (selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainer,
+)
+
+/** A rounded container on the panel colour around a group of fields. */
+@Composable
+fun Panel(content: @Composable ColumnScope.() -> Unit) {
+    Card(Modifier.fillMaxWidth(), MaterialTheme.shapes.extraLarge, panelColors()) {
+        Column(Modifier.padding(20.dp), Arrangement.spacedBy(16.dp), content = content)
+    }
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+fun Hint(icon: ImageVector, text: String, modifier: Modifier = Modifier) {
+    val scheme = MaterialTheme.colorScheme
+    Column(
+        modifier.fillMaxSize().padding(24.dp),
+        Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
+        Alignment.CenterHorizontally,
+    ) {
+        Box(
+            Modifier.size(96.dp).background(scheme.surfaceContainerHigh, MaterialShapes.Cookie9Sided.toShape()),
+            Alignment.Center,
+        ) { Icon(icon, null, Modifier.size(40.dp), scheme.onSurfaceVariant) }
+        Text(text, color = scheme.onSurfaceVariant, textAlign = TextAlign.Center)
     }
 }
 
 @Composable
-fun SectionTitle(text: String) {
+fun GroupTitle(text: String) {
     Text(
         text,
-        Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-        color = MaterialTheme.colorScheme.primary,
-        style = MaterialTheme.typography.titleSmall,
+        Modifier.padding(start = 16.dp, top = 16.dp, bottom = 8.dp),
+        MaterialTheme.colorScheme.onSurfaceVariant,
+        style = MaterialTheme.typography.titleSmallEmphasized,
     )
+}
+
+/** Row `index` of `count` in a grouped list, rounded where the group begins and ends. */
+@Composable
+fun GroupRow(
+    index: Int,
+    count: Int,
+    onClick: (() -> Unit)? = null,
+    leading: @Composable (() -> Unit)? = null,
+    trailing: @Composable (() -> Unit)? = null,
+    supporting: @Composable (() -> Unit)? = null,
+    title: @Composable () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    val shapes = ListItemDefaults.segmentedShapes(index, count)
+    val colors = ListItemDefaults.segmentedColors(scheme.surfaceContainer, trailingContentColor = scheme.onSurface)
+    val gap = Modifier.padding(bottom = ListItemDefaults.SegmentedGap)
+    if (onClick == null) {
+        SegmentedListItem(
+            shapes,
+            gap,
+            leadingContent = leading,
+            trailingContent = trailing,
+            supportingContent = supporting,
+            colors = colors,
+            content = title,
+        )
+    } else {
+        SegmentedListItem(
+            onClick,
+            shapes,
+            gap,
+            leadingContent = leading,
+            trailingContent = trailing,
+            supportingContent = supporting,
+            colors = colors,
+            content = title,
+        )
+    }
+}
+
+/** The one main action of a page: a tall filled button that shows progress while `busy`. */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+fun MainButton(text: String, enabled: Boolean = true, busy: Boolean = false, onClick: () -> Unit) {
+    val height = ButtonDefaults.MediumContainerHeight
+    Button(
+        onClick,
+        ButtonDefaults.shapesFor(height),
+        Modifier.fillMaxWidth().heightIn(height),
+        enabled && !busy,
+        contentPadding = ButtonDefaults.contentPaddingFor(height),
+    ) {
+        if (busy) {
+            LoadingIndicator(
+                Modifier.padding(end = ButtonDefaults.iconSpacingFor(height)).size(ButtonDefaults.iconSizeFor(height)),
+                LocalContentColor.current,
+            )
+        }
+        Text(text, style = ButtonDefaults.textStyleFor(height))
+    }
 }
 
 /** A round picture, or the first letter of `name` where there is none. */
@@ -122,12 +263,15 @@ fun Avatar(picture: ImageBitmap?, name: String, size: Dp, modifier: Modifier = M
         modifier.size(size).clip(CircleShape).background(MaterialTheme.colorScheme.secondaryContainer),
         Alignment.Center,
     ) {
-        if (picture != null) {
-            Image(picture, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-        } else {
-            val letter = name.take(if (name.firstOrNull()?.isHighSurrogate() == true) 2 else 1)
-            val color = MaterialTheme.colorScheme.onSecondaryContainer
-            Text(letter.uppercase(), color = color, fontSize = (size.value * 0.4f).sp)
+        val type = MaterialTheme.typography
+        when {
+            picture != null -> Image(picture, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            name.isBlank() -> Icon(Icons.Default.Person, null, Modifier.size(size / 2))
+            else -> Text(
+                name.trim().take(if (name.trim().first().isHighSurrogate()) 2 else 1).uppercase(),
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                style = if (size < 56.dp) type.titleMedium else type.headlineMedium,
+            )
         }
     }
 }
@@ -136,7 +280,7 @@ fun Avatar(picture: ImageBitmap?, name: String, size: Dp, modifier: Modifier = M
 @Composable
 fun PersonPicture(model: AppModel, person: Person, size: Dp, modifier: Modifier = Modifier) {
     if (person.blocked) {
-        Icon(Icons.Default.Block, null, modifier.size(size), MaterialTheme.colorScheme.outline)
+        Icon(Icons.Default.Block, null, modifier.size(size), MaterialTheme.colorScheme.onSurfaceVariant)
     } else {
         Avatar(model.picture(person.avatar), person.name, size, modifier)
     }
@@ -146,8 +290,8 @@ fun PersonPicture(model: AppModel, person: Person, size: Dp, modifier: Modifier 
 fun MutedIcon(person: Person) {
     val tint = MaterialTheme.colorScheme.onSurfaceVariant
     when {
-        person.deafened -> Icon(Icons.Default.HeadsetOff, "Deafened", Modifier.size(18.dp), tint)
-        !person.mic -> Icon(Icons.Default.MicOff, "Muted", Modifier.size(18.dp), tint)
+        person.deafened -> Icon(Icons.Default.HeadsetOff, "Deafened", Modifier.size(20.dp), tint)
+        !person.mic -> Icon(Icons.Default.MicOff, "Muted", Modifier.size(20.dp), tint)
     }
 }
 
@@ -161,13 +305,19 @@ fun CoreState.trust(person: Person) = when {
 
 @Composable
 fun TrustLabel(trust: Trust) {
-    val style = MaterialTheme.typography.labelMedium
-    when (trust) {
-        Trust.KeyChanged -> Text("Key changed", color = MaterialTheme.colorScheme.error, style = style)
-        Trust.Verified -> Text("Verified", color = MaterialTheme.colorScheme.primary, style = style)
-        Trust.Unverified -> Text("Not verified", color = MaterialTheme.colorScheme.onSurfaceVariant, style = style)
+    val scheme = MaterialTheme.colorScheme
+    val (icon, text, color) = when (trust) {
+        Trust.KeyChanged -> Triple(Icons.Default.Warning, "Key changed", scheme.error)
+        Trust.Verified -> Triple(Icons.Default.VerifiedUser, "Verified", scheme.primary)
+        Trust.Unverified -> Triple(Icons.Outlined.GppMaybe, "Not verified", scheme.onSurfaceVariant)
+    }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        Icon(icon, null, Modifier.size(16.dp), color)
+        Text(text, color = color, style = MaterialTheme.typography.labelLarge)
     }
 }
+
+fun people(count: Int) = if (count == 1) "1 person" else "$count people"
 
 val Role.label
     get() = when (this) {
@@ -209,14 +359,15 @@ fun PictureField(model: AppModel, picture: ByteArray?, name: String, onChange: (
     val picker = rememberLauncherForActivityResult(PickVisualMedia()) { uri ->
         if (uri != null) {
             scope.launch {
-                squarePicture(context, uri)?.let(onChange) ?: model.notices.trySend("Couldn’t read that picture.")
+                squarePicture(context, uri)?.let(onChange)
+                    ?: model.notices.trySend("Couldn’t read that picture. Choose another one.")
             }
         }
     }
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-        Avatar(remember(picture) { picture?.toImage() }, name, 72.dp)
+        Avatar(remember(picture) { picture?.toImage() }, name, 80.dp)
         Column {
-            OutlinedButton({ picker.launch(PickVisualMediaRequest(PickVisualMedia.ImageOnly)) }) {
+            FilledTonalButton({ picker.launch(PickVisualMediaRequest(PickVisualMedia.ImageOnly)) }) {
                 Text("Choose Picture…")
             }
             if (picture != null) TextButton({ onChange(null) }) { Text("Remove") }
@@ -234,15 +385,29 @@ fun OverflowMenu(items: @Composable ColumnScope.(close: () -> Unit) -> Unit) {
     }
 }
 
+/** A menu item for something that can't be undone. */
+@Composable
+fun DangerItem(text: String, onClick: () -> Unit) {
+    val colors = MenuDefaults.itemColors(textColor = MaterialTheme.colorScheme.error)
+    DropdownMenuItem({ Text(text) }, onClick, colors = colors)
+}
+
+@Composable
+private fun DangerButton(text: String, onClick: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    Button(onClick, colors = ButtonDefaults.buttonColors(scheme.error, scheme.onError)) { Text(text) }
+}
+
+/** Asks before `action`, which can't be undone. */
 @Composable
 fun Confirm(title: String, text: String, action: String, onDismiss: () -> Unit, onConfirm: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
-            TextButton({
+            DangerButton(action) {
                 onConfirm()
                 onDismiss()
-            }) { Text(action) }
+            }
         },
         dismissButton = { TextButton(onDismiss) { Text("Cancel") } },
         title = { Text(title) },
@@ -257,10 +422,10 @@ fun RemoveDialog(name: String, onDismiss: () -> Unit, onRemove: (cascade: Boolea
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
-            TextButton({
+            DangerButton("Remove") {
                 onRemove(cascade)
                 onDismiss()
-            }) { Text("Remove") }
+            }
         },
         dismissButton = { TextButton(onDismiss) { Text("Cancel") } },
         title = { Text("Remove “$name”?") },
@@ -268,7 +433,7 @@ fun RemoveDialog(name: String, onDismiss: () -> Unit, onRemove: (cascade: Boolea
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("They are disconnected at once and need a new invite to come back.")
                 Row(
-                    Modifier.toggleable(cascade, role = Semantics.Checkbox) { cascade = it },
+                    Modifier.heightIn(min = 48.dp).toggleable(cascade, role = Semantics.Checkbox) { cascade = it },
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
@@ -284,27 +449,34 @@ fun RemoveDialog(name: String, onDismiss: () -> Unit, onRemove: (cascade: Boolea
 @Composable
 fun ConnectionBanner(model: AppModel, state: CoreState) {
     val signIn = { state.server?.let { model.connect(it.address) } ?: Unit }
+    val signingIn = model.connecting != null
     when (val connection = state.connection) {
         Connection.Connected, Connection.Disconnected -> {}
         is Connection.Reconnecting -> Banner(
             "Reconnecting (attempt ${connection.attempt}): ${connection.reason}. You’ll be put back in your room.",
+            busy = true,
         )
         Connection.AwaitingReconnect -> Banner(
             "The connection was down for a while. Reconnecting here signs you out on any other device.",
-            "Reconnect",
-            model::reconnect,
+            action = "Reconnect",
+            onAction = model::reconnect,
         )
-        Connection.SignedInElsewhere -> Banner("Signed in on another device.", "Sign In Here", signIn)
-        is Connection.Failed -> Banner("Disconnected: ${connection.reason}", "Try Again", signIn)
+        Connection.SignedInElsewhere -> Banner("Signed in on another device.", signingIn, "Sign In Here", signIn)
+        is Connection.Failed -> Banner("Disconnected: ${connection.reason}", signingIn, "Try Again", signIn)
     }
 }
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun Banner(text: String, action: String? = null, onAction: () -> Unit = {}) {
-    Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-        Column(Modifier.padding(16.dp), Arrangement.spacedBy(8.dp)) {
-            Text(text)
-            if (action != null) Button(onAction, Modifier.align(Alignment.End)) { Text(action) }
+private fun Banner(text: String, busy: Boolean = false, action: String? = null, onAction: () -> Unit = {}) {
+    val container = CardDefaults.cardColors(MaterialTheme.colorScheme.surfaceContainerHigh)
+    Card(Modifier.fillMaxWidth().padding(bottom = 12.dp), MaterialTheme.shapes.extraLarge, container) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (busy) LoadingIndicator(Modifier.size(24.dp)) else Icon(Icons.Default.CloudOff, null)
+                Text(text)
+            }
+            if (action != null) Button(onAction, Modifier.align(Alignment.End), !busy) { Text(action) }
         }
     }
 }

@@ -1,17 +1,18 @@
 package cc.thro.throcc
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -26,25 +27,24 @@ import androidx.compose.ui.unit.dp
 fun Onboarding(model: AppModel) {
     var name by rememberSaveable { mutableStateOf("") }
     var picture by rememberSaveable { mutableStateOf<ByteArray?>(null) }
-    Scaffold { padding ->
-        Column(
-            Modifier
-                .padding(padding)
-                .consumeWindowInsets(padding)
-                .imePadding()
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(24.dp),
-            Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
-            Alignment.CenterHorizontally,
-        ) {
-            Text("Welcome to throcc", style = MaterialTheme.typography.headlineMedium)
-            Text("Choose the name people see you as.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Column(Modifier.widthIn(max = 480.dp), Arrangement.spacedBy(16.dp)) {
-                PictureField(model, picture, name) { picture = it }
-                NameField(name) { name = it }
+    val notices = @Composable { SnackbarHost(model.snackbars) }
+    Scaffold(snackbarHost = notices, contentWindowInsets = WindowInsets.safeDrawing) { padding ->
+        Box(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()), Alignment.Center) {
+            Column(Modifier.widthIn(max = 480.dp).padding(24.dp), Arrangement.spacedBy(24.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Welcome to throcc", style = MaterialTheme.typography.displaySmallEmphasized)
+                    Text(
+                        "Choose the name and picture people see you as.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                }
+                Panel {
+                    PictureField(model, picture, name) { picture = it }
+                    NameField(name) { name = it }
+                }
+                MainButton("Continue", validName(name) != null) { model.saveProfile(name, picture) }
             }
-            Button({ model.saveProfile(name, picture) }, enabled = validName(name) != null) { Text("Continue") }
         }
     }
 }

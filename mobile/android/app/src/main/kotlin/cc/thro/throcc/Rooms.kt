@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -18,14 +19,13 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.outlined.GppMaybe
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.ListItem
-import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -78,56 +78,56 @@ fun Rooms(model: AppModel, state: CoreState) {
             else -> model.core.command(Command.Join(room.id))
         }
     }
-    Scaffold(
-        topBar = {
-            TopBar(server, model::back) {
-                if (managesRooms) IconButton({ dialog = RoomDialog.New }) { Icon(Icons.Default.Add, "New room") }
-                OverflowMenu { close ->
-                    pages.forEach { (title, screen) ->
-                        DropdownMenuItem({ Text(title) }, {
-                            close()
-                            model.open(screen)
-                        })
-                    }
-                    DropdownMenuItem({ Text("Disconnect") }, model::disconnect)
-                    DropdownMenuItem({ Text("Leave Server") }, {
+    Page(
+        model,
+        server,
+        subtitle = state.server?.address.takeIf { state.server?.name != null },
+        actions = {
+            if (managesRooms) IconButton({ dialog = RoomDialog.New }) { Icon(Icons.Default.Add, "New room") }
+            OverflowMenu { close ->
+                pages.forEach { (title, screen) ->
+                    DropdownMenuItem({ Text(title) }, {
                         close()
-                        leaving = true
+                        model.open(screen)
                     })
+                }
+                DropdownMenuItem({ Text("Disconnect") }, model::disconnect)
+                DangerItem("Leave Server") {
+                    close()
+                    leaving = true
                 }
             }
         },
     ) { padding ->
-        Column(Modifier.padding(padding)) {
-            ConnectionBanner(model, state)
-            if (state.server != null && state.rooms.isEmpty()) {
-                Text("No rooms yet.", Modifier.padding(16.dp), MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            LazyColumn {
-                state.rooms.forEach { room ->
-                    item("room ${room.id}") {
-                        RoomRow(room, state.current?.room == room.id, { join(room) }) {
-                            if (managesRooms) {
-                                OverflowMenu { close ->
-                                    DropdownMenuItem({ Text("Edit Room…") }, {
-                                        close()
-                                        dialog = RoomDialog.Edit(room)
-                                    })
-                                    DropdownMenuItem({ Text("Delete Room") }, {
-                                        close()
-                                        dialog = RoomDialog.Delete(room)
-                                    })
-                                }
+        if (state.server != null && state.rooms.isEmpty()) {
+            Hint(Icons.AutoMirrored.Filled.VolumeUp, "No rooms yet.", Modifier.padding(padding))
+        }
+        LazyColumn(Modifier.pageWidth(), contentPadding = padding) {
+            item("connection") { ConnectionBanner(model, state) }
+            items(state.rooms, { "room ${it.id}" }) { room ->
+                RoomCard(model, state, room, { join(room) }) {
+                    if (managesRooms) {
+                        OverflowMenu { close ->
+                            DropdownMenuItem({ Text("Edit Room…") }, {
+                                close()
+                                dialog = RoomDialog.Edit(room)
+                            })
+                            DangerItem("Delete Room") {
+                                close()
+                                dialog = RoomDialog.Delete(room)
                             }
                         }
                     }
-                    items(state.people.filter { it.room == room.id }, { "person ${it.user}" }) {
-                        PersonRow(model, state, it)
+                }
+            }
+            val lobby = state.people.filter { person -> state.rooms.none { it.id == person.room } }
+            if (lobby.isNotEmpty()) {
+                item("lobby") {
+                    GroupTitle("Lobby")
+                    Card(shape = MaterialTheme.shapes.extraLarge, colors = panelColors()) {
+                        Column(Modifier.padding(vertical = 8.dp)) { lobby.forEach { PersonRow(model, state, it) } }
                     }
                 }
-                val lobby = state.people.filter { person -> state.rooms.none { it.id == person.room } }
-                if (lobby.isNotEmpty()) item("lobby") { SectionTitle("Lobby") }
-                items(lobby, { "person ${it.user}" }) { PersonRow(model, state, it) }
             }
         }
     }
@@ -157,43 +157,70 @@ fun Rooms(model: AppModel, state: CoreState) {
     }
 }
 
+/** A room with the people in it. Tapping it joins the room, or opens the one we are in. */
 @Composable
-private fun RoomRow(room: Room, current: Boolean, onJoin: () -> Unit, menu: @Composable () -> Unit) {
-    val container = if (current) MaterialTheme.colorScheme.secondaryContainer else ListItemDefaults.containerColor
-    ListItem(
-        headlineContent = { Text(room.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-        modifier = Modifier.clickable(onClick = onJoin),
-        leadingContent = {
-            if (room.locked) Icon(Icons.Default.Lock, "Locked") else Icon(Icons.AutoMirrored.Filled.VolumeUp, null)
-        },
-        trailingContent = menu,
-        colors = ListItemDefaults.colors(containerColor = container),
+private fun RoomCard(model: AppModel, state: CoreState, room: Room, onJoin: () -> Unit, menu: @Composable () -> Unit) {
+    val people = state.people.filter { it.room == room.id }
+    val current = state.current?.room == room.id
+    val facts = listOfNotNull(
+        "You’re here".takeIf { current },
+        "Locked".takeIf { room.locked },
+        people(people.size),
     )
+    val shape = MaterialTheme.shapes.extraLarge
+    Card(onJoin, Modifier.padding(bottom = 12.dp), shape = shape, colors = panelColors(current)) {
+        Row(
+            Modifier.padding(start = 20.dp, top = 12.dp, end = 8.dp, bottom = 4.dp),
+            Arrangement.spacedBy(16.dp),
+            Alignment.CenterVertically,
+        ) {
+            Icon(if (room.locked) Icons.Default.Lock else Icons.AutoMirrored.Filled.VolumeUp, null)
+            Column(Modifier.weight(1f).heightIn(min = 48.dp), Arrangement.Center) {
+                Text(
+                    room.name,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.titleMediumEmphasized,
+                )
+                Text(
+                    facts.joinToString(" · "),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+            menu()
+        }
+        Column(Modifier.padding(bottom = 8.dp)) { people.forEach { PersonRow(model, state, it) } }
+    }
 }
 
 @Composable
 private fun PersonRow(model: AppModel, state: CoreState, person: Person) {
     val scheme = MaterialTheme.colorScheme
     val quiet = scheme.onSurfaceVariant
-    val small = Modifier.size(18.dp)
+    val small = Modifier.size(20.dp)
     Row(
         Modifier
             .fillMaxWidth()
             .clickable { model.sheet = person.user }
-            .padding(start = 56.dp, end = 24.dp, top = 8.dp, bottom = 8.dp),
+            .heightIn(min = 48.dp)
+            .padding(horizontal = 20.dp),
         Arrangement.spacedBy(12.dp),
         Alignment.CenterVertically,
     ) {
-        PersonPicture(model, person, 28.dp)
-        Row(Modifier.weight(1f), Arrangement.spacedBy(6.dp), Alignment.CenterVertically) {
-            val color = if (person.blocked) scheme.outline else quiet
-            Text(person.name, Modifier.weight(1f, fill = false), color, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (!person.blocked) {
-                when (state.trust(person)) {
-                    Trust.KeyChanged -> Icon(Icons.Default.Warning, "Key changed", small, scheme.error)
-                    Trust.Unverified -> Icon(Icons.Outlined.GppMaybe, "Not verified", small, scheme.outline)
-                    Trust.Verified -> {}
-                }
+        PersonPicture(model, person, 32.dp)
+        Text(
+            person.name,
+            Modifier.weight(1f),
+            if (person.blocked) quiet else scheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (!person.blocked) {
+            when (state.trust(person)) {
+                Trust.KeyChanged -> Icon(Icons.Default.Warning, "Key changed", small, scheme.error)
+                Trust.Unverified -> Icon(Icons.Outlined.GppMaybe, "Not verified", small, quiet)
+                Trust.Verified -> {}
             }
         }
         if (person.sharing != null) Icon(Icons.AutoMirrored.Filled.ScreenShare, "Sharing", small, quiet)
@@ -231,7 +258,7 @@ private fun RoomForm(
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
-            TextButton(
+            Button(
                 {
                     onAction()
                     onDismiss()
@@ -303,7 +330,7 @@ private fun JoinLocked(model: AppModel, room: Room, joined: Boolean, onDismiss: 
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
-            TextButton(
+            Button(
                 { model.core.command(Command.JoinWithPassword(room.id, password)) },
                 enabled = isValidPassword(password),
             ) { Text("Join") }

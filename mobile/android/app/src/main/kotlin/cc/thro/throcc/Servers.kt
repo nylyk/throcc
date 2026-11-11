@@ -1,27 +1,28 @@
 package cc.thro.throcc
 
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.ListItem
+import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -43,21 +44,21 @@ import cc.thro.throcc.core.isInviteCode
 @Composable
 fun Servers(model: AppModel, state: CoreState) {
     var removing by remember { mutableStateOf<KnownServer?>(null) }
-    Scaffold(
-        topBar = {
-            TopBar("Servers") {
-                IconButton({ model.open(Screen.Settings) }) { Icon(Icons.Default.Settings, "Settings") }
-            }
-        },
-        floatingActionButton = {
-            FloatingActionButton({ model.open(Screen.AddServer) }) { Icon(Icons.Default.Add, "Add server") }
-        },
+    Page(
+        model,
+        "Servers",
+        onBack = null,
+        actions = { IconButton({ model.open(Screen.Settings) }) { Icon(Icons.Default.Settings, "Settings") } },
+        floatingButton = { AddServerButton { model.open(Screen.AddServer) } },
     ) { padding ->
-        if (model.servers.isEmpty()) Hint("Add your first server to get started.", Modifier.padding(padding))
-        LazyColumn(contentPadding = padding) {
-            items(model.servers, key = { it.address }) { server ->
-                ServerRow(model, server, state.server?.address == server.address) { removing = server }
+        if (model.servers.isEmpty()) {
+            Hint(Icons.Default.Dns, "Add your first server to get started.", Modifier.padding(padding))
+        }
+        LazyColumn(Modifier.pageWidth(), contentPadding = padding) {
+            itemsIndexed(model.servers, key = { _, server -> server.address }) { index, server ->
+                ServerRow(model, server, index, state.server?.address == server.address) { removing = server }
             }
+            item { Spacer(Modifier.height(88.dp)) }
         }
     }
     removing?.let { server ->
@@ -72,65 +73,96 @@ fun Servers(model: AppModel, state: CoreState) {
 }
 
 @Composable
-private fun ServerRow(model: AppModel, server: KnownServer, connected: Boolean, onRemove: () -> Unit) {
+private fun AddServerButton(onClick: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    ExtendedFloatingActionButton(
+        { Text("Add Server") },
+        // The button hides its text from accessibility services, which read the icon's description.
+        { Icon(Icons.Default.Add, "Add Server") },
+        onClick,
+        containerColor = scheme.primary,
+        contentColor = scheme.onPrimary,
+    )
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun ServerRow(model: AppModel, server: KnownServer, index: Int, connected: Boolean, onRemove: () -> Unit) {
     val title = server.name ?: server.address
-    ListItem(
-        headlineContent = { Text(title) },
-        modifier = Modifier.clickable(enabled = model.connecting == null) { model.openServer(server.address) },
-        supportingContent = server.name?.let { { Text(server.address) } },
-        leadingContent = { Avatar(remember(server) { server.picture?.toImage() }, title, 40.dp) },
-        trailingContent = {
+    GroupRow(
+        index,
+        model.servers.size,
+        { model.openServer(server.address) },
+        leading = { Avatar(remember(server) { server.picture?.toImage() }, title, 40.dp) },
+        trailing = {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (connected) {
-                    val style = MaterialTheme.typography.labelMedium
-                    Text("Connected", color = MaterialTheme.colorScheme.primary, style = style)
-                }
-                if (model.connecting == server.address) {
-                    CircularProgressIndicator(Modifier.padding(12.dp).size(24.dp))
-                } else {
-                    IconButton(onRemove) { Icon(Icons.Default.Close, "Remove from List") }
+                if (model.connecting == server.address) LoadingIndicator(Modifier.size(32.dp))
+                OverflowMenu { close ->
+                    DangerItem("Remove from List") {
+                        close()
+                        onRemove()
+                    }
                 }
             }
         },
-    )
+        supporting = {
+            Column {
+                if (server.name != null) Text(server.address)
+                if (connected) Connected()
+            }
+        },
+    ) { Text(title) }
+}
+
+@Composable
+private fun Connected() {
+    val color = MaterialTheme.colorScheme.primary
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Icon(Icons.Default.Link, null, Modifier.padding(end = 4.dp).size(16.dp), color)
+        Text("Connected", color = color, style = MaterialTheme.typography.labelLarge)
+    }
 }
 
 @Composable
 fun AddServer(model: AppModel) {
     var address by rememberSaveable { mutableStateOf("") }
     var code by rememberSaveable { mutableStateOf("") }
-    val joining = model.connecting != null
     val wrongCode = code.isNotBlank() && !isInviteCode(code)
-    Scaffold(topBar = { TopBar("Add Server", model::back) }) { padding ->
+    Page(model, "Add Server") { padding ->
         Form(padding) {
-            OutlinedTextField(
-                address,
-                { address = it },
-                Modifier.fillMaxWidth(),
-                label = { Text("Address") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
-                singleLine = true,
-            )
-            OutlinedTextField(
-                code,
-                { code = it },
-                Modifier.fillMaxWidth(),
-                textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace),
-                label = { Text("Invite code") },
-                supportingText = {
-                    Text(
-                        "The code also proves you reached the real server. " +
-                            "Leave it empty for a server you’ve joined before.",
-                    )
-                },
-                isError = wrongCode,
-                keyboardOptions = KeyboardOptions(KeyboardCapitalization.Characters, autoCorrectEnabled = false),
-                singleLine = true,
-            )
-            Button(
-                { model.connect(address.trim(), code.trim().ifEmpty { null }) },
-                enabled = !joining && address.isNotBlank() && !wrongCode,
-            ) { Text(if (joining) "Joining…" else "Join") }
+            Panel {
+                OutlinedTextField(
+                    address,
+                    { address = it },
+                    Modifier.fillMaxWidth(),
+                    label = { Text("Address") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    code,
+                    { code = it },
+                    Modifier.fillMaxWidth(),
+                    textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace),
+                    label = { Text("Invite code") },
+                    supportingText = {
+                        Text(
+                            if (wrongCode) {
+                                "That isn’t an invite code. Check it against the one you were sent."
+                            } else {
+                                "The code also proves you reached the real server. " +
+                                    "Leave it empty for a server you’ve joined before."
+                            },
+                        )
+                    },
+                    isError = wrongCode,
+                    keyboardOptions = KeyboardOptions(KeyboardCapitalization.Characters, autoCorrectEnabled = false),
+                    singleLine = true,
+                )
+            }
+            MainButton("Join", address.isNotBlank() && !wrongCode, model.connecting != null) {
+                model.connect(address.trim(), code.trim().ifEmpty { null })
+            }
         }
     }
 }
