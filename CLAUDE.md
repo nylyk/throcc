@@ -19,6 +19,8 @@ throcc-client --mock --screen <name>   # sample data, no server; names in `Throc
 packaging/licenses/notices.sh client   # third-party notices the packages ship; needs cargo-about
 packaging/macos/bundle.sh              # macOS: target/macos/throcc.dmg
 packaging/flatpak/cargo-sources.sh     # the flatpak's offline crates, before flatpak-builder
+mobile/ios/build-core.sh               # iOS: ThroccCore.xcframework and the Swift bindings, before Xcode builds
+mobile/android/gradlew -p mobile/android assembleDebug   # Android: builds the core with cargo-ndk, then the APK
 ```
 
 On macOS, building with `--features ffmpeg` needs `FFMPEG_PKG_CONFIG_PATH=$PWD/deps/ffmpeg-lgpl/lib/pkgconfig` (built by `packaging/ffmpeg/build.sh deps/ffmpeg-lgpl`).

@@ -12,6 +12,7 @@ ignore = [
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is unmaintained, not vulnerable; pulled by gpui's reqwest fork, client only" },
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser is unmaintained, not vulnerable; gpui's text stack, client only" },
     { id = "RUSTSEC-2026-0206", reason = "rustybuzz is unmaintained, not vulnerable; gpui-component's text shaping, client only" },
+    { id = "RUSTSEC-2026-0374", reason = "basic-toml is unmaintained, not vulnerable; a proc macro pulled by askama in uniffi's bindings generator, which only runs on the build host behind throcc-mobile's bindgen feature. Not in any library the apps ship" },
 ]
 
 [licenses]
