@@ -70,7 +70,7 @@ private fun PersonCard(model: AppModel, person: Person) {
     } else {
         CardDefaults.cardColors()
     }
-    val ring = if (person.speaking) scheme.primary else Color.Transparent
+    val ring = if (person.speaking) scheme.tertiary else Color.Transparent
     Card({ model.sheet = person.user }, colors = colors) {
         Column(
             Modifier.fillMaxWidth().padding(16.dp),

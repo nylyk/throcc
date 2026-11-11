@@ -24,9 +24,9 @@ struct TrustLabel: View {
 
     var body: some View {
         switch trust {
-        case .keyChanged: Text("Key changed").foregroundStyle(.red)
-        case .unverified: Text("Not verified").foregroundStyle(Color.secondary)
-        case .verified: Text("Verified").foregroundStyle(.green)
+        case .keyChanged: Text("Key changed").foregroundStyle(.bad)
+        case .unverified: Text("Not verified").foregroundStyle(.muted)
+        case .verified: Text("Verified").foregroundStyle(.good)
         }
     }
 }

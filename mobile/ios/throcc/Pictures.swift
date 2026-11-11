@@ -15,9 +15,9 @@ struct Avatar: View {
             } else {
                 Text(name.prefix(1).uppercased())
                     .font(.system(size: size * 0.45, weight: .medium))
-                    .foregroundStyle(Color.secondary)
+                    .foregroundStyle(.muted)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color(.systemFill))
+                    .background(ThemeColor.raised)
             }
         }
         .frame(width: size, height: size)
@@ -35,9 +35,9 @@ struct PersonPicture: View {
         if person.blocked {
             Image(systemName: "nosign")
                 .font(.system(size: size * 0.5))
-                .foregroundStyle(Color.secondary)
+                .foregroundStyle(.muted)
                 .frame(width: size, height: size)
-                .background(Color(.systemFill), in: Circle())
+                .background(ThemeColor.raised, in: Circle())
         } else {
             Avatar(picture: person.avatar.flatMap { model.pictures[$0] }, name: person.name, size: size)
         }

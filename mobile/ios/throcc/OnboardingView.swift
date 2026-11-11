@@ -9,7 +9,7 @@ struct OnboardingView: View {
     var body: some View {
         let check = checkName(typed: name)
         NavigationStack {
-            Form {
+            ThemedForm {
                 Section {
                     PictureEditor(picture: $picture, name: name)
                     TextField("Name", text: $name)
@@ -19,7 +19,7 @@ struct OnboardingView: View {
                     Text("Choose the name people see you as.")
                 } footer: {
                     if let problem = check.problem ?? refusal {
-                        Text(problem).foregroundStyle(.red)
+                        Text(problem).foregroundStyle(.bad)
                     }
                 }
                 Section {

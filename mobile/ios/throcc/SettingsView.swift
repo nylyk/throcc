@@ -6,21 +6,21 @@ struct SettingsView: View {
     var body: some View {
         @Bindable var model = model
         NavigationStack(path: $model.settingsPath) {
-            List {
+            ThemedList {
                 NavigationLink(value: SettingsPage.profile) {
-                    Label("Profile", systemImage: "person.crop.circle")
+                    IconLabel("Profile", symbol: "person.crop.circle")
                 }
                 NavigationLink(value: SettingsPage.appearance) {
-                    Label("Appearance", systemImage: "paintpalette")
+                    IconLabel("Appearance", symbol: "paintpalette")
                 }
                 NavigationLink(value: SettingsPage.verified) {
-                    Label("Verified People", systemImage: "checkmark.shield")
+                    IconLabel("Verified People", symbol: "checkmark.shield")
                 }
                 NavigationLink(value: SettingsPage.blocked) {
-                    Label("Blocked People", systemImage: "nosign")
+                    IconLabel("Blocked People", symbol: "nosign")
                 }
                 NavigationLink(value: SettingsPage.about) {
-                    Label("About", systemImage: "info.circle")
+                    IconLabel("About", symbol: "info.circle")
                 }
             }
             .navigationTitle("Settings")
@@ -47,7 +47,7 @@ private struct ProfilePage: View {
     var body: some View {
         let check = checkName(typed: name)
         let changed = check.name != model.profile?.name || picture != model.profile?.picture
-        Form {
+        ThemedForm {
             Section {
                 PictureEditor(picture: $picture, name: name)
                 TextField("Name", text: $name)
@@ -55,7 +55,7 @@ private struct ProfilePage: View {
                     .autocorrectionDisabled()
             } footer: {
                 if let problem = check.problem {
-                    Text(problem).foregroundStyle(.red)
+                    Text(problem).foregroundStyle(.bad)
                 }
             }
             Section {
@@ -87,7 +87,7 @@ struct SaveStatusText: View {
         switch status {
         case .saving: Text("Saving…")
         case .saved: Text("Saved")
-        case .refused(let reason): Text(reason).foregroundStyle(.red)
+        case .refused(let reason): Text(reason).foregroundStyle(.bad)
         case nil: EmptyView()
         }
     }
@@ -104,7 +104,7 @@ private struct AppearancePage: View {
             model.useAccent(rgb: color.resolve(in: environment).rgb)
         }
         let accents = model.core.accents()
-        List {
+        ThemedList {
             Section("Accent") {
                 ForEach(accents, id: \.name) { accent in
                     Button { model.useAccent(named: accent.name) } label: {
@@ -141,7 +141,7 @@ private struct VerifiedPage: View {
     @State private var blocked: Set<Data> = []
 
     var body: some View {
-        List {
+        ThemedList {
             Section {
                 ForEach(people, id: \.key) { person in
                     HStack {
@@ -149,7 +149,7 @@ private struct VerifiedPage: View {
                             Text(blocked.contains(person.key) ? blockedName() : person.name)
                             Text(person.servers.joined(separator: ", "))
                                 .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.muted)
                         }
                         Spacer()
                         ShortKey(key: person.key)
@@ -185,7 +185,7 @@ private struct BlockedPage: View {
     @State private var people: [BlockedPerson] = []
 
     var body: some View {
-        List {
+        ThemedList {
             Section {
                 ForEach(people, id: \.key) { person in
                     HStack(spacing: 12) {
@@ -195,7 +195,7 @@ private struct BlockedPage: View {
                             if let server = person.server {
                                 Text(server)
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(.muted)
                             }
                         }
                         Spacer()
@@ -227,13 +227,13 @@ struct ShortKey: View {
         Text(fingerprintShort(key: key))
             .font(.caption)
             .monospaced()
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.muted)
     }
 }
 
 private struct AboutPage: View {
     var body: some View {
-        List {
+        ThemedList {
             LabeledContent("Version", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")
             if let source = URL(string: "https://github.com/nylyk/throcc") {
                 Link("Source", destination: source)

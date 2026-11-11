@@ -29,7 +29,7 @@ private struct ServerOverview: View {
             let editable = model.state.permissions?.editServer == true
             let check = checkName(typed: name)
             let changed = check.name != server.name || picture != keptPicture
-            Form {
+            ThemedForm {
                 Section {
                     if editable {
                         PictureEditor(picture: $picture, name: server.title)
@@ -43,7 +43,7 @@ private struct ServerOverview: View {
                     LabeledContent("Address", value: server.address)
                 } footer: {
                     if let problem = check.problem {
-                        Text(problem).foregroundStyle(.red)
+                        Text(problem).foregroundStyle(.bad)
                     }
                 }
                 Section("Fingerprint") {
@@ -86,7 +86,7 @@ private struct MembersPage: View {
 
     var body: some View {
         let state = model.state
-        List {
+        ThemedList {
             Section("\(model.users.count) People") {
                 ForEach(model.users, id: \.id) { user in
                     let editable = user.id != state.me && state.role.map { canRemove(actor: $0, target: user.role) } == true
@@ -101,7 +101,7 @@ private struct MembersPage: View {
                             if let inviter = model.users.first(where: { $0.id == user.invitedBy }) {
                                 Text("Invited by \(inviter.name)")
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(.muted)
                             }
                         }
                         Spacer()
@@ -135,7 +135,7 @@ private struct MembersPage: View {
             }
             .labelsHidden()
         } else {
-            Text(user.role.title).foregroundStyle(.secondary)
+            Text(user.role.title).foregroundStyle(.muted)
         }
     }
 }
@@ -144,7 +144,7 @@ private struct InvitesPage: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        Form {
+        ThemedForm {
             Section {
                 if let code = model.invite {
                     Text(code)
@@ -152,8 +152,8 @@ private struct InvitesPage: View {
                         .monospaced()
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity)
-                    Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = code }
-                    ShareLink(item: code)
+                    Button { UIPasteboard.general.string = code } label: { IconLabel("Copy", symbol: "doc.on.doc") }
+                    ShareLink(item: code) { IconLabel("Share…", symbol: "square.and.arrow.up") }
                 }
                 Button(model.invite == nil ? "Create Code" : "New Code") {
                     model.core.command(command: .createInvite)
@@ -175,14 +175,14 @@ private struct KeysPage: View {
 
     var body: some View {
         let state = model.state
-        List {
+        ThemedList {
             if let server = state.server {
                 Section("This Server") {
                     Text(server.address)
                     Text(fingerprintText(key: server.fingerprint))
                         .font(.footnote)
                         .monospaced()
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.muted)
                         .textSelection(.enabled)
                 }
             }

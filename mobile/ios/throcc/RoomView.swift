@@ -15,6 +15,7 @@ struct RoomView: View {
                 }
                 .padding(16)
             }
+            .background(.bg)
             .navigationTitle(room.name)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -22,11 +23,11 @@ struct RoomView: View {
                     Button("Microphone", systemImage: state.mic ? "mic.fill" : "mic.slash.fill") {
                         model.core.command(command: .setMic(on: !state.mic))
                     }
-                    .tint(state.mic ? nil : .red)
+                    .tint(state.mic ? .primary : model.theme.bad)
                     Button("Sound", systemImage: state.deafened ? "speaker.slash.fill" : "speaker.wave.2.fill") {
                         model.core.command(command: .setDeafened(on: !state.deafened))
                     }
-                    .tint(state.deafened ? .red : nil)
+                    .tint(state.deafened ? model.theme.bad : .primary)
                     Spacer()
                     Button("Leave Room", systemImage: "phone.down.fill") {
                         model.core.command(command: .join(room: nil))
@@ -34,12 +35,17 @@ struct RoomView: View {
                     .tint(.red)
                 }
             }
-        } else if state.server == nil {
-            ContentUnavailableView("Pick a server on the left.", systemImage: "server.rack")
-        } else if state.rooms.isEmpty {
-            ContentUnavailableView("There are no rooms yet.", systemImage: "speaker.wave.2")
         } else {
-            ContentUnavailableView("Join a room on the left.", systemImage: "speaker.wave.2")
+            let (hint, symbol) = if state.server == nil {
+                ("Pick a server on the left.", "server.rack")
+            } else if state.rooms.isEmpty {
+                ("There are no rooms yet.", "speaker.wave.2")
+            } else {
+                ("Join a room on the left.", "speaker.wave.2")
+            }
+            ContentUnavailableView(hint, systemImage: symbol)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(.bg)
         }
     }
 }
@@ -53,26 +59,28 @@ private struct PersonCard: View {
                 .padding(4)
                 .overlay {
                     if person.speaking {
-                        Circle().strokeBorder(.tint, lineWidth: 3)
+                        Circle().strokeBorder(.good, lineWidth: 3)
                     }
                 }
             HStack(spacing: 4) {
                 Text(person.name).lineLimit(1)
                 MutedIcon(person: person).font(.footnote)
             }
-            .foregroundStyle(person.blocked ? .secondary : .primary)
+            .foregroundStyle(person.blocked ? AnyShapeStyle(.muted) : AnyShapeStyle(.primary))
             if let sharing = person.sharing {
                 Text("Sharing \(sharing.label)")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.muted)
                     .lineLimit(1)
             }
         }
         .frame(maxWidth: .infinity, minHeight: 140)
         .padding(8)
-        .background(
-            Color(person.blocked ? .systemGray5 : .secondarySystemBackground),
-            in: .rect(cornerRadius: 16)
-        )
+        .background(person.blocked ? ThemeColor.bg : .panel, in: .rect(cornerRadius: 16))
+        .overlay {
+            if person.blocked {
+                RoundedRectangle(cornerRadius: 16).strokeBorder(.panel)
+            }
+        }
     }
 }

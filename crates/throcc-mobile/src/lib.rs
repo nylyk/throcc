@@ -78,6 +78,19 @@ pub struct Accent {
     pub rgb: u32,
 }
 
+/// The eight colours a theme is made of, each as 0xRRGGBB.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct Palette {
+    pub bg: u32,
+    pub panel: u32,
+    pub text: u32,
+    pub muted: u32,
+    pub accent: u32,
+    pub warning: u32,
+    pub good: u32,
+    pub bad: u32,
+}
+
 /// Someone verified on this install.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct VerifiedPerson {
@@ -239,6 +252,21 @@ impl Core {
         Accent {
             name: name.to_owned(),
             rgb,
+        }
+    }
+
+    /// The colours of the default theme, with the accent in use.
+    pub fn palette(&self) -> Palette {
+        let [bg, panel, text, muted, _, warning, good, bad] = DEFAULT_PALETTE;
+        Palette {
+            bg,
+            panel,
+            text,
+            muted,
+            accent: self.accent().rgb,
+            warning,
+            good,
+            bad,
         }
     }
 

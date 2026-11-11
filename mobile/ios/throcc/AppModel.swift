@@ -38,6 +38,7 @@ final class AppModel {
     let core: Core
     private(set) var profile: Profile?
     private(set) var accent: Accent
+    private(set) var theme: Theme
     private(set) var servers: [KnownServer] = []
     private(set) var state: CoreState
     /// Decoded pictures by the hash the state names them with.
@@ -63,6 +64,7 @@ final class AppModel {
         self.core = core
         profile = core.profile()
         accent = core.accent()
+        theme = Theme(core.palette())
         state = core.state()
         loadServers()
         core.setListener(listener: self)
@@ -87,11 +89,13 @@ final class AppModel {
     func useAccent(named name: String) {
         attempt { try core.setAccent(name: name) }
         accent = core.accent()
+        theme = Theme(core.palette())
     }
 
     func useAccent(rgb: UInt32) {
         attempt { try core.setCustomAccent(rgb: rgb) }
         accent = core.accent()
+        theme = Theme(core.palette())
     }
 
     /// Signs in to the server at `address`, joining it first with the invite `code`, and opens
@@ -104,7 +108,7 @@ final class AppModel {
         connecting = address
         defer { connecting = nil }
         let core = core
-        try await Task.detached { try core.connect(address: address, invite: code) }.value
+        try await Task.detached(priority: .userInitiated) { try core.connect(address: address, invite: code) }.value
         connectedAddress = address
         users = []
         invite = nil

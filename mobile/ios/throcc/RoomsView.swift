@@ -13,7 +13,7 @@ struct RoomsView: View {
         let state = model.state
         let permissions = state.permissions
         let managesRooms = permissions?.manageRooms == true
-        List {
+        ThemedList {
             LostConnectionSection()
             ForEach(state.rooms, id: \.id) { room in
                 Section {
@@ -32,7 +32,7 @@ struct RoomsView: View {
                 }
             }
             if state.rooms.isEmpty, state.connection == .connected {
-                Text("No rooms yet.").foregroundStyle(.secondary)
+                Text("No rooms yet.").foregroundStyle(.muted)
             }
             if state.people.contains(where: { $0.room == nil }) {
                 Section("Lobby") { people(in: nil) }
@@ -43,6 +43,7 @@ struct RoomsView: View {
             if managesRooms {
                 ToolbarItem(placement: .primaryAction) {
                     Button("New Room", systemImage: "plus") { model.sheet = .newRoom }
+                        .tint(.primary)
                 }
             }
             ToolbarItem(placement: .primaryAction) {
@@ -59,6 +60,7 @@ struct RoomsView: View {
                         confirmsLeave = true
                     }
                 }
+                .tint(.primary)
             }
         }
         .alert("Join “\(lockedRoom?.name ?? "")”", isPresented: $asksPassword, presenting: lockedRoom) { room in
@@ -106,7 +108,7 @@ struct RoomsView: View {
     private func label(for room: Room) -> some View {
         HStack {
             Image(systemName: room.locked ? "lock.fill" : "speaker.wave.2.fill")
-                .foregroundStyle(Color.secondary)
+                .foregroundStyle(.muted)
                 .frame(width: 28)
             Text(room.name)
                 .font(.headline)
@@ -154,7 +156,7 @@ private struct LostConnectionSection: View {
                 } icon: {
                     ProgressView()
                 }
-                Text("Lost the connection: \(reason).").foregroundStyle(.secondary)
+                Text("Lost the connection: \(reason).").foregroundStyle(.muted)
             }
         case .awaitingReconnect:
             Section {
@@ -205,7 +207,7 @@ private struct PersonRow: View {
                     MutedIcon(person: person)
                 }
             }
-            .foregroundStyle(Color.secondary)
+            .foregroundStyle(.muted)
         }
     }
 }
@@ -233,12 +235,12 @@ struct RoomEditor: View {
         let check = checkName(typed: name)
         let passwordFits = password.isEmpty || isValidPassword(typed: password)
         NavigationStack {
-            Form {
+            ThemedForm {
                 Section {
                     TextField("Name", text: $name)
                 } footer: {
                     if let problem = check.problem {
-                        Text(problem).foregroundStyle(.red)
+                        Text(problem).foregroundStyle(.bad)
                     }
                 }
                 Section {
@@ -253,7 +255,7 @@ struct RoomEditor: View {
                     if passwordFits {
                         Text(passwordHint)
                     } else {
-                        Text("Passwords can be at most \(limits().passwordChars) characters.").foregroundStyle(.red)
+                        Text("Passwords can be at most \(limits().passwordChars) characters.").foregroundStyle(.bad)
                     }
                 }
             }
@@ -262,6 +264,7 @@ struct RoomEditor: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(role: .cancel) { dismiss() }
+                        .tint(.primary)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(room == nil ? "Create" : "Save") {

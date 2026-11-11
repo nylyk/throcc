@@ -24,12 +24,12 @@ struct PersonView: View {
 
     private func form(for person: Person) -> some View {
         let mine = model.state.me == user
-        return Form {
+        return ThemedForm {
             Section {
                 VStack(spacing: 8) {
                     PersonPicture(person: person, size: 96)
                     Text(person.name).font(.title2.weight(.semibold))
-                    Text(person.role.title).foregroundStyle(.secondary)
+                    Text(person.role.title).foregroundStyle(.muted)
                 }
                 .frame(maxWidth: .infinity)
                 .listRowBackground(Color.clear)
@@ -38,7 +38,7 @@ struct PersonView: View {
                 Button("Unblock") { model.core.command(command: .unblock(user: user)) }
             } else if mine {
                 Text("To verify your safety number with someone, open their profile while they open yours. You have a separate number with each person.")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.muted)
             } else {
                 keyWarning(for: person)
                 trust(in: person)
@@ -72,7 +72,7 @@ struct PersonView: View {
                 }
                 .disabled(keyChangedWhileOpen || shownKey != person.identityKey)
             } header: {
-                Text("\(person.name)’s key changed").foregroundStyle(.red)
+                Text("\(person.name)’s key changed").foregroundStyle(.bad)
             }
         }
     }
@@ -92,7 +92,7 @@ struct PersonView: View {
                 }
                 .disabled(keyChangedWhileOpen || shownKey != person.identityKey)
             } else {
-                Text("Their safety number appears once you share a room.").foregroundStyle(.secondary)
+                Text("Their safety number appears once you share a room.").foregroundStyle(.muted)
             }
         } header: {
             Text("Safety Number")

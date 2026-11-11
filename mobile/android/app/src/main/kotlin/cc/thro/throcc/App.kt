@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -29,7 +30,7 @@ fun App(model: AppModel) {
     LaunchedEffect(model) {
         for (notice in model.notices) snackbars.showSnackbar(notice)
     }
-    ThroccTheme(model.accent.rgb) {
+    ThroccTheme(model.palette) {
         Surface {
             Box(Modifier.fillMaxSize()) {
                 if (model.profile == null) Onboarding(model) else Panes(model, state)
@@ -47,14 +48,17 @@ private fun Panes(model: AppModel, state: CoreState) {
         .isWidthAtLeastBreakpoint(WindowSizeClass.WIDTH_DP_EXPANDED_LOWER_BOUND)
     val roomInFront = !wide && model.roomInFront && state.current != null
     Row(Modifier.fillMaxSize()) {
-        NavDisplay(
-            backStack = if (roomInFront) model.stack + Screen.Room else model.stack,
-            modifier = if (wide) Modifier.width(360.dp) else Modifier.weight(1f),
-            onBack = { if (roomInFront) model.roomInFront = false else model.back() },
-            // NavDisplay keeps an entry until the stack changes, so an entry that captured the state
-            // would show a stale one.
-            entryProvider = { screen -> NavEntry(screen) { Page(model, screen) } },
-        )
+        val scheme = MaterialTheme.colorScheme
+        MaterialTheme(colorScheme = if (wide) sidePane(scheme) else scheme) {
+            NavDisplay(
+                backStack = if (roomInFront) model.stack + Screen.Room else model.stack,
+                modifier = if (wide) Modifier.width(360.dp) else Modifier.weight(1f),
+                onBack = { if (roomInFront) model.roomInFront = false else model.back() },
+                // NavDisplay keeps an entry until the stack changes, so an entry that captured the
+                // state would show a stale one.
+                entryProvider = { screen -> NavEntry(screen) { Page(model, screen) } },
+            )
+        }
         if (wide) Box(Modifier.weight(1f)) { RoomPane(model, state, null) }
     }
 }

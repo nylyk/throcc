@@ -50,6 +50,7 @@ class AppModel(val core: Core, sample: String?) : ViewModel(), Listener {
     var profile by mutableStateOf(core.profile())
         private set
     var accent by mutableStateOf(core.accent())
+    var palette by mutableStateOf(core.palette())
         private set
     var servers by mutableStateOf(emptyList<KnownServer>())
         private set
@@ -151,11 +152,13 @@ class AppModel(val core: Core, sample: String?) : ViewModel(), Listener {
     fun pickAccent(name: String) {
         tell { core.setAccent(name) }
         accent = core.accent()
+        palette = core.palette()
     }
 
     fun pickCustomAccent(rgb: UInt) {
         tell { core.setCustomAccent(rgb) }
         accent = core.accent()
+        palette = core.palette()
     }
 
     /** Whether `action` on the core worked. A failure shows as a notice. */

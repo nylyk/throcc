@@ -6,15 +6,17 @@ struct ServersView: View {
     @State private var confirmsRemoval = false
 
     var body: some View {
-        List(model.servers, id: \.address) { server in
-            Button { model.open(server.address) } label: { row(for: server) }
-                .swipeActions {
-                    Button("Remove") {
-                        removed = server
-                        confirmsRemoval = true
+        ThemedList {
+            ForEach(model.servers, id: \.address) { server in
+                Button { model.open(server.address) } label: { row(for: server) }
+                    .swipeActions {
+                        Button("Remove") {
+                            removed = server
+                            confirmsRemoval = true
+                        }
+                        .tint(.red)
                     }
-                    .tint(.red)
-                }
+            }
         }
         .overlay {
             if model.servers.isEmpty {
@@ -31,9 +33,11 @@ struct ServersView: View {
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 Button("Settings", systemImage: "gearshape") { model.sheet = .settings }
+                    .tint(.primary)
             }
             ToolbarItem(placement: .primaryAction) {
                 Button("Add Server", systemImage: "plus") { model.sheet = .addServer }
+                    .tint(.primary)
             }
         }
         .confirmationDialog(
@@ -56,7 +60,7 @@ struct ServersView: View {
                 if server.name != nil {
                     Text(server.address)
                         .font(.subheadline)
-                        .foregroundStyle(Color.secondary)
+                        .foregroundStyle(.muted)
                 }
             }
             Spacer()
@@ -65,7 +69,7 @@ struct ServersView: View {
             } else if model.connectedAddress == server.address {
                 Text("Connected")
                     .font(.caption)
-                    .foregroundStyle(Color.secondary)
+                    .foregroundStyle(.muted)
             }
         }
     }
@@ -82,7 +86,7 @@ struct AddServerView: View {
         let address = address.trimmingCharacters(in: .whitespaces)
         let joinable = !address.isEmpty && (code.isEmpty || isInviteCode(typed: code))
         NavigationStack {
-            Form {
+            ThemedForm {
                 Section {
                     TextField("Address", text: $address)
                         .keyboardType(.URL)
@@ -95,7 +99,7 @@ struct AddServerView: View {
                 }
                 .autocorrectionDisabled()
                 if let problem {
-                    Text(problem).foregroundStyle(.red)
+                    Text(problem).foregroundStyle(.bad)
                 }
             }
             .navigationTitle("Add Server")
@@ -103,6 +107,7 @@ struct AddServerView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(role: .cancel) { dismiss() }
+                        .tint(.primary)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Join") { join(address) }

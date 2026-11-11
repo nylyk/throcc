@@ -120,7 +120,7 @@ fun Appearance(model: AppModel) {
 
 @Composable
 private fun Swatch(rgb: UInt) {
-    Box(Modifier.size(24.dp).background(accentColor(rgb), CircleShape))
+    Box(Modifier.size(24.dp).background(color(rgb), CircleShape))
 }
 
 @Composable

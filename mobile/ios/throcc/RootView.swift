@@ -3,6 +3,7 @@ import SwiftUI
 struct RootView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.horizontalSizeClass) private var sizeClass
     let sample: Sample?
 
     var body: some View {
@@ -16,6 +17,7 @@ struct RootView: View {
                         ServersView()
                             .navigationDestination(isPresented: $model.showsRooms) { RoomsView() }
                     }
+                    .environment(\.isSidePane, sizeClass == .regular)
                 } detail: {
                     RoomView()
                 }
@@ -23,13 +25,13 @@ struct RootView: View {
                 .sheet(item: $model.sheet) { sheet in
                     content(of: sheet)
                         .modifier(NoticeBanner())
-                        .tint(model.tint)
+                        .modifier(Themed())
                 }
             }
         }
         .modifier(NoticeBanner())
         .alert(model.alert, isPresented: $model.showsAlert) {}
-        .tint(model.tint)
+        .modifier(Themed())
         .task {
             if let sample {
                 await model.show(sample)
@@ -65,7 +67,7 @@ struct NoticeBanner: ViewModifier {
                     .font(.callout)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)
-                    .background(Color(.secondarySystemBackground), in: .capsule)
+                    .background(.raised, in: .capsule)
                     .padding(.horizontal, 16)
                     .task(id: notice) {
                         if (try? await Task.sleep(for: .seconds(4))) != nil {
@@ -83,6 +85,7 @@ struct CloseButton: ToolbarContent {
     var body: some ToolbarContent {
         ToolbarItem(placement: .cancellationAction) {
             Button(role: .close) { model.sheet = nil }
+                .tint(.primary)
         }
     }
 }
