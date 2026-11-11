@@ -1763,11 +1763,16 @@ impl Session {
                     };
                     s.add_person(p.user, updated);
                 });
+                // Only now that they are shown may the key manager count them as here.
+                let notices = self.call.engine.set_presence(p.user, p.room);
+                self.notices(notices);
                 self.refresh_trust();
                 self.follow_room().await;
             }
             ServerEvent::PresenceEnded(user) => {
                 self.room_cue(user, None);
+                let notices = self.call.engine.end_presence(user);
+                self.notices(notices);
                 self.shared.update(|s| {
                     s.people.remove(&user);
                 });

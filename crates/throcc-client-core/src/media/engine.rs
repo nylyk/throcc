@@ -224,7 +224,9 @@ impl MediaEngine {
         notices
     }
 
-    /// Applies a control event that concerns media. Returns key warnings for the user.
+    /// Applies a control event that concerns media, other than a presence, which
+    /// [`Self::set_presence`] and [`Self::end_presence`] take. Returns key warnings for the
+    /// user.
     pub fn event(&self, event: &Event) -> Vec<KeyNotice> {
         match event {
             Event::PeersChanged { room, epoch, peers } => {
@@ -243,8 +245,6 @@ impl MediaEngine {
                 }
                 Vec::new()
             }
-            Event::PresenceChanged(p) => self.set_presence(p.user, p.room),
-            Event::PresenceEnded(user) => self.presence(|keys| keys.end_presence(*user)),
             _ => Vec::new(),
         }
     }
@@ -253,6 +253,12 @@ impl MediaEngine {
     /// in our room.
     pub fn set_presence(&self, user: UserId, room: Option<RoomId>) -> Vec<KeyNotice> {
         self.presence(|keys| keys.set_presence(user, room))
+    }
+
+    /// Forgets `user`, whose presence ended, and applies the room state again when that
+    /// changes who is in our room.
+    pub fn end_presence(&self, user: UserId) -> Vec<KeyNotice> {
+        self.presence(|keys| keys.end_presence(user))
     }
 
     fn presence(&self, change: impl FnOnce(&mut KeyManager) -> bool) -> Vec<KeyNotice> {

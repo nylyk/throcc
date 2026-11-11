@@ -38,23 +38,35 @@ pub struct Call {
     /// The newest epochs we took part in, which the session saves now and then.
     pub floors: EpochFloors,
     connected: Connected,
+    shows_people: bool,
 }
 
 impl Call {
+    /// Starts a call that tells the key manager itself where people are, as their
+    /// presences arrive. For a client that shows nobody.
     pub fn start(link: ControlLink, keystore: &Keystore) -> Result<Self> {
-        Self::start_after(link, keystore, None)
+        Self::start_after(link, keystore, None, false)
+    }
+
+    /// Starts a call for a client that shows who is in a room. The key manager then learns
+    /// where someone is from whoever reads `events`, through the engine's `set_presence`
+    /// and `end_presence`, once that reader shows them there. A reader that is behind
+    /// shows nobody new, so nobody gets our key before they are shown.
+    pub fn start_shown(link: ControlLink, keystore: &Keystore) -> Result<Self> {
+        Self::start_after(link, keystore, None, true)
     }
 
     /// Starts the call that replaces `previous` after a reconnect, keeping the epoch floors
     /// it raised even where they never reached the file.
     pub fn restart(link: ControlLink, keystore: &Keystore, previous: &Call) -> Result<Self> {
-        Self::start_after(link, keystore, Some(previous))
+        Self::start_after(link, keystore, Some(previous), previous.shows_people)
     }
 
     fn start_after(
         link: ControlLink,
         keystore: &Keystore,
         previous: Option<&Call>,
+        shows_people: bool,
     ) -> Result<Self> {
         let ControlLink {
             welcome,
@@ -92,7 +104,14 @@ impl Call {
         let pump_engine = engine.clone();
         tokio::spawn(async move {
             while let Some(event) = server_events.recv().await {
-                let notices = pump_engine.event(&event);
+                let notices = match &event {
+                    Event::PresenceChanged(_) | Event::PresenceEnded(_) if shows_people => {
+                        Vec::new()
+                    }
+                    Event::PresenceChanged(p) => pump_engine.set_presence(p.user, p.room),
+                    Event::PresenceEnded(user) => pump_engine.end_presence(*user),
+                    _ => pump_engine.event(&event),
+                };
                 let trusted = pump_engine.keys().take_newly_trusted();
                 if !trusted.is_empty() {
                     events_tx.send(CallEvent::Trusted(trusted)).await.ok();
@@ -126,6 +145,7 @@ impl Call {
             connection,
             floors,
             connected,
+            shows_people,
         })
     }
 
