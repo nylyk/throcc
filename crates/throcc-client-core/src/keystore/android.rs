@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 use std::ptr;
-use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
 use jni::objects::{JByteArray, JObject, JObjectArray, JString, JValue};
@@ -10,7 +9,6 @@ use zeroize::Zeroizing;
 
 use super::SeedEntry;
 use crate::files::{read_if_exists, replace_file};
-use crate::lock;
 
 const WRAPPED_IDENTITY_FILE: &str = "identity_key.wrapped";
 const KEYSTORE: &str = "AndroidKeyStore";
@@ -18,16 +16,12 @@ const WRAPPING_KEY_ALIAS: &str = "throcc.identity";
 const NONCE_LEN: usize = 12;
 const TAG_BITS: jint = 128;
 
-/// `javax.crypto.Cipher.ENCRYPT_MODE`.
+/// The value of `javax.crypto.Cipher.ENCRYPT_MODE`.
 const ENCRYPT_MODE: jint = 1;
-/// `javax.crypto.Cipher.DECRYPT_MODE`.
+/// The value of `javax.crypto.Cipher.DECRYPT_MODE`.
 const DECRYPT_MODE: jint = 2;
-/// `KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT`.
+/// The value of `KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT`.
 const PURPOSE_ENCRYPT_DECRYPT: jint = 1 | 2;
-
-// A wrapping key made while another call holds one replaces it under the same alias, and
-// the seed that call then writes can never be unwrapped.
-static WRAPPING: Mutex<()> = Mutex::new(());
 
 /// The identity key's seed in a file in `dir`, wrapped with an Android Keystore key.
 pub(super) struct WrappedSeed {
@@ -42,7 +36,6 @@ pub(super) fn identity_entry(dir: &Path) -> Result<Option<WrappedSeed>> {
 
 impl SeedEntry for WrappedSeed {
     fn read(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
-        let _wrapping = lock(&WRAPPING);
         let Some(wrapped) = read_if_exists(&self.path)? else {
             return Ok(None);
         };
@@ -56,8 +49,12 @@ impl SeedEntry for WrappedSeed {
     }
 
     fn write(&self, seed: &[u8]) -> Result<()> {
-        let _wrapping = lock(&WRAPPING);
         let wrapped = with_env(|env| wrap(env, seed))?;
+        if wrapped.len() != NONCE_LEN + seed.len() + TAG_BITS as usize / 8 {
+            bail!(
+                "the Android Keystore sealed the identity key in a shape that can't be read back"
+            );
+        }
         replace_file(&self.path, &wrapped)
     }
 }

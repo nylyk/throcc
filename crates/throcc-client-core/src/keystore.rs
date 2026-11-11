@@ -283,6 +283,11 @@ trait SeedEntry {
 /// The identity key in the OS keychain, put there when it has none. `None` on a platform
 /// without a keychain.
 fn keychain_identity(dir: &Path, when_missing: WhenMissing) -> Result<Option<Found>> {
+    // Two first runs at once would each start an identity, and the one whose write loses
+    // would sign in with a key that is stored nowhere. On Android the later wrapping key
+    // would also replace the earlier one, leaving a seed nothing can unwrap.
+    static OPENING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _opening = crate::lock(&OPENING);
     let Some(entry) = platform::identity_entry(dir)? else {
         return Ok(None);
     };
