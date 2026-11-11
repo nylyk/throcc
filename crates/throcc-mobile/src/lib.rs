@@ -10,9 +10,7 @@ use throcc_client_core::client::{self, Client, ClientApi, MockClient, UiCommand,
 use throcc_client_core::keystore::{self, Keystore};
 use throcc_client_core::profile::Profile as CoreProfile;
 use throcc_client_core::server_look::ServerLook;
-use throcc_client_core::settings::{
-    ACCENT, CUSTOM_THEME, DEFAULT_PALETTE, PRESET_ACCENTS, Settings,
-};
+use throcc_client_core::settings::{CUSTOM_THEME, PRESETS, Settings};
 use throcc_client_core::state::BLOCKED_NAME;
 use throcc_client_core::verified::VerifiedStore;
 use throcc_proto::Fingerprint;
@@ -71,11 +69,11 @@ pub struct KnownServer {
     pub picture: Option<Vec<u8>>,
 }
 
-/// An accent colour by name, as 0xRRGGBB.
+/// A theme by name with its colours.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct Accent {
+pub struct ThemeChoice {
     pub name: String,
-    pub rgb: u32,
+    pub palette: Palette,
 }
 
 /// The eight colours a theme is made of, each as 0xRRGGBB.
@@ -89,6 +87,62 @@ pub struct Palette {
     pub warning: u32,
     pub good: u32,
     pub bad: u32,
+}
+
+impl Palette {
+    fn colors(self) -> [u32; 8] {
+        [
+            self.bg,
+            self.panel,
+            self.text,
+            self.muted,
+            self.accent,
+            self.warning,
+            self.good,
+            self.bad,
+        ]
+    }
+}
+
+impl From<[u32; 8]> for Palette {
+    fn from([bg, panel, text, muted, accent, warning, good, bad]: [u32; 8]) -> Self {
+        Self {
+            bg,
+            panel,
+            text,
+            muted,
+            accent,
+            warning,
+            good,
+            bad,
+        }
+    }
+}
+
+impl From<&(&str, [u32; 8])> for ThemeChoice {
+    fn from((name, colors): &(&str, [u32; 8])) -> Self {
+        Self {
+            name: (*name).to_owned(),
+            palette: Palette::from(*colors),
+        }
+    }
+}
+
+/// The preset called `name`, ignoring case.
+fn preset(name: &str) -> Option<ThemeChoice> {
+    let preset = PRESETS
+        .iter()
+        .find(|(preset, _)| preset.eq_ignore_ascii_case(name));
+    preset.map(ThemeChoice::from)
+}
+
+/// The eight `#rrggbb` colours of a saved Custom theme.
+fn saved_custom(colors: Option<&[String]>) -> Option<Palette> {
+    let colors: Vec<u32> = colors?
+        .iter()
+        .map(|color| u32::from_str_radix(color.trim().trim_start_matches('#'), 16).ok())
+        .collect::<Option<_>>()?;
+    Some(Palette::from(<[u32; 8]>::try_from(colors).ok()?))
 }
 
 /// Someone verified on this install.
@@ -222,70 +276,49 @@ impl Core {
         Ok(())
     }
 
-    /// The accents to pick from. The first is the default.
-    pub fn accents(&self) -> Vec<Accent> {
-        let accents = PRESET_ACCENTS.iter().map(|(name, rgb)| Accent {
-            name: (*name).to_owned(),
-            rgb: *rgb,
-        });
-        accents.collect()
+    /// The preset themes to pick from. The first is the default.
+    pub fn themes(&self) -> Vec<ThemeChoice> {
+        PRESETS.iter().map(ThemeChoice::from).collect()
     }
 
-    /// The accent in use: a preset, or a colour of the user's own under the name "Custom".
-    pub fn accent(&self) -> Accent {
+    /// The theme in use: a preset, or the user's own colours under the name "Custom".
+    pub fn theme(&self) -> ThemeChoice {
         let settings = lock(&self.settings);
         let appearance = &settings.appearance;
-        let custom = || {
-            let rgb = appearance.palette.as_ref()?.get(ACCENT)?;
-            let rgb = u32::from_str_radix(rgb.trim_start_matches('#'), 16).ok()?;
-            Some((CUSTOM_THEME, rgb))
-        };
-        let (name, rgb) = match appearance.theme.as_deref() {
-            Some(CUSTOM_THEME) => custom(),
-            Some(name) => PRESET_ACCENTS
-                .iter()
-                .find(|(preset, _)| preset.eq_ignore_ascii_case(name))
-                .copied(),
+        let picked = match appearance.theme.as_deref() {
+            Some(CUSTOM_THEME) => {
+                saved_custom(appearance.palette.as_deref()).map(|palette| ThemeChoice {
+                    name: CUSTOM_THEME.to_owned(),
+                    palette,
+                })
+            }
+            Some(name) => preset(name),
             None => None,
-        }
-        .unwrap_or(PRESET_ACCENTS[0]);
-        Accent {
-            name: name.to_owned(),
-            rgb,
-        }
+        };
+        picked.unwrap_or_else(|| ThemeChoice::from(&PRESETS[0]))
     }
 
-    /// The colours of the default theme, with the accent in use.
-    pub fn palette(&self) -> Palette {
-        let [bg, panel, text, muted, _, warning, good, bad] = DEFAULT_PALETTE;
-        Palette {
-            bg,
-            panel,
-            text,
-            muted,
-            accent: self.accent().rgb,
-            warning,
-            good,
-            bad,
-        }
+    /// The colours the Custom theme starts from: the user's own once saved, else the
+    /// picked theme's.
+    pub fn custom_palette(&self) -> Palette {
+        let saved = saved_custom(lock(&self.settings).appearance.palette.as_deref());
+        saved.unwrap_or_else(|| self.theme().palette)
     }
 
-    /// Picks the preset accent called `name`.
-    pub fn set_accent(&self, name: String) -> Result<(), CoreError> {
-        if !PRESET_ACCENTS.iter().any(|(preset, _)| *preset == name) {
-            return Err(anyhow!("there is no accent called {name}").into());
-        }
-        self.change_settings(|settings| settings.appearance.theme = Some(name))
+    /// Picks the preset theme called `name`.
+    pub fn set_theme(&self, name: String) -> Result<(), CoreError> {
+        let theme = preset(&name).with_context(|| format!("there is no theme called {name}"))?;
+        self.change_settings(|settings| settings.appearance.theme = Some(theme.name))
     }
 
-    /// Picks an accent of the user's own, as 0xRRGGBB.
-    pub fn set_custom_accent(&self, rgb: u32) -> Result<(), CoreError> {
-        let mut palette = DEFAULT_PALETTE;
-        palette[ACCENT] = rgb & 0xFF_FFFF;
-        let palette = palette.iter().map(|rgb| format!("#{rgb:06X}")).collect();
+    /// Picks the Custom theme with `palette` as its colours.
+    pub fn set_custom_theme(&self, palette: Palette) -> Result<(), CoreError> {
+        let colors = palette
+            .colors()
+            .map(|rgb| format!("#{:06X}", rgb & 0xFF_FFFF));
         self.change_settings(|settings| {
             settings.appearance.theme = Some(CUSTOM_THEME.to_owned());
-            settings.appearance.palette = Some(palette);
+            settings.appearance.palette = Some(colors.to_vec());
         })
     }
 
@@ -740,7 +773,7 @@ mod tests {
     }
 
     #[test]
-    fn the_mock_keeps_a_profile_and_an_accent_in_memory() {
+    fn the_mock_keeps_a_profile_and_a_theme_in_memory() {
         let core = Core::mock(false);
         assert_eq!(core.profile(), None);
         assert!(core.connect("owls.thro.cc".into(), None).is_err());
@@ -751,13 +784,21 @@ mod tests {
         core.set_profile(profile).unwrap();
         assert_eq!(core.profile().unwrap().name, "mara");
 
-        assert_eq!(core.accent(), core.accents()[0]);
-        core.set_accent("Tide".into()).unwrap();
-        assert_eq!(core.accent().rgb, 0x5CC8E8);
-        core.set_custom_accent(0x12_3456).unwrap();
-        let custom = core.accent();
-        assert_eq!((custom.name.as_str(), custom.rgb), ("Custom", 0x12_3456));
-        assert!(core.set_accent("Nope".into()).is_err());
+        assert_eq!(core.theme(), core.themes()[0]);
+        core.set_theme("tide".into()).unwrap();
+        assert_eq!(core.theme().name, "Tide");
+        assert_eq!(core.custom_palette().accent, 0x5CC8E8);
+        let own = Palette {
+            accent: 0x12_3456,
+            ..core.theme().palette
+        };
+        core.set_custom_theme(own).unwrap();
+        assert_eq!(core.theme().name, "Custom");
+        assert_eq!(core.theme().palette, own);
+        assert_eq!(core.custom_palette(), own);
+        core.set_theme("Paper".into()).unwrap();
+        assert_eq!(core.custom_palette(), own);
+        assert!(core.set_theme("Nope".into()).is_err());
     }
 
     #[test]

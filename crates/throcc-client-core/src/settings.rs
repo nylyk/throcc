@@ -103,21 +103,52 @@ impl json_file::Format for Settings {
     }];
 }
 
-/// The eight colours of the default theme, in the order [`Appearance::palette`] keeps them.
-pub const DEFAULT_PALETTE: [u32; 8] = [
-    0x0C0D11, 0x14161D, 0xECEDF3, 0x8E92A6, 0xD07A93, 0xFFB86B, 0x5BE3A4, 0xFF6B85,
-];
-/// Where the accent sits in a palette.
-pub const ACCENT: usize = 4;
-/// The preset themes by name with their accents. The first is the default.
-pub const PRESET_ACCENTS: [(&str, u32); 7] = [
-    ("Ink", 0xD07A93),
-    ("Moss", 0x7FD1A8),
-    ("Dusk", 0xFF8FB8),
-    ("Tide", 0x5CC8E8),
-    ("Ember", 0xFF9A5C),
-    ("Paper", 0x5B4BDB),
-    ("Sand", 0x1E7F86),
+/// The preset themes by name, each as its eight colours in the order
+/// [`Appearance::palette`] keeps them: background, panel, text, muted text, accent,
+/// warning, good and bad. The first is the default.
+pub const PRESETS: [(&str, [u32; 8]); 7] = [
+    (
+        "Ink",
+        [
+            0x0C0D11, 0x14161D, 0xECEDF3, 0x8E92A6, 0xD07A93, 0xFFB86B, 0x5BE3A4, 0xFF6B85,
+        ],
+    ),
+    (
+        "Moss",
+        [
+            0x0F1411, 0x161D18, 0xE8EFE9, 0x8C9A90, 0x7FD1A8, 0xE8C468, 0x8BE07D, 0xF0786E,
+        ],
+    ),
+    (
+        "Dusk",
+        [
+            0x15101A, 0x1E1724, 0xF1EAF4, 0x9C8FA6, 0xFF8FB8, 0xFFC285, 0x7FE0C4, 0xFF6F6F,
+        ],
+    ),
+    (
+        "Tide",
+        [
+            0x0B1218, 0x111B23, 0xE6EEF3, 0x8798A6, 0x5CC8E8, 0xF2B55E, 0x5FD9A0, 0xF2727F,
+        ],
+    ),
+    (
+        "Ember",
+        [
+            0x14100D, 0x1D1814, 0xF2ECE6, 0xA0958A, 0xFF9A5C, 0xF5D06B, 0x8FD88A, 0xFF6B6B,
+        ],
+    ),
+    (
+        "Paper",
+        [
+            0xF2F4F7, 0xFFFFFF, 0x1C1B22, 0x6B6878, 0x5B4BDB, 0xD9822B, 0x1F9D6A, 0xD9445E,
+        ],
+    ),
+    (
+        "Sand",
+        [
+            0xF3EEDF, 0xFCF9EE, 0x24201A, 0x756C5F, 0x1E7F86, 0xC07A1F, 0x4A8B3A, 0xC8414F,
+        ],
+    ),
 ];
 /// The name [`Appearance::theme`] has while [`Appearance::palette`] holds the colours.
 pub const CUSTOM_THEME: &str = "Custom";

@@ -10,8 +10,8 @@ Native iOS and Android clients on top of `throcc-client-core`. Same servers, sam
 | Frontends | iOS in Swift and SwiftUI. Android in Kotlin and Jetpack Compose with Material 3 Expressive |
 | Minimum OS | iOS 26 (Liquid Glass everywhere). Android 12, API 31 (about 78% of devices in Oct 2026) |
 | Devices supported | Phones and tablets: iPhone and iPad, Android phones and tablets. Wide windows show two panes, such as the room list beside the room; narrow ones collapse to one |
-| Look | Native components, system font, system mono for keys, fingerprints, safety numbers and invite codes. System colours, except the accent |
-| Accent | Pickable: the desktop presets' accents plus a custom colour. The default matches the desktop default |
+| Look | Native components and the system font, with system mono for keys, fingerprints, safety numbers and invite codes. The colours are the desktop's: the picked theme's eight colours, and what the apps mix from them |
+| Theme | Pickable as on desktop: the seven presets, or a Custom theme of the user's own eight colours. The default is the desktop default. The picked theme decides light or dark |
 | Features | Voice, rooms, watching shares and sending shares on both platforms. Room admin, profiles and verification as on desktop |
 | Talking | Voice activity with a mute toggle. No push-to-talk |
 | Echo | The platform's voice-processing I/O: VoiceProcessingIO on iOS, `VOICE_COMMUNICATION` on Android. sonora's echo canceller is skipped there |

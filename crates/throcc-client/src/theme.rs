@@ -601,13 +601,11 @@ mod tests {
     }
 
     #[test]
-    fn the_core_knows_the_presets_accents_and_the_default_palette() {
-        use throcc_client_core::settings::{ACCENT, CUSTOM_THEME, DEFAULT_PALETTE, PRESET_ACCENTS};
-        let accents = PRESETS.map(|(name, palette)| (name, palette.accent));
-        assert_eq!(accents, PRESET_ACCENTS);
-        assert_eq!(PRESETS[0].1.colors(), DEFAULT_PALETTE);
-        assert_eq!(Palette::LABELS[ACCENT], "Accent");
-        assert_eq!(CUSTOM, CUSTOM_THEME);
+    fn the_core_holds_the_same_presets() {
+        use throcc_client_core::settings;
+        let presets = PRESETS.map(|(name, palette)| (name, palette.colors()));
+        assert_eq!(presets, settings::PRESETS);
+        assert_eq!(CUSTOM, settings::CUSTOM_THEME);
     }
 
     #[test]
