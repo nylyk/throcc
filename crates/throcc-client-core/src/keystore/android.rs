@@ -42,10 +42,7 @@ impl SeedEntry for WrappedSeed {
         let Some((nonce, sealed)) = wrapped.split_at_checked(NONCE_LEN) else {
             bail!("the stored identity key is corrupt");
         };
-        match with_env(|env| unwrap(env, nonce, sealed))? {
-            Some(seed) => Ok(Some(seed)),
-            None => bail!("the Android Keystore lost the key that wraps the identity key"),
-        }
+        with_env(|env| unwrap(env, nonce, sealed))
     }
 
     fn write(&self, seed: &[u8]) -> Result<()> {
