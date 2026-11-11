@@ -585,11 +585,12 @@ pub fn spawn(connection: quinn::Connection, control: mpsc::Sender<Outbound>) -> 
                 }
             }
             match queues.pop() {
-                Some(bytes) => {
-                    if connection.send_datagram_wait(bytes).await.is_err() {
-                        return;
-                    }
-                }
+                // A datagram too large for this receiver's path is its own loss; only a
+                // connection that is gone ends the task, which nothing would restart.
+                Some(bytes) => match connection.send_datagram_wait(bytes).await {
+                    Ok(()) | Err(quinn::SendDatagramError::TooLarge) => {}
+                    Err(_) => return,
+                },
                 None => {
                     let wait = next_stats.saturating_duration_since(Instant::now());
                     match tokio::time::timeout(wait, rx.recv()).await {
