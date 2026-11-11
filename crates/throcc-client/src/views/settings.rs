@@ -16,6 +16,7 @@ use throcc_client_core::media::voice::MicLevel;
 use throcc_client_core::settings::{
     AudioSettings, DEFAULT_GATE_DBFS, NoiseSuppression, Transmit, VoiceSettings,
 };
+use throcc_client_core::state::BLOCKED_NAME;
 use throcc_proto::Fingerprint;
 
 use super::common::{
@@ -575,7 +576,11 @@ fn verified(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .child(div().truncate().child(person.name.clone()))
+                    .child(div().truncate().child(if app.blocked.is_blocked(&key.0) {
+                        BLOCKED_NAME.to_owned()
+                    } else {
+                        person.name.clone()
+                    }))
                     .child(
                         div()
                             .child(servers.join(", "))

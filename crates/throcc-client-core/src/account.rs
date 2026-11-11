@@ -4,7 +4,7 @@ use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::Request;
 use tracing::warn;
 
-use crate::connection::{self, ConnectError};
+use crate::connection::{self, ConnectError, Connected};
 use crate::control::{self, ControlLink, LinkError, LoginError, Requester};
 use crate::floors::EpochFloors;
 use crate::keystore::{IdentityMissing, Keystore};
@@ -48,11 +48,26 @@ pub async fn sign_in(
     address: &str,
     want_room: Option<RoomId>,
 ) -> Result<ControlLink, SignInError> {
+    let connected = reach(keystore, address).await?;
+    sign_in_over(keystore, connected, want_room).await
+}
+
+/// Connects to a server this install has enrolled with, checking its pinned key. Nobody
+/// is signed in yet, so no other device of ours is pushed off.
+pub async fn reach(keystore: &Keystore, address: &str) -> Result<Connected, SignInError> {
     let pin = keystore
         .known_servers
         .get(address)
         .ok_or_else(|| SignInError::NotEnrolled(address.to_owned()))?;
-    let connected = connection::connect(address, Some(pin)).await?;
+    Ok(connection::connect(address, Some(pin)).await?)
+}
+
+/// Signs in over `connected`, then publishes the encryption key.
+pub async fn sign_in_over(
+    keystore: &Keystore,
+    connected: Connected,
+    want_room: Option<RoomId>,
+) -> Result<ControlLink, SignInError> {
     let link = control::login(connected, keystore.identity(), want_room).await?;
     let server = &link.connected.fingerprint;
     publish_encryption_key(keystore, &link.requester, server, link.welcome.me).await?;

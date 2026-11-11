@@ -248,9 +248,9 @@ pub(crate) struct Session {
     server_share: Option<ShareConfig>,
     /// The peers our key is wrapped to, whose tracks we follow.
     peers: BTreeMap<UserId, Peer>,
-    /// Everyone's presence as the server last gave it. A blocked person's name and picture
+    /// Who the state shows, as the server names them. A blocked person's name and picture
     /// are kept here only.
-    presences: HashMap<UserId, Presence>,
+    shown: HashMap<UserId, Shown>,
     blocked: BlockedStore,
     trust: Trust,
     watching: Vec<UserId>,
@@ -361,6 +361,17 @@ struct LastCounts {
     udp_sent: u64,
 }
 
+/// Someone the state shows, as the server names them.
+struct Shown {
+    /// The identity key the server names for them, which blocks follow.
+    key: PublicKey,
+    name: String,
+    avatar: Option<Hash>,
+    /// Whether they are shown, played and watched as blocked. Only
+    /// [`Session::show_blocked`] changes it, together with what plays.
+    blocked: bool,
+}
+
 /// The lists a session shares with the app that started it.
 pub(crate) struct Lists {
     pub verified: VerifiedStore,
@@ -401,7 +412,7 @@ impl Session {
             },
             server_share: None,
             peers: BTreeMap::new(),
-            presences: HashMap::new(),
+            shown: HashMap::new(),
             blocked,
             trust: Trust::new(server, verified),
             watching: Vec::new(),
@@ -710,7 +721,7 @@ impl Session {
                             });
                             break;
                         }
-                        Some(UiCommand::Reconnect) => {}
+                        Some(UiCommand::Reconnect) => self.last_alive = SystemTime::now(),
                         Some(UiCommand::Join(room)) => want_room = room,
                         // Asked again on the next render once connected.
                         Some(UiCommand::FetchAvatar(hash)) => self.shared.forget_avatar(hash),
@@ -731,8 +742,9 @@ impl Session {
             if let Err(e) = self.keystore.renew_encryption_key_if_due() {
                 warn!("renewing the encryption key: {e:#}");
             }
-            let link = match account::sign_in(&self.keystore, &self.address, want_room).await {
-                Ok(link) => link,
+            let link = match self.sign_in_unless_stale(want_room).await {
+                Ok(Some(link)) => link,
+                Ok(None) => continue,
                 Err(e) => {
                     let fatal = match &e {
                         SignInError::Login(LoginError::Refused(reason))
@@ -792,6 +804,23 @@ impl Session {
         None
     }
 
+    /// Signs in again, or returns `None` where the link went stale while the server was
+    /// being reached: a machine that fell asleep mid-connect finishes connecting on waking.
+    async fn sign_in_unless_stale(
+        &self,
+        want_room: Option<RoomId>,
+    ) -> Result<Option<control::ControlLink>, SignInError> {
+        let connected = account::reach(&self.keystore, &self.address).await?;
+        if went_stale(self.last_alive, SystemTime::now()) {
+            connected
+                .connection
+                .close(close::NORMAL.into(), b"asleep too long");
+            return Ok(None);
+        }
+        let link = account::sign_in_over(&self.keystore, connected, want_room).await?;
+        Ok(Some(link))
+    }
+
     /// Leaves our room here after the server took us out of it.
     fn put_out_of_room(&mut self) {
         self.call.engine.apply_placement(&Placement {
@@ -830,15 +859,10 @@ impl Session {
         self.remember_server(welcome.server.name.clone(), welcome.server.avatar);
         let address = self.address.clone();
         let media = self.media;
-        self.presences = welcome
-            .presence
-            .iter()
-            .map(|p| (p.user, p.clone()))
-            .collect();
         let people: Vec<Person> = welcome
             .presence
             .iter()
-            .map(|p| person(p, self.playback_of(p.user), self.is_blocked(p.user)))
+            .map(|p| person(p, self.playback_of(p.user), self.blocks(p)))
             .collect();
         self.shared.update(move |s| {
             s.mic = media.mic;
@@ -862,6 +886,12 @@ impl Session {
             }
             s.current = None;
         });
+        let state = self.shared.state();
+        let shown = welcome.presence.iter().filter_map(|p| {
+            let person = state.person(p.user)?;
+            Some((p.user, shown_as(p, person)))
+        });
+        self.shown = shown.collect();
         // The key manager hears of people only from what is shown, here and as presences
         // change, so it can trust nobody the state leaves out.
         let state = self.shared.state();
@@ -1129,13 +1159,31 @@ impl Session {
         }
     }
 
-    /// Whether the user blocked the identity key the server names for `user`.
+    /// The server's users as listed: a blocked one without their name.
+    fn shown_users(&self, users: Vec<User>) -> Vec<User> {
+        let me = self.call.me();
+        let name = |user: &User| {
+            if user.id != me && self.blocked.is_blocked(&user.identity_key) {
+                BLOCKED_NAME.to_owned()
+            } else {
+                person_name(user.id, &user.name)
+            }
+        };
+        let shown = users.into_iter().map(|user| User {
+            name: name(&user),
+            ..user
+        });
+        shown.collect()
+    }
+
+    /// Whether `user` is shown, played and watched as blocked.
     fn is_blocked(&self, user: UserId) -> bool {
-        user != self.call.me()
-            && self
-                .presences
-                .get(&user)
-                .is_some_and(|p| self.blocked.is_blocked(&p.identity_key))
+        self.shown.get(&user).is_some_and(|shown| shown.blocked)
+    }
+
+    /// Whether the user blocked the identity key the server names in `presence`.
+    fn blocks(&self, presence: &Presence) -> bool {
+        presence.user != self.call.me() && self.blocked.is_blocked(&presence.identity_key)
     }
 
     /// Plays `sound` of `user` at `level`, or not at all while they are blocked.
@@ -1146,27 +1194,28 @@ impl Session {
 
     /// Shows, plays and watches everyone as the blocked list now says.
     async fn show_blocked(&mut self) {
-        let state = self.shared.state();
-        let changed: Vec<UserId> = state
-            .people
-            .iter()
-            .filter(|(user, p)| p.blocked != self.is_blocked(**user))
-            .map(|(user, _)| *user)
-            .collect();
+        let me = self.call.me();
+        let mut changed = Vec::new();
+        for (user, shown) in &mut self.shown {
+            let blocked = *user != me && self.blocked.is_blocked(&shown.key);
+            if shown.blocked != blocked {
+                shown.blocked = blocked;
+                changed.push(*user);
+            }
+        }
         if changed.is_empty() {
             return;
         }
         self.shared.update(|s| {
             for user in &changed {
-                if let (Some(shown), Some(p)) = (s.people.get_mut(user), self.presences.get(user)) {
-                    let playback = shown.playback;
-                    let blocked = !shown.blocked;
-                    *shown = Person {
-                        speaking: shown.speaking && !blocked,
-                        audience: shown.audience,
-                        verified: shown.verified,
-                        identity_key: shown.identity_key,
-                        ..person(p, playback, blocked)
+                if let (Some(person), Some(shown)) = (s.people.get_mut(user), self.shown.get(user))
+                {
+                    person.blocked = shown.blocked;
+                    person.speaking &= !shown.blocked;
+                    (person.name, person.avatar) = if shown.blocked {
+                        (BLOCKED_NAME.to_owned(), None)
+                    } else {
+                        (shown.name.clone(), shown.avatar)
                     };
                 }
             }
@@ -1338,7 +1387,9 @@ impl Session {
                 other => self.refused(other),
             },
             UiCommand::ListUsers => match self.call.request(Request::ListUsers).await {
-                Ok(Response::Users(users)) => self.shared.emit(UiEvent::Users(shown_users(users))),
+                Ok(Response::Users(users)) => {
+                    self.shared.emit(UiEvent::Users(self.shown_users(users)))
+                }
                 other => self.refused(other),
             },
             UiCommand::SetRole(user, role) => {
@@ -1373,11 +1424,11 @@ impl Session {
             UiCommand::VerifiedChanged => self.refresh_trust(),
             UiCommand::Block(user) => {
                 let me = self.call.me();
-                if let Some(p) = self.presences.get(&user).filter(|_| user != me) {
+                if let Some(shown) = self.shown.get(&user).filter(|_| user != me) {
                     let person = BlockedPerson {
-                        key: Fingerprint(p.identity_key),
-                        name: person_name(user, &p.name),
-                        avatar: p.avatar,
+                        key: Fingerprint(shown.key),
+                        name: shown.name.clone(),
+                        avatar: shown.avatar,
                         server: Some(self.call.server()),
                     };
                     match self.blocked.block(person) {
@@ -1387,15 +1438,15 @@ impl Session {
                 }
             }
             UiCommand::Unblock(user) => {
-                if let Some(p) = self.presences.get(&user) {
-                    match self.blocked.unblock(&Fingerprint(p.identity_key)) {
+                if let Some(shown) = self.shown.get(&user) {
+                    match self.blocked.unblock(&Fingerprint(shown.key)) {
                         Ok(()) => self.show_blocked().await,
                         Err(e) => self.shared.notice(format!("Couldn't unblock them: {e:#}")),
                     }
                 }
             }
             UiCommand::BlockedChanged => self.show_blocked().await,
-            UiCommand::Reconnect => {}
+            UiCommand::Reconnect => self.last_alive = SystemTime::now(),
             UiCommand::LeaveServer => {
                 if self.leave_server().await {
                     return ControlFlow::Break(());
@@ -1413,7 +1464,7 @@ impl Session {
 
     async fn list_users(&mut self) {
         if let Ok(Response::Users(users)) = self.call.request(Request::ListUsers).await {
-            self.shared.emit(UiEvent::Users(shown_users(users)));
+            self.shared.emit(UiEvent::Users(self.shown_users(users)));
         }
     }
 
@@ -1907,8 +1958,12 @@ impl Session {
             }
             ServerEvent::PresenceChanged(p) => {
                 self.room_cue(p.user, p.room);
-                self.presences.insert(p.user, p.clone());
-                let blocked = self.is_blocked(p.user);
+                // A presence keeps the block it is shown with, so what plays never parts
+                // from what shows; `show_blocked` follows the list.
+                let blocked = match self.shown.get(&p.user) {
+                    Some(shown) => shown.blocked,
+                    None => self.blocks(&p),
+                };
                 let (verified, identity_key) = self.trust.of(p.user);
                 let playback = self.playback_of(p.user);
                 let sharing = self.sharing_of(p.user);
@@ -1927,8 +1982,16 @@ impl Session {
                 });
                 // The key manager counts as here only who is shown, where they are shown.
                 let notices = match self.shared.state().person(p.user) {
-                    Some(shown) => self.call.engine.set_presence(p.user, shown.room),
-                    None => self.call.engine.end_presence(p.user),
+                    Some(person) => {
+                        let mut shown = shown_as(&p, person);
+                        shown.blocked = blocked;
+                        self.shown.insert(p.user, shown);
+                        self.call.engine.set_presence(p.user, person.room)
+                    }
+                    None => {
+                        self.shown.remove(&p.user);
+                        self.call.engine.end_presence(p.user)
+                    }
                 };
                 self.notices(notices);
                 self.refresh_trust();
@@ -1936,7 +1999,7 @@ impl Session {
             }
             ServerEvent::PresenceEnded(user) => {
                 self.room_cue(user, None);
-                self.presences.remove(&user);
+                self.shown.remove(&user);
                 let notices = self.call.engine.end_presence(user);
                 self.notices(notices);
                 self.shared.update(|s| {
@@ -2152,15 +2215,14 @@ fn drop_unwanted_share(started: StartResult) {
     }
 }
 
-/// `users` with their names as shown.
-fn shown_users(users: Vec<User>) -> Vec<User> {
-    users
-        .into_iter()
-        .map(|user| User {
-            name: person_name(user.id, &user.name),
-            ..user
-        })
-        .collect()
+/// What is kept of `presence` beside the `person` the state shows for it.
+fn shown_as(presence: &Presence, person: &Person) -> Shown {
+    Shown {
+        key: presence.identity_key,
+        name: person_name(presence.user, &presence.name),
+        avatar: presence.avatar,
+        blocked: person.blocked,
+    }
 }
 
 /// Whether a link last seen up at `last_alive` has been down too long to sign in unasked.

@@ -92,7 +92,8 @@ pub enum UiCommand {
     BlockedChanged,
     /// Ends our membership of this server and forgets it, then disconnects.
     LeaveServer,
-    /// Signs in again once the session waits in [`ConnectionStatus::AwaitingReconnect`].
+    /// Says the user is here and wants the link: signs in again from
+    /// [`ConnectionStatus::AwaitingReconnect`], and lets the next reconnect go unasked.
     Reconnect,
     Disconnect,
 }
