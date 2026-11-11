@@ -1,5 +1,6 @@
 pub mod account;
 pub mod avatars;
+pub mod blocked;
 pub mod call;
 pub mod client;
 pub mod connection;

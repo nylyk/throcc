@@ -303,6 +303,7 @@ fn voice_call(
     input: Option<String>,
     output: Option<String>,
 ) -> Result<()> {
+    use throcc_client_core::blocked::BlockedStore;
     use throcc_client_core::client::{Client, ClientApi, UiCommand, UiEvent};
     use throcc_client_core::media::voice::AudioEngine;
     use throcc_client_core::state::ConnectionStatus;
@@ -321,9 +322,13 @@ fn voice_call(
         eprintln!("Couldn't read who you verified ({e:#}), so everyone shows as not verified.");
         VerifiedStore::empty(keystore.dir())
     });
+    let blocked = BlockedStore::load(keystore.dir()).unwrap_or_else(|e| {
+        eprintln!("Couldn't read who you blocked ({e:#}), so nobody is blocked.");
+        BlockedStore::empty(keystore.dir())
+    });
     let profile = load_profile(&keystore, None)?;
     let profile = tokio::sync::watch::channel(profile).1;
-    let client = Client::connect(address, keystore, None, profile, audio, verified)?;
+    let client = Client::connect(address, keystore, None, profile, audio, verified, blocked)?;
     let state = client.state();
     let rooms = state.rooms.iter().map(|r| (r.id, r.name.as_str()));
     let room = find_room(rooms, room)?;

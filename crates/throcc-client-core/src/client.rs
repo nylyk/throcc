@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -12,17 +12,18 @@ use tracing::warn;
 
 use crate::account::{self, SignInError};
 use crate::avatars;
+use crate::blocked::BlockedStore;
 use crate::call::Call;
 use crate::keystore::Keystore;
 use crate::media::video::frame::VideoFrame;
 use crate::media::video::{Frame, Picture};
 use crate::media::voice::AudioEngine;
 use crate::profile::Profile;
-use crate::session::{AvatarSlot, Session, Shared};
+use crate::session::{AvatarSlot, Lists, Session, Shared};
 use crate::state::{
-    ConnectionStatus, CurrentRoom, Health, MIC_KBPS, Person, Playback, RoomView,
-    SHARE_AUDIO_DETAIL, SHARE_AUDIO_KBPS, SentTrack, ServerView, Sound, SoundLevel, State,
-    TrackHealth, VOICE_DETAIL, share_detail,
+    BLOCKED_NAME, BlockedPerson, ConnectionStatus, CurrentRoom, Health, MIC_KBPS, Person, Playback,
+    RoomView, SHARE_AUDIO_DETAIL, SHARE_AUDIO_KBPS, SentTrack, ServerView, Sound, SoundLevel,
+    State, TrackHealth, VOICE_DETAIL, share_detail,
 };
 use crate::verified::VerifiedStore;
 
@@ -83,6 +84,12 @@ pub enum UiCommand {
     /// Shows who is verified again, after a change to the [`VerifiedStore`] made outside
     /// the client.
     VerifiedChanged,
+    /// Blocks whoever holds the identity key the server names for this user, on every
+    /// server. They stay in their room, unnamed, unheard and with their shares left out.
+    Block(UserId),
+    Unblock(UserId),
+    /// Tells the core the blocked list changed outside this session, as in settings.
+    BlockedChanged,
     /// Ends our membership of this server and forgets it, then disconnects.
     LeaveServer,
     /// Signs in again once the session waits in [`ConnectionStatus::AwaitingReconnect`].
@@ -157,6 +164,7 @@ impl Client {
         profile: watch::Receiver<Profile>,
         audio: Option<Arc<AudioEngine>>,
         verified: VerifiedStore,
+        blocked: BlockedStore,
     ) -> Result<Self, SignInError> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -192,7 +200,7 @@ impl Client {
                 profile,
                 audio,
                 call,
-                verified,
+                Lists { verified, blocked },
             )
         };
         let session = runtime.spawn(session.run(commands_rx));
@@ -266,17 +274,46 @@ impl ClientApi for Client {
 pub struct MockClient {
     shared: Shared,
     verified: VerifiedStore,
+    blocked: BlockedStore,
+    /// The sample people as they are when not blocked.
+    sample_people: BTreeMap<UserId, Person>,
     /// The picture every share shows.
     picture: watch::Sender<Option<Arc<Frame>>>,
 }
 
 impl Default for MockClient {
     fn default() -> Self {
-        Self::new(VerifiedStore::in_memory())
+        Self::new(VerifiedStore::in_memory(), BlockedStore::in_memory())
     }
 }
 
 impl MockClient {
+    /// Shows the sample people as the blocked list now says.
+    fn show_blocked(&self) {
+        self.update(|s| {
+            for (user, sample) in &self.sample_people {
+                let blocked = self.blocked.is_blocked(&sample_key(user.0));
+                let Some(shown) = s.people.get_mut(user).filter(|p| p.blocked != blocked) else {
+                    continue;
+                };
+                if blocked {
+                    shown.name = BLOCKED_NAME.to_owned();
+                    shown.avatar = None;
+                    shown.sharing = None;
+                    shown.speaking = false;
+                    if let Some(current) = s.current.as_mut() {
+                        current.watching.retain(|watched| watched != user);
+                    }
+                } else {
+                    shown.name = sample.name.clone();
+                    shown.avatar = sample.avatar;
+                    shown.sharing = sample.sharing;
+                }
+                shown.blocked = blocked;
+            }
+        });
+    }
+
     /// Keeps `bytes` as a picture, as the server would, and returns its hash.
     fn keep_avatar(&self, bytes: Vec<u8>) -> Hash {
         let hash = Hash::of(&bytes);
@@ -286,12 +323,15 @@ impl MockClient {
     }
 
     /// The sample client, with its sample verified people added to `verified`.
-    pub fn new(verified: VerifiedStore) -> Self {
+    pub fn new(verified: VerifiedStore, blocked: BlockedStore) -> Self {
         let frame = VideoFrame::test_pattern(1280, 720, 1, 0);
         add_sample_verified(&verified);
+        let state = sample_state();
         let client = Self {
-            shared: Shared::new(sample_state()),
+            sample_people: state.people.clone(),
+            shared: Shared::new(state),
             verified,
+            blocked,
             picture: watch::Sender::new(Some(Arc::new(Frame::Planes(frame)))),
         };
         for (_, picture) in SAMPLE_PICTURES {
@@ -308,8 +348,8 @@ impl MockClient {
     }
 
     /// The sample client, as if connected at `address`.
-    pub fn at(address: &str, verified: VerifiedStore) -> Self {
-        let client = Self::new(verified);
+    pub fn at(address: &str, verified: VerifiedStore, blocked: BlockedStore) -> Self {
+        let client = Self::new(verified, blocked);
         client.update(|s| {
             if let Some(server) = s.server.as_mut() {
                 server.address = address.to_owned();
@@ -513,6 +553,28 @@ impl ClientApi for MockClient {
                 self.update(|s| s.connection = ConnectionStatus::Disconnected);
                 self.shared.emit(UiEvent::LeftServer);
             }
+            UiCommand::Block(user) => {
+                let state = self.state();
+                if let Some(p) = self
+                    .sample_people
+                    .get(&user)
+                    .filter(|_| state.me != Some(user))
+                {
+                    let person = BlockedPerson {
+                        key: Fingerprint(sample_key(user.0)),
+                        name: p.name.clone(),
+                        avatar: p.avatar,
+                        server: state.server.as_ref().map(|s| s.fingerprint),
+                    };
+                    let _ = self.blocked.block(person);
+                    self.show_blocked();
+                }
+            }
+            UiCommand::Unblock(user) => {
+                let _ = self.blocked.unblock(&Fingerprint(sample_key(user.0)));
+                self.show_blocked();
+            }
+            UiCommand::BlockedChanged => self.show_blocked(),
             UiCommand::Reconnect => self.update(|s| s.connection = ConnectionStatus::Connected),
             UiCommand::Disconnect => self.update(|s| s.connection = ConnectionStatus::Disconnected),
         }
@@ -559,6 +621,7 @@ fn person(name: &str, room: Option<u64>) -> Person {
         verified: false,
         identity_key: None,
         role: Role::User,
+        blocked: false,
     }
 }
 

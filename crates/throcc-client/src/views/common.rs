@@ -143,6 +143,26 @@ pub fn server_seed(address: &str) -> u64 {
     })
 }
 
+/// The grey disc in place of a blocked person's picture.
+pub fn blocked_avatar(size: Pixels) -> Div {
+    div()
+        .flex_none()
+        .size(size + px(4.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .size(size)
+                .rounded_full()
+                .bg(theme::control())
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon("ban").size(size * 0.5).text_color(theme::text_3())),
+        )
+}
+
 /// The person's picture, or their initials on a muted hue, with the speaking ring when
 /// they talk.
 pub fn avatar(

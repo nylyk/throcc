@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use throcc_crypto::identity::random;
+use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, MediaId, RoomId, UserId};
 use throcc_proto::limits::{MAX_ROOM_MEMBERS, MAX_ROOM_SHARES};
 use throcc_proto::messages::{
@@ -18,6 +19,7 @@ use tracing::{info, warn};
 
 use crate::account::{self, SignInError};
 use crate::avatars;
+use crate::blocked::BlockedStore;
 use crate::call::{Call, CallEvent};
 use crate::client::{UiCommand, UiEvent};
 use crate::control::{self, LoginError};
@@ -33,9 +35,9 @@ use crate::playback::SavedPlayback;
 use crate::profile::Profile;
 use crate::server_look::ServerLook;
 use crate::state::{
-    ConnectionStatus, CurrentRoom, Health, KeyWarning, MIC_KBPS, Person, Playback,
-    SHARE_AUDIO_DETAIL, SHARE_AUDIO_KBPS, SentTrack, ServerView, Sound, SoundLevel, State,
-    TrackHealth, VOICE_DETAIL, person_name, room_name, share_detail, shown_name,
+    BLOCKED_NAME, BlockedPerson, ConnectionStatus, CurrentRoom, Health, KeyWarning, MIC_KBPS,
+    Person, Playback, SHARE_AUDIO_DETAIL, SHARE_AUDIO_KBPS, SentTrack, ServerView, Sound,
+    SoundLevel, State, TrackHealth, VOICE_DETAIL, person_name, room_name, share_detail, shown_name,
 };
 use crate::trust::Trust;
 use crate::verified::VerifiedStore;
@@ -246,6 +248,10 @@ pub(crate) struct Session {
     server_share: Option<ShareConfig>,
     /// The peers our key is wrapped to, whose tracks we follow.
     peers: BTreeMap<UserId, Peer>,
+    /// Everyone's presence as the server last gave it. A blocked person's name and picture
+    /// are kept here only.
+    presences: HashMap<UserId, Presence>,
+    blocked: BlockedStore,
     trust: Trust,
     watching: Vec<UserId>,
     /// Who watches each watched share in our room, by its video.
@@ -355,6 +361,12 @@ struct LastCounts {
     udp_sent: u64,
 }
 
+/// The lists a session shares with the app that started it.
+pub(crate) struct Lists {
+    pub verified: VerifiedStore,
+    pub blocked: BlockedStore,
+}
+
 impl Session {
     pub fn new(
         shared: Arc<Shared>,
@@ -363,8 +375,9 @@ impl Session {
         mut kept_profile: watch::Receiver<Profile>,
         audio: Option<Arc<AudioEngine>>,
         call: Call,
-        verified: VerifiedStore,
+        lists: Lists,
     ) -> Self {
+        let Lists { verified, blocked } = lists;
         let profile = kept_profile.borrow_and_update().clone();
         let server = call.server();
         let saved_playback = SavedPlayback::load(keystore.dir()).unwrap_or_else(|e| {
@@ -388,6 +401,8 @@ impl Session {
             },
             server_share: None,
             peers: BTreeMap::new(),
+            presences: HashMap::new(),
+            blocked,
             trust: Trust::new(server, verified),
             watching: Vec::new(),
             audiences: Audiences::default(),
@@ -815,10 +830,15 @@ impl Session {
         self.remember_server(welcome.server.name.clone(), welcome.server.avatar);
         let address = self.address.clone();
         let media = self.media;
-        let playbacks: Vec<Playback> = welcome
+        self.presences = welcome
             .presence
             .iter()
-            .map(|p| self.playback_of(p.user))
+            .map(|p| (p.user, p.clone()))
+            .collect();
+        let people: Vec<Person> = welcome
+            .presence
+            .iter()
+            .map(|p| person(p, self.playback_of(p.user), self.is_blocked(p.user)))
             .collect();
         self.shared.update(move |s| {
             s.mic = media.mic;
@@ -837,8 +857,8 @@ impl Session {
                 s.add_room(room.into());
             }
             s.people.clear();
-            for (p, playback) in welcome.presence.iter().zip(playbacks) {
-                s.add_person(p.user, person(p, playback));
+            for (p, person) in welcome.presence.iter().zip(people) {
+                s.add_person(p.user, person);
             }
             s.current = None;
         });
@@ -1011,7 +1031,7 @@ impl Session {
         }
         for (user, playback) in &kept {
             for sound in Sound::ALL {
-                self.audio(gain_command(*user, sound, playback.get(sound)));
+                self.play(*user, sound, playback.get(sound));
             }
         }
         self.shared.update(|s| {
@@ -1098,11 +1118,69 @@ impl Session {
         });
     }
 
+    /// The share `user` runs, as shown: a blocked person's is left out.
     fn sharing_of(&self, user: UserId) -> Option<ShareConfig> {
         if user == self.call.me() {
             self.media.share
+        } else if self.is_blocked(user) {
+            None
         } else {
             self.peers.get(&user).and_then(|p| p.share)
+        }
+    }
+
+    /// Whether the user blocked the identity key the server names for `user`.
+    fn is_blocked(&self, user: UserId) -> bool {
+        user != self.call.me()
+            && self
+                .presences
+                .get(&user)
+                .is_some_and(|p| self.blocked.is_blocked(&p.identity_key))
+    }
+
+    /// Plays `sound` of `user` at `level`, or not at all while they are blocked.
+    fn play(&self, user: UserId, sound: Sound, level: SoundLevel) {
+        let muted = level.muted || self.is_blocked(user);
+        self.audio(gain_command(user, sound, SoundLevel { muted, ..level }));
+    }
+
+    /// Shows, plays and watches everyone as the blocked list now says.
+    async fn show_blocked(&mut self) {
+        let state = self.shared.state();
+        let changed: Vec<UserId> = state
+            .people
+            .iter()
+            .filter(|(user, p)| p.blocked != self.is_blocked(**user))
+            .map(|(user, _)| *user)
+            .collect();
+        if changed.is_empty() {
+            return;
+        }
+        self.shared.update(|s| {
+            for user in &changed {
+                if let (Some(shown), Some(p)) = (s.people.get_mut(user), self.presences.get(user)) {
+                    let playback = shown.playback;
+                    let blocked = !shown.blocked;
+                    *shown = Person {
+                        speaking: shown.speaking && !blocked,
+                        audience: shown.audience,
+                        verified: shown.verified,
+                        identity_key: shown.identity_key,
+                        ..person(p, playback, blocked)
+                    };
+                }
+            }
+        });
+        self.play_as_kept(changed.iter().copied());
+        self.show_shares();
+        let watched = self.watching.len();
+        let blocked: Vec<UserId> = changed
+            .into_iter()
+            .filter(|u| self.is_blocked(*u))
+            .collect();
+        self.watching.retain(|user| !blocked.contains(user));
+        if self.watching.len() != watched {
+            self.push_watching().await;
         }
     }
 
@@ -1197,6 +1275,7 @@ impl Session {
             }
             UiCommand::StartShare(config) => self.start_share(config),
             UiCommand::StopShare => self.end_share().await,
+            UiCommand::Watch(user) if self.is_blocked(user) => {}
             UiCommand::Watch(user) => {
                 if !self.watching.contains(&user) {
                     self.watching.push(user);
@@ -1212,7 +1291,7 @@ impl Session {
                 self.push_watching().await;
             }
             UiCommand::SetSoundLevel(user, sound, level) => {
-                self.audio(gain_command(user, sound, level));
+                self.play(user, sound, level);
                 match self.trust.of(user).1 {
                     Some(key) => self.saved_playback.set(&key, sound, level),
                     None => {
@@ -1292,6 +1371,30 @@ impl Session {
                 }
             }
             UiCommand::VerifiedChanged => self.refresh_trust(),
+            UiCommand::Block(user) => {
+                let me = self.call.me();
+                if let Some(p) = self.presences.get(&user).filter(|_| user != me) {
+                    let person = BlockedPerson {
+                        key: Fingerprint(p.identity_key),
+                        name: person_name(user, &p.name),
+                        avatar: p.avatar,
+                        server: Some(self.call.server()),
+                    };
+                    match self.blocked.block(person) {
+                        Ok(()) => self.show_blocked().await,
+                        Err(e) => self.shared.notice(format!("Couldn't block them: {e:#}")),
+                    }
+                }
+            }
+            UiCommand::Unblock(user) => {
+                if let Some(p) = self.presences.get(&user) {
+                    match self.blocked.unblock(&Fingerprint(p.identity_key)) {
+                        Ok(()) => self.show_blocked().await,
+                        Err(e) => self.shared.notice(format!("Couldn't unblock them: {e:#}")),
+                    }
+                }
+            }
+            UiCommand::BlockedChanged => self.show_blocked().await,
             UiCommand::Reconnect => {}
             UiCommand::LeaveServer => {
                 if self.leave_server().await {
@@ -1804,6 +1907,8 @@ impl Session {
             }
             ServerEvent::PresenceChanged(p) => {
                 self.room_cue(p.user, p.room);
+                self.presences.insert(p.user, p.clone());
+                let blocked = self.is_blocked(p.user);
                 let (verified, identity_key) = self.trust.of(p.user);
                 let playback = self.playback_of(p.user);
                 let sharing = self.sharing_of(p.user);
@@ -1816,7 +1921,7 @@ impl Session {
                         speaking,
                         sharing,
                         audience,
-                        ..person(&p, playback)
+                        ..person(&p, playback, blocked)
                     };
                     s.add_person(p.user, updated);
                 });
@@ -1831,6 +1936,7 @@ impl Session {
             }
             ServerEvent::PresenceEnded(user) => {
                 self.room_cue(user, None);
+                self.presences.remove(&user);
                 let notices = self.call.engine.end_presence(user);
                 self.notices(notices);
                 self.shared.update(|s| {
@@ -1923,12 +2029,17 @@ impl Session {
             }
         };
         let state = self.shared.state();
-        if state.people.iter().all(|(u, p)| p.speaking == speaking(u)) {
+        let speaking = |user: &UserId, person: &Person| speaking(user) && !person.blocked;
+        if state
+            .people
+            .iter()
+            .all(|(u, p)| p.speaking == speaking(u, p))
+        {
             return;
         }
         self.shared.update(|s| {
             for (user, person) in s.people.iter_mut() {
-                person.speaking = speaking(user);
+                person.speaking = speaking(user, person);
             }
         });
     }
@@ -2059,11 +2170,17 @@ fn went_stale(last_alive: SystemTime, now: SystemTime) -> bool {
         .is_ok_and(|down| down > RECONNECT_WINDOW)
 }
 
-/// `p` as a person, playing as `playback` says.
-fn person(p: &Presence, playback: Playback) -> Person {
+/// `p` as a person, playing as `playback` says. A blocked one is shown without their name
+/// and picture.
+fn person(p: &Presence, playback: Playback, blocked: bool) -> Person {
+    let (name, avatar) = if blocked {
+        (BLOCKED_NAME.to_owned(), None)
+    } else {
+        (person_name(p.user, &p.name), p.avatar)
+    };
     Person {
-        name: person_name(p.user, &p.name),
-        avatar: p.avatar,
+        name,
+        avatar,
         room: p.room,
         mic: p.mic,
         deafened: p.deafened,
@@ -2074,6 +2191,7 @@ fn person(p: &Presence, playback: Playback) -> Person {
         verified: false,
         identity_key: None,
         role: p.role,
+        blocked,
     }
 }
 

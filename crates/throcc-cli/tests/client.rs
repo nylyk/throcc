@@ -9,7 +9,9 @@ use throcc_client_core::call::{Call, CallEvent};
 use throcc_client_core::client::{Client, ClientApi, UiCommand, UiEvent};
 use throcc_client_core::keystore::Keystore;
 use throcc_client_core::profile::Profile;
-use throcc_client_core::state::{ConnectionStatus, KeyWarning, Sound, SoundLevel, State};
+use throcc_client_core::state::{
+    BLOCKED_NAME, ConnectionStatus, KeyWarning, Sound, SoundLevel, State,
+};
 use throcc_client_core::verified::VerifiedStore;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{RoomId, UserId};
@@ -898,4 +900,45 @@ fn a_client_replaced_by_another_device_stays_signed_out() {
         ConnectionStatus::SignedInElsewhere
     );
     assert_eq!(second.state().connection, ConnectionStatus::Connected);
+}
+
+#[test]
+fn a_blocked_person_stays_in_the_room_unnamed_and_still_gets_our_key() {
+    let (address, admin_invite, _server) = server();
+    let (alice, alice_dir) = client(&address, &admin_invite);
+    wait_connected(&alice, "connected");
+    let room = create_room(&alice);
+    alice.command(UiCommand::Join(Some(room)));
+    wait_for(&alice, "alice in the room", |s| s.current.is_some());
+    let alice_id = alice.state().me.unwrap();
+    let code = invite(&alice);
+    let runtime = Runtime::new().unwrap();
+    let bob_dir = tempfile::tempdir().unwrap();
+    let bob = call_in(&runtime, bob_dir.path(), &address, &code, room);
+    let shown_blocked = |s: &State| {
+        s.person(bob.me()).is_some_and(|p| {
+            p.blocked && p.name == BLOCKED_NAME && p.avatar.is_none() && p.room == Some(room)
+        })
+    };
+    wait_for(&alice, "bob by name", |s| {
+        s.person(bob.me())
+            .is_some_and(|p| p.name == "Ilse" && !p.blocked)
+    });
+
+    alice.command(UiCommand::Block(bob.me()));
+    wait_for(&alice, "bob blocked but still shown", shown_blocked);
+
+    drop(alice);
+    let alice = client_in(alice_dir.path(), &address, None);
+    alice.command(UiCommand::Join(Some(room)));
+    wait_for(&alice, "bob still blocked after a restart", shown_blocked);
+    wait_until("blocked bob to hold alice's new key", || {
+        holds_key_of(&bob, alice_id)
+    });
+
+    alice.command(UiCommand::Unblock(bob.me()));
+    wait_for(&alice, "bob by name again", |s| {
+        s.person(bob.me())
+            .is_some_and(|p| p.name == "Ilse" && !p.blocked)
+    });
 }

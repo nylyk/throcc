@@ -13,6 +13,7 @@ use gpui_component::slider::{SliderEvent, SliderState};
 use gpui_component::{Root, WindowExt};
 use throcc_client_core::account::SignInError;
 use throcc_client_core::avatars;
+use throcc_client_core::blocked::BlockedStore;
 use throcc_client_core::client::{self, Client, ClientApi, MockClient, UiCommand, UiEvent};
 use throcc_client_core::keystore::{self, Keystore, StartedOver};
 use throcc_client_core::media::devices;
@@ -22,7 +23,7 @@ use throcc_client_core::profile::Profile;
 use throcc_client_core::server_look::ServerLook;
 use throcc_client_core::settings::{Appearance, AudioSettings, Settings, Transmit};
 use throcc_client_core::state::{
-    ConnectionStatus, KeyWarning, ServerView, ShareChoice, Sound, SoundLevel, State,
+    BlockedPerson, ConnectionStatus, KeyWarning, ServerView, ShareChoice, Sound, SoundLevel, State,
 };
 use throcc_client_core::verified::VerifiedStore;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
@@ -67,15 +68,17 @@ pub enum SettingsPage {
     Audio,
     Appearance,
     Verified,
+    Blocked,
     About,
 }
 
 impl SettingsPage {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Profile,
         Self::Audio,
         Self::Appearance,
         Self::Verified,
+        Self::Blocked,
         Self::About,
     ];
 
@@ -85,6 +88,7 @@ impl SettingsPage {
             Self::Audio => "Audio",
             Self::Appearance => "Appearance",
             Self::Verified => "Verified People",
+            Self::Blocked => "Blocked People",
             Self::About => "About",
         }
     }
@@ -95,6 +99,7 @@ impl SettingsPage {
             Self::Audio => "audio-lines",
             Self::Appearance => "palette",
             Self::Verified => "shield-check",
+            Self::Blocked => "ban",
             Self::About => "info",
         }
     }
@@ -286,6 +291,12 @@ fn widest_sidebar(window: &Window) -> gpui::Pixels {
         .clamp(theme::SIDEBAR_MIN_WIDTH, theme::SIDEBAR_MAX_WIDTH)
 }
 
+/// Someone blocked, with the picture they had when blocked where it is still cached.
+pub struct BlockedLook {
+    pub person: BlockedPerson,
+    pub picture: Option<Arc<RenderImage>>,
+}
+
 /// A known server's name and picture as last seen, for while we aren't connected to it.
 pub struct CachedLook {
     pub name: Option<String>,
@@ -370,6 +381,33 @@ fn read_verified(verified: &VerifiedStore) -> Option<String> {
     Some(format!(
         "Couldn't read who you verified ({e}), so everyone shows as not verified."
     ))
+}
+
+/// The blocked people kept on this computer. Nobody counts as blocked where they can't be
+/// read.
+fn load_blocked() -> BlockedStore {
+    let Ok(dir) = keystore::config_dir() else {
+        return BlockedStore::in_memory();
+    };
+    BlockedStore::load(&dir).unwrap_or_else(|e| {
+        tracing::warn!("no blocked people: {e:#}");
+        BlockedStore::empty(&dir)
+    })
+}
+
+/// Everyone in `blocked` with the picture they had when blocked, where it is still cached.
+fn blocked_people(blocked: &BlockedStore) -> Vec<BlockedLook> {
+    let cache = keystore::cache_dir().ok();
+    let look = |person: BlockedPerson| BlockedLook {
+        picture: person
+            .avatar
+            .zip(cache.as_ref())
+            .and_then(|(hash, cache)| avatars::load(cache, hash))
+            .as_deref()
+            .and_then(crate::avatar::decode),
+        person,
+    };
+    blocked.list().into_iter().map(look).collect()
 }
 
 fn known_servers() -> Vec<(String, Fingerprint)> {
@@ -492,6 +530,9 @@ pub struct ThroccApp {
     pub profile_form: PictureForm,
     pub known_servers: Vec<(String, Fingerprint)>,
     pub verified: VerifiedStore,
+    pub blocked: BlockedStore,
+    /// The blocked people as the settings page lists them.
+    pub blocked_people: Vec<BlockedLook>,
     /// Why the verified people couldn't be read or saved, the last time that failed.
     pub verified_problem: Option<String>,
     pub server_looks: HashMap<String, CachedLook>,
@@ -617,6 +658,11 @@ impl ThroccApp {
         } else {
             load_verified()
         };
+        let blocked = if mock {
+            BlockedStore::in_memory()
+        } else {
+            load_blocked()
+        };
         let known_servers = if mock {
             vec![
                 ("owls.thro.cc".into(), Fingerprint([0x2c; 32])),
@@ -680,6 +726,8 @@ impl ThroccApp {
             profile_form: PictureForm::default(),
             known_servers,
             verified,
+            blocked_people: blocked_people(&blocked),
+            blocked,
             verified_problem,
             server_looks,
             users: Vec::new(),
@@ -730,7 +778,7 @@ impl ThroccApp {
                 picture: client::sample_picture(UserId(1)).map(Arc::from),
             };
             app.set_profile(profile, cx);
-            let client = MockClient::new(app.verified.clone());
+            let client = MockClient::new(app.verified.clone(), app.blocked.clone());
             app.attach(with_sample_share(client), window, cx);
         } else {
             match app.settings.profile.clone() {
@@ -1020,6 +1068,17 @@ impl ThroccApp {
             self.verified_problem = Some(format!("Couldn't save who you verified: {e}"));
         }
         self.command(UiCommand::VerifiedChanged);
+    }
+
+    /// Takes the block off whoever holds `key`, on every server.
+    pub fn unblock(&mut self, key: Fingerprint, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(e) = self.blocked.unblock(&key) {
+            tracing::warn!("could not save who is blocked: {e:#}");
+            let notice = format!("Couldn't unblock them: {e}");
+            window.push_notification(Notification::new().message(notice), cx);
+        }
+        self.blocked_people = blocked_people(&self.blocked);
+        self.command(UiCommand::BlockedChanged);
     }
 
     /// Makes the sidebar see-through or solid and keeps the choice for next time.
@@ -1664,6 +1723,9 @@ impl ThroccApp {
             {
                 self.command(UiCommand::ListUsers);
             }
+            Screen::Settings(SettingsPage::Blocked) => {
+                self.blocked_people = blocked_people(&self.blocked);
+            }
             _ => {}
         }
         self.screen = screen;
@@ -1803,7 +1865,7 @@ impl ThroccApp {
             self.dialog = dialog;
         }
         if self.mock {
-            let client = MockClient::at(&address, self.verified.clone());
+            let client = MockClient::at(&address, self.verified.clone(), self.blocked.clone());
             self.attach(with_sample_share(client), window, cx);
             return;
         }
@@ -1823,6 +1885,7 @@ impl ThroccApp {
         let connecting = cx.background_executor().spawn({
             let address = address.clone();
             let verified = self.verified.clone();
+            let blocked = self.blocked.clone();
             async move {
                 let keystore = Keystore::open_default().map_err(SignInError::Store)?;
                 Client::connect(
@@ -1832,6 +1895,7 @@ impl ThroccApp {
                     profile,
                     audio,
                     verified,
+                    blocked,
                 )
             }
         });
@@ -2007,10 +2071,10 @@ impl ThroccApp {
     /// welcome, join, joinfailed, lost, personmenu, addserver, removeserver, room, testpattern,
     /// unwatched, alone, emptylobby, focus, fullscreen, popout, slow, slowpopout, slowfullscreen,
     /// share, connection, person, personverified, personchanged, keychange, ownprofile,
-    /// pinmismatch, settings, appearance, verified, about, update, newroom, editroom,
-    /// roompassword, deleteroom, profile, profileerror, server, keys, members, invites,
-    /// removeuser, leaveserver, identitymissing, identityback or startedover. Any other name
-    /// leaves the lobby.
+    /// pinmismatch, settings, appearance, verified, blocked, blockedmenu, blockedpeople, about,
+    /// update, reconnect, elsewhere, newroom, editroom, roompassword, deleteroom, profile,
+    /// profileerror, server, keys, members, invites, removeuser, leaveserver, identitymissing,
+    /// identityback or startedover. Any other name leaves the lobby.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         let room = RoomId(1);
         let joined = |app: &mut Self| {
@@ -2105,7 +2169,7 @@ impl ThroccApp {
                 after_a_moment(cx, move |app, _| show_overlay(app));
             }
             "testpattern" => {
-                let client = MockClient::new(self.verified.clone());
+                let client = MockClient::new(self.verified.clone(), self.blocked.clone());
                 self.attach(Arc::new(client), window, cx);
                 joined(self);
             }
@@ -2197,6 +2261,21 @@ impl ThroccApp {
             "settings" => self.screen = Screen::Settings(SettingsPage::Audio),
             "appearance" => self.screen = Screen::Settings(SettingsPage::Appearance),
             "verified" => self.screen = Screen::Settings(SettingsPage::Verified),
+            "blocked" | "blockedmenu" | "blockedpeople" => {
+                joined(self);
+                self.command(UiCommand::Block(UserId(3)));
+                self.command(UiCommand::Block(UserId(6)));
+                match screen {
+                    "blockedpeople" => {
+                        self.show_screen(Screen::Settings(SettingsPage::Blocked), window, cx)
+                    }
+                    "blockedmenu" => {
+                        let position = gpui::point(gpui::px(300.), gpui::px(240.));
+                        self.open_person_menu(UserId(3), position, window, cx);
+                    }
+                    _ => {}
+                }
+            }
             "about" => {
                 self.screen = Screen::Settings(SettingsPage::About);
                 self.newer_release = Some(Release::sample());

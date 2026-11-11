@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use serde::de::DeserializeOwned;
 use tempfile::TempDir;
 use throcc_client_core::account::{self, SignInError};
+use throcc_client_core::blocked::BlockedStore;
 use throcc_client_core::call::{Call, CallEvent};
 use throcc_client_core::client::{Client, ClientApi};
 use throcc_client_core::connection::{self, Connected};
@@ -304,8 +305,9 @@ pub fn client_as(
 ) -> Client {
     let keystore = Keystore::open_in(dir).unwrap();
     let verified = VerifiedStore::load(dir).unwrap();
+    let blocked = BlockedStore::load(dir).unwrap();
     let profile = tokio::sync::watch::channel(profile).1;
-    Client::connect(address, keystore, invite, profile, None, verified).unwrap()
+    Client::connect(address, keystore, invite, profile, None, verified, blocked).unwrap()
 }
 
 pub fn wait_for_state_within(
