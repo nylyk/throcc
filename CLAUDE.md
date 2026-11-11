@@ -79,7 +79,7 @@ A release, for each side that changed since its last tag (`git log <side>-vX.Y.Z
 - Quiet and minimal: one accent, no gradients, no shadows beyond focus rings, no emoji.
 - Geist and Geist Mono; mono only for keys, fingerprints, safety numbers and invite codes. Spacing on a 4 px grid.
 - Match the existing screens. Add a `--mock --screen` sample for any new screen or dialog.
-- The phone apps in `mobile/` use native components and the system font, with the accent as the only colour of ours. A new screen there gets a sample on both platforms.
+- The phone apps in `mobile/` use native components and the system font, coloured by the desktop's themes; the presets live in `throcc_client_core::settings`. A new screen there gets a sample on both platforms.
 
 ## Style
 
