@@ -42,6 +42,7 @@ pub async fn authenticate(
     stream: &mut FrameStream,
     server_nonce: &[u8; 32],
     sign_in: SignIn,
+    source: SourceKey,
 ) -> Result<Authenticated, AuthRefusal> {
     let exporter = exporter(connection).map_err(AuthRefusal::Auth)?;
     match sign_in {
@@ -74,7 +75,7 @@ pub async fn authenticate(
                 .to_owned();
             let run = Enrollment {
                 shared,
-                source: SourceKey::of(connection.remote_address().ip()),
+                source,
                 code_id: invite::normalize(&code_id),
                 pubkey,
                 name,

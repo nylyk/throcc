@@ -215,7 +215,7 @@ impl Server {
             let shared = self.shared.clone();
             tokio::spawn(async move {
                 match tokio::time::timeout(TLS_TIMEOUT, incoming).await {
-                    Ok(Ok(connection)) => handle(shared, connection, pass).await,
+                    Ok(Ok(connection)) => handle(shared, connection, source, pass).await,
                     Ok(Err(e)) => {
                         debug!(%peer, "handshake failed: {e}");
                         shared.refusals.count("TLS handshake failed");
@@ -308,7 +308,13 @@ fn spawn_every(
     });
 }
 
-async fn handle(shared: Arc<ServerState>, connection: quinn::Connection, unauthenticated: Pass) {
+/// Serves a connection whose address was validated as `source`.
+async fn handle(
+    shared: Arc<ServerState>,
+    connection: quinn::Connection,
+    source: SourceKey,
+    unauthenticated: Pass,
+) {
     let peer = connection.remote_address();
     if let Err(e) = check_datagrams(connection.max_datagram_size()) {
         debug!(%peer, "refusing connection: {e}");
@@ -317,7 +323,7 @@ async fn handle(shared: Arc<ServerState>, connection: quinn::Connection, unauthe
         return;
     }
     debug!(%peer, "connected");
-    session::run(shared, connection, unauthenticated).await;
+    session::run(shared, connection, source, unauthenticated).await;
 }
 
 /// Locks `mutex`, carrying on past a panic of an earlier holder.

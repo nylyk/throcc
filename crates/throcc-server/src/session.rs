@@ -86,9 +86,18 @@ pub async fn write_frame<T: Serialize>(
 
 /// Serves one connection. Everything before sign-in is logged as counts, since one source
 /// can fail sign-ins as fast as it can connect.
-pub async fn run(shared: Arc<ServerState>, connection: quinn::Connection, unauthenticated: Pass) {
+///
+/// `source` is the address the connection was accepted from, which a retry validated. Every
+/// limit counts against it and never against `remote_address()`, which follows a client that
+/// moves to another address before that one is validated, a forged one too.
+pub async fn run(
+    shared: Arc<ServerState>,
+    connection: quinn::Connection,
+    source: SourceKey,
+    unauthenticated: Pass,
+) {
     let peer = connection.remote_address();
-    match serve(&shared, &connection, unauthenticated).await {
+    match serve(&shared, &connection, source, unauthenticated).await {
         Ok(()) => debug!(%peer, "session ended"),
         Err(ReadError::Closed) => {
             debug!(%peer, "closed before signing in");
@@ -106,13 +115,13 @@ pub async fn run(shared: Arc<ServerState>, connection: quinn::Connection, unauth
 async fn serve(
     shared: &ServerState,
     connection: &quinn::Connection,
+    source: SourceKey,
     unauthenticated: Pass,
 ) -> Result<(), ReadError> {
     let peer = connection.remote_address();
     // Nothing reads datagrams until sign-in, and quinn would otherwise keep them, together
     // with the receive buffers they arrived in.
     let discarding = AbortOnDrop(tokio::spawn(discard_datagrams(connection.clone())));
-    let source = SourceKey::of(peer.ip());
     let Ok(permit) = tokio::time::timeout(HELLO_TIMEOUT, shared.handshakes.enter(source)).await
     else {
         debug!(%peer, "no handshake slot in time");
@@ -150,7 +159,14 @@ async fn serve(
         return Ok(());
     };
 
-    let signing_in = auth::authenticate(shared, connection, &mut stream, &server_nonce, sign_in);
+    let signing_in = auth::authenticate(
+        shared,
+        connection,
+        &mut stream,
+        &server_nonce,
+        sign_in,
+        source,
+    );
     let authenticated = match tokio::time::timeout(SIGN_IN_TIMEOUT, signing_in).await {
         Ok(Ok(authenticated)) => authenticated,
         Ok(Err(refused)) => {
