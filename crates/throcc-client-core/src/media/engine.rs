@@ -205,22 +205,22 @@ impl MediaEngine {
 
     /// Applies our placement after `JoinRoom` or `LeaveRoom`.
     pub fn apply_placement(&self, placement: &Placement) -> Vec<KeyNotice> {
-        let (room_changed, (requests, notices)) = {
+        let (room_changed, notices) = {
             let mut keys = self.keys();
             let room_changed = keys.room() != placement.room;
-            let applied = keys.apply_placement(
+            let (requests, notices) = keys.apply_placement(
                 placement.room,
                 placement.epoch,
                 placement.tracks.clone(),
                 &placement.peers,
                 Instant::now(),
             );
-            (room_changed, applied)
+            self.send_requests(requests);
+            (room_changed, notices)
         };
         if room_changed {
             lock(&self.sinks).clear();
         }
-        self.send_requests(requests);
         notices
     }
 
@@ -289,11 +289,15 @@ impl MediaEngine {
         &self,
         f: impl FnOnce(&mut KeyManager, Instant) -> (Option<Request>, Vec<KeyNotice>),
     ) -> Vec<KeyNotice> {
-        let (request, notices) = f(&mut self.keys(), Instant::now());
+        let mut keys = self.keys();
+        let (request, notices) = f(&mut keys, Instant::now());
         self.send_requests(request);
         notices
     }
 
+    /// Queues requests the key manager made. Called with the keys still locked: the session
+    /// and the call's event pump both re-key, and peers keep the secret that reaches them
+    /// last, so the requests must leave in the order the secrets were made.
     fn send_requests(&self, requests: impl IntoIterator<Item = Request>) {
         for request in requests {
             self.requests.send(request).ok();
