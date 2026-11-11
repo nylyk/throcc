@@ -12,6 +12,7 @@ use tracing::{debug, info, warn};
 
 use crate::database::{Enrolled, InviteRow, UserRow};
 use crate::limits::SourceKey;
+use crate::rooms::Hub;
 use crate::session::{FrameStream, read_handshake, write_frame};
 use crate::{ServerState, unix_now};
 
@@ -130,11 +131,19 @@ impl Enrollment<'_> {
         });
 
         let exchanged = self.exchange(stream, &secret, pake_a).await.is_some();
-        if !exchanged || invite.is_none() {
+        let Some(invite) = invite.filter(|_| exchanged) else {
             return Err(AuthRefusal::Auth(AuthError::BadInvite));
-        }
+        };
         let enrolled = {
             let mut hub = self.shared.hub();
+            // Said only to someone who knew the invite's secret and holds the key, so it
+            // tells a stranger nothing, and under the lock every account is made under, so
+            // the count is exact. The try the run used is given back: the code was right.
+            if self.no_account_is_left(&hub, &invite).map_err(internal)? {
+                hub.db.return_invite_try(&self.code_id).map_err(internal)?;
+                info!(code_id = %self.code_id, "enrollment refused: the server keeps no more accounts");
+                return Err(AuthRefusal::Auth(AuthError::ServerFull));
+            }
             let enrolled = hub.db.enroll(&self.pubkey, &self.code_id, &self.name, now);
             match &enrolled {
                 Ok(Some(Enrolled::Added(row))) => {
@@ -160,6 +169,15 @@ impl Enrollment<'_> {
         }
     }
 
+    /// Whether enrolling would make one account more than the server keeps. An admin invite
+    /// always enrolls, so a server holding every account it keeps can still be managed, and
+    /// a key that has an account gets no new one.
+    fn no_account_is_left(&self, hub: &Hub, invite: &InviteRow) -> anyhow::Result<bool> {
+        Ok(invite.minted_by.is_some()
+            && hub.db.user_count()? >= self.shared.max_accounts
+            && hub.db.user_by_pubkey(&self.pubkey)?.is_none())
+    }
+
     /// Looks up the invite and uses up one of its tries before any PAKE message is sent,
     /// so a run that is dropped halfway still costs a try.
     fn claim_try(&self, now: u64) -> Result<Option<InviteRow>, AuthRefusal> {
@@ -172,23 +190,6 @@ impl Enrollment<'_> {
         } else {
             None
         };
-        // Refused before the try is used, as a full server is. An admin invite still enrolls,
-        // so a server holding all the accounts it keeps can be managed, and so does a key
-        // that has an account.
-        if invite.as_ref().is_some_and(|i| i.minted_by.is_some())
-            && hub.db.user_count().map_err(internal)? >= self.shared.max_accounts
-            && hub
-                .db
-                .user_by_pubkey(&self.pubkey)
-                .map_err(internal)?
-                .is_none()
-        {
-            debug!(source = ?self.source, "enrollment refused: no account is free");
-            self.shared
-                .refusals
-                .count("enrollment refused: the server keeps no more accounts");
-            return Err(AuthRefusal::Enroll(AuthError::ServerFull));
-        }
         if invite.is_some() {
             hub.db.consume_invite_try(&self.code_id).map_err(internal)?;
             hub.invite_runs.start(&self.code_id);

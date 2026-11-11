@@ -199,8 +199,9 @@ async fn unknown_invite_ids_fail_like_wrong_secrets() {
 async fn a_server_keeping_all_its_accounts_enrolls_only_through_an_admin_invite() {
     let server = start_server_with(|config| config.max_accounts = 2);
     let alice = admin(&server).await;
-    let _bob = invited(&server, &alice).await;
+    let bob = invited(&server, &alice).await;
 
+    // More refusals than an invite has tries: a right code on a full server costs none.
     let code = invite(&alice).await;
     for _ in 0..4 {
         let err = try_enroll(&server.addr, &code).await.unwrap_err();
@@ -212,6 +213,13 @@ async fn a_server_keeping_all_its_accounts_enrolls_only_through_an_admin_invite(
             "{err}"
         );
     }
+    let leave = Request::RemoveUser {
+        user: bob.link.welcome.me,
+        cascade: false,
+    };
+    assert_eq!(alice.request(leave).await, Response::Ok);
+    try_enroll(&server.addr, &code).await.unwrap();
+
     let recovery = mint_admin_invite(server.dir.path());
     try_enroll(&server.addr, &recovery).await.unwrap();
 }

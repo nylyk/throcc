@@ -56,7 +56,7 @@ pub const HANDSHAKES: Caps = Caps {
 };
 /// The most accounts a server keeps before it refuses to enroll another with a member's
 /// invite. `ListUsers` answers with all of them in one frame, which this many fit in with
-/// the longest names, and with those every handshake in flight could add past it.
+/// the longest names, with room for the admins enrolled past it.
 pub const MAX_ACCOUNTS: usize = 5000;
 /// A real handshake takes a few round trips; this leaves room for several lost packets.
 pub const TLS_TIMEOUT: Duration = Duration::from_secs(5);

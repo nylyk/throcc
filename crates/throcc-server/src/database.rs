@@ -491,6 +491,14 @@ impl Database {
         Ok(())
     }
 
+    pub fn return_invite_try(&self, code_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE invites SET failures = failures - 1 WHERE code_id = ?1 AND failures > 0",
+            [code_id],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_invite(&self, code_id: &str) -> Result<()> {
         self.conn
             .execute("DELETE FROM invites WHERE code_id = ?1", [code_id])?;
