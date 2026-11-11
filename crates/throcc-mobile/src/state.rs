@@ -3,7 +3,7 @@ use throcc_proto::ids;
 
 /// Everything the apps show while connected, sent whole after every change.
 #[derive(Clone, Debug, Default, PartialEq, uniffi::Record)]
-pub struct State {
+pub struct CoreState {
     pub server: Option<Server>,
     pub connection: Connection,
     pub me: Option<u64>,
@@ -123,7 +123,7 @@ pub struct Health {
     pub download_loss: f32,
 }
 
-impl From<&core::State> for State {
+impl From<&core::State> for CoreState {
     fn from(state: &core::State) -> Self {
         Self {
             server: state.server.as_ref().map(|server| Server {

@@ -5,7 +5,7 @@ The UniFFI layer between `throcc-client-core` and the iOS and Android apps in `m
 | File | Holds |
 | --- | --- |
 | `src/lib.rs` | `Core`, the one object an app holds: what the install keeps (our profile, the accent, known servers, verified and blocked people) and the connection to one server at a time, over `Client` or, for `Core::mock`, `MockClient`. An app registers a `Listener`; a thread per connection passes every state and event on to it. Also the name, password and invite checks, and what each role may do |
-| `src/state.rs` | `State` and its parts as UniFFI records and enums, built from the core's with `From` impls. Ids are `u64`, keys, fingerprints and picture hashes are bytes |
+| `src/state.rs` | `CoreState` (the core's `State`, named apart from SwiftUI's and Compose's own `State`) and its parts as UniFFI records and enums, built from the core's with `From` impls. Ids are `u64`, keys, fingerprints and picture hashes are bytes |
 | `src/messages.rs` | `Command`, turned into the core's `UiCommand`, and `Event`, built from its `UiEvent` |
 | `src/bin/uniffi-bindgen.rs` | The bindings generator, behind the `bindgen` feature so the libraries don't carry it |
 | `uniffi.toml` | The Kotlin package of the generated bindings |

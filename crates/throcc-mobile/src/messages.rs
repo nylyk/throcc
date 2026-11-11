@@ -33,13 +33,10 @@ pub enum Command {
         sound: Sound,
         level: SoundLevel,
     },
-    /// Names the server, or clears its name. Admins only.
-    NameServer {
-        name: Option<String>,
-    },
-    /// Sets the server's picture, at most 64 KiB, or clears it. Admins only.
-    SetServerPicture {
-        picture: Option<Vec<u8>>,
+    /// Names the server and sets its picture in one save. Admins only.
+    SetServerProfile {
+        name: NameChange,
+        picture: PictureChange,
     },
     CreateRoom {
         name: String,
@@ -95,6 +92,26 @@ pub enum Command {
     Reconnect,
 }
 
+/// What a save does to the server's name.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum NameChange {
+    Keep,
+    /// Names the server, or clears its name with `None`.
+    Set {
+        name: Option<String>,
+    },
+}
+
+/// What a save does to the server's picture.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum PictureChange {
+    Keep,
+    /// Sets the picture, at most 64 KiB, or clears it with `None`.
+    Set {
+        picture: Option<Vec<u8>>,
+    },
+}
+
 impl Command {
     /// The core's command, or `None` where a key isn't 32 bytes.
     pub(crate) fn into_core(self) -> Option<UiCommand> {
@@ -110,13 +127,15 @@ impl Command {
             Self::SetSoundLevel { user, sound, level } => {
                 UiCommand::SetSoundLevel(UserId(user), sound.into(), level.into())
             }
-            Self::NameServer { name } => UiCommand::SetServerProfile {
-                name: Some(name),
-                picture: None,
-            },
-            Self::SetServerPicture { picture } => UiCommand::SetServerProfile {
-                name: None,
-                picture: Some(picture),
+            Self::SetServerProfile { name, picture } => UiCommand::SetServerProfile {
+                name: match name {
+                    NameChange::Keep => None,
+                    NameChange::Set { name } => Some(name),
+                },
+                picture: match picture {
+                    PictureChange::Keep => None,
+                    PictureChange::Set { picture } => Some(picture),
+                },
             },
             Self::CreateRoom { name, password } => UiCommand::CreateRoom(name, password),
             Self::RenameRoom { room, name } => UiCommand::RenameRoom(RoomId(room), name),

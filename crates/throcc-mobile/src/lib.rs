@@ -13,21 +13,23 @@ use throcc_client_core::server_look::ServerLook;
 use throcc_client_core::settings::{
     ACCENT, CUSTOM_THEME, DEFAULT_PALETTE, PRESET_ACCENTS, Settings,
 };
+use throcc_client_core::state::BLOCKED_NAME;
 use throcc_client_core::verified::VerifiedStore;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, UserId};
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
-    MAX_AVATAR_BYTES, MAX_NAME_CHARS, shows_something, valid_name, valid_password,
+    MAX_AVATAR_BYTES, MAX_NAME_CHARS, MAX_PASSWORD_CHARS, shows_something, valid_name,
+    valid_password,
 };
 use throcc_proto::permissions;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::watch;
 
-pub use messages::{Command, Event, User};
+pub use messages::{Command, Event, NameChange, PictureChange, User};
 pub use state::{
-    Connection, CurrentRoom, Health, KeyWarning, Person, Role, Room, Server, Share, Sound,
-    SoundLevel, State,
+    Connection, CoreState, CurrentRoom, Health, KeyWarning, Person, Role, Room, Server, Share,
+    Sound, SoundLevel,
 };
 
 uniffi::setup_scaffolding!();
@@ -49,7 +51,7 @@ impl From<anyhow::Error> for CoreError {
 /// Hears of every change while connected. Calls arrive on a thread of the core's.
 #[uniffi::export(with_foreign)]
 pub trait Listener: Send + Sync {
-    fn state(&self, state: State);
+    fn state(&self, state: CoreState);
     fn event(&self, event: Event);
 }
 
@@ -107,6 +109,14 @@ pub enum NameCheck {
     TooLong,
     ShowsNothing,
     HidesText,
+}
+
+/// The limits every server holds a profile and a room to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct Limits {
+    pub name_chars: u32,
+    pub password_chars: u32,
+    pub picture_bytes: u32,
 }
 
 /// What a role may do on its server.
@@ -313,10 +323,9 @@ impl Core {
             Arc::new(connected.map_err(anyhow::Error::from)?)
         };
         self.forward_events(&client);
-        if let Some(listener) = lock(&self.listener).clone() {
-            listener.state(State::from(&*client.state()));
-        }
+        let state = CoreState::from(&*client.state());
         *lock(&self.connected) = Some(Connected { client, profile });
+        self.tell_listener(state);
         Ok(())
     }
 
@@ -326,9 +335,7 @@ impl Core {
             return;
         };
         drop(connected);
-        if let Some(listener) = lock(&self.listener).clone() {
-            listener.state(State::default());
-        }
+        self.tell_listener(CoreState::default());
     }
 
     pub fn command(&self, command: Command) {
@@ -340,10 +347,10 @@ impl Core {
         }
     }
 
-    pub fn state(&self) -> State {
+    pub fn state(&self) -> CoreState {
         match &*lock(&self.connected) {
-            Some(connected) => State::from(&*connected.client.state()),
-            None => State::default(),
+            Some(connected) => CoreState::from(&*connected.client.state()),
+            None => CoreState::default(),
         }
     }
 
@@ -392,11 +399,14 @@ impl Core {
     pub fn blocked(&self) -> Vec<BlockedPerson> {
         let addresses = self.addresses();
         let cache = keystore::cache_dir().ok().filter(|_| !self.mock);
+        let connected = lock(&self.connected);
+        let fetched = |hash| connected.as_ref()?.client.avatar(hash);
         let people = self.blocked.list().into_iter().map(|person| {
             let cached = person
                 .avatar
                 .zip(cache.as_ref())
-                .and_then(|(hash, cache)| avatars::load(cache, hash));
+                .and_then(|(hash, cache)| avatars::load(cache, hash))
+                .or_else(|| person.avatar.and_then(fetched));
             BlockedPerson {
                 key: person.key.0.to_vec(),
                 name: person.name,
@@ -447,6 +457,14 @@ impl Core {
         Ok(())
     }
 
+    /// Gives the listener `state`, with no lock held while it runs.
+    fn tell_listener(&self, state: CoreState) {
+        let listener = lock(&self.listener).clone();
+        if let Some(listener) = listener {
+            listener.state(state);
+        }
+    }
+
     fn connected_to(&self, address: &str) -> bool {
         let connected = lock(&self.connected);
         let state = connected.as_ref().map(|connected| connected.client.state());
@@ -484,7 +502,7 @@ impl Core {
                     continue;
                 };
                 match event {
-                    UiEvent::State(state) => listener.state(State::from(&*state)),
+                    UiEvent::State(state) => listener.state(CoreState::from(&*state)),
                     other => {
                         if let Some(event) = Event::from_core(other) {
                             listener.event(event);
@@ -502,6 +520,21 @@ impl Core {
 #[uniffi::export]
 pub fn set_app_dirs(data: String, cache: String) {
     keystore::set_app_dirs(data.into(), cache.into());
+}
+
+#[uniffi::export]
+pub fn limits() -> Limits {
+    Limits {
+        name_chars: MAX_NAME_CHARS as u32,
+        password_chars: MAX_PASSWORD_CHARS as u32,
+        picture_bytes: MAX_AVATAR_BYTES as u32,
+    }
+}
+
+/// The name a blocked person is shown under.
+#[uniffi::export]
+pub fn blocked_name() -> String {
+    BLOCKED_NAME.to_owned()
 }
 
 /// What `typed` is as a name, as every server judges it.
@@ -613,17 +646,21 @@ mod tests {
 
     use super::*;
 
-    struct Recorder(Mutex<mpsc::Sender<State>>);
+    struct Recorder(Mutex<mpsc::Sender<CoreState>>);
 
     impl Listener for Recorder {
-        fn state(&self, state: State) {
+        fn state(&self, state: CoreState) {
             lock(&self.0).send(state).ok();
         }
 
         fn event(&self, _event: Event) {}
     }
 
-    fn next(states: &mpsc::Receiver<State>, what: &str, ready: impl Fn(&State) -> bool) -> State {
+    fn next(
+        states: &mpsc::Receiver<CoreState>,
+        what: &str,
+        ready: impl Fn(&CoreState) -> bool,
+    ) -> CoreState {
         loop {
             let state = states
                 .recv_timeout(Duration::from_secs(5))

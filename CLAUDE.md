@@ -21,6 +21,8 @@ packaging/macos/bundle.sh              # macOS: target/macos/throcc.dmg
 packaging/flatpak/cargo-sources.sh     # the flatpak's offline crates, before flatpak-builder
 mobile/ios/build-core.sh               # iOS: ThroccCore.xcframework and the Swift bindings, before Xcode builds
 mobile/android/gradlew -p mobile/android assembleDebug   # Android: builds the core with cargo-ndk, then the APK
+xcrun simctl launch booted cc.thro.throcc --mock --screen <name>   # iOS sample screens; names in `Sample.swift`
+adb shell am start -S -n cc.thro.throcc/.MainActivity --ez mock true --es screen <name>   # Android sample screens; names in `AppModel.kt`
 ```
 
 On macOS, building with `--features ffmpeg` needs `FFMPEG_PKG_CONFIG_PATH=$PWD/deps/ffmpeg-lgpl/lib/pkgconfig` (built by `packaging/ffmpeg/build.sh deps/ffmpeg-lgpl`).
@@ -77,6 +79,7 @@ A release, for each side that changed since its last tag (`git log <side>-vX.Y.Z
 - Quiet and minimal: one accent, no gradients, no shadows beyond focus rings, no emoji.
 - Geist and Geist Mono; mono only for keys, fingerprints, safety numbers and invite codes. Spacing on a 4 px grid.
 - Match the existing screens. Add a `--mock --screen` sample for any new screen or dialog.
+- The phone apps in `mobile/` use native components and the system font, with the accent as the only colour of ours. A new screen there gets a sample on both platforms.
 
 ## Style
 
