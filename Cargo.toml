@@ -83,6 +83,7 @@ tempfile = "3.27.0"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1.44"
+uniffi = { version = "0.32.2", default-features = false }
 ureq = { version = "3.5.1", default-features = false, features = ["rustls-no-provider"] }
 windows = { version = "0.62.2", features = [
     "Foundation",

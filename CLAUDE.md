@@ -33,6 +33,7 @@ On macOS, building with `--features ffmpeg` needs `FFMPEG_PKG_CONFIG_PATH=$PWD/d
 | `throcc-client-core` | Connection, keystore, key manager, voice and share pipelines. `Client` and `MockClient` behind `ClientApi` |
 | `throcc-client` | gpui UI and the video surface |
 | `throcc-cli` | Headless client for scripts and integration tests |
+| `throcc-mobile` | UniFFI layer over the core for the iOS and Android apps in `mobile/` |
 
 Each crate's `README.md` explains its modules and how they fit together. Update it when a module is added, removed or changes its role.
 
