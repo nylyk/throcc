@@ -37,7 +37,7 @@ An invite without a minter enrolls an admin, or promotes the member whose identi
 
 ## Limits
 
-The limits in `throcc_proto::limits` hold always, for admins too: a full room refuses a join, a reconnect into it lands in the lobby, and a sixth screen share in a room is refused. The one exception is the server's: with 250 people signed in it refuses the next sign-in, unless that is an admin with an account, so a full server can still be managed; up to 10 admins sign in past it, and nobody past that. Enrolling, admin invites included, is refused while the server is full. An account nobody has signed in to for a year is removed, unless it is an admin's; whoever it invited stays.
+The limits in `throcc_proto::limits` hold always, for admins too: a full room refuses a join, a reconnect into it lands in the lobby, and a sixth screen share in a room is refused. The one exception is the server's: with 250 people signed in it refuses the next sign-in, unless that is an admin with an account, so a full server can still be managed; up to 10 admins sign in past it, and nobody past that. Enrolling, admin invites included, is refused while the server is full. A server keeps 5,000 accounts: with that many it enrolls nobody new through a member's invite, only through an admin invite, so the list of users always fits one message and a server filled with accounts can still be managed. An account nobody has signed in to for a year is removed, unless it is an admin's; whoever it invited stays.
 
 ## Media limits
 

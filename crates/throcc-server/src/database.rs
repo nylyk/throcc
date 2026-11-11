@@ -222,6 +222,13 @@ impl Database {
         )? as u64)
     }
 
+    pub fn user_count(&self) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?;
+        Ok(count as usize)
+    }
+
     pub fn user_by_pubkey(&self, pubkey: &PublicKey) -> Result<Option<UserRow>> {
         Ok(self
             .conn

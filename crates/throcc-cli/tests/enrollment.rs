@@ -196,6 +196,27 @@ async fn unknown_invite_ids_fail_like_wrong_secrets() {
 }
 
 #[tokio::test]
+async fn a_server_keeping_all_its_accounts_enrolls_only_through_an_admin_invite() {
+    let server = start_server_with(|config| config.max_accounts = 2);
+    let alice = admin(&server).await;
+    let _bob = invited(&server, &alice).await;
+
+    let code = invite(&alice).await;
+    for _ in 0..4 {
+        let err = try_enroll(&server.addr, &code).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SignInError::Login(LoginError::Refused(AuthError::ServerFull))
+            ),
+            "{err}"
+        );
+    }
+    let recovery = mint_admin_invite(server.dir.path());
+    try_enroll(&server.addr, &recovery).await.unwrap();
+}
+
+#[tokio::test]
 async fn repeated_failures_from_one_source_are_rate_limited() {
     let server = start_server();
     let unknown: InviteCode = "ZZZ-ZZZZZ".parse().unwrap();

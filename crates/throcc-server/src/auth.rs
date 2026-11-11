@@ -172,6 +172,23 @@ impl Enrollment<'_> {
         } else {
             None
         };
+        // Refused before the try is used, as a full server is. An admin invite still enrolls,
+        // so a server holding all the accounts it keeps can be managed, and so does a key
+        // that has an account.
+        if invite.as_ref().is_some_and(|i| i.minted_by.is_some())
+            && hub.db.user_count().map_err(internal)? >= self.shared.max_accounts
+            && hub
+                .db
+                .user_by_pubkey(&self.pubkey)
+                .map_err(internal)?
+                .is_none()
+        {
+            debug!(source = ?self.source, "enrollment refused: no account is free");
+            self.shared
+                .refusals
+                .count("enrollment refused: the server keeps no more accounts");
+            return Err(AuthRefusal::Enroll(AuthError::ServerFull));
+        }
         if invite.is_some() {
             hub.db.consume_invite_try(&self.code_id).map_err(internal)?;
             hub.invite_runs.start(&self.code_id);
