@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{MediaId, RoomId, UserId};
-use throcc_proto::messages::{Event, Placement, Request, Response, Welcome};
+use throcc_proto::messages::{Event, Placement, PublicKey, Request, Response, Welcome};
 use tokio::sync::mpsc;
 use tracing::warn;
 
@@ -20,6 +20,10 @@ const EVENTS: usize = 1024;
 pub enum CallEvent {
     Server(Event),
     Key(KeyNotice),
+    /// The identity keys the server event that follows made the key manager trust, oldest
+    /// first. They are told apart from the room as it stands once that event is handled,
+    /// because a later event may have replaced them by then.
+    Trusted(Vec<(UserId, PublicKey)>),
 }
 
 /// A signed-in connection with its media engine attached to the control stream.
@@ -89,6 +93,10 @@ impl Call {
         tokio::spawn(async move {
             while let Some(event) = server_events.recv().await {
                 let notices = pump_engine.event(&event);
+                let trusted = pump_engine.keys().take_newly_trusted();
+                if !trusted.is_empty() {
+                    events_tx.send(CallEvent::Trusted(trusted)).await.ok();
+                }
                 events_tx.send(CallEvent::Server(event)).await.ok();
                 for notice in notices {
                     events_tx.send(CallEvent::Key(notice)).await.ok();

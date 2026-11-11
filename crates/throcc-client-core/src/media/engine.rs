@@ -244,7 +244,7 @@ impl MediaEngine {
                 Vec::new()
             }
             Event::PresenceChanged(p) => self.set_presence(p.user, p.room),
-            Event::PresenceEnded(user) => self.set_presence(*user, None),
+            Event::PresenceEnded(user) => self.presence(|keys| keys.end_presence(*user)),
             _ => Vec::new(),
         }
     }
@@ -252,8 +252,12 @@ impl MediaEngine {
     /// Notes where `user` is, and applies the room state again when that changes who is
     /// in our room.
     pub fn set_presence(&self, user: UserId, room: Option<RoomId>) -> Vec<KeyNotice> {
+        self.presence(|keys| keys.set_presence(user, room))
+    }
+
+    fn presence(&self, change: impl FnOnce(&mut KeyManager) -> bool) -> Vec<KeyNotice> {
         self.rekey(|keys, now| {
-            if keys.set_presence(user, room) {
+            if change(keys) {
                 keys.reapply_peers(now)
             } else {
                 (None, Vec::new())
