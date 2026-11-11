@@ -103,6 +103,25 @@ impl json_file::Format for Settings {
     }];
 }
 
+/// The eight colours of the default theme, in the order [`Appearance::palette`] keeps them.
+pub const DEFAULT_PALETTE: [u32; 8] = [
+    0x0C0D11, 0x14161D, 0xECEDF3, 0x8E92A6, 0xD07A93, 0xFFB86B, 0x5BE3A4, 0xFF6B85,
+];
+/// Where the accent sits in a palette.
+pub const ACCENT: usize = 4;
+/// The preset themes by name with their accents. The first is the default.
+pub const PRESET_ACCENTS: [(&str, u32); 7] = [
+    ("Ink", 0xD07A93),
+    ("Moss", 0x7FD1A8),
+    ("Dusk", 0xFF8FB8),
+    ("Tide", 0x5CC8E8),
+    ("Ember", 0xFF9A5C),
+    ("Paper", 0x5B4BDB),
+    ("Sand", 0x1E7F86),
+];
+/// The name [`Appearance::theme`] has while [`Appearance::palette`] holds the colours.
+pub const CUSTOM_THEME: &str = "Custom";
+
 impl Settings {
     /// The settings kept in `dir`, the defaults where there are none. A name a server would
     /// refuse counts as no profile, and volumes are kept in range.

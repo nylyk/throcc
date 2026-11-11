@@ -7993,6 +7993,8 @@ dependencies = [
  "anyhow",
  "thiserror 2.0.21",
  "throcc-client-core",
+ "throcc-proto",
+ "tokio",
  "uniffi",
 ]
 

@@ -20,6 +20,8 @@ required-features = ["bindgen"]
 
 [dependencies]
 throcc-client-core.workspace = true
+throcc-proto.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 uniffi.workspace = true
