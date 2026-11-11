@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use gpui::{App, FontWeight, Hsla, Pixels, SharedString, px, rgb};
 use gpui_component::{Theme, ThemeMode};
-use throcc_client_core::settings::Appearance;
+use throcc_client_core::settings::{self, Appearance};
 
 /// The eight colours a theme is made of. Every other colour is mixed from them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,7 +67,7 @@ impl Palette {
     }
 
     fn is_light(self) -> bool {
-        oklab(self.bg)[0] > 0.6
+        settings::is_light(self.bg)
     }
 }
 

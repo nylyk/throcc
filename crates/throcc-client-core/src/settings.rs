@@ -153,6 +153,23 @@ pub const PRESETS: [(&str, [u32; 8]); 7] = [
 /// The name [`Appearance::theme`] has while [`Appearance::palette`] holds the colours.
 pub const CUSTOM_THEME: &str = "Custom";
 
+/// Whether a theme on the background `bg`, as 0xRRGGBB, is a light one.
+pub fn is_light(bg: u32) -> bool {
+    let [r, g, b] = [bg >> 16, bg >> 8, bg].map(|channel| {
+        let c = (channel & 0xFF) as f32 / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    });
+    let l = (0.412_221_46 * r + 0.536_332_55 * g + 0.051_445_995 * b).cbrt();
+    let m = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
+    let s = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
+    let oklab_lightness = 0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s;
+    oklab_lightness > 0.6
+}
+
 impl Settings {
     /// The settings kept in `dir`, the defaults where there are none. A name a server would
     /// refuse counts as no profile, and volumes are kept in range.

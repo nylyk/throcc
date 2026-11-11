@@ -10,7 +10,7 @@ use throcc_client_core::client::{self, Client, ClientApi, MockClient, UiCommand,
 use throcc_client_core::keystore::{self, Keystore};
 use throcc_client_core::profile::Profile as CoreProfile;
 use throcc_client_core::server_look::ServerLook;
-use throcc_client_core::settings::{CUSTOM_THEME, PRESETS, Settings};
+use throcc_client_core::settings::{self, CUSTOM_THEME, PRESETS, Settings};
 use throcc_client_core::state::BLOCKED_NAME;
 use throcc_client_core::verified::VerifiedStore;
 use throcc_proto::Fingerprint;
@@ -598,6 +598,18 @@ pub fn blocked_name() -> String {
     BLOCKED_NAME.to_owned()
 }
 
+/// The name of the theme that holds the user's own colours.
+#[uniffi::export]
+pub fn custom_theme_name() -> String {
+    CUSTOM_THEME.to_owned()
+}
+
+/// Whether `palette` makes a light theme.
+#[uniffi::export]
+pub fn is_light_theme(palette: Palette) -> bool {
+    settings::is_light(palette.bg)
+}
+
 /// What `typed` is as a name, as every server judges it.
 #[uniffi::export]
 pub fn check_name(typed: String) -> NameCheck {
@@ -793,10 +805,12 @@ mod tests {
             ..core.theme().palette
         };
         core.set_custom_theme(own).unwrap();
-        assert_eq!(core.theme().name, "Custom");
+        assert_eq!(core.theme().name, custom_theme_name());
+        assert!(!is_light_theme(own));
         assert_eq!(core.theme().palette, own);
         assert_eq!(core.custom_palette(), own);
         core.set_theme("Paper".into()).unwrap();
+        assert!(is_light_theme(core.theme().palette));
         assert_eq!(core.custom_palette(), own);
         assert!(core.set_theme("Nope".into()).is_err());
     }
