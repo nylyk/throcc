@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 
 use gpui::{Context, Div, IntoElement, ParentElement, Styled, div, px};
 use throcc_client_core::account::SignInError;
+use throcc_client_core::client::UiCommand;
 use throcc_client_core::connection::ConnectError;
 use throcc_client_core::control::LoginError;
 use throcc_client_core::state::ConnectionStatus;
@@ -89,22 +90,37 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
 }
 
 /// The window in place of the room while the connection is lost, or `None` while it holds.
-pub fn render_lost(app: &mut ThroccApp) -> Option<Div> {
+pub fn render_lost(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> Option<Div> {
     let (hint, error) = match &app.state.connection {
         ConnectionStatus::Reconnecting { attempt, reason } => (
             format!("Reconnecting, attempt {attempt}. You’ll be put back in your room."),
-            format!("Lost the connection: {reason}."),
+            Some(format!("Lost the connection: {reason}.")),
+        ),
+        ConnectionStatus::AwaitingReconnect => (
+            "The connection was down for a while. Reconnecting here signs you out on any other device.".to_owned(),
+            None,
+        ),
+        ConnectionStatus::SignedInElsewhere => (
+            "Pick the server on the left to sign in here again.".to_owned(),
+            Some("Signed in on another device.".to_owned()),
         ),
         ConnectionStatus::Failed(reason) => (
             "Pick the server on the left to try again.".to_owned(),
-            reason.clone(),
+            Some(reason.clone()),
         ),
-        _ => return None,
+        ConnectionStatus::Disconnected | ConnectionStatus::Connected => return None,
     };
+    let awaiting = app.state.connection == ConnectionStatus::AwaitingReconnect;
     Some(
         frame(app.mascot.pick(mascot::UPSET))
             .child(description(hint))
-            .child(div().w(px(420.)).child(error_box(error))),
+            .children(error.map(|e| div().w(px(420.)).child(error_box(e))))
+            .children(awaiting.then(|| {
+                primary("reconnect", "Reconnect")
+                    .h_10()
+                    .px_4()
+                    .on_click(cx.listener(|app, _, _, _| app.command(UiCommand::Reconnect)))
+            })),
     )
 }
 

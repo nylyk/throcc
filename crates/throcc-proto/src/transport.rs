@@ -36,4 +36,5 @@ pub mod close {
     pub const AUTH_FAILED: u32 = 3;
     pub const REMOVED: u32 = 4;
     pub const SERVER_BUSY: u32 = 5;
+    pub const SIGNED_IN_ELSEWHERE: u32 = 6;
 }

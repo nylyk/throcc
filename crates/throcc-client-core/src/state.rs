@@ -96,6 +96,11 @@ pub enum ConnectionStatus {
         attempt: u32,
         reason: String,
     },
+    /// The link was down too long to sign in again unasked, which could push another
+    /// device of ours off the server. `UiCommand::Reconnect` signs in again.
+    AwaitingReconnect,
+    /// Another device signed in as us, which ended this session.
+    SignedInElsewhere,
     Failed(String),
 }
 

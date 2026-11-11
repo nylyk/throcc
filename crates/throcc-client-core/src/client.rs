@@ -85,6 +85,8 @@ pub enum UiCommand {
     VerifiedChanged,
     /// Ends our membership of this server and forgets it, then disconnects.
     LeaveServer,
+    /// Signs in again once the session waits in [`ConnectionStatus::AwaitingReconnect`].
+    Reconnect,
     Disconnect,
 }
 
@@ -511,6 +513,7 @@ impl ClientApi for MockClient {
                 self.update(|s| s.connection = ConnectionStatus::Disconnected);
                 self.shared.emit(UiEvent::LeftServer);
             }
+            UiCommand::Reconnect => self.update(|s| s.connection = ConnectionStatus::Connected),
             UiCommand::Disconnect => self.update(|s| s.connection = ConnectionStatus::Disconnected),
         }
     }

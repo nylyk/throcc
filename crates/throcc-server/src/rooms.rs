@@ -18,6 +18,7 @@ use throcc_proto::messages::{
 };
 use throcc_proto::permissions;
 use throcc_proto::transport::close;
+use throcc_proto::v1;
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tracing::{info, warn};
 
@@ -64,8 +65,9 @@ const ROOM_CHANGES_PER_SECOND: f64 = 0.5;
 /// the rate of room hopping.
 const REJOIN_BURST: f64 = 10.0;
 const REJOINS_PER_SECOND: f64 = 0.1;
-/// A new encryption key re-keys the user's room. Clients replace theirs once a month.
-const ENCRYPTION_KEY_CHANGE_BURST: f64 = 3.0;
+/// A new encryption key re-keys the user's room. Clients replace theirs once a month, and
+/// each device has its own, so switching between two devices changes it at every sign-in.
+const ENCRYPTION_KEY_CHANGE_BURST: f64 = 6.0;
 const ENCRYPTION_KEY_CHANGES_PER_SECOND: f64 = 1.0 / 60.0;
 /// Starting or changing a share sends the room's peers to every member. Stopping is free.
 const SHARE_CHANGE_BURST: f64 = 5.0;
@@ -168,11 +170,21 @@ pub enum Outbound {
     Message(ServerMessage),
     /// A message that keeps its share of the connection's queue budget until it is written.
     Budgeted(ServerMessage, OwnedSemaphorePermit),
-    /// Sends `RemovedFromServer`, finishes the stream once the client has read it, then closes.
+    /// Sends `event`, finishes the stream once the client has read it, then closes.
     Kick {
-        reason: String,
+        event: Event,
         code: u32,
+        reason: &'static str,
     },
+}
+
+/// Why the hub ends a connection.
+#[derive(Clone, Copy)]
+enum Kick {
+    /// The user was removed from the server.
+    Removed,
+    /// The user signed in again, on the connection that replaces this one.
+    Replaced,
 }
 
 /// What the hub needs to reach one live connection.
@@ -180,20 +192,39 @@ pub struct ConnectionHandle {
     pub outgoing: mpsc::Sender<Outbound>,
     pub connection: quinn::Connection,
     pub egress: EgressHandle,
+    /// The protocol the client signed in with.
+    pub protocol: u16,
 }
 
 impl ConnectionHandle {
-    fn kick(&self, reason: &str, code: u32) {
+    fn kick(&self, kick: Kick) {
+        let (event, code, reason) = match kick {
+            Kick::Removed => {
+                let reason = "you were removed from this server";
+                let event = Event::RemovedFromServer {
+                    reason: reason.to_owned(),
+                };
+                (event, close::REMOVED, reason)
+            }
+            // Protocol 1 has no close code for this and takes `REMOVED`.
+            Kick::Replaced => {
+                let code = match self.protocol {
+                    1 => close::REMOVED,
+                    _ => close::SIGNED_IN_ELSEWHERE,
+                };
+                (Event::SignedInElsewhere, code, v1::SIGNED_IN_ELSEWHERE)
+            }
+        };
         let kick = Outbound::Kick {
-            reason: reason.to_owned(),
+            event,
             code,
+            reason,
         };
         if self.outgoing.try_send(kick).is_err() {
             self.connection.close(code.into(), reason.as_bytes());
             return;
         }
         let connection = self.connection.clone();
-        let reason = reason.to_owned();
         tokio::spawn(async move {
             tokio::time::sleep(crate::session::LINGER).await;
             connection.close(code.into(), reason.as_bytes());
@@ -328,7 +359,7 @@ impl Hub {
         if full && !self.sessions.contains_key(&user) {
             return Ok(Err(AuthError::ServerFull));
         }
-        self.evict(user, "you signed in from somewhere else");
+        self.evict(user, Kick::Replaced);
         self.next_conn += 1;
         let conn_id = self.next_conn;
         let role = row.role;
@@ -523,10 +554,10 @@ impl Hub {
         }
     }
 
-    fn evict(&mut self, user: UserId, reason: &str) {
+    fn evict(&mut self, user: UserId, kick: Kick) {
         self.leave_room(user);
         if let Some(session) = self.sessions.remove(&user) {
-            session.handle.kick(reason, close::REMOVED);
+            session.handle.kick(kick);
         }
     }
 
@@ -1394,7 +1425,7 @@ impl Hub {
         self.db.remove_users(users)?;
         for id in users {
             self.last_joined.remove(id);
-            self.evict(*id, "you were removed from this server");
+            self.evict(*id, Kick::Removed);
             self.emit_user_list_change(Event::UserRemoved(*id));
         }
         Ok(())
@@ -1693,6 +1724,7 @@ fn presence(session: &Session) -> Option<Presence> {
         deafened: session.media.deafened,
         sharing: session.media.share.is_some(),
         role: session.row.role,
+        identity_key: session.row.pubkey,
     })
 }
 

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::ControlFlow;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use throcc_crypto::identity::random;
 use throcc_proto::ids::{Hash, MediaId, RoomId, UserId};
@@ -49,6 +49,10 @@ const MAX_BACKOFF: Duration = Duration::from_secs(15);
 /// that lost the same server don't all come back in the same instant.
 const BACKOFF_JITTER: f64 = 0.3;
 const RENEWAL_CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
+/// How long the link may be down, or this machine asleep, before signing in again waits
+/// for the user. A sign-in pushes any other device of ours off the server, and a machine
+/// that slept through that never heard of it.
+const RECONNECT_WINDOW: Duration = Duration::from_secs(5 * 60);
 const MAX_QUEUED_WHILE_RECONNECTING: usize = 64;
 /// How many pictures are fetched from the server at once.
 const AVATAR_FETCHES: usize = 8;
@@ -271,6 +275,11 @@ pub(crate) struct Session {
     tracks: HashMap<MediaId, Watched>,
     dropped_for_you: u32,
     last: LastCounts,
+    /// When the link was last seen up, by the wall clock, which keeps counting while this
+    /// machine sleeps.
+    last_alive: SystemTime,
+    /// Whether the server said another device signed in as us.
+    replaced: bool,
 }
 
 /// The starts of our share. A capture starts beside the session loop, since picking what to
@@ -399,6 +408,8 @@ impl Session {
             tracks: HashMap::new(),
             dropped_for_you: 0,
             last: LastCounts::default(),
+            last_alive: SystemTime::now(),
+            replaced: false,
             call,
         };
         let welcome = session.call.welcome.clone();
@@ -551,6 +562,11 @@ impl Session {
                     self.stop_ended_share().await;
                 }
                 _ = health.tick() => {
+                    if went_stale(self.last_alive, SystemTime::now()) {
+                        self.call.connection.close(close::NORMAL.into(), b"asleep too long");
+                    } else {
+                        self.last_alive = SystemTime::now();
+                    }
                     self.refresh_health();
                     if let Some(wanted) = self.too_soon_profile.take() {
                         self.set_profile(wanted).await;
@@ -625,28 +641,61 @@ impl Session {
             .map_or("connection lost".to_owned(), |e| e.to_string());
         let mut reason = lost.clone();
         self.cue(Cue::ConnectionLost);
+        let replaced_by_close = matches!(
+            self.call.connection.close_reason(),
+            Some(quinn::ConnectionError::ApplicationClosed(c))
+                if c.error_code == quinn::VarInt::from_u32(close::SIGNED_IN_ELSEWHERE)
+        );
+        if self.replaced || replaced_by_close {
+            self.shared
+                .update(|s| s.connection = ConnectionStatus::SignedInElsewhere);
+            return None;
+        }
         let mut backoff = Duration::from_secs(1);
         let mut queued = Vec::new();
         let mut dropped_any = false;
         let mut want_room = self.room;
         let (room_before, watching_before) = (self.room, self.watching.clone());
         for attempt in 1.. {
+            let mut asking = went_stale(self.last_alive, SystemTime::now());
             self.shared.update(|s| {
-                s.connection = ConnectionStatus::Reconnecting {
-                    attempt,
-                    reason: reason.clone(),
+                s.connection = if asking {
+                    ConnectionStatus::AwaitingReconnect
+                } else {
+                    ConnectionStatus::Reconnecting {
+                        attempt,
+                        reason: reason.clone(),
+                    }
                 }
             });
             let wait = tokio::time::sleep(jittered(backoff, u64::from_le_bytes(random())));
             tokio::pin!(wait);
             loop {
                 tokio::select! {
-                    _ = &mut wait => break,
+                    _ = &mut wait, if !asking => {
+                        if !went_stale(self.last_alive, SystemTime::now()) {
+                            break;
+                        }
+                        asking = true;
+                        self.shared
+                            .update(|s| s.connection = ConnectionStatus::AwaitingReconnect);
+                    }
                     command = commands.recv() => match command {
                         None | Some(UiCommand::Disconnect) => {
                             self.shared.update(|s| s.connection = ConnectionStatus::Disconnected);
                             return None;
                         }
+                        Some(UiCommand::Reconnect) if asking => {
+                            self.last_alive = SystemTime::now();
+                            self.shared.update(|s| {
+                                s.connection = ConnectionStatus::Reconnecting {
+                                    attempt,
+                                    reason: reason.clone(),
+                                }
+                            });
+                            break;
+                        }
+                        Some(UiCommand::Reconnect) => {}
                         Some(UiCommand::Join(room)) => want_room = room,
                         // Asked again on the next render once connected.
                         Some(UiCommand::FetchAvatar(hash)) => self.shared.forget_avatar(hash),
@@ -708,6 +757,7 @@ impl Session {
             match Call::restart(link, &self.keystore, &self.call) {
                 Ok(call) => {
                     self.call = call;
+                    self.last_alive = SystemTime::now();
                     self.trust.forget_presented();
                     self.reset_room();
                     self.audio = self.audio.as_ref().map(CallAudio::renew);
@@ -1242,6 +1292,7 @@ impl Session {
                 }
             }
             UiCommand::VerifiedChanged => self.refresh_trust(),
+            UiCommand::Reconnect => {}
             UiCommand::LeaveServer => {
                 if self.leave_server().await {
                     return ControlFlow::Break(());
@@ -1836,6 +1887,7 @@ impl Session {
             ServerEvent::RemovedFromServer { reason } => {
                 self.shared.emit(UiEvent::RemovedFromServer(reason))
             }
+            ServerEvent::SignedInElsewhere => self.replaced = true,
             ServerEvent::KickedFromRoom { by, room } if self.room == Some(room) => {
                 self.put_out_of_room();
                 let state = self.shared.state();
@@ -1998,6 +2050,13 @@ fn shown_users(users: Vec<User>) -> Vec<User> {
             ..user
         })
         .collect()
+}
+
+/// Whether a link last seen up at `last_alive` has been down too long to sign in unasked.
+/// A clock set back since then counts as no time passed.
+fn went_stale(last_alive: SystemTime, now: SystemTime) -> bool {
+    now.duration_since(last_alive)
+        .is_ok_and(|down| down > RECONNECT_WINDOW)
 }
 
 /// `p` as a person, playing as `playback` says.
@@ -2235,6 +2294,18 @@ mod tests {
             Some(ErrorCode::Full)
         );
         assert!(share_start_refusal(&Err(anyhow::anyhow!("timed out")), share, None).is_none());
+    }
+
+    #[test]
+    fn a_link_down_past_the_window_no_longer_signs_in_unasked() {
+        let alive = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        assert!(!went_stale(alive, alive));
+        assert!(!went_stale(alive, alive + RECONNECT_WINDOW));
+        assert!(went_stale(
+            alive,
+            alive + RECONNECT_WINDOW + Duration::from_secs(1)
+        ));
+        assert!(!went_stale(alive, alive - Duration::from_secs(3600)));
     }
 
     #[test]

@@ -882,3 +882,20 @@ fn a_removed_member_stops_reconnecting() {
         matches!(s.connection, ConnectionStatus::Failed(_))
     });
 }
+
+#[test]
+fn a_client_replaced_by_another_device_stays_signed_out() {
+    let (address, invite, _server) = server();
+    let (first, dir) = client(&address, &invite);
+    let second = client_in(dir.path(), &address, None);
+    wait_for(&first, "the first device to be signed out", |s| {
+        s.connection == ConnectionStatus::SignedInElsewhere
+    });
+
+    std::thread::sleep(Duration::from_secs(4));
+    assert_eq!(
+        first.state().connection,
+        ConnectionStatus::SignedInElsewhere
+    );
+    assert_eq!(second.state().connection, ConnectionStatus::Connected);
+}

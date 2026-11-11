@@ -305,6 +305,7 @@ fn voice_call(
 ) -> Result<()> {
     use throcc_client_core::client::{Client, ClientApi, UiCommand, UiEvent};
     use throcc_client_core::media::voice::AudioEngine;
+    use throcc_client_core::state::ConnectionStatus;
     use throcc_client_core::verified::VerifiedStore;
     let saved = Settings::load(keystore.dir())?.audio;
     let audio = if audio {
@@ -333,6 +334,16 @@ fn voice_call(
     let mut speaking = std::collections::BTreeSet::new();
     loop {
         match events.blocking_recv() {
+            Ok(UiEvent::State(state))
+                if state.connection == ConnectionStatus::SignedInElsewhere =>
+            {
+                bail!("disconnected: signed in on another device")
+            }
+            Ok(UiEvent::State(state))
+                if state.connection == ConnectionStatus::AwaitingReconnect =>
+            {
+                bail!("disconnected: the connection was down too long to sign in again unasked")
+            }
             Ok(UiEvent::State(state)) => {
                 let now: std::collections::BTreeSet<String> = state
                     .people
@@ -472,7 +483,7 @@ async fn read_commands(keystore: &Keystore, link: &mut ControlLink) -> Result<()
                 let Some(event) = event else { bail!("disconnected") };
                 print_event(&event);
                 follow(&mut link.welcome, &event);
-                if let Event::RemovedFromServer { .. } = event {
+                if let Event::RemovedFromServer { .. } | Event::SignedInElsewhere = event {
                     return Ok(());
                 }
             }
@@ -647,6 +658,7 @@ fn print_event(event: &Event) {
             )
         }
         Event::RemovedFromServer { reason } => println!("* disconnected: {}", shown(reason)),
+        Event::SignedInElsewhere => println!("* disconnected: signed in on another device"),
         other => println!("* {other:?}"),
     }
 }
@@ -764,6 +776,7 @@ mod tests {
             deafened: false,
             sharing: false,
             role: Role::User,
+            identity_key: [0; 32],
         }
     }
 

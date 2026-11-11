@@ -919,14 +919,14 @@ async fn only_a_new_encryption_key_rekeys_the_room_and_new_keys_are_rate_limited
     }
     assert_eq!(alice.join(Some(general)).await.epoch, epoch);
 
-    for (i, key) in [[1; 32], [2; 32], [3; 32]].into_iter().enumerate() {
-        let set = Request::SetEncryptionKey(signed_key(&alice, key));
+    for i in 0..6 {
+        let set = Request::SetEncryptionKey(signed_key(&alice, [i + 1; 32]));
         assert_eq!(alice.request(set).await, Response::Ok);
-        let rekeyed = Epoch(epoch.0 + 1 + i as u32);
+        let rekeyed = Epoch(epoch.0 + 1 + u32::from(i));
         assert_eq!(alice.join(Some(general)).await.epoch, rekeyed);
     }
-    let fourth = Request::SetEncryptionKey(signed_key(&alice, [4; 32]));
-    assert_error(&alice.request(fourth).await, ErrorCode::RateLimited);
+    let seventh = Request::SetEncryptionKey(signed_key(&alice, [7; 32]));
+    assert_error(&alice.request(seventh).await, ErrorCode::RateLimited);
 }
 
 #[tokio::test]

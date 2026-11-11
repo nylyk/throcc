@@ -4,7 +4,7 @@ use crate::framing::FrameError;
 use crate::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
 
 /// The protocol this build speaks.
-pub const PROTOCOL: u16 = 1;
+pub const PROTOCOL: u16 = 2;
 /// The oldest protocol a server of this build accepts.
 pub const MIN_PROTOCOL: u16 = 1;
 pub const MAX_AVATAR_BYTES: usize = 64 * 1024;
@@ -316,6 +316,8 @@ pub enum Event {
     },
     /// Who receives each share in our room now.
     AudiencesChanged(Audiences),
+    /// Another connection signed in as us and replaces this one, which the server closes.
+    SignedInElsewhere,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -417,6 +419,9 @@ pub struct Presence {
     pub deafened: bool,
     pub sharing: bool,
     pub role: Role,
+    /// The identity key the server knows this user by. Nothing signs it here; only a
+    /// [`Peer`]'s signed encryption key proves an identity.
+    pub identity_key: PublicKey,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

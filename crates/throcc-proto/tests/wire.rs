@@ -116,9 +116,11 @@ fn control_messages_encode_to_pinned_bytes() {
             deafened: false,
             sharing: true,
             role: Role::Admin,
+            identity_key: [3; 32],
         })),
-        "01000201610106060606060606060606060606060606060606060606060606060606060606060001000102",
+        "010002016101060606060606060606060606060606060606060606060606060606060606060600010001020303030303030303030303030303030303030303030303030303030303030303",
     );
+    pinned(ServerMessage::Event(Event::SignedInElsewhere), "0112");
     pinned(
         ServerMessage::Event(Event::KickedFromRoom {
             by: UserId(1),

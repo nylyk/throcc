@@ -1738,7 +1738,10 @@ impl ThroccApp {
 
     /// The server we are connected to, or still reconnecting to.
     pub fn connected_server(&self) -> Option<&ServerView> {
-        let gave_up = matches!(self.state.connection, ConnectionStatus::Failed(_));
+        let gave_up = matches!(
+            self.state.connection,
+            ConnectionStatus::Failed(_) | ConnectionStatus::SignedInElsewhere
+        );
         self.client
             .as_ref()
             .filter(|_| !gave_up)
@@ -2069,6 +2072,17 @@ impl ThroccApp {
                     };
                 });
             }
+            "reconnect" | "elsewhere" => {
+                joined(self);
+                let connection = if screen == "reconnect" {
+                    ConnectionStatus::AwaitingReconnect
+                } else {
+                    ConnectionStatus::SignedInElsewhere
+                };
+                after_a_moment(cx, move |app, _| {
+                    Arc::make_mut(&mut app.state).connection = connection;
+                });
+            }
             "personmenu" => {
                 joined(self);
                 self.open_person_menu(
@@ -2371,7 +2385,7 @@ impl Render for ThroccApp {
         self.sidebar_width = self.sidebar_width.min(widest_sidebar(window));
         self.mascot.start_render();
         let lost = match self.screen {
-            Screen::Main => views::join::render_lost(self),
+            Screen::Main => views::join::render_lost(self, cx),
             _ => None,
         };
         let shows_lost = lost.is_some();
