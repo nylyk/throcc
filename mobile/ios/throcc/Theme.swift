@@ -1,22 +1,55 @@
 import SwiftUI
 
-/// The colours of a palette, with the one mixed from them that cards on a panel use.
+/// The colours of a palette and the ones mixed from them. The text and status colours
+/// read at 4.5:1 on every surface.
 struct Theme: Equatable {
-    let bg, panel, raised, text, muted, accent, warning, good, bad: Color
+    let bg, panel, raised, line, text, muted, accent, warning, good, bad: Color
     let isDark: Bool
 
     init(_ palette: Palette) {
-        bg = Color(rgb: palette.bg)
-        panel = Color(rgb: palette.panel)
-        text = Color(rgb: palette.text)
-        muted = Color(rgb: palette.muted)
-        accent = Color(rgb: palette.accent)
-        warning = Color(rgb: palette.warning)
-        good = Color(rgb: palette.good)
-        bad = Color(rgb: palette.bad)
-        raised = panel.mix(with: text, by: 0.06)
-        let channels = [16, 8, 0].map { Double(palette.bg >> UInt32($0) & 0xFF) / 255 }
-        isDark = 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2] < 0.5
+        let text = Color(rgb: palette.text)
+        let bg = Color(rgb: palette.bg)
+        let panel = Color(rgb: palette.panel)
+        let raised = panel.mix(with: text, by: 0.06)
+        let readable = { (rgb: UInt32) -> Color in
+            let color = Color(rgb: rgb)
+            let mixes = stride(from: 0, through: 1, by: 0.1).lazy.map { color.mix(with: text, by: $0) }
+            return mixes.first { mixed in [bg, panel, raised].allSatisfy { contrast(mixed, $0) >= 4.5 } } ?? text
+        }
+        self.text = text
+        self.bg = bg
+        self.panel = panel
+        self.raised = raised
+        line = panel.mix(with: text, by: 0.16)
+        muted = readable(palette.muted)
+        accent = readable(palette.accent)
+        warning = readable(palette.warning)
+        good = readable(palette.good)
+        bad = readable(palette.bad)
+        isDark = !isLightTheme(palette: palette)
+    }
+}
+
+/// The WCAG contrast ratio of two colours.
+private func contrast(_ one: Color, _ other: Color) -> Float {
+    let luminances = [one, other].map { color in
+        let parts = color.resolve(in: EnvironmentValues())
+        return 0.2126 * parts.linearRed + 0.7152 * parts.linearGreen + 0.0722 * parts.linearBlue
+    }
+    return (max(luminances[0], luminances[1]) + 0.05) / (min(luminances[0], luminances[1]) + 0.05)
+}
+
+extension Color {
+    init(rgb: UInt32) {
+        let part = { (shift: UInt32) in Double(rgb >> shift & 0xFF) / 255 }
+        self.init(red: part(16), green: part(8), blue: part(0))
+    }
+}
+
+extension Color.Resolved {
+    var rgb: UInt32 {
+        let byte = { (part: Float) in UInt32((min(max(part, 0), 1) * 255).rounded()) }
+        return byte(red) << 16 | byte(green) << 8 | byte(blue)
     }
 }
 
@@ -39,6 +72,8 @@ extension ShapeStyle where Self == ThemeColor {
     static var bg: ThemeColor { ThemeColor { $0.bg } }
     static var panel: ThemeColor { ThemeColor { $0.panel } }
     static var raised: ThemeColor { ThemeColor { $0.raised } }
+    static var line: ThemeColor { ThemeColor { $0.line } }
+    static var text: ThemeColor { ThemeColor { $0.text } }
     static var muted: ThemeColor { ThemeColor { $0.muted } }
     static var warning: ThemeColor { ThemeColor { $0.warning } }
     static var good: ThemeColor { ThemeColor { $0.good } }
@@ -69,7 +104,47 @@ struct IconLabel: View {
     }
 
     var body: some View {
-        Label { Text(title) } icon: { Image(systemName: symbol).foregroundStyle(Color.primary) }
+        Label { Text(title) } icon: { Image(systemName: symbol).foregroundStyle(.text) }
+    }
+}
+
+/// A button for a destructive action, titled in the theme's bad colour.
+struct DestructiveButton: View {
+    let title: LocalizedStringKey
+    let action: () -> Void
+
+    init(_ title: LocalizedStringKey, action: @escaping () -> Void) {
+        self.title = title
+        self.action = action
+    }
+
+    var body: some View {
+        Button(role: .destructive, action: action) { Text(title).foregroundStyle(.bad) }
+    }
+}
+
+/// A sheet's confirming button, filled with the accent and titled in the background colour.
+struct ConfirmButton: View {
+    @Environment(\.theme) private var theme
+    @Environment(\.isEnabled) private var isEnabled
+    let title: LocalizedStringKey
+    let action: () -> Void
+
+    init(_ title: LocalizedStringKey, action: @escaping () -> Void) {
+        self.title = title
+        self.action = action
+    }
+
+    var body: some View {
+        Button(action: action) { Text(title).foregroundStyle(isEnabled ? theme.bg : theme.muted) }
+            .buttonStyle(.glassProminent)
+    }
+}
+
+extension View {
+    /// Gives a text button's label the 44 pt a finger needs.
+    nonisolated func touchTarget() -> some View {
+        frame(minWidth: 44, minHeight: 44).contentShape(.rect)
     }
 }
 
@@ -81,9 +156,13 @@ struct ThemedList<Content: View>: View {
     @ViewBuilder let content: Content
 
     var body: some View {
-        List { Group { content }.listRowBackground(isSidePane ? theme.raised : theme.panel) }
-            .scrollContentBackground(.hidden)
-            .background(isSidePane ? theme.panel : theme.bg)
+        List {
+            Group { content }
+                .listRowBackground(isSidePane ? theme.raised : theme.panel)
+                .listRowSeparatorTint(theme.line)
+        }
+        .scrollContentBackground(.hidden)
+        .background(isSidePane ? theme.panel : theme.bg)
     }
 }
 
@@ -93,8 +172,12 @@ struct ThemedForm<Content: View>: View {
     @ViewBuilder let content: Content
 
     var body: some View {
-        Form { Group { content }.listRowBackground(theme.panel) }
-            .scrollContentBackground(.hidden)
-            .background(theme.bg)
+        Form {
+            Group { content }
+                .listRowBackground(theme.panel)
+                .listRowSeparatorTint(theme.line)
+        }
+        .scrollContentBackground(.hidden)
+        .background(theme.bg)
     }
 }

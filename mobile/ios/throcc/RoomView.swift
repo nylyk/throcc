@@ -23,16 +23,18 @@ struct RoomView: View {
                     Button("Microphone", systemImage: state.mic ? "mic.fill" : "mic.slash.fill") {
                         model.core.command(command: .setMic(on: !state.mic))
                     }
-                    .tint(state.mic ? .primary : model.theme.bad)
+                    .tint(state.mic ? model.theme.text : model.theme.bad)
+                    .accessibilityValue(state.mic ? "On" : "Off")
                     Button("Sound", systemImage: state.deafened ? "speaker.slash.fill" : "speaker.wave.2.fill") {
                         model.core.command(command: .setDeafened(on: !state.deafened))
                     }
-                    .tint(state.deafened ? model.theme.bad : .primary)
+                    .tint(state.deafened ? model.theme.bad : model.theme.text)
+                    .accessibilityValue(state.deafened ? "Off" : "On")
                     Spacer()
                     Button("Leave Room", systemImage: "phone.down.fill") {
                         model.core.command(command: .join(room: nil))
                     }
-                    .tint(.red)
+                    .tint(model.theme.bad)
                 }
             }
         } else {
@@ -44,6 +46,7 @@ struct RoomView: View {
                 ("Join a room on the left.", "speaker.wave.2")
             }
             ContentUnavailableView(hint, systemImage: symbol)
+                .foregroundStyle(.text)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(.bg)
         }
@@ -66,7 +69,7 @@ private struct PersonCard: View {
                 Text(person.name).lineLimit(1)
                 MutedIcon(person: person).font(.footnote)
             }
-            .foregroundStyle(person.blocked ? AnyShapeStyle(.muted) : AnyShapeStyle(.primary))
+            .foregroundStyle(person.blocked ? ThemeColor.muted : .text)
             if let sharing = person.sharing {
                 Text("Sharing \(sharing.label)")
                     .font(.caption)

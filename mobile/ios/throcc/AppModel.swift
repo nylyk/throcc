@@ -37,7 +37,10 @@ enum SaveStatus: Equatable {
 final class AppModel {
     let core: Core
     private(set) var profile: Profile?
-    private(set) var accent: Accent
+    let themes: [ThemeChoice]
+    private(set) var pickedTheme: ThemeChoice
+    /// The colours the Custom theme has, or starts from.
+    private(set) var customPalette: Palette
     private(set) var theme: Theme
     private(set) var servers: [KnownServer] = []
     private(set) var state: CoreState
@@ -47,6 +50,7 @@ final class AppModel {
     private(set) var invite: String?
     private(set) var connecting: String?
     private(set) var connectedAddress: String?
+    private(set) var alertTitle = ""
     private(set) var alert = ""
     var showsAlert = false
     var notice: String?
@@ -63,14 +67,15 @@ final class AppModel {
     init(core: Core) {
         self.core = core
         profile = core.profile()
-        accent = core.accent()
-        theme = Theme(core.palette())
+        themes = core.themes()
+        let picked = core.theme()
+        pickedTheme = picked
+        customPalette = core.customPalette()
+        theme = Theme(picked.palette)
         state = core.state()
         loadServers()
         core.setListener(listener: self)
     }
-
-    var tint: Color { Color(rgb: accent.rgb) }
 
     /// Runs `action`, and shows why it failed as a notice.
     func attempt(_ action: () throws -> Void) {
@@ -86,16 +91,14 @@ final class AppModel {
         profile = core.profile()
     }
 
-    func useAccent(named name: String) {
-        attempt { try core.setAccent(name: name) }
-        accent = core.accent()
-        theme = Theme(core.palette())
+    func useTheme(named name: String) {
+        attempt { try core.setTheme(name: name) }
+        loadTheme()
     }
 
-    func useAccent(rgb: UInt32) {
-        attempt { try core.setCustomAccent(rgb: rgb) }
-        accent = core.accent()
-        theme = Theme(core.palette())
+    func useCustomTheme(_ palette: Palette) {
+        attempt { try core.setCustomTheme(palette: palette) }
+        loadTheme()
     }
 
     /// Signs in to the server at `address`, joining it first with the invite `code`, and opens
@@ -123,8 +126,7 @@ final class AppModel {
             do {
                 try await connect(to: address)
             } catch {
-                alert = error.explanation
-                showsAlert = true
+                show(alert: error.explanation, titled: "Couldn’t Connect")
             }
         }
     }
@@ -154,6 +156,18 @@ final class AppModel {
         guard let picture = UIImage(data: bytes) else { return nil }
         decoded.setObject(picture, forKey: bytes as NSData)
         return picture
+    }
+
+    private func loadTheme() {
+        pickedTheme = core.theme()
+        customPalette = core.customPalette()
+        theme = Theme(pickedTheme.palette)
+    }
+
+    private func show(alert: String, titled title: String) {
+        alertTitle = title
+        self.alert = alert
+        showsAlert = true
     }
 
     private func loadServers() {
@@ -189,8 +203,7 @@ final class AppModel {
         case .notice(let text):
             notice = text
         case .removedFromServer(let reason):
-            alert = reason
-            showsAlert = true
+            show(alert: reason, titled: "Removed from Server")
             disconnect()
         case .avatarReady(let hash):
             loadPicture(hash)

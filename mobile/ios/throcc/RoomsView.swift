@@ -20,12 +20,12 @@ struct RoomsView: View {
                     Button { enter(room, unasked: managesRooms) } label: { label(for: room) }
                         .swipeActions {
                             if managesRooms {
-                                Button("Delete") {
+                                Button("Delete", systemImage: "trash") {
                                     deleted = room
                                     confirmsDelete = true
                                 }
                                 .tint(.red)
-                                Button("Edit") { model.sheet = .editRoom(room) }
+                                Button("Edit", systemImage: "pencil") { model.sheet = .editRoom(room) }
                             }
                         }
                     people(in: room.id)
@@ -33,21 +33,26 @@ struct RoomsView: View {
             }
             if state.rooms.isEmpty, state.connection == .connected {
                 Text("No rooms yet.").foregroundStyle(.muted)
+                if managesRooms {
+                    Button("New Room") { model.sheet = .newRoom }
+                }
             }
             if state.people.contains(where: { $0.room == nil }) {
-                Section("Lobby") { people(in: nil) }
+                Section {
+                    people(in: nil)
+                } header: {
+                    Text("Lobby").foregroundStyle(.muted)
+                }
             }
         }
         .navigationTitle(state.server?.title ?? "")
         .toolbar {
-            if managesRooms {
-                ToolbarItem(placement: .primaryAction) {
-                    Button("New Room", systemImage: "plus") { model.sheet = .newRoom }
-                        .tint(.primary)
-                }
-            }
             ToolbarItem(placement: .primaryAction) {
                 Menu("Server", systemImage: "ellipsis") {
+                    if managesRooms {
+                        Button("New Room", systemImage: "plus") { model.sheet = .newRoom }
+                        Divider()
+                    }
                     Button("Overview", systemImage: "info.circle") { model.sheet = .server(.overview) }
                     if permissions?.listUsers == true {
                         Button("Members", systemImage: "person.2") { model.sheet = .server(.members) }
@@ -60,7 +65,7 @@ struct RoomsView: View {
                         confirmsLeave = true
                     }
                 }
-                .tint(.primary)
+                .tint(model.theme.text)
             }
         }
         .alert("Join “\(lockedRoom?.name ?? "")”", isPresented: $asksPassword, presenting: lockedRoom) { room in
@@ -110,12 +115,16 @@ struct RoomsView: View {
             Image(systemName: room.locked ? "lock.fill" : "speaker.wave.2.fill")
                 .foregroundStyle(.muted)
                 .frame(width: 28)
+                .accessibilityLabel("Locked")
+                .accessibilityHidden(!room.locked)
             Text(room.name)
                 .font(.headline)
-                .foregroundStyle(Color.primary)
+                .foregroundStyle(.text)
             Spacer()
             if model.state.current?.room == room.id {
                 Image(systemName: "checkmark")
+                    .foregroundStyle(.tint)
+                    .accessibilityLabel("Joined")
             }
         }
     }
@@ -156,29 +165,38 @@ private struct LostConnectionSection: View {
                 } icon: {
                     ProgressView()
                 }
+                .foregroundStyle(.text)
                 Text("Lost the connection: \(reason).").foregroundStyle(.muted)
             }
         case .awaitingReconnect:
             Section {
                 Text("The connection was down for a while. Reconnecting here signs you out on any other device.")
+                    .foregroundStyle(.text)
                 Button("Reconnect") { model.core.command(command: .reconnect) }
             }
         case .signedInElsewhere:
             Section {
-                Text("Signed in on another device.")
-                Button("Sign In Here", action: connectAgain)
+                Text("Signed in on another device.").foregroundStyle(.text)
+                connectAgain(titled: "Sign In Here")
             }
         case .failed(let reason):
             Section {
-                Text(reason)
-                Button("Try Again", action: connectAgain)
+                Text(reason).foregroundStyle(.text)
+                connectAgain(titled: "Try Again")
             }
         }
     }
 
-    private func connectAgain() {
-        if let address = model.connectedAddress {
-            model.open(address)
+    @ViewBuilder
+    private func connectAgain(titled title: LocalizedStringKey) -> some View {
+        if model.connecting != nil {
+            ProgressView()
+        } else {
+            Button(title) {
+                if let address = model.connectedAddress {
+                    model.open(address)
+                }
+            }
         }
     }
 }
@@ -192,7 +210,7 @@ private struct PersonRow: View {
         HStack(spacing: 12) {
             PersonPicture(person: person, size: 28)
             Text(person.name)
-                .foregroundStyle(person.blocked ? Color.secondary : .primary)
+                .foregroundStyle(person.blocked ? ThemeColor.muted : .text)
                 .lineLimit(1)
             if trust != .verified, !person.blocked {
                 TrustLabel(trust: trust).font(.caption)
@@ -227,6 +245,7 @@ struct MutedIcon: View {
 struct RoomEditor: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.theme) private var theme
     let room: Room?
     @State private var name = ""
     @State private var password = ""
@@ -237,23 +256,25 @@ struct RoomEditor: View {
         NavigationStack {
             ThemedForm {
                 Section {
-                    TextField("Name", text: $name)
+                    TextField("Name", text: $name, prompt: Text("Name").foregroundStyle(theme.muted))
+                        .foregroundStyle(.text)
                 } footer: {
                     if let problem = check.problem {
                         Text(problem).foregroundStyle(.bad)
                     }
                 }
                 Section {
-                    SecureField("Password", text: $password)
+                    SecureField("Password", text: $password, prompt: Text("Password").foregroundStyle(theme.muted))
+                        .foregroundStyle(.text)
                     if let room, room.locked {
-                        Button("Remove Password", role: .destructive) {
+                        DestructiveButton("Remove Password") {
                             model.core.command(command: .setRoomPassword(room: room.id, password: nil))
                             dismiss()
                         }
                     }
                 } footer: {
                     if passwordFits {
-                        Text(passwordHint)
+                        Text(passwordHint).foregroundStyle(.muted)
                     } else {
                         Text("Passwords can be at most \(limits().passwordChars) characters.").foregroundStyle(.bad)
                     }
@@ -264,10 +285,10 @@ struct RoomEditor: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(role: .cancel) { dismiss() }
-                        .tint(.primary)
+                        .tint(theme.text)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(room == nil ? "Create" : "Save") {
+                    ConfirmButton(room == nil ? "Create" : "Save") {
                         save(name: check.name)
                         dismiss()
                     }

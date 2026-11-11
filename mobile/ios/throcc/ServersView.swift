@@ -10,7 +10,7 @@ struct ServersView: View {
             ForEach(model.servers, id: \.address) { server in
                 Button { model.open(server.address) } label: { row(for: server) }
                     .swipeActions {
-                        Button("Remove") {
+                        Button("Remove", systemImage: "minus.circle") {
                             removed = server
                             confirmsRemoval = true
                         }
@@ -21,11 +21,11 @@ struct ServersView: View {
         .overlay {
             if model.servers.isEmpty {
                 ContentUnavailableView {
-                    Label("No Servers", systemImage: "server.rack")
+                    Label("No Servers", systemImage: "server.rack").foregroundStyle(.text)
                 } description: {
-                    Text("Add your first server to get started.")
+                    Text("Add your first server to get started.").foregroundStyle(.muted)
                 } actions: {
-                    Button("Add Server") { model.sheet = .addServer }
+                    Button { model.sheet = .addServer } label: { Text("Add Server").touchTarget() }
                 }
             }
         }
@@ -33,11 +33,11 @@ struct ServersView: View {
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 Button("Settings", systemImage: "gearshape") { model.sheet = .settings }
-                    .tint(.primary)
+                    .tint(model.theme.text)
             }
             ToolbarItem(placement: .primaryAction) {
                 Button("Add Server", systemImage: "plus") { model.sheet = .addServer }
-                    .tint(.primary)
+                    .tint(model.theme.text)
             }
         }
         .confirmationDialog(
@@ -56,7 +56,7 @@ struct ServersView: View {
         HStack(spacing: 12) {
             Avatar(picture: model.picture(in: server.picture), name: server.title, size: 40)
             VStack(alignment: .leading, spacing: 2) {
-                Text(server.title).foregroundStyle(Color.primary)
+                Text(server.title).foregroundStyle(.text)
                 if server.name != nil {
                     Text(server.address)
                         .font(.subheadline)
@@ -78,6 +78,7 @@ struct ServersView: View {
 struct AddServerView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.theme) private var theme
     @State private var address = ""
     @State private var code = ""
     @State private var problem: String?
@@ -88,16 +89,18 @@ struct AddServerView: View {
         NavigationStack {
             ThemedForm {
                 Section {
-                    TextField("Address", text: $address)
+                    TextField("Address", text: $address, prompt: Text("Address").foregroundStyle(theme.muted))
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
-                    TextField("Invite code", text: $code)
+                    TextField("Invite code", text: $code, prompt: Text("Invite code").foregroundStyle(theme.muted))
                         .monospaced()
                         .textInputAutocapitalization(.characters)
                 } footer: {
                     Text("The code also proves you reached the real server. Leave it empty for a server you’ve joined before.")
+                        .foregroundStyle(.muted)
                 }
                 .autocorrectionDisabled()
+                .foregroundStyle(.text)
                 if let problem {
                     Text(problem).foregroundStyle(.bad)
                 }
@@ -107,11 +110,15 @@ struct AddServerView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(role: .cancel) { dismiss() }
-                        .tint(.primary)
+                        .tint(theme.text)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Join") { join(address) }
-                        .disabled(!joinable || model.connecting != nil)
+                    if model.connecting == nil {
+                        ConfirmButton("Join") { join(address) }
+                            .disabled(!joinable)
+                    } else {
+                        ProgressView()
+                    }
                 }
             }
         }

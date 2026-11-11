@@ -16,10 +16,12 @@ struct PersonView: View {
                 form(for: person)
             } else {
                 ContentUnavailableView("No longer on this server", systemImage: "person.slash")
+                    .foregroundStyle(.text)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(.bg)
             }
         }
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar { CloseButton() }
     }
 
     private func form(for person: Person) -> some View {
@@ -28,7 +30,10 @@ struct PersonView: View {
             Section {
                 VStack(spacing: 8) {
                     PersonPicture(person: person, size: 96)
-                    Text(person.name).font(.title2.weight(.semibold))
+                    Text(person.name)
+                        .font(.title2.weight(.semibold))
+                        .foregroundStyle(person.blocked ? ThemeColor.muted : .text)
+                        .multilineTextAlignment(.center)
                     Text(person.role.title).foregroundStyle(.muted)
                 }
                 .frame(maxWidth: .infinity)
@@ -42,15 +47,19 @@ struct PersonView: View {
             } else {
                 keyWarning(for: person)
                 trust(in: person)
-                Section("Voice") {
+                Section {
                     SoundControl(user: user, sound: .voice, level: person.voice)
+                } header: {
+                    Text("Voice").foregroundStyle(.muted)
                 }
                 if person.sharing?.audio == true {
-                    Section("Stream audio") {
+                    Section {
                         SoundControl(user: user, sound: .share, level: person.shareAudio)
+                    } header: {
+                        Text("Stream Audio").foregroundStyle(.muted)
                     }
                 }
-                Button("Block", role: .destructive) { model.core.command(command: .block(user: user)) }
+                DestructiveButton("Block") { model.core.command(command: .block(user: user)) }
             }
             if !mine {
                 moderation(of: person)
@@ -65,14 +74,17 @@ struct PersonView: View {
         if let warning = model.state.keyWarnings.first(where: { $0.user == user }) {
             Section {
                 Text("\(person.name)’s new key doesn’t match the one you verified. Someone might be listening in.")
-                LabeledContent("Before") { Text(fingerprintShort(key: warning.verified)).monospaced() }
-                LabeledContent("Now") { Text(fingerprintShort(key: warning.now)).monospaced() }
+                    .foregroundStyle(.text)
+                LabeledContent("Before") { Text(fingerprintShort(key: warning.verified)).monospaced().foregroundStyle(.muted) }
+                    .foregroundStyle(.text)
+                LabeledContent("Now") { Text(fingerprintShort(key: warning.now)).monospaced().foregroundStyle(.muted) }
+                    .foregroundStyle(.text)
                 Button("Dismiss Warning") {
                     model.core.command(command: .dismissKeyChange(user: user, shown: shownKey))
                 }
                 .disabled(keyChangedWhileOpen || shownKey != person.identityKey)
             } header: {
-                Text("\(person.name)’s key changed").foregroundStyle(.bad)
+                Label("\(person.name)’s key changed", systemImage: "exclamationmark.triangle").foregroundStyle(.bad)
             }
         }
     }
@@ -84,6 +96,7 @@ struct PersonView: View {
                 SafetyNumber(number: number)
                 if keyChangedWhileOpen {
                     Text("\(person.name)’s key changed while this was open, so this is a new number. Compare it again.")
+                        .foregroundStyle(.text)
                     Button("Compare Again") { keyChangedWhileOpen = false }
                 }
                 Button(person.verified ? "Mark as Not Verified" : "Mark as Verified") {
@@ -95,10 +108,11 @@ struct PersonView: View {
                 Text("Their safety number appears once you share a room.").foregroundStyle(.muted)
             }
         } header: {
-            Text("Safety Number")
+            Text("Safety Number").foregroundStyle(.muted)
         } footer: {
             if number != nil {
                 Text("To check that your calls with \(person.name) are end-to-end encrypted, compare these numbers with theirs in person or through another app.")
+                    .foregroundStyle(.muted)
             }
         }
     }
@@ -108,12 +122,12 @@ struct PersonView: View {
         if let role = model.state.role {
             Section {
                 if let room = person.room, canKickFromRoom(actor: role, target: person.role) {
-                    Button("Kick from Room", role: .destructive) {
+                    DestructiveButton("Kick from Room") {
                         model.core.command(command: .kickFromRoom(user: user, room: room))
                     }
                 }
                 if canRemove(actor: role, target: person.role) {
-                    Button("Remove from Server", role: .destructive) {
+                    DestructiveButton("Remove from Server") {
                         removal = Removal(user: user, name: person.name)
                         confirmsRemoval = true
                     }
@@ -137,10 +151,13 @@ private struct SafetyNumber: View {
     var body: some View {
         let groups = stride(from: 0, to: number.count, by: 5).map { number.dropFirst($0).prefix(5) }
         LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 4), spacing: 8) {
-            ForEach(groups.indices, id: \.self) { Text(groups[$0]) }
+            ForEach(groups.indices, id: \.self) { Text(groups[$0]).speechSpellsOutCharacters() }
         }
         .font(.title3)
         .monospaced()
+        .foregroundStyle(.text)
+        .lineLimit(1)
+        .minimumScaleFactor(0.5)
         .padding(.vertical, 8)
     }
 }
@@ -161,10 +178,14 @@ private struct SoundControl: View {
     }
 
     var body: some View {
-        LabeledContent("Volume", value: "\(Int((volume * 100).rounded()))%")
-        Slider(value: $volume, in: 0...2)
+        let percent = "\(Int((volume * 100).rounded()))%"
+        LabeledContent("Volume") { Text(percent).foregroundStyle(.muted) }
+            .foregroundStyle(.text)
+        Slider(value: $volume, in: 0...2) { Text("Volume") }
+            .accessibilityValue(percent)
             .onChange(of: volume) { set(SoundLevel(volume: volume, muted: level.muted)) }
         Toggle("Mute", isOn: Binding { level.muted } set: { set(SoundLevel(volume: volume, muted: $0)) })
+            .foregroundStyle(.text)
     }
 
     private func set(_ level: SoundLevel) {

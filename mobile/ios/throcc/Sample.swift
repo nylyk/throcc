@@ -3,7 +3,7 @@ import Foundation
 /// A screen that `--mock --screen <name>` opens directly.
 enum Sample: String {
     case onboarding, servers, addserver, rooms, room, blocked, person, personblocked
-    case profile, settings, appearance, verified, blockedpeople
+    case profile, settings, appearance, customtheme, verified, blockedpeople
     case server, members, invites, keys
     case reconnect, elsewhere
 }
@@ -34,6 +34,9 @@ extension AppModel {
         case .profile:
             await showSampleSettings([.profile])
         case .appearance:
+            await showSampleSettings([.appearance])
+        case .customtheme:
+            useCustomTheme(customPalette)
             await showSampleSettings([.appearance])
         case .verified:
             await showSampleSettings([.verified])

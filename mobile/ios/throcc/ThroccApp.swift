@@ -8,11 +8,16 @@ struct ThroccApp: App {
     init() {
         let arguments = ProcessInfo.processInfo.arguments
         let mock = arguments.contains("--mock")
-        let sample = arguments.drop { $0 != "--screen" }.dropFirst().first.flatMap(Sample.init(rawValue:))
+        let value = { (flag: String) in arguments.drop { $0 != flag }.dropFirst().first }
+        let sample = value("--screen").flatMap(Sample.init(rawValue:))
         self.sample = mock ? sample : nil
         launch = Result {
             try setAppDirs()
-            return AppModel(core: mock ? .mock(onboarded: sample != .onboarding) : try Core())
+            let model = AppModel(core: mock ? .mock(onboarded: sample != .onboarding) : try Core())
+            if mock, let theme = value("--theme") {
+                model.useTheme(named: theme)
+            }
+            return model
         }
     }
 

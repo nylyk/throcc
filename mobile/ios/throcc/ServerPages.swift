@@ -19,6 +19,7 @@ struct ServerPageView: View {
 
 private struct ServerOverview: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.theme) private var theme
     @State private var name = ""
     @State private var picture: Data?
     /// The picture the server had when this page loaded or last saved it.
@@ -33,29 +34,39 @@ private struct ServerOverview: View {
                 Section {
                     if editable {
                         PictureEditor(picture: $picture, name: server.title)
-                        TextField("Name", text: $name)
+                        TextField("Name", text: $name, prompt: Text("Name").foregroundStyle(theme.muted))
+                            .foregroundStyle(.text)
                     } else {
                         LabeledContent("Name") {
                             Avatar(picture: model.picture(in: picture), name: server.title, size: 28)
-                            Text(server.title)
+                            Text(server.title).foregroundStyle(.muted)
                         }
+                        .foregroundStyle(.text)
                     }
-                    LabeledContent("Address", value: server.address)
+                    LabeledContent("Address") { Text(server.address).foregroundStyle(.muted) }
+                        .foregroundStyle(.text)
                 } footer: {
                     if let problem = check.problem {
                         Text(problem).foregroundStyle(.bad)
                     }
                 }
-                Section("Fingerprint") {
+                Section {
                     Text(fingerprintText(key: server.fingerprint))
                         .font(.footnote)
                         .monospaced()
+                        .foregroundStyle(.text)
                         .textSelection(.enabled)
+                } header: {
+                    Text("Fingerprint").foregroundStyle(.muted)
                 }
                 if editable {
                     Section {
-                        Button("Save") { save(name: check.name, over: server) }
-                            .disabled(!changed || check.problem != nil || model.serverSave == .saving)
+                        if model.serverSave == .saving {
+                            ProgressView()
+                        } else {
+                            Button("Save") { save(name: check.name, over: server) }
+                                .disabled(!changed || check.problem != nil)
+                        }
                     } footer: {
                         SaveStatusText(status: model.serverSave)
                     }
@@ -87,7 +98,10 @@ private struct MembersPage: View {
     var body: some View {
         let state = model.state
         ThemedList {
-            Section("\(model.users.count) People") {
+            Section {
+                if model.users.isEmpty {
+                    ProgressView()
+                }
                 ForEach(model.users, id: \.id) { user in
                     let editable = user.id != state.me && state.role.map { canRemove(actor: $0, target: user.role) } == true
                     HStack(spacing: 12) {
@@ -97,7 +111,7 @@ private struct MembersPage: View {
                             size: 28
                         )
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(user.id == state.me ? "\(user.name) (you)" : user.name)
+                            Text(user.id == state.me ? "\(user.name) (you)" : user.name).foregroundStyle(.text)
                             if let inviter = model.users.first(where: { $0.id == user.invitedBy }) {
                                 Text("Invited by \(inviter.name)")
                                     .font(.caption)
@@ -109,7 +123,7 @@ private struct MembersPage: View {
                     }
                     .swipeActions {
                         if editable {
-                            Button("Remove") {
+                            Button("Remove", systemImage: "minus.circle") {
                                 removal = Removal(user: user.id, name: user.name)
                                 confirmsRemoval = true
                             }
@@ -117,6 +131,8 @@ private struct MembersPage: View {
                         }
                     }
                 }
+            } header: {
+                Text(model.users.count == 1 ? "1 Person" : "\(model.users.count) People").foregroundStyle(.muted)
             }
         }
         .navigationTitle("Members")
@@ -150,20 +166,32 @@ private struct InvitesPage: View {
                     Text(code)
                         .font(.largeTitle)
                         .monospaced()
+                        .foregroundStyle(.text)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.5)
+                        .speechSpellsOutCharacters()
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity)
-                    Button { UIPasteboard.general.string = code } label: { IconLabel("Copy", symbol: "doc.on.doc") }
+                    Button {
+                        UIPasteboard.general.string = code
+                        model.notice = "Invite code copied."
+                    } label: {
+                        IconLabel("Copy", symbol: "doc.on.doc")
+                    }
                     ShareLink(item: code) { IconLabel("Share…", symbol: "square.and.arrow.up") }
                 }
-                Button(model.invite == nil ? "Create Code" : "New Code") {
+                Button(model.invite == nil ? "Create Code" : "Create New Code") {
                     model.core.command(command: .createInvite)
                 }
             } footer: {
-                if let cap = model.state.permissions?.inviteCap {
-                    Text("Single use, expires in 24 hours. You can make \(cap) a day.")
-                } else {
-                    Text("Single use, expires in 24 hours.")
+                Group {
+                    if let cap = model.state.permissions?.inviteCap {
+                        Text("Single use, expires in 24 hours. You can make \(cap) a day.")
+                    } else {
+                        Text("Single use, expires in 24 hours.")
+                    }
                 }
+                .foregroundStyle(.muted)
             }
         }
         .navigationTitle("Invites")
@@ -177,16 +205,18 @@ private struct KeysPage: View {
         let state = model.state
         ThemedList {
             if let server = state.server {
-                Section("This Server") {
-                    Text(server.address)
+                Section {
+                    Text(server.address).foregroundStyle(.text)
                     Text(fingerprintText(key: server.fingerprint))
                         .font(.footnote)
                         .monospaced()
                         .foregroundStyle(.muted)
                         .textSelection(.enabled)
+                } header: {
+                    Text("This Server").foregroundStyle(.muted)
                 }
             }
-            Section("People Here") {
+            Section {
                 ForEach(state.people.filter { $0.user != state.me }, id: \.user) { person in
                     NavigationLink {
                         PersonView(user: person.user)
@@ -194,7 +224,7 @@ private struct KeysPage: View {
                         HStack(spacing: 12) {
                             PersonPicture(person: person, size: 28)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(person.name)
+                                Text(person.name).foregroundStyle(person.blocked ? ThemeColor.muted : .text)
                                 if let key = person.identityKey {
                                     ShortKey(key: key)
                                 }
@@ -204,6 +234,8 @@ private struct KeysPage: View {
                         }
                     }
                 }
+            } header: {
+                Text("People Here").foregroundStyle(.muted)
             }
         }
         .navigationTitle("Keys")

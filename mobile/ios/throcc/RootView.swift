@@ -12,12 +12,15 @@ struct RootView: View {
             if model.profile == nil {
                 OnboardingView()
             } else {
+                let isSidePane = sizeClass == .regular
                 NavigationSplitView(preferredCompactColumn: $model.column) {
                     NavigationStack {
                         ServersView()
-                            .navigationDestination(isPresented: $model.showsRooms) { RoomsView() }
+                            .navigationDestination(isPresented: $model.showsRooms) {
+                                RoomsView().environment(\.isSidePane, isSidePane)
+                            }
                     }
-                    .environment(\.isSidePane, sizeClass == .regular)
+                    .environment(\.isSidePane, isSidePane)
                 } detail: {
                     RoomView()
                 }
@@ -25,12 +28,14 @@ struct RootView: View {
                 .sheet(item: $model.sheet) { sheet in
                     content(of: sheet)
                         .modifier(NoticeBanner())
+                        .presentationBackground(model.theme.bg)
                         .modifier(Themed())
                 }
             }
         }
         .modifier(NoticeBanner())
-        .alert(model.alert, isPresented: $model.showsAlert) {}
+        .background(.bg)
+        .alert(model.alertTitle, isPresented: $model.showsAlert) {} message: { Text(model.alert) }
         .modifier(Themed())
         .task {
             if let sample {
@@ -51,7 +56,7 @@ struct RootView: View {
         case .settings: SettingsView()
         case .newRoom: RoomEditor(room: nil)
         case .editRoom(let room): RoomEditor(room: room)
-        case .person(let user): NavigationStack { PersonView(user: user) }
+        case .person(let user): NavigationStack { PersonView(user: user).toolbar { CloseButton() } }
         case .server(let page): NavigationStack { ServerPageView(page: page) }
         }
     }
@@ -65,11 +70,16 @@ struct NoticeBanner: ViewModifier {
             if let notice = model.notice {
                 Text(notice)
                     .font(.callout)
+                    .foregroundStyle(.text)
+                    .multilineTextAlignment(.center)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)
-                    .background(.raised, in: .capsule)
+                    .background(.raised, in: .rect(cornerRadius: 16))
+                    .overlay { RoundedRectangle(cornerRadius: 16).strokeBorder(.line) }
                     .padding(.horizontal, 16)
+                    .onTapGesture { model.notice = nil }
                     .task(id: notice) {
+                        AccessibilityNotification.Announcement(notice).post()
                         if (try? await Task.sleep(for: .seconds(4))) != nil {
                             model.notice = nil
                         }
@@ -85,7 +95,7 @@ struct CloseButton: ToolbarContent {
     var body: some ToolbarContent {
         ToolbarItem(placement: .cancellationAction) {
             Button(role: .close) { model.sheet = nil }
-                .tint(.primary)
+                .tint(model.theme.text)
         }
     }
 }

@@ -22,6 +22,7 @@ struct Avatar: View {
         }
         .frame(width: size, height: size)
         .clipShape(Circle())
+        .accessibilityHidden(true)
     }
 }
 
@@ -38,6 +39,7 @@ struct PersonPicture: View {
                 .foregroundStyle(.muted)
                 .frame(width: size, height: size)
                 .background(ThemeColor.raised, in: Circle())
+                .accessibilityHidden(true)
         } else {
             Avatar(picture: person.avatar.flatMap { model.pictures[$0] }, name: person.name, size: size)
         }
@@ -53,10 +55,20 @@ struct PictureEditor: View {
     var body: some View {
         HStack(spacing: 16) {
             Avatar(picture: model.picture(in: picture), name: name, size: 72)
-            VStack(alignment: .leading, spacing: 12) {
-                PhotosPicker("Choose Picture…", selection: $picked, matching: .images)
+                .opacity(picked == nil ? 1 : 0.3)
+                .overlay {
+                    if picked != nil {
+                        ProgressView()
+                    }
+                }
+            VStack(alignment: .leading, spacing: 0) {
+                PhotosPicker(selection: $picked, matching: .images) {
+                    Text("Choose Picture…").touchTarget()
+                }
                 if picture != nil {
-                    Button("Remove", role: .destructive) { picture = nil }
+                    Button(role: .destructive) { picture = nil } label: {
+                        Text("Remove Picture").foregroundStyle(.bad).touchTarget()
+                    }
                 }
             }
         }
@@ -67,7 +79,7 @@ struct PictureEditor: View {
             if let fitted = chosen.flatMap(UIImage.init(data:)).flatMap(profilePicture(from:)) {
                 picture = fitted
             } else {
-                model.notice = "That picture couldn’t be read."
+                model.notice = "That picture couldn’t be read. Choose another one."
             }
             self.picked = nil
         }
