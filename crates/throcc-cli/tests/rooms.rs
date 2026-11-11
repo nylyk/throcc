@@ -779,7 +779,10 @@ async fn members_leave_on_their_own_but_the_only_admin_cannot() {
     };
     assert!(users.iter().all(|u| u.id != bob_id));
     let carol_row = users.iter().find(|u| u.id == carol_id).unwrap();
-    assert_eq!((carol_row.role, carol_row.invited_by), (Role::User, None));
+    assert_eq!(
+        (carol_row.role, carol_row.invited_by),
+        (Role::User, Some(alice_id))
+    );
     let now = unix_now();
     let bobs_invites = server
         .shared
