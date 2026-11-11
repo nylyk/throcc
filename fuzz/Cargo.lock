@@ -2404,6 +2404,7 @@ name = "throcc-client-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "apple-native-keyring-store",
  "ashpd",
  "async-io",
  "base64",
@@ -2411,7 +2412,9 @@ dependencies = [
  "cpal",
  "directories",
  "futures-core",
+ "jni",
  "keyring",
+ "keyring-core",
  "libc",
  "pipewire",
  "quinn",
