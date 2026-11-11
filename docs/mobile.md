@@ -15,13 +15,13 @@ Native iOS and Android clients on top of `throcc-client-core`. Same servers, sam
 | Talking | Voice activity with a mute toggle. No push-to-talk |
 | Echo | The platform's voice-processing I/O: VoiceProcessingIO on iOS, `VOICE_COMMUNICATION` on Android. sonora's echo canceller is skipped there |
 | Codecs | Platform decoders for all four codecs, with dav1d and libvpx filling the gaps. No ffmpeg, no codec negotiation. See [Codecs](#codecs) |
-| Devices | A phone either creates its own account at onboarding or imports an identity from another device by QR. One device per identity is online at a time. See [Devices](#devices) |
+| Devices | At onboarding, a phone either creates its own identity or imports one from another device by QR. One device per identity is online at a time. See [Devices](#devices) |
 | Invites | `https://thro.cc/join#<address+code>` on every platform. Verified links open the mobile apps; desktop gets `throcc://`. See [Invite links](#invite-links) |
 | iOS distribution | App Store, TestFlight for betas |
 | Android distribution | Signed APK on the GitHub release, and F-Droid's main repo with reproducible builds so it ships the same signature. IzzyOnDroid is out: it rejects apps partly written by generative AI |
 | Releases | Separate versions and tags per platform: `ios-vX.Y.Z`, `android-vX.Y.Z` |
 | License | AGPL-3.0 plus a section 7 additional permission for app store distribution |
-| Protocol | One bump: a kick reason of its own for "signed in on another device". It ships as a breaking server release before the mobile apps |
+| Protocol | One bump, to 2: a "signed in on another device" event and identity keys in presences. `MIN_PROTOCOL` stays 1: every server version supports the current protocol and the one before it. It ships as a server release before the mobile apps. See [Protocol 2](#protocol-2) |
 
 ## Layout
 
@@ -46,7 +46,7 @@ Each one follows the existing pattern of a backend per OS behind the same type.
 1. **Paths.** `directories` has no Android support. The app passes its data and cache directories in at start; desktop keeps `ProjectDirs`.
 2. **Keystore.** On iOS, the identity key goes to the keychain as a this-device-only item, readable after first unlock so a background reconnect on a locked phone works. Whether `keyring` 4 has an iOS store needs checking first; otherwise the keychain is called directly. On Android, the identity file in app-private storage is wrapped with an Android Keystore key. Both apps exclude their data from backups: a restore would roll the epoch floors back under the same key.
 3. **Audio I/O.** New iOS and Android backends next to cpal: a VoiceProcessingIO audio unit, and AAudio with the voice-communication usage and input preset. Callbacks follow the same rules as desktop.
-4. **Video without ffmpeg.** Video sits behind the `ffmpeg` feature today: `media/video/` is ffmpeg only, and `session.rs` gates video on it in 22 places. A `video` feature splits out from the ffmpeg backend, so a build has video with ffmpeg on desktop and with platform codecs on mobile. This lands before phase 4.
+4. **Video without ffmpeg.** Video sits behind the `ffmpeg` feature today: `media/video/` is ffmpeg only, and `session.rs` gates video on it in 22 places. A `video` feature splits out from the ffmpeg backend, so a build has video with ffmpeg on desktop and with platform codecs on mobile. This is the first step of phase 5.
 5. **Video decode.** VideoToolbox through `objc2` on iOS, MediaCodec through the `ndk` crate on Android. MediaCodec decodes straight into the Surface the app hands over. On iOS, decoded pixel buffers go to an `AVSampleBufferDisplayLayer` uncopied, as they reach gpui uncopied on macOS. VideoToolbox takes length-prefixed NAL units and a format description built from the parameter sets, so H.264 and HEVC access units are converted from what desktop sends. dav1d and libvpx output NV12 into pixel buffers for the same path. A decoder rebuilds when the codec, size or pixel format changes, and never writes a picture into a buffer made for another format.
 6. **Video encode and capture.** Hardware HEVC, then H.264.
    - Android: MediaProjection feeds a MediaCodec input surface directly; AudioPlaybackCapture gives system audio.
@@ -77,11 +77,20 @@ Phones send hardware HEVC, then H.264. They never encode AV1 or VP9.
 
 ## Devices
 
-The server signs out an identity's earlier connection whenever it signs in again. That makes switching devices work, and needs three things from clients:
+The server signs out an identity's earlier connection whenever it signs in again. That makes switching devices work, and needs three things:
 
-- **Reconnects ask after a long gap.** A client reconnects on its own for 5 minutes after losing the link. After that it shows a Reconnect button and signs in only on a tap. Without this, a laptop waking from sleep kicks the phone mid-call.
-- **A kick of its own.** A new kick reason, last in its enum, tells a client it was signed in on another device. Clients show "Signed in on another device" and never reconnect on their own after it. This bumps `PROTOCOL` and is a breaking server release.
-- **Rate limits.** Every sign-in publishes the device's encryption key, and a changed key re-keys the room. The server allows 3 changes, then one per minute. A device switching back within that window gets `RateLimited` on the publish after the other device is already out; the client retries it once the limit allows.
+- **Reconnects ask after a long gap.** A client signs in again on its own only while less than 5 minutes have passed since the link was last alive. The client stamps "last alive" in wall-clock time on every health tick and compares `SystemTime` against it before each automatic sign-in. `Instant` and tokio timers stop while a machine sleeps, so a window measured with them would never expire for a laptop waking up. That laptop also never receives a kick, so this check is its only guard. Past the window, the client shows a Reconnect button. On mobile, bringing the app to the foreground counts as that tap: iOS suspends the app outside a room, and opening it is a deliberate act.
+- **A kick of its own.** The server tells the replaced connection `SignedInElsewhere` and closes it with a close code of its own. The session ends, shows "Signed in on another device" and never signs in again on its own. `leave_server` counts only `REMOVED` as proof the account is gone, so another device signing in during a Leave no longer makes the client forget the server. See [Protocol 2](#protocol-2).
+- **Rate limits.** Every sign-in publishes the device's encryption key, and a changed key re-keys the room. The server's burst for key changes rises from 3 to 6, still refilling one per minute, so switching devices back and forth doesn't run into it.
+
+## Protocol 2
+
+One bump, shipped as a server release before the mobile apps. Desktop and CLI move to it in the same release.
+
+- `Event::SignedInElsewhere`, last in `Event`, and a new close code in `throcc_proto::transport::close`.
+- `Presence` carries the person's identity key, so clients refer to people by identity everywhere, not only in a shared room. The key is the server's word, not signed: it decides how someone is drawn and whether a block applies. Trust and verification still come only from the signed encryption key in a shared room. Every member of a server now sees every member's identity key.
+- `PROTOCOL` becomes 2 and `MIN_PROTOCOL` stays 1. Every server version supports the current protocol and the one before it. The server keeps each session's protocol after the hello, and sends a protocol 1 session the protocol 1 shapes: `RemovedFromServer` in place of `SignedInElsewhere`, and presences without identity keys.
+- The encryption-key change burst rises from 3 to 6.
 
 ## Blocking
 
@@ -91,19 +100,21 @@ App Store Guideline 1.2 asks apps with user content for filtering, reporting, bl
 - **Only the drawing changes:** a blocked person stays in `State`. The key manager trusts only people `State` shows, so taking them out would cut them off from our key without anyone seeing it.
 - **In a room:** a blocked person shows as a grey "Blocked person" row with no name or picture, so nobody listens unseen. Tapping the row offers Unblock.
 - **Settings:** a Blocked list shows each blocked person's name and picture as they were when blocked, and the server, with Unblock. It is the only place their name appears.
-- **Storage:** blocks are kept by identity key in `people.json`, like playback, so a block holds on every server where the key appears. Adding them is the file's first migration, version 1 to 2: `add_blocked` inserts an empty `blocked` object. A 0.1 desktop client or CLI then refuses the file rather than dropping the blocks on its next write.
-- Desktop gets blocking too. No protocol change.
+- **By identity:** blocks are kept by identity key in `people.json`, like playback, so a block holds on every server where the key appears. With identity keys in presences, a blocked person is hidden in every room and the lobby, not only in a shared room.
+- **Storage:** Adding them is the file's first migration, version 1 to 2: `add_blocked` inserts an empty `blocked` object. A 0.1 desktop client or CLI then refuses the file rather than dropping the blocks on its next write.
+- Desktop gets blocking too. It needs protocol 2 for presences with identity keys.
 
 ## Identity transfer
 
+Import is a choice at onboarding, next to creating a new identity. A phone that has an identity never imports another.
+
 The phone shows a code; the user types it on the source device. The source then shows an animated QR, and the phone scans it. The QR and the code never appear on the same screen, so one photo or screen share can't capture both. The source refuses to export while it is sharing its screen.
 
-- **Payload:** the identity key, each known server's address and pinned fingerprint, each verified key with the server and user-id pairs it was seen under, and every standing key-changed warning, so a warning isn't lost by switching devices. No encryption key, settings, floors or volumes.
+- **Payload:** the identity key, each known server's address and pinned fingerprint, each verified key with its stored name and the server and user-id pairs it was seen under, and every standing key-changed warning, so a warning isn't lost by switching devices. No encryption key, settings, floors or volumes.
 - **Encryption:** the payload is sealed under a key derived from the code, about 60 bits, with a memory-hard KDF.
 - **Framing:** fixed-size frames that the source cycles through. A small payload is one frame. The phone collects frames in any order.
 - **After import:** the phone always makes a new encryption key, as enrollment does, and publishes it on sign-in. Sender keys from before were wrapped to the other device's encryption key, so the phone can't open them, and leaving the floors out loses nothing. The transfer is a snapshot; later verifications don't sync.
-- **Onto a phone with data:** imported servers join the phone's known servers. If the phone has its own identity, import asks first and replaces it.
-- **Lost device:** the identity can't be revoked. Its signed encryption key expires after 30 days. Someone who loses a device starts a new identity, and the people who verified them verify the new one.
+- **Lost device:** whoever holds the identity key can sign new encryption keys and sign in indefinitely; it can't be revoked. A "Signed in on another device" kick is the only warning. An admin of each server removes the account, the owner starts a new identity, and the people who verified them verify the new one.
 - The source can be desktop or phone; the target needs a camera.
 
 This is security-critical code. A subagent that didn't write it reviews it before merge.
@@ -113,23 +124,25 @@ This is security-critical code. A subagent that didn't write it reviews it befor
 - Links are `https://thro.cc/join#<address+code>`. The secret stays in the fragment, which browsers never send.
 - The mobile apps open them as verified links: Android App Links through `/.well-known/assetlinks.json`, iOS Universal Links through `apple-app-site-association`, both on thro.cc. No other app can claim them, unlike a custom scheme.
 - On desktop, `thro.cc/join` is a static page that opens `throcc://join#...` and otherwise offers downloads. It has a strict CSP and no third-party scripts, because anything running on it can read the fragment.
+- Verified links don't open the app from in-app browsers or pasted URLs. On a phone, the page then shows the address and code with copy buttons, and store links.
 - The desktop client registers `throcc://`: `CFBundleURLTypes` on macOS, the installer's registry entries on Windows, `x-scheme-handler/throcc` in the flatpak's desktop file.
+- The desktop client runs as a single instance. A link opened while it runs goes to the running app: macOS delivers it as an Apple event; on Windows and Linux a second process hands the link over through a local socket and exits. A second process that signed in would kick the first.
 - The desktop's create-invite dialog shows the link next to the code. Mobile shows it with the platform share sheet.
 - Opening a link fills in the join screen. It never joins without a tap.
 
 ## Phases
 
-1. **Groundwork.** Update the scope line in `CLAUDE.md`. Add the section 7 permission. Create `throcc-mobile` and both projects. Injected paths and the mobile keystores, so the core cross-builds for all four targets in CI from the start.
-2. **Devices and blocking.** The reconnect window and the new kick reason, with the protocol bump and a server release. Blocking and the `people.json` migration. Desktop gets all three.
-3. **Shell on mock data.** The UniFFI layer and every screen against `MockClient` on both platforms: onboarding, server list, rooms, room, person sheet, profile, settings, verified people, server pages.
+1. **Groundwork.** Update the scope line in `CLAUDE.md`, and add the rule that a server supports the current protocol and the one before. Add the section 7 permission. Create `throcc-mobile` and both projects. Injected paths and the mobile keystores, so the core cross-builds for all four targets in CI from the start. Register the app ids under the Apple team and create the Android signing key, which the verified links need.
+2. **Protocol 2, devices and blocking.** `SignedInElsewhere`, identity keys in presences, per-session protocol on the server, the higher key-change burst, and a server release. The reconnect window, the `leave_server` fix, blocking and the `people.json` migration. Desktop gets all of it.
+3. **Shell on mock data.** Starts once phase 2 lands, since it mirrors the `State` that phase changes. The UniFFI layer and every screen against `MockClient` on both platforms: onboarding, server list, rooms, room, person sheet, profile, settings, verified people, server pages.
 4. **Voice.** Audio backends and the app audio work. Join a real server and talk.
-5. **Watching shares.** The `video` feature split, platform decoders, dav1d and libvpx, fullscreen and rotation.
-6. **Invite links.** The web page and verification files, links on all five platforms, the desktop dialog change.
+5. **Watching shares.** First the `video` feature split, then platform decoders, dav1d and libvpx, fullscreen and rotation.
+6. **Invite links.** The web page with its phone fallback and verification files, links on all five platforms, the desktop's single instance and dialog change.
 7. **Identity transfer.** Export on desktop and mobile, import on mobile, security review.
 8. **Sending shares.** Android first, then the iOS broadcast extension.
-9. **Distribution.** App Store Connect upload from CI with an API key. Android signing key in CI secrets, APK on the release. F-Droid recipe, reproducible builds, merge request to `fdroiddata`.
+9. **Distribution.** App Store Connect upload from CI with an API key. The Android signing key in CI secrets, APK on the release. F-Droid recipe, reproducible builds, merge request to `fdroiddata`.
 
-Phases 3 and 4 can run per platform in parallel once phase 1 lands.
+From phase 3 on, the iOS and Android work in each phase can run in parallel.
 
 ## Releases
 
