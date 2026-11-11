@@ -58,9 +58,9 @@ impl Sfu {
     ///
     /// A connection that sends more bytes than [`MAX_INGRESS_BYTES_PER_SECOND`] is closed.
     /// Datagrams over [`MAX_INGRESS_PACKETS_PER_SECOND`], over an audio track's
-    /// [`AudioAllowance`] or larger than [`DATAGRAM_PAYLOAD_FLOOR`] are dropped and counted: admission policing of a sender that
-    /// doesn't conform, which a well-behaved client never reaches. Egress itself never
-    /// drops audio by policy.
+    /// [`AudioAllowance`] or larger than [`DATAGRAM_PAYLOAD_FLOOR`] are dropped and
+    /// counted: admission policing of a sender that doesn't conform, which a well-behaved
+    /// client never reaches. Egress itself never drops audio by policy.
     pub async fn ingress(self: Arc<Self>, conn_id: u64, connection: quinn::Connection) {
         let start = Instant::now();
         let mut bytes = TokenBucket::full(INGRESS_BURST_BYTES, MAX_INGRESS_BYTES_PER_SECOND, start);

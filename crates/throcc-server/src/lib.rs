@@ -361,9 +361,10 @@ mod tests {
             identity_key: [0xff; 32],
             created_at: u64::MAX,
         };
+        let admins_past_it = 100;
         let message = ServerMessage::Response {
             id: u32::MAX,
-            response: Response::Users(vec![longest; MAX_ACCOUNTS + HANDSHAKES.total]),
+            response: Response::Users(vec![longest; MAX_ACCOUNTS + admins_past_it]),
         };
         assert!(framing::encode(&message).is_ok());
     }
