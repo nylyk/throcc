@@ -19,6 +19,7 @@ throcc-client-core = { path = "crates/throcc-client-core" }
 
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "zeroize"] }
 anyhow = "1.0.104"
+apple-native-keyring-store = { version = "1.0.2", features = ["protected"] }
 arc-swap = "1.9.3"
 ashpd = { version = "=0.13.13", default-features = false, features = ["async-io", "inhibit", "screencast"] }
 async-io = "2.6.0"
@@ -31,7 +32,9 @@ directories = "6.0.0"
 futures-core = "0.3.34"
 getrandom = "0.4.3"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+jni = "0.22.4"
 keyring = "4.2.0"
+keyring-core = "1.0.1"
 libc = "0.2.191"
 objc2 = "0.6.5"
 objc2-core-foundation = { version = "0.3.2", default-features = false }
