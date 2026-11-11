@@ -9,6 +9,7 @@ Native iOS and Android clients on top of `throcc-client-core`. Same servers, sam
 | Core binding | A new crate, `throcc-mobile`, exposes the core through UniFFI. The core gains no UniFFI types |
 | Frontends | iOS in Swift and SwiftUI. Android in Kotlin and Jetpack Compose with Material 3 Expressive |
 | Minimum OS | iOS 26 (Liquid Glass everywhere). Android 12, API 31 (about 78% of devices in Oct 2026) |
+| Devices supported | Phones and tablets: iPhone and iPad, Android phones and tablets. Wide windows show two panes, such as the room list beside the room; narrow ones collapse to one |
 | Look | Native components, system font, system mono for keys, fingerprints, safety numbers and invite codes. System colours, except the accent |
 | Accent | Pickable: the desktop presets' accents plus a custom colour. The default matches the desktop default |
 | Features | Voice, rooms, watching shares and sending shares on both platforms. Room admin, profiles and verification as on desktop |
@@ -134,7 +135,7 @@ This is security-critical code. A subagent that didn't write it reviews it befor
 
 1. **Groundwork.** Update the scope line in `CLAUDE.md`, and add the rule that a server supports the current protocol and the one before. Add the section 7 permission. Create `throcc-mobile` and both projects. Injected paths and the mobile keystores, so the core cross-builds for all four targets in CI from the start. Register the app ids under the Apple team and create the Android signing key, which the verified links need.
 2. **Protocol 2, devices and blocking.** `SignedInElsewhere`, identity keys in presences, per-session protocol on the server, the higher key-change burst, and a server release. The reconnect window, the `leave_server` fix, blocking and the `people.json` migration. Desktop gets all of it.
-3. **Shell on mock data.** Starts once phase 2 lands, since it mirrors the `State` that phase changes. The UniFFI layer and every screen against `MockClient` on both platforms: onboarding, server list, rooms, room, person sheet, profile, settings, verified people, server pages.
+3. **Shell on mock data.** Starts once phase 2 lands, since it mirrors the `State` that phase changes. The UniFFI layer and every screen against `MockClient` on both platforms: onboarding, server list, rooms, room, person sheet, profile, settings, verified people, server pages. Each screen is laid out for any window width, since an iPad or tablet window can be resized.
 4. **Voice.** Audio backends and the app audio work. Join a real server and talk.
 5. **Watching shares.** First the `video` feature split, then platform decoders, dav1d and libvpx, fullscreen and rotation.
 6. **Invite links.** The web page with its phone fallback and verification files, links on all five platforms, the desktop's single instance and dialog change.
