@@ -60,6 +60,7 @@ Each one follows the existing pattern of a backend per OS behind the same type.
 - **iOS audio session:** `playAndRecord` with `voiceChat` mode, the background audio mode, interruptions and route changes.
 - **Android audio:** `MODE_IN_COMMUNICATION`, audio focus, Bluetooth routing. A foreground service of type `mediaPlayback|microphone`, started with only the types granted, so someone who denies the mic still listens in a room. Type `mediaProjection` is added while sharing.
 - **iOS local network:** `NSLocalNetworkUsageDescription`, for servers on the LAN.
+- **Android local network:** `ACCESS_LOCAL_NETWORK`, asked before connecting to an address on the LAN. Android 17 blocks local addresses for apps that target it without this permission.
 
 ## Codecs
 
