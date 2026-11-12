@@ -14,7 +14,7 @@ use gpui_component::{Disableable, IndexPath};
 use throcc_client_core::media::cues::Cue;
 use throcc_client_core::media::voice::MicLevel;
 use throcc_client_core::settings::{
-    AudioSettings, DEFAULT_GATE_DBFS, NoiseSuppression, Transmit, VoiceSettings,
+    AudioSettings, DEFAULT_GATE_DBFS, NoiseSuppression, QUIETEST_GATE_DBFS, Transmit, VoiceSettings,
 };
 use throcc_client_core::state::BLOCKED_NAME;
 use throcc_proto::Fingerprint;
@@ -125,8 +125,6 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
 }
 
 const SYSTEM_DEFAULT: &str = "System default";
-/// The quietest level the meter and the threshold slider show.
-const METER_FLOOR_DBFS: f32 = -80.0;
 const METER_EVERY: Duration = Duration::from_millis(100);
 
 type Devices = Vec<SharedString>;
@@ -159,7 +157,7 @@ impl AudioControls {
         let cue_volume = cx.new(|_| volume_slider(voice.cue_volume));
         let threshold = cx.new(|_| {
             SliderState::new()
-                .min(METER_FLOOR_DBFS)
+                .min(QUIETEST_GATE_DBFS)
                 .max(0.)
                 .step(1.)
                 .default_value(gate_dbfs(voice.transmit))
@@ -298,7 +296,7 @@ fn keep_metering(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) {
 /// The mic level as a bar, green while the gate lets it through, with a mark at
 /// `threshold_dbfs`.
 fn meter(level: MicLevel, threshold_dbfs: f32) -> Div {
-    let fraction = |dbfs: f32| (1. - dbfs / METER_FLOOR_DBFS).clamp(0., 1.);
+    let fraction = |dbfs: f32| (1. - dbfs / QUIETEST_GATE_DBFS).clamp(0., 1.);
     div()
         .relative()
         .h(px(8.))

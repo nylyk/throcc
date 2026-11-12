@@ -1,5 +1,6 @@
 mod messages;
 mod state;
+mod voice;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,7 +14,7 @@ use throcc_client_core::keystore::{self, Keystore};
 use throcc_client_core::media::voice::AudioEngine;
 use throcc_client_core::profile::Profile as CoreProfile;
 use throcc_client_core::server_look::ServerLook;
-use throcc_client_core::settings::Settings;
+use throcc_client_core::settings::{QUIETEST_GATE_DBFS, Settings};
 use throcc_client_core::state::BLOCKED_NAME;
 use throcc_client_core::theme;
 use throcc_client_core::verified::VerifiedStore;
@@ -33,6 +34,7 @@ pub use state::{
     Connection, CoreState, CurrentRoom, Health, KeyWarning, Person, Role, Room, Server, Share,
     Sound, SoundLevel,
 };
+pub use voice::{MicLevel, NoiseSuppression, Voice};
 
 uniffi::setup_scaffolding!();
 
@@ -424,6 +426,35 @@ impl Core {
         }
     }
 
+    pub fn voice(&self) -> Voice {
+        Voice::of(&lock(&self.settings).audio.voice)
+    }
+
+    /// Applies `voice` to the call at once, and keeps it when `keep`. A slider keeps it only
+    /// once let go.
+    pub fn set_voice(&self, voice: Voice, keep: bool) -> Result<(), CoreError> {
+        if keep {
+            self.change_settings(|settings| voice.apply_to(&mut settings.audio.voice))?;
+        } else {
+            voice.apply_to(&mut lock(&self.settings).audio.voice);
+        }
+        if let Some(audio) = self.audio() {
+            audio.apply(lock(&self.settings).audio.voice);
+        }
+        Ok(())
+    }
+
+    /// The mic level while a call has the mic open. The mock shows a sample level.
+    pub fn mic_level(&self) -> Option<MicLevel> {
+        if self.mock {
+            return Some(MicLevel {
+                dbfs: -32.0,
+                gate_open: true,
+            });
+        }
+        MicLevel::of(self.audio()?.mic_level())
+    }
+
     pub fn command(&self, command: Command) {
         let Some(command) = command.into_core() else {
             return;
@@ -670,6 +701,12 @@ pub fn limits() -> Limits {
         password_chars: MAX_PASSWORD_CHARS as u32,
         picture_bytes: MAX_AVATAR_BYTES as u32,
     }
+}
+
+/// The quietest voice sensitivity (dBFS), and the bottom of the level meter.
+#[uniffi::export]
+pub fn quietest_gate_dbfs() -> f32 {
+    QUIETEST_GATE_DBFS
 }
 
 /// The name a blocked person is shown under.

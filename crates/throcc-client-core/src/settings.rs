@@ -11,6 +11,9 @@ use crate::state::MAX_VOLUME;
 const FILE: &str = "settings.json";
 /// Processed mic level (dBFS) above which voice activation opens, unless configured otherwise.
 pub const DEFAULT_GATE_DBFS: f32 = -50.0;
+/// The quietest voice activation threshold (dBFS) the apps offer, and the bottom of their
+/// level meters.
+pub const QUIETEST_GATE_DBFS: f32 = -80.0;
 
 /// Everything the user sets for the app as a whole, kept in one file.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

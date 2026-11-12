@@ -11,6 +11,9 @@ struct SettingsView: View {
                     NavigationLink(value: SettingsPage.profile) {
                         IconLabel("Profile", symbol: "person.crop.circle")
                     }
+                    NavigationLink(value: SettingsPage.voice) {
+                        IconLabel("Voice", symbol: "mic")
+                    }
                     NavigationLink(value: SettingsPage.appearance) {
                         IconLabel("Appearance", symbol: "paintpalette")
                     }
@@ -31,6 +34,7 @@ struct SettingsView: View {
             .navigationDestination(for: SettingsPage.self) { page in
                 switch page {
                 case .profile: ProfilePage()
+                case .voice: VoicePage()
                 case .appearance: AppearancePage()
                 case .verified: VerifiedPage()
                 case .blocked: BlockedPage()
@@ -93,6 +97,134 @@ struct SaveStatusText: View {
         case .refused(let reason): Text(reason).foregroundStyle(.bad)
         case nil: EmptyView()
         }
+    }
+}
+
+private struct VoicePage: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let voice = model.voice
+        ThemedForm {
+            Section {
+                LabeledContent("Sensitivity") { Text(decibels(voice.sensitivityDbfs)).foregroundStyle(.muted) }
+                    .foregroundStyle(.text)
+                VStack(spacing: 12) {
+                    TimelineView(.periodic(from: .now, by: 0.1)) { _ in
+                        LevelMeter(level: model.core.micLevel(), sensitivity: voice.sensitivityDbfs)
+                    }
+                    Slider(value: setting(\.sensitivityDbfs), in: quietestGateDbfs()...0) {
+                        Text("Sensitivity")
+                    } onEditingChanged: { editing in
+                        if !editing { model.setVoice(model.voice, keep: true) }
+                    }
+                    .accessibilityValue(decibels(voice.sensitivityDbfs))
+                }
+                Toggle("Speech detection", isOn: setting(\.speechOnly, keep: true))
+                    .foregroundStyle(.text)
+            } header: {
+                Text("Voice activation").foregroundStyle(.muted)
+            } footer: {
+                Text("Your mic sends while it is louder than the mark.").foregroundStyle(.muted)
+            }
+            Section {
+                Picker("Noise suppression", selection: setting(\.noiseSuppression, keep: true)) {
+                    Text("Off").tag(NoiseSuppression.off)
+                    Text("Low").tag(NoiseSuppression.low)
+                    Text("Moderate").tag(NoiseSuppression.moderate)
+                    Text("High").tag(NoiseSuppression.high)
+                }
+                .foregroundStyle(.text)
+                Toggle("Automatic gain", isOn: setting(\.automaticGain, keep: true))
+                    .foregroundStyle(.text)
+            } header: {
+                Text("Processing").foregroundStyle(.muted)
+            }
+            Section {
+                VolumeSlider("Input volume", value: setting(\.inputVolume)) { model.setVoice(model.voice, keep: true) }
+                VolumeSlider("Output volume", value: setting(\.outputVolume)) { model.setVoice(model.voice, keep: true) }
+            } header: {
+                Text("Volume").foregroundStyle(.muted)
+            }
+        }
+        .navigationTitle("Voice")
+    }
+
+    /// One of the voice settings, applied as it changes and kept when `keep`. The sensitivity
+    /// moves in whole decibels.
+    private func setting<Value>(_ path: WritableKeyPath<Voice, Value>, keep: Bool = false) -> Binding<Value> {
+        Binding {
+            model.voice[keyPath: path]
+        } set: { value in
+            var voice = model.voice
+            voice[keyPath: path] = value
+            voice.sensitivityDbfs.round()
+            model.setVoice(voice, keep: keep)
+        }
+    }
+}
+
+private func decibels(_ dbfs: Float) -> String {
+    "\(Int(dbfs.rounded())) dB".replacingOccurrences(of: "-", with: "−")
+}
+
+/// The mic level as a bar, in the good colour while the gate lets it through, with a mark at
+/// `sensitivity`. Outside a call it says where the level shows.
+private struct LevelMeter: View {
+    let level: MicLevel?
+    let sensitivity: Float
+
+    var body: some View {
+        if let level {
+            GeometryReader { bar in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.line)
+                    Capsule()
+                        .fill(level.gateOpen ? AnyShapeStyle(.good) : AnyShapeStyle(.muted))
+                        .frame(width: bar.size.width * fraction(level.dbfs))
+                    Rectangle()
+                        .fill(.text)
+                        .frame(width: 2)
+                        .offset(x: bar.size.width * fraction(sensitivity) - 1)
+                }
+            }
+            .frame(height: 8)
+            .clipShape(.capsule)
+            .accessibilityElement()
+            .accessibilityLabel("Mic level")
+            .accessibilityValue(level.gateOpen ? "Sending" : "Quiet")
+        } else {
+            Text("Your level shows here while you're in a room.").foregroundStyle(.muted)
+        }
+    }
+
+    private func fraction(_ dbfs: Float) -> CGFloat {
+        CGFloat(min(max(1 - dbfs / quietestGateDbfs(), 0), 1))
+    }
+}
+
+/// A volume from 0 to 200 % with its percentage, which calls `done` once let go.
+private struct VolumeSlider: View {
+    let title: LocalizedStringKey
+    @Binding var value: Float
+    let done: () -> Void
+
+    init(_ title: LocalizedStringKey, value: Binding<Float>, done: @escaping () -> Void) {
+        self.title = title
+        _value = value
+        self.done = done
+    }
+
+    var body: some View {
+        let percent = "\(Int((value * 100).rounded()))%"
+        LabeledContent(title) { Text(percent).foregroundStyle(.muted) }
+            .foregroundStyle(.text)
+        Slider(value: Binding { min(value, 2) } set: { value = $0 }, in: 0...2) {
+            Text(title)
+        } onEditingChanged: { editing in
+            if !editing { done() }
+        }
+        .accessibilityValue(percent)
     }
 }
 

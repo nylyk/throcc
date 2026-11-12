@@ -6,6 +6,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -19,12 +21,14 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Palette as PaletteIcon
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.RemoveModerator
@@ -35,6 +39,11 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -54,8 +63,14 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import cc.thro.throcc.core.CoreState
+import cc.thro.throcc.core.MicLevel
+import cc.thro.throcc.core.NoiseSuppression
+import cc.thro.throcc.core.Voice
 import cc.thro.throcc.core.Palette
 import cc.thro.throcc.core.fingerprintShort
+import cc.thro.throcc.core.quietestGateDbfs
+import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 
 private const val SOURCE = "https://github.com/nylyk/throcc"
 
@@ -65,6 +80,7 @@ private val COLOR_LABELS = listOf("Background", "Panel", "Text", "Muted text", "
 fun Settings(model: AppModel) {
     val pages = listOf(
         Triple(Icons.Default.Person, "Profile", Screen.Profile),
+        Triple(Icons.Default.Mic, "Voice", Screen.Voice),
         Triple(Icons.Default.PaletteIcon, "Appearance", Screen.Appearance),
         Triple(Icons.Default.VerifiedUser, "Verified People", Screen.Verified),
         Triple(Icons.Default.Block, "Blocked People", Screen.Blocked),
@@ -94,6 +110,131 @@ fun Profile(model: AppModel) {
                 NameField(name) { name = it }
             }
             MainButton("Save", changed && validName(name) != null) { model.saveProfile(name, picture) }
+        }
+    }
+}
+
+private val NOISE_LEVELS = listOf(
+    NoiseSuppression.OFF to "Off",
+    NoiseSuppression.LOW to "Low",
+    NoiseSuppression.MODERATE to "Moderate",
+    NoiseSuppression.HIGH to "High",
+)
+
+@Composable
+fun VoiceSettings(model: AppModel) {
+    val voice = model.voice
+    val slide = { changed: Voice -> model.setVoice(changed, keep = false) }
+    val keep = { model.setVoice(model.voice, keep = true) }
+    val titled = MaterialTheme.typography.titleMediumEmphasized
+    Page(model, "Voice") { padding ->
+        Form(padding) {
+            Panel {
+                Text("Voice activation", style = titled)
+                Labeled("Sensitivity", decibels(voice.sensitivityDbfs))
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    LevelMeter(model, voice.sensitivityDbfs)
+                    Slider(
+                        voice.sensitivityDbfs,
+                        { slide(voice.copy(sensitivityDbfs = it.roundToInt().toFloat())) },
+                        valueRange = quietestGateDbfs()..0f,
+                        onValueChangeFinished = keep,
+                    )
+                }
+                SwitchRow("Speech detection", voice.speechOnly) {
+                    model.setVoice(voice.copy(speechOnly = it), keep = true)
+                }
+                Text(
+                    "Your mic sends while it is louder than the mark.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Panel {
+                Text("Processing", style = titled)
+                Text("Noise suppression", style = MaterialTheme.typography.titleMedium)
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                    NOISE_LEVELS.forEachIndexed { index, (level, label) ->
+                        SegmentedButton(
+                            voice.noiseSuppression == level,
+                            { model.setVoice(voice.copy(noiseSuppression = level), keep = true) },
+                            SegmentedButtonDefaults.itemShape(index, NOISE_LEVELS.size),
+                            icon = {},
+                            label = { Text(label, maxLines = 1) },
+                        )
+                    }
+                }
+                SwitchRow("Automatic gain", voice.automaticGain) {
+                    model.setVoice(voice.copy(automaticGain = it), keep = true)
+                }
+            }
+            Panel {
+                Text("Volume", style = titled)
+                VolumeSlider("Input volume", voice.inputVolume, { slide(voice.copy(inputVolume = it)) }, keep)
+                VolumeSlider("Output volume", voice.outputVolume, { slide(voice.copy(outputVolume = it)) }, keep)
+            }
+        }
+    }
+}
+
+private fun decibels(dbfs: Float) = "${dbfs.roundToInt()} dB".replace('-', '−')
+
+@Composable
+private fun Labeled(label: String, value: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+        Text(value, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().toggleable(checked, role = Role.Switch, onValueChange = onChange),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+        Switch(checked, null)
+    }
+}
+
+/** A volume from 0 to 200 % with its percentage, which calls `done` once let go. */
+@Composable
+private fun VolumeSlider(label: String, volume: Float, onChange: (Float) -> Unit, done: () -> Unit) {
+    Column {
+        Labeled(label, "${(volume * 100).roundToInt()}%")
+        Slider(volume.coerceIn(0f, 2f), onChange, valueRange = 0f..2f, onValueChangeFinished = done)
+    }
+}
+
+/**
+ * The mic level as a bar, in the speaking colour while the gate lets it through, with a mark at
+ * `sensitivity`. Outside a call it says where the level shows.
+ */
+@Composable
+private fun LevelMeter(model: AppModel, sensitivity: Float) {
+    var level by remember { mutableStateOf<MicLevel?>(null) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            level = model.core.micLevel()
+            delay(100)
+        }
+    }
+    val shown = level ?: return Text(
+        "Your level shows here while you're in a room.",
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    val scheme = MaterialTheme.colorScheme
+    val fraction = { dbfs: Float -> (1 - dbfs / quietestGateDbfs()).coerceIn(0f, 1f) }
+    Box(Modifier.fillMaxWidth().height(8.dp).clip(CircleShape).background(scheme.surfaceContainerHighest)) {
+        Box(
+            Modifier.fillMaxWidth(fraction(shown.dbfs)).fillMaxHeight()
+                .background(if (shown.gateOpen) scheme.tertiary else scheme.onSurfaceVariant, CircleShape),
+        )
+        Row(Modifier.fillMaxSize()) {
+            if (fraction(sensitivity) > 0f) Spacer(Modifier.weight(fraction(sensitivity)))
+            Box(Modifier.width(2.dp).fillMaxHeight().background(scheme.onSurface))
+            if (fraction(sensitivity) < 1f) Spacer(Modifier.weight(1f - fraction(sensitivity)))
         }
     }
 }

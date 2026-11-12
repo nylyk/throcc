@@ -14,7 +14,7 @@ Native iOS and Android clients on top of `throcc-client-core`. Same servers, sam
 | Theme | Pickable as on desktop: the seven presets, or a Custom theme of the user's own eight colours. The default is the desktop default. The picked theme decides light or dark |
 | Features | Voice, rooms, watching shares and sending shares on both platforms. Room admin, profiles and verification as on desktop |
 | Watching | One share at a time. Watching another stops the one before, so a phone runs one decoder and one video surface, and its link carries one share. Desktop keeps watching several |
-| Talking | Voice activity with a mute toggle. No push-to-talk |
+| Talking | Voice activity with a mute toggle. No push-to-talk. A Voice page sets the sensitivity against a live level meter, speech detection, noise suppression, automatic gain and the input and output volume; the phone picks the devices and cancels echo itself |
 | Echo | The platform's voice-processing I/O: VoiceProcessingIO on iOS, `VOICE_COMMUNICATION` on Android. sonora's echo canceller is skipped there |
 | Codecs | Platform codecs on iOS, Android and macOS, with dav1d and libvpx filling the gaps. ffmpeg stays only on Linux and Windows. No codec negotiation. See [Codecs](#codecs) and [macOS without ffmpeg](#macos-without-ffmpeg) |
 | Video crate | `media/video/` becomes its own crate, `throcc-video`, with a backend per platform behind one encoder and decoder. See [Core changes](#core-changes) |

@@ -20,6 +20,7 @@ enum ServerPage {
 
 enum SettingsPage {
     case profile
+    case voice
     case appearance
     case verified
     case blocked
@@ -42,6 +43,7 @@ struct AlertText {
 final class AppModel {
     let core: Core
     private(set) var profile: Profile?
+    private(set) var voice: Voice
     let themes: [ThemeChoice]
     private(set) var pickedTheme: ThemeChoice
     /// The colours the Custom theme has, or starts from.
@@ -93,6 +95,7 @@ final class AppModel {
     init(core: Core, mock: Bool) {
         self.core = core
         profile = core.profile()
+        voice = core.voice()
         themes = core.themes()
         let picked = core.theme()
         pickedTheme = picked
@@ -118,6 +121,12 @@ final class AppModel {
     func setProfile(name: String, picture: Data?) throws {
         try core.setProfile(profile: Profile(name: name, picture: picture))
         profile = core.profile()
+    }
+
+    /// Applies `voice` to the call at once, and keeps it when `keep`.
+    func setVoice(_ voice: Voice, keep: Bool) {
+        self.voice = voice
+        attempt { try core.setVoice(voice: voice, keep: keep) }
     }
 
     func useTheme(named name: String) {

@@ -85,6 +85,7 @@ private fun Shown(model: AppModel, screen: Screen) {
         Screen.Room -> RoomPane(model, state) { model.roomInFront = false }
         Screen.Settings -> Settings(model)
         Screen.Profile -> Profile(model)
+        Screen.Voice -> VoiceSettings(model)
         Screen.Appearance -> Appearance(model)
         Screen.Verified -> VerifiedPeople(model, state)
         Screen.Blocked -> BlockedPeople(model, state)

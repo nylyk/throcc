@@ -22,6 +22,7 @@ import cc.thro.throcc.core.Palette
 import cc.thro.throcc.core.Profile
 import cc.thro.throcc.core.User
 import cc.thro.throcc.core.VerifiedPerson
+import cc.thro.throcc.core.Voice
 import cc.thro.throcc.core.customThemeName
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
@@ -32,7 +33,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 enum class Screen {
-    Servers, AddServer, Rooms, Settings, Profile, Appearance, Verified, Blocked, About, Server, Members, Invites, Keys,
+    Servers, AddServer, Rooms, Settings, Profile, Voice, Appearance, Verified, Blocked, About, Server, Members, Invites, Keys,
 
     /** Our room, which a narrow window shows in front of the pages. It is never on the model's stack. */
     Room,
@@ -106,6 +107,8 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
     var sheetPerson by mutableStateOf<ULong?>(null)
 
     var profile by mutableStateOf(core.profile())
+        private set
+    var voice by mutableStateOf(core.voice())
         private set
     var theme by mutableStateOf(core.theme())
         private set
@@ -263,6 +266,16 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
     }
 
     /** Picks the preset called `name`, or with `CUSTOM` the user's own colours. */
+    /** Applies `voice` to the call at once, and keeps it when `keep`. */
+    fun setVoice(voice: Voice, keep: Boolean) {
+        this.voice = voice
+        try {
+            core.setVoice(voice, keep)
+        } catch (failure: CoreException) {
+            notices.trySend(failure.message.orEmpty())
+        }
+    }
+
     fun pickTheme(name: String) {
         changeTheme { if (name == CUSTOM) core.setCustomTheme(core.customPalette()) else core.setTheme(name) }
     }
@@ -407,6 +420,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
             "rooms", "room", "blocked", "person", "personblocked", "reconnect", "elsewhere" -> listOf(Screen.Rooms)
             "settings" -> listOf(Screen.Settings)
             "profile" -> listOf(Screen.Settings, Screen.Profile)
+            "voice" -> listOf(Screen.Settings, Screen.Voice)
             "appearance" -> listOf(Screen.Settings, Screen.Appearance)
             "verified" -> listOf(Screen.Settings, Screen.Verified)
             "blockedpeople" -> listOf(Screen.Settings, Screen.Blocked)
