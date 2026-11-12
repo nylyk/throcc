@@ -916,7 +916,7 @@ async fn managers_kick_lower_ranks_out_of_rooms() {
     assert_error(&bob.request(elsewhere).await, ErrorCode::NotFound);
 }
 
-/// Sets `client`'s name to `name`, signed by `signer` for the server `client` is connected to.
+/// A request setting `client`'s name to `name`, signed by `signer` for `client`'s server.
 fn signed_profile(client: &TestClient, signer: &TestClient, name: &str) -> Request {
     let server = &client.link.connected.fingerprint;
     Request::SetProfile {

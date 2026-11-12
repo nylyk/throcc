@@ -203,7 +203,8 @@ async fn a_server_keeping_all_its_accounts_enrolls_only_through_an_admin_invite(
     let alice = admin(&server).await;
     let bob = invited(&server, &alice).await;
 
-    // More refusals than an invite has tries: a right code on a full server costs none.
+    // A right code on a full server costs no try, so the loop refuses more often than an
+    // invite has tries.
     let code = invite(&alice).await;
     for _ in 0..4 {
         let err = try_enroll(&server.addr, &code).await.unwrap_err();
@@ -215,11 +216,11 @@ async fn a_server_keeping_all_its_accounts_enrolls_only_through_an_admin_invite(
             "{err}"
         );
     }
-    let leave = Request::RemoveUser {
+    let remove_bob = Request::RemoveUser {
         user: bob.link.welcome.me,
         cascade: false,
     };
-    assert_eq!(alice.request(leave).await, Response::Ok);
+    assert_eq!(alice.request(remove_bob).await, Response::Ok);
     try_enroll(&server.addr, &code).await.unwrap();
 
     let recovery = mint_admin_invite(server.dir.path());
@@ -248,8 +249,8 @@ async fn a_run_counts_against_the_address_its_connection_was_accepted_from() {
     let server = start_server();
     let unknown: InviteCode = "ZZZ-ZZZZZ".parse().unwrap();
     let mut refused = None;
-    // One run more than a source gets, each on a connection that moved to an address of
-    // its own once it was accepted.
+    // The loop makes one run more than a source gets. Each run's connection moves to an
+    // address of its own once it is accepted.
     for host in 2..=12 {
         let Ok(elsewhere) = UdpSocket::bind((Ipv4Addr::new(127, 0, 0, host), 0)) else {
             return skip("this machine has a single loopback address");

@@ -421,8 +421,7 @@ pub async fn watch(viewer: &Call, video: MediaId, capacity: usize) -> mpsc::Rece
     units
 }
 
-/// A share whose video the SFU never holds back, as synthetic units need: only their first
-/// is a keyframe. A real encoder's share announces its own recovery.
+/// A 1080p60 share whose video the SFU never holds back for a keyframe.
 pub const fn share_1080p60(codec: Codec, kbps: u32) -> ShareConfig {
     ShareConfig {
         audio: false,
