@@ -10,7 +10,6 @@ use throcc_proto::messages::{
     Response, ServerHello, ServerMessage,
 };
 use throcc_proto::transport::close;
-use throcc_proto::v1;
 use tokio::sync::{Semaphore, mpsc};
 use tracing::{debug, info, warn};
 
@@ -82,34 +81,6 @@ pub async fn write_frame<T: Serialize>(
     message: &T,
 ) -> anyhow::Result<()> {
     send.write_all(&framing::encode(message)?).await?;
-    Ok(())
-}
-
-/// Writes `result` in the shapes of the client's `protocol`.
-async fn write_auth_result(
-    send: &mut quinn::SendStream,
-    protocol: u16,
-    result: &AuthResult,
-) -> anyhow::Result<()> {
-    let frame = match protocol {
-        1 => v1::encode_auth_result(result)?,
-        _ => framing::encode(result)?,
-    };
-    send.write_all(&frame).await?;
-    Ok(())
-}
-
-/// Writes `message` in the shapes of the client's `protocol`.
-async fn write_message(
-    send: &mut quinn::SendStream,
-    protocol: u16,
-    message: &ServerMessage,
-) -> anyhow::Result<()> {
-    let frame = match protocol {
-        1 => v1::encode_server_message(message)?,
-        _ => framing::encode(message)?,
-    };
-    send.write_all(&frame).await?;
     Ok(())
 }
 
@@ -218,7 +189,6 @@ async fn serve(
         outgoing: outgoing.clone(),
         connection: connection.clone(),
         egress: egress::spawn(connection.clone(), outgoing.clone()),
-        protocol,
     };
     let connected = shared
         .hub()
@@ -244,8 +214,8 @@ async fn serve(
 
     let FrameStream { mut send, mut recv } = stream;
     let welcome = AuthResult::Ok(Box::new(welcome));
-    let sent = write_auth_result(&mut send, protocol, &welcome).await;
-    let writer = tokio::spawn(write_loop(send, protocol, outgoing_rx, connection.clone()));
+    let sent = write_frame(&mut send, &welcome).await;
+    let writer = tokio::spawn(write_loop(send, outgoing_rx, connection.clone()));
     let result = match sent {
         Ok(()) => read_loop(shared, user, conn_id, &mut recv, &outgoing).await,
         Err(_) => Err(ReadError::Closed),
@@ -379,7 +349,6 @@ fn request_kind(req: &Request) -> &'static str {
 
 async fn write_loop(
     mut send: quinn::SendStream,
-    protocol: u16,
     mut outgoing: mpsc::Receiver<Outbound>,
     connection: quinn::Connection,
 ) {
@@ -393,7 +362,7 @@ async fn write_loop(
                 reason,
             } => {
                 let kicked = ServerMessage::Event(event);
-                let written = write_message(&mut send, protocol, &kicked).await;
+                let written = write_frame(&mut send, &kicked).await;
                 if written.is_ok() && send.finish().is_ok() {
                     tokio::time::timeout(LINGER, send.stopped()).await.ok();
                 }
@@ -401,7 +370,7 @@ async fn write_loop(
                 return;
             }
         };
-        if write_message(&mut send, protocol, &message).await.is_err() {
+        if write_frame(&mut send, &message).await.is_err() {
             return;
         }
         drop(budget);

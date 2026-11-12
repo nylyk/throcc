@@ -18,7 +18,6 @@ use throcc_proto::messages::{
 };
 use throcc_proto::permissions;
 use throcc_proto::transport::close;
-use throcc_proto::v1;
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tracing::{info, warn};
 
@@ -192,8 +191,6 @@ pub struct ConnectionHandle {
     pub outgoing: mpsc::Sender<Outbound>,
     pub connection: quinn::Connection,
     pub egress: EgressHandle,
-    /// The protocol the client signed in with.
-    pub protocol: u16,
 }
 
 impl ConnectionHandle {
@@ -206,13 +203,11 @@ impl ConnectionHandle {
                 };
                 (event, close::REMOVED, reason)
             }
-            Kick::Replaced => {
-                let code = match self.protocol {
-                    1 => v1::SIGNED_IN_ELSEWHERE_CLOSE,
-                    _ => close::SIGNED_IN_ELSEWHERE,
-                };
-                (Event::SignedInElsewhere, code, v1::SIGNED_IN_ELSEWHERE)
-            }
+            Kick::Replaced => (
+                Event::SignedInElsewhere,
+                close::SIGNED_IN_ELSEWHERE,
+                "you signed in from somewhere else",
+            ),
         };
         let kick = Outbound::Kick {
             event,

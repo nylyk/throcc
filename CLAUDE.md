@@ -62,7 +62,7 @@ Each crate's `README.md` explains its modules and how they fit together. Update 
 
 - `main` only holds releases. Work happens on `develop`, and PRs target `develop`. `main` takes changes only through a PR with green `ci`; neither branch accepts force pushes, and release tags can't be moved or deleted.
 - `throcc-server` and `throcc-client` have their own semver `version` in their `Cargo.toml`; the other crates keep the workspace version. Patch for fixes, minor for features or a protocol bump while 0.x.
-- `PROTOCOL` alone decides compatibility. A server accepts `MIN_PROTOCOL..=PROTOCOL`, and a client checks its `PROTOCOL` is in the server's range. Both hellos stay decodable by every version. Every server version supports the current protocol and the one before it. A protocol bump is a breaking server release.
+- `PROTOCOL` alone decides compatibility. A server accepts `MIN_PROTOCOL..=PROTOCOL`, and a client checks its `PROTOCOL` is in the server's range. Both hellos stay decodable by every version. Every server version supports the current protocol and the one before it, except protocol 2, which dropped protocol 1. A protocol bump is a breaking server release.
 - Docker is the only supported server distribution. The app id is `cc.thro.throcc` everywhere.
 
 A release, for each side that changed since its last tag (`git log <side>-vX.Y.Z..develop -- crates/`):

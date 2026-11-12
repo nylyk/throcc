@@ -7,7 +7,6 @@ pub mod limits;
 pub mod messages;
 pub mod permissions;
 pub mod transport;
-pub mod v1;
 
 pub use fingerprint::Fingerprint;
 

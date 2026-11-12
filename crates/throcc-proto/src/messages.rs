@@ -5,8 +5,8 @@ use crate::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
 
 /// The protocol this build speaks.
 pub const PROTOCOL: u16 = 2;
-/// The oldest protocol a server of this build accepts.
-pub const MIN_PROTOCOL: u16 = 1;
+/// The oldest protocol a server of this build accepts. Protocol 2 dropped protocol 1.
+pub const MIN_PROTOCOL: u16 = 2;
 pub const MAX_AVATAR_BYTES: usize = 64 * 1024;
 pub const MAX_NAME_CHARS: usize = 32;
 pub const MAX_PASSWORD_CHARS: usize = 128;
