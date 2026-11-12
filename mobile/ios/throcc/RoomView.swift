@@ -5,6 +5,7 @@ struct RoomView: View {
 
     var body: some View {
         let state = model.state
+        let micOn = state.mic && !model.micDenied
         if let current = state.current, let room = state.rooms.first(where: { $0.id == current.room }) {
             ScrollView {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
@@ -21,11 +22,15 @@ struct RoomView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItemGroup(placement: .bottomBar) {
-                    Button("Microphone", systemImage: state.mic ? "mic.fill" : "mic.slash.fill") {
-                        model.core.command(command: .setMic(on: !state.mic))
+                    Button("Microphone", systemImage: micOn ? "mic.fill" : "mic.slash.fill") {
+                        if model.micDenied {
+                            model.notice = "To talk, allow the microphone for throcc in Settings."
+                        } else {
+                            model.core.command(command: .setMic(on: !state.mic))
+                        }
                     }
-                    .tint(state.mic ? model.theme.text : model.theme.bad)
-                    .accessibilityValue(state.mic ? "On" : "Off")
+                    .tint(micOn ? model.theme.text : model.theme.bad)
+                    .accessibilityValue(micOn ? "On" : "Off")
                     Button("Sound", systemImage: state.deafened ? "speaker.slash.fill" : "speaker.wave.2.fill") {
                         model.core.command(command: .setDeafened(on: !state.deafened))
                     }

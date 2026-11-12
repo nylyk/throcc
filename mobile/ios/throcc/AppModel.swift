@@ -84,8 +84,13 @@ final class AppModel {
     @ObservationIgnored private let themeSaves = DispatchQueue(label: "cc.thro.throcc.theme-saves", qos: .utility)
     /// Waits for the Custom theme's colours to rest before it saves them.
     @ObservationIgnored private var customThemeSave: Task<Void, Never>?
+    /// The room's sound, which only a real server has.
+    @ObservationIgnored private var callAudio: CallAudio?
 
-    init(core: Core) {
+    /// Whether the system keeps the microphone from throcc.
+    var micDenied: Bool { callAudio?.micDenied ?? false }
+
+    init(core: Core, mock: Bool) {
         self.core = core
         profile = core.profile()
         themes = core.themes()
@@ -96,6 +101,9 @@ final class AppModel {
         state = core.state()
         loadServers()
         core.setListener(listener: self)
+        if !mock {
+            callAudio = CallAudio(core: core) { [weak self] in self?.notice = $0 }
+        }
     }
 
     /// Runs `action`, and shows why it failed as a notice.
@@ -273,6 +281,7 @@ final class AppModel {
             column = .detail
         }
         state = new
+        callAudio?.follow(inRoom: new.hasLiveRoom)
         if let sampleConnection {
             state.connection = sampleConnection
         }
@@ -340,5 +349,14 @@ extension CoreState {
 
     var permissions: Permissions? {
         role.map(permissionsOf(role:))
+    }
+
+    /// Whether we are in a room over a connection that is up, or that the core is bringing back.
+    var hasLiveRoom: Bool {
+        guard current != nil else { return false }
+        return switch connection {
+        case .connected, .reconnecting: true
+        case .disconnected, .awaitingReconnect, .signedInElsewhere, .failed: false
+        }
     }
 }
