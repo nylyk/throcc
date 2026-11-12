@@ -226,6 +226,9 @@ pub struct Queues {
     audio: AudioQueues,
     started: BTreeMap<u64, VideoUnit>,
     waiting: BTreeMap<u64, VideoUnit>,
+    /// Waiting units that aren't strays, by track, first `seq` and id, to find the units
+    /// after a loss.
+    waiting_seqs: BTreeSet<(MediaId, u32, u64)>,
     /// Started units that still hold packets.
     sending: BTreeSet<u64>,
     /// Waiting strays in id order. Units that have since left are skipped when met at the
@@ -291,21 +294,23 @@ impl Queues {
         if !self.idr_tracks.contains(&media_id) || healed {
             return;
         }
-        let mut after: Vec<&VideoUnit> = self
-            .waiting
-            .values()
-            .filter(|u| u.media_id == media_id && u.first_seq >= seq && !u.stray)
-            .collect();
-        after.sort_by_key(|u| u.first_seq);
-        let keyframe = after.iter().position(|u| u.keyframe);
-        let undecodable: Vec<u64> = after[..keyframe.unwrap_or(after.len())]
-            .iter()
-            .map(|u| u.id)
-            .collect();
+        let after = self
+            .waiting_seqs
+            .range((media_id, seq, 0)..=(media_id, u32::MAX, u64::MAX))
+            .map(|&(_, _, id)| id);
+        let mut undecodable = Vec::new();
+        let mut keyframe = false;
+        for id in after {
+            if self.waiting.get(&id).is_some_and(|u| u.keyframe) {
+                keyframe = true;
+                break;
+            }
+            undecodable.push(id);
+        }
         for id in undecodable {
             self.finish(id, Fate::Dropped);
         }
-        if keyframe.is_some() {
+        if keyframe {
             return;
         }
         let hold = self.held.entry(media_id).or_insert_with(|| {
@@ -428,6 +433,9 @@ impl Queues {
         self.video_bytes += unit.packets.iter().map(Bytes::len).sum::<usize>();
         if unit.stray {
             self.strays.push_back(unit.id);
+        } else {
+            self.waiting_seqs
+                .insert((unit.media_id, unit.first_seq, unit.id));
         }
         self.waiting.insert(unit.id, unit);
     }
@@ -569,6 +577,8 @@ impl Queues {
         };
         self.video_bytes -= unit.packets.iter().map(Bytes::len).sum::<usize>();
         self.sending.remove(&id);
+        self.waiting_seqs
+            .remove(&(unit.media_id, unit.first_seq, id));
         if !unit.stray {
             let key = (unit.media_id, unit.first_seq);
             if let Some(ids) = self.copies.get_mut(&key) {
@@ -632,6 +642,8 @@ impl Queues {
             Some(id) => *id,
             None => {
                 let (id, mut unit) = self.waiting.pop_first()?;
+                self.waiting_seqs
+                    .remove(&(unit.media_id, unit.first_seq, id));
                 while self.strays.front().is_some_and(|stray| *stray <= id) {
                     self.strays.pop_front();
                 }
@@ -1237,17 +1249,17 @@ mod tests {
     /// One second of a flood of the smallest units into a receiver that drains 20,000
     /// datagrams a second, after one unit was sent, so fragments that start no unit queue
     /// as strays. Every step must stay cheap however long the queue gets.
-    fn flood(flags: Flags) -> Duration {
+    fn flood(kind: TrackKind, flags: Flags) -> Duration {
         let start = Instant::now();
         let mut queues = Queues::default();
         let first = Flags::FIRST | Flags::LAST;
-        queues.push(packet(VIDEO, 1, 0, first, 1), start);
+        queues.push(packet(kind, 1, 0, first, 1), start);
         queues.pop();
         let mut seq = 1;
         for ms in 0..1000 {
             let now = start + Duration::from_millis(ms);
             for _ in 0..200 {
-                queues.push(packet(VIDEO, 1, seq, flags, 1), now);
+                queues.push(packet(kind, 1, seq, flags, 1), now);
                 seq += 1;
             }
             for _ in 0..20 {
@@ -1260,9 +1272,20 @@ mod tests {
 
     #[test]
     fn a_flood_of_tiny_units_costs_little_per_unit() {
-        for flags in [Flags::FIRST | Flags::LAST, Flags::default(), Flags::FIRST] {
-            let took = flood(flags);
-            assert!(took < Duration::from_secs(5), "{flags:?}: {took:?}");
+        let idr = TrackKind::Video(Recovery::Idr);
+        let keyframes = Flags::FIRST | Flags::LAST | Flags::KEYFRAME;
+        for (kind, flags) in [
+            (VIDEO, Flags::FIRST | Flags::LAST),
+            (VIDEO, Flags::default()),
+            (VIDEO, Flags::FIRST),
+            (idr, keyframes),
+            (idr, Flags::FIRST | Flags::LAST),
+        ] {
+            let took = flood(kind, flags);
+            assert!(
+                took < Duration::from_secs(5),
+                "{kind:?} {flags:?}: {took:?}"
+            );
         }
     }
 
