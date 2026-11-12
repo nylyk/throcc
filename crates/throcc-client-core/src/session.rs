@@ -1030,9 +1030,8 @@ impl Session {
         changed
     }
 
-    /// Notes every identity key our secret was wrapped to, oldest first. The room is only
-    /// looked at now and then, and a key the server showed and took back in between still
-    /// has to count as presented, so a verified person's key can't change unseen.
+    /// Notes every identity key our secret was wrapped to, oldest first, including one the
+    /// server showed and took back between two looks at the room.
     fn note_trusted(&mut self, keys: Vec<(UserId, PublicKey)>) {
         let mut noted = false;
         for key in keys {

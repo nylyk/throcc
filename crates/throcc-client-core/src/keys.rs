@@ -468,8 +468,8 @@ impl KeyManager {
             self.epoch = epoch;
             self.epoch_since = now;
         }
-        // Raised for the epoch a stay starts at too. A room change resets ours to 0, so a
-        // stay at epoch 0 would otherwise leave no floor and could be replayed.
+        // The floor covers the epoch a stay starts at. A room change resets our epoch to 0,
+        // and a stay at epoch 0 needs a floor too, or it could be replayed.
         if let Some(room) = self.room {
             self.floors.raise(self.me, room, epoch);
         }
@@ -544,10 +544,9 @@ impl KeyManager {
         (request, refused.into_iter().map(|(user, _)| user).collect())
     }
 
-    /// Stores a peer's sender secret. One that arrives before its room state is held for
-    /// up to [`OLD_KEY_GRACE`], and one from someone the room state names but who isn't
-    /// trusted yet for as long as it names them at that epoch. One for an earlier epoch is accepted only within the grace
-    /// period after our epoch moved on, and expires with it.
+    /// Stores a peer's sender secret. One that arrives before its room state or before its
+    /// sender is trusted is held as [`keeps_early`] says. One for an earlier epoch is accepted
+    /// only within the grace period after our epoch moved on, and expires with it.
     pub fn sender_key(
         &mut self,
         from: UserId,
@@ -679,8 +678,7 @@ impl KeyManager {
 }
 
 /// Whether a sender key that came early is still kept: for [`OLD_KEY_GRACE`], and past it
-/// while the room state names its sender at our epoch. Such a sender may only be waiting
-/// for a client that shows people to show them, and sends its key just once.
+/// while the room state names its sender at our epoch.
 fn keeps_early(
     room_peers: &[Peer],
     epoch: Epoch,
@@ -689,6 +687,8 @@ fn keeps_early(
     arrived: Instant,
     now: Instant,
 ) -> bool {
+    // A sender the room names may only be waiting for a client that shows people to show
+    // them, and sends its key just once.
     now.duration_since(arrived) < OLD_KEY_GRACE
         || (early_epoch == epoch && room_peers.iter().any(|p| p.user == from))
 }

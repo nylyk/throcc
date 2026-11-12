@@ -14,8 +14,8 @@ const STOP_WAIT_NANOS: i64 = 100_000_000;
 
 /// The running speaker stream, and the mic's where it is open.
 pub struct Streams {
-    _mic: Option<AudioStream>,
-    _speaker: AudioStream,
+    mic: Option<AudioStream>,
+    speaker: AudioStream,
 }
 
 // SAFETY: AAudio lets a stream be stopped and closed on any thread.
@@ -24,7 +24,7 @@ unsafe impl Send for Streams {}
 impl Drop for Streams {
     fn drop(&mut self) {
         // A callback must not run once the streams close and free what it uses.
-        for stream in self._mic.iter().chain([&self._speaker]) {
+        for stream in self.mic.iter().chain([&self.speaker]) {
             let _ = stream.request_stop();
             let _ = stream.wait_for_state_change(AudioStreamState::Stopping, STOP_WAIT_NANOS);
         }
@@ -60,10 +60,7 @@ pub fn open(with_mic: bool) -> Result<Devices, DeviceError> {
     };
 
     Ok(Devices {
-        _streams: Streams {
-            _mic: mic,
-            _speaker: speaker,
-        },
+        _streams: Streams { mic, speaker },
         input_rate,
         output_rate,
         capture,

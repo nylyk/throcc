@@ -23,9 +23,7 @@ pub enum CallEvent {
     Server(Event),
     Key(KeyNotice),
     /// The identity keys the key manager came to trust since the last of these, oldest
-    /// first, ahead of the server event applied last. They are told apart from the room as
-    /// it stands once that event is handled, because a later event may have replaced them
-    /// by then.
+    /// first. This event comes ahead of the server event applied last, which may replace them.
     Trusted(Vec<(UserId, PublicKey)>),
 }
 
@@ -52,15 +50,8 @@ impl Call {
         Self::start_after(link, keystore, None, None)
     }
 
-    /// Starts a call for a client that shows who is in a room. The key manager then learns
-    /// where someone is only from whoever reads `events`, through the engine's
-    /// `set_presences`, `set_presence` and `end_presence`: the welcome's people and every
-    /// presence after, each once that reader shows them. A reader that is behind shows
-    /// nobody new, so nobody gets our key before they are shown.
-    ///
-    /// Every identity key our secret is wrapped to is noted in `verified` as soon as an
-    /// event makes it trusted, so a key that replaces a verified one is written down even
-    /// if the reader never gets to it.
+    /// Starts a call for a client that shows who is in a room. The key manager learns where
+    /// people are only as the reader of `events` shows them, through the engine's presence calls.
     pub fn start_shown(
         link: ControlLink,
         keystore: &Keystore,
@@ -131,6 +122,8 @@ impl Call {
                 };
                 let trusted = pump_engine.keys().take_newly_trusted();
                 if !trusted.is_empty() {
+                    // A key that replaces a verified one is written down here, even if the
+                    // reader of `events` never gets to it.
                     if let Some(verified) = &verified {
                         note_presented(verified, &server, &trusted);
                     }

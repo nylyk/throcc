@@ -295,9 +295,8 @@ impl MediaEngine {
         notices
     }
 
-    /// Queues requests the key manager made. Called with the keys still locked: the session
-    /// and the call's event pump both re-key, and peers keep the secret that reaches them
-    /// last, so the requests must leave in the order the secrets were made.
+    /// Queues requests the key manager made. Callers hold the keys locked, so requests leave
+    /// in the order their secrets were made, and peers keep the secret that reaches them last.
     fn send_requests(&self, requests: impl IntoIterator<Item = Request>) {
         for request in requests {
             self.requests.send(request).ok();
