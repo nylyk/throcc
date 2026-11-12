@@ -10,6 +10,7 @@ use throcc_client_core::avatars;
 use throcc_client_core::blocked::BlockedStore;
 use throcc_client_core::client::{self, Client, ClientApi, MockClient, UiCommand, UiEvent};
 use throcc_client_core::keystore::{self, Keystore};
+use throcc_client_core::media::voice::AudioEngine;
 use throcc_client_core::profile::Profile as CoreProfile;
 use throcc_client_core::server_look::ServerLook;
 use throcc_client_core::settings::Settings;
@@ -211,6 +212,8 @@ enum Told {
 struct Connected {
     address: String,
     client: Arc<dyn ClientApi>,
+    /// What the room's sound runs through. The mock has none.
+    audio: Option<Arc<AudioEngine>>,
     /// Carries a profile saved while the client runs to its session.
     profile: watch::Sender<CoreProfile>,
 }
@@ -355,16 +358,20 @@ impl Core {
         self.end_connection();
         let (kept_profile, profile_changes) = watch::channel(profile.clone());
         let (verified, blocked) = (self.verified.clone(), self.blocked.clone());
+        let mut audio = None;
         let client: Arc<dyn ClientApi> = if self.mock {
             Arc::new(MockClient::at(&address, verified, blocked))
         } else {
             let keystore = Keystore::open_default()?;
+            let voice = lock(&self.settings).audio.voice;
+            let engine = Arc::new(AudioEngine::start(voice).context("starting the audio")?);
+            audio = Some(engine.clone());
             let connected = Client::connect(
                 &address,
                 keystore,
                 invite.as_ref(),
                 profile_changes,
-                None,
+                Some(engine),
                 verified,
                 blocked,
             );
@@ -376,6 +383,7 @@ impl Core {
         *lock(&self.connected) = Some(Connected {
             address,
             client,
+            audio,
             profile: kept_profile,
         });
         let _ = self.told.send((connection, Told::State(Box::new(state))));
@@ -392,6 +400,27 @@ impl Core {
     pub fn disconnect(&self) {
         let _switching = lock(&self.switching);
         self.end_connection();
+    }
+
+    /// Opens the speaker, and the mic `with_mic`, for the room we are in. The app sets up
+    /// the platform's audio session first. It blocks until the devices run.
+    pub fn open_audio(&self, with_mic: bool) -> Result<(), CoreError> {
+        let Some(audio) = self.audio() else {
+            return Ok(());
+        };
+        #[cfg(any(target_os = "ios", target_os = "android"))]
+        audio.open_devices(with_mic)?;
+        #[cfg(not(any(target_os = "ios", target_os = "android")))]
+        let _ = (audio, with_mic);
+        Ok(())
+    }
+
+    /// Closes the speaker and the mic, which frees them for other apps.
+    pub fn close_audio(&self) {
+        #[cfg(any(target_os = "ios", target_os = "android"))]
+        if let Some(audio) = self.audio() {
+            audio.close_devices();
+        }
     }
 
     pub fn command(&self, command: Command) {
@@ -541,6 +570,10 @@ impl Core {
         }
         *settings = changed;
         Ok(())
+    }
+
+    fn audio(&self) -> Option<Arc<AudioEngine>> {
+        lock(&self.connected).as_ref()?.audio.clone()
     }
 
     fn connected_to(&self, address: &str) -> bool {
