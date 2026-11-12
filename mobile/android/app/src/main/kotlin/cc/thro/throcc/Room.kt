@@ -137,9 +137,17 @@ private fun RoomControls(model: AppModel, state: CoreState) {
         IconButtonDefaults.mediumPressedShape,
         IconButtonDefaults.mediumSelectedRoundShape,
     )
+    val mic = state.mic && !model.micDenied
+    val setMic = { on: Boolean ->
+        if (model.micDenied) {
+            model.notices.trySend("To talk, allow the microphone for throcc in the system settings.")
+        } else {
+            model.core.command(Command.SetMic(on))
+        }
+    }
     HorizontalFloatingToolbar(expanded = true) {
-        FilledTonalIconToggleButton(!state.mic, { model.core.command(Command.SetMic(!it)) }, shapes, size) {
-            Icon(if (state.mic) Icons.Default.Mic else Icons.Default.MicOff, "Mute")
+        FilledTonalIconToggleButton(!mic, { setMic(!it) }, shapes, size) {
+            Icon(if (mic) Icons.Default.Mic else Icons.Default.MicOff, "Mute")
         }
         FilledTonalIconToggleButton(state.deafened, { model.core.command(Command.SetDeafened(it)) }, shapes, size) {
             Icon(if (state.deafened) Icons.Default.HeadsetOff else Icons.Default.Headset, "Deafen")

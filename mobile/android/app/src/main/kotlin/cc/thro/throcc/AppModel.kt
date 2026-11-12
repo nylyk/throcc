@@ -1,5 +1,7 @@
 package cc.thro.throcc
 
+import android.Manifest
+import android.os.Build
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -7,8 +9,6 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
 import cc.thro.throcc.core.BlockedPerson
 import cc.thro.throcc.core.Command
 import cc.thro.throcc.core.Connection
@@ -23,11 +23,8 @@ import cc.thro.throcc.core.Profile
 import cc.thro.throcc.core.User
 import cc.thro.throcc.core.VerifiedPerson
 import cc.thro.throcc.core.customThemeName
-import java.util.concurrent.locks.ReentrantReadWriteLock
-import kotlin.concurrent.read
-import kotlin.concurrent.write
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -53,7 +50,50 @@ val CUSTOM = customThemeName()
 
 fun CoreState.connectedTo(address: String) = connection == Connection.Connected && server?.address == address
 
-class AppModel(val core: Core, sample: String?) : ViewModel() {
+/** The room `this` has us in while the link is up or the core is bringing it back. */
+fun CoreState.voiceRoom(): ULong? = when (connection) {
+    // A link that came back lists us among the room's people a moment before `current` names the room.
+    Connection.Connected, is Connection.Reconnecting -> current?.room ?: people.find { it.user == me }?.room
+    else -> null
+}
+
+/** Whether `address`, a host with or without a port, is on the local network. */
+fun isLocalAddress(address: String): Boolean {
+    val host = when {
+        address.startsWith('[') -> address.drop(1).substringBefore(']')
+        address.count { it == ':' } == 1 -> address.substringBefore(':')
+        else -> address
+    }.substringBefore('%').trimEnd('.').lowercase()
+    val octets = host.split('.').mapNotNull { it.toIntOrNull()?.takeIf { octet -> octet in 0..255 } }
+    val group = host.substringBefore(':').toIntOrNull(16)
+    return when {
+        ':' in host -> group != null && ((group and 0xffc0) == 0xfe80 || (group and 0xfe00) == 0xfc00)
+        octets.size == 4 && host.count { it == '.' } == 3 -> {
+            val (first, second) = octets
+            first == 10 || first == 172 && second in 16..31 || first == 192 && second == 168 ||
+                first == 169 && second == 254
+        }
+        else -> '.' !in host || host.endsWith(".local")
+    }
+}
+
+/** The permissions a room's sound and its notification need. */
+private val ROOM_PERMISSIONS = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+    listOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
+} else {
+    listOf(Manifest.permission.RECORD_AUDIO)
+}
+
+/** The permissions reaching the server at `address` needs. */
+private fun networkPermissions(address: String) =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN && isLocalAddress(address)) {
+        listOf(Manifest.permission.ACCESS_LOCAL_NETWORK)
+    } else {
+        emptyList()
+    }
+
+class AppModel(val core: Core, val mock: Boolean, sample: String?) {
+    private val scope = MainScope()
     private val shown = MutableStateFlow(core.state())
     val state = shown.asStateFlow()
 
@@ -93,6 +133,18 @@ class AppModel(val core: Core, sample: String?) : ViewModel() {
     val notices = Channel<String>(Channel.BUFFERED)
     val snackbars = SnackbarHostState()
 
+    /** Whether the room's sound runs without the mic, which the user has not allowed. */
+    var micDenied by mutableStateOf(false)
+
+    /** The permissions to ask the user for. `answered` takes the answer to each list. */
+    val asks = Channel<List<String>>(Channel.BUFFERED)
+    private val asked = mutableSetOf<String>()
+    private var afterAnswer: (() -> Unit)? = null
+
+    /** What the room's sound is to become: open with or without the mic, or closed with null. A newer wish
+     *  takes the place of one that still waits. */
+    private val sound = Channel<Boolean?>(Channel.CONFLATED)
+
     private val pictures = mutableStateMapOf<String, Picture>()
     private var serverPictures by mutableStateOf(emptyMap<String, Picture>())
     private var blockedPictures by mutableStateOf(emptyMap<String, Picture>())
@@ -100,38 +152,34 @@ class AppModel(val core: Core, sample: String?) : ViewModel() {
     /** The connection a sample shows in place of the mock's. */
     private var sampleConnection: Connection? = null
 
-    private val coreHandle = ReentrantReadWriteLock()
-    private var closed = false
-
     private val listener = object : Listener {
         override fun state(state: CoreState) {
-            unlessClosed { loadPictures(state) }
-            viewModelScope.launch { show(state) }
+            loadPictures(state)
+            scope.launch { show(state) }
         }
 
         override fun event(event: Event) {
             if (event is Event.AvatarReady) {
-                unlessClosed { loadPicture(event.hash) }
+                loadPicture(event.hash)
             } else {
-                viewModelScope.launch { handle(event) }
+                scope.launch { handle(event) }
             }
         }
     }
 
     init {
         core.setListener(listener)
-        viewModelScope.launch { loadServers() }
-        sample?.let(::showSample)
-    }
-
-    override fun onCleared() {
-        core.setListener(null)
-        CoroutineScope(Dispatchers.IO).launch {
-            coreHandle.write {
-                closed = true
-                core.close()
+        scope.launch { loadServers() }
+        scope.launch(Dispatchers.IO) {
+            for (withMic in sound) {
+                try {
+                    if (withMic == null) core.closeAudio() else core.openAudio(withMic)
+                } catch (failure: CoreException) {
+                    notices.trySend("The room has no sound: ${failure.message}")
+                }
             }
         }
+        sample?.let(::showSample)
     }
 
     fun open(screen: Screen) {
@@ -152,15 +200,35 @@ class AppModel(val core: Core, sample: String?) : ViewModel() {
     /** Signs in at `address` and opens its rooms, or says why it couldn't. */
     fun connect(address: String, invite: String? = null) {
         if (connectingTo != null) return
-        viewModelScope.launch {
-            connectingTo = address
-            val signedIn = signIn(address, invite)
-            connectingTo = null
-            when {
-                signedIn -> showPages(Screen.Rooms)
-                Screen.Rooms in stack -> showPages()
+        withPermissions(networkPermissions(address)) {
+            scope.launch {
+                connectingTo = address
+                val signedIn = signIn(address, invite)
+                connectingTo = null
+                when {
+                    signedIn -> showPages(Screen.Rooms)
+                    Screen.Rooms in stack -> showPages()
+                }
             }
         }
+    }
+
+    /** `join`, which moves us into a room, is sent once the user has answered for the mic and notifications. */
+    fun join(join: Command) = withPermissions(ROOM_PERMISSIONS) { core.command(join) }
+
+    /** What waited for the user's answer about permissions carries on. */
+    fun answered() {
+        afterAnswer?.invoke()
+        afterAnswer = null
+    }
+
+    /** The room's sound opens anew, with the mic `withMic`, once the open or close under way has finished. */
+    fun openAudio(withMic: Boolean) {
+        sound.trySend(withMic)
+    }
+
+    fun closeAudio() {
+        sound.trySend(null)
     }
 
     fun reconnect() {
@@ -172,14 +240,14 @@ class AppModel(val core: Core, sample: String?) : ViewModel() {
     /** Ends the connection and returns to the server list. */
     fun disconnect() {
         showPages()
-        viewModelScope.launch {
+        scope.launch {
             ask { core.disconnect() }
             loadServers()
         }
     }
 
     fun forgetServer(address: String) {
-        viewModelScope.launch {
+        scope.launch {
             ask { core.forgetServer(address) }
             loadServers()
         }
@@ -187,7 +255,7 @@ class AppModel(val core: Core, sample: String?) : ViewModel() {
 
     /** Our name and picture are kept and the profile page closes, or a notice says why not. */
     fun saveProfile(name: String, picture: ByteArray?) {
-        viewModelScope.launch {
+        scope.launch {
             val saved = ask { core.setProfile(Profile(name, picture)) } != null
             profile = ask { core.profile() }
             if (saved) stack.remove(Screen.Profile)
@@ -204,18 +272,18 @@ class AppModel(val core: Core, sample: String?) : ViewModel() {
     }
 
     fun loadVerified() {
-        viewModelScope.launch { ask { core.verified() }?.let { verified = it } }
+        scope.launch { ask { core.verified() }?.let { verified = it } }
     }
 
     fun unverify(key: ByteArray) {
-        viewModelScope.launch {
+        scope.launch {
             ask { core.unverify(key) }
             loadVerified()
         }
     }
 
     fun loadBlocked() {
-        viewModelScope.launch {
+        scope.launch {
             val kept = blockedPictures
             val (people, peoplePictures) = ask {
                 val people = core.blocked()
@@ -227,7 +295,7 @@ class AppModel(val core: Core, sample: String?) : ViewModel() {
     }
 
     fun unblock(key: ByteArray) {
-        viewModelScope.launch {
+        scope.launch {
             ask { core.unblock(key) }
             loadBlocked()
         }
@@ -245,21 +313,25 @@ class AppModel(val core: Core, sample: String?) : ViewModel() {
 
     /** What `action` gave off the main thread, or null where it failed, which shows as a notice. */
     private suspend fun <T> ask(action: () -> T): T? = withContext(Dispatchers.IO) {
-        unlessClosed {
-            try {
-                action()
-            } catch (failure: CoreException) {
-                notices.trySend(failure.message.orEmpty())
-                null
-            }
+        try {
+            action()
+        } catch (failure: CoreException) {
+            notices.trySend(failure.message.orEmpty())
+            null
         }
     }
 
-    /** The result of `action`, run while the core's handle is held open, or null once the handle is closed. */
-    private fun <T> unlessClosed(action: () -> T): T? = coreHandle.read { if (closed) null else action() }
+    /** `then` runs once the user has answered for those of `permissions` not asked for before in this run. */
+    private fun withPermissions(permissions: List<String>, then: () -> Unit) {
+        val unasked = if (mock) emptyList() else permissions - asked
+        if (unasked.isEmpty()) return then()
+        asked += unasked
+        afterAnswer = then
+        asks.trySend(unasked)
+    }
 
     private fun changeTheme(change: () -> Unit) {
-        viewModelScope.launch {
+        scope.launch {
             ask(change)
             ask { core.theme() }?.let { theme = it }
         }
@@ -345,7 +417,7 @@ class AppModel(val core: Core, sample: String?) : ViewModel() {
             else -> emptyList()
         }
         if (name in listOf("onboarding", "servers", "addserver")) return
-        viewModelScope.launch {
+        scope.launch {
             signIn("owls.thro.cc", null)
             if (name in listOf("room", "blocked", "person", "personblocked")) core.command(Command.Join(1u))
             if (name in listOf("blocked", "personblocked", "blockedpeople")) core.command(Command.Block(3u))

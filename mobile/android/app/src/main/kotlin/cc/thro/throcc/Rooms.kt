@@ -76,7 +76,7 @@ fun Rooms(model: AppModel, state: CoreState) {
                 model.passwordRefused = null
                 dialog = RoomDialog.Password(room.id)
             }
-            else -> model.core.command(Command.Join(room.id))
+            else -> model.join(Command.Join(room.id))
         }
     }
     Page(
@@ -337,7 +337,7 @@ private fun JoinLocked(model: AppModel, room: Room, joined: Boolean, onDismiss: 
         onDismissRequest = onDismiss,
         confirmButton = {
             Button(
-                { model.core.command(Command.JoinWithPassword(room.id, password)) },
+                { model.join(Command.JoinWithPassword(room.id, password)) },
                 enabled = isValidPassword(password),
             ) { Text("Join") }
         },

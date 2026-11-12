@@ -1,5 +1,8 @@
 package cc.thro.throcc
 
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
@@ -16,6 +19,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation3.runtime.NavEntry
@@ -28,6 +32,16 @@ fun App(model: AppModel) {
     val state by model.state.collectAsStateWithLifecycle()
     LaunchedEffect(model) {
         for (notice in model.notices) model.snackbars.showSnackbar(notice)
+    }
+    val context = LocalContext.current
+    val request = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        model.answered()
+    }
+    LaunchedEffect(model) {
+        for (permissions in model.asks) {
+            val missing = permissions.filter { context.checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+            if (missing.isEmpty()) model.answered() else request.launch(missing.toTypedArray())
+        }
     }
     ThroccTheme(model.theme.palette) {
         Surface(Modifier.fillMaxSize()) {
