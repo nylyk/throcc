@@ -84,12 +84,8 @@ pub async fn write_frame<T: Serialize>(
     Ok(())
 }
 
-/// Serves one connection. Everything before sign-in is logged as counts, since one source
-/// can fail sign-ins as fast as it can connect.
-///
-/// `source` is the address the connection was accepted from, which a retry validated. Every
-/// limit counts against it and never against `remote_address()`, which follows a client that
-/// moves to another address before that one is validated, a forged one too.
+/// Serves one connection, counting every limit against `source`, the address a retry validated.
+/// `remote_address()` follows a client to an address not yet validated, a forged one too.
 pub async fn run(
     shared: Arc<ServerState>,
     connection: quinn::Connection,

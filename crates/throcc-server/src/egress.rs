@@ -107,7 +107,7 @@ enum Fate {
     Queued(u64),
     Sent,
     Dropped,
-    /// Turned away by a hold: never counted, so a copy undoes nothing.
+    /// A unit a hold turned away. It never counted, so a copy of it undoes nothing.
     HeldBack,
 }
 
@@ -285,10 +285,8 @@ impl Queues {
         self.hold(media_id, seq);
     }
 
-    /// Holds an `Idr` track back from the unit lost at `seq` on. Its queued units after the
-    /// loss go, up to a keyframe queued after it. A keyframe from after the loss, queued or
-    /// already sent, heals the picture: then there is nothing to hold. The loss already
-    /// counted, so neither these nor the units the hold turns away count again.
+    /// Holds an `Idr` track back from the unit lost at `seq` on, dropping its waiting units
+    /// from there up to a keyframe. A keyframe from after the loss, waiting or sent, heals it.
     fn hold(&mut self, media_id: MediaId, seq: u32) {
         let healed = self.sent_keyframes.get(&media_id).is_some_and(|&k| k > seq);
         if !self.idr_tracks.contains(&media_id) || healed {
@@ -307,6 +305,7 @@ impl Queues {
             }
             undecodable.push(id);
         }
+        // These units are part of the loss, which already counted once.
         for id in undecodable {
             self.finish(id, Fate::Dropped);
         }
@@ -535,9 +534,8 @@ impl Queues {
         self.waiting.first_key_value().map(|(id, _)| *id)
     }
 
-    /// Drops a unit, counting it unless another copy of it is still queued. Its track is
-    /// held back unless a copy of it was sent or still is queued: a dropped stray breaks
-    /// the unit it belongs to.
+    /// Drops a unit, counting it and holding its track back unless another copy is queued.
+    /// A dropped stray holds its track without counting; a dropped copy does neither.
     fn drop_unit(&mut self, id: u64) {
         let Some(unit) = self.unit_mut(id) else {
             return;
@@ -1272,14 +1270,13 @@ mod tests {
 
     #[test]
     fn a_flood_of_tiny_units_costs_little_per_unit() {
-        let idr = TrackKind::Video(Recovery::Idr);
         let keyframes = Flags::FIRST | Flags::LAST | Flags::KEYFRAME;
         for (kind, flags) in [
             (VIDEO, Flags::FIRST | Flags::LAST),
             (VIDEO, Flags::default()),
             (VIDEO, Flags::FIRST),
-            (idr, keyframes),
-            (idr, Flags::FIRST | Flags::LAST),
+            (IDR_VIDEO, keyframes),
+            (IDR_VIDEO, Flags::FIRST | Flags::LAST),
         ] {
             let took = flood(kind, flags);
             assert!(

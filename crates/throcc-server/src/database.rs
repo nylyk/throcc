@@ -397,8 +397,7 @@ impl Database {
     }
 
     /// Removes these users in one transaction. Whoever one of them invited passes to that
-    /// one's own inviter, so they stay in an invite tree a cascade reaches and still count
-    /// against an invite allowance: leaving frees neither.
+    /// one's own inviter.
     pub fn remove_users(&mut self, users: &[UserId]) -> Result<()> {
         let tx = self.write()?;
         for user in users {

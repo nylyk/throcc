@@ -15,9 +15,8 @@ use crate::limits::TokenBucket;
 
 /// Keyframe requests for one track are forwarded at most this often.
 pub const KEYFRAME_INTERVAL: Duration = Duration::from_secs(1);
-/// The longest a watcher waits between its own requests. Each one taken doubles its wait,
-/// from [`KEYFRAME_INTERVAL`], so a watcher whose link can't carry the share costs everyone
-/// else a keyframe this often at most. A watcher quiet for this long past its wait starts over.
+/// The longest a watcher waits between its own requests, its wait doubling from
+/// [`KEYFRAME_INTERVAL`] with each one taken. A watcher quiet this long past its wait starts over.
 pub const KEYFRAME_BACKOFF_MAX: Duration = Duration::from_secs(8);
 /// The most a connection may send in datagrams, voice and share together: 25 Mbps.
 pub const MAX_INGRESS_BYTES_PER_SECOND: f64 = 25_000_000.0 / 8.0;
@@ -237,19 +236,16 @@ impl Backoff {
     }
 }
 
-/// Merges keyframe requests: at most one per track per [`KEYFRAME_INTERVAL`], and an
-/// `Idr` beats a `Refresh` within one interval. A watcher that keeps starting requests backs
-/// off on top. Joining a waiting request is free, so a picture broken for everyone at once
-/// charges only the one or two watchers that start the requests, not the room.
+/// Merges keyframe requests: at most one per track per [`KEYFRAME_INTERVAL`], an `Idr`
+/// beating a `Refresh` within one, and each watcher backed off on the requests it starts.
 #[derive(Default)]
 pub struct KeyframeAggregator {
     tracks: HashMap<MediaId, Pending>,
 }
 
 impl KeyframeAggregator {
-    /// Records a request from `watcher`. Joining a request already waiting is free; starting
-    /// one counts against the watcher's backoff, which may drop it. Returns the request to
-    /// forward now, if the track is due.
+    /// Records a request from `watcher`, whose backoff may drop it unless one is already
+    /// waiting. Returns the request to forward at once, if the track is due.
     pub fn request(
         &mut self,
         media_id: MediaId,

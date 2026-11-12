@@ -54,9 +54,8 @@ pub const HANDSHAKES: Caps = Caps {
     per_network: 16,
     total: 128,
 };
-/// The most accounts a server keeps before it refuses to enroll another with a member's
-/// invite. `ListUsers` answers with all of them in one frame, which this many fit in with
-/// the longest names, with room for the admins enrolled past it.
+/// The most accounts a server keeps before a member's invite enrolls nobody new. All of
+/// them, and the admins enrolled past it, must fit one `ListUsers` frame.
 pub const MAX_ACCOUNTS: usize = 5000;
 /// A real handshake takes a few round trips; this leaves room for several lost packets.
 pub const TLS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -73,7 +72,7 @@ pub struct Config {
     /// How long a connection may go without a packet before it is closed; QUIC uses the
     /// shorter of this and the client's. At least a second. Tests shorten it.
     pub idle_timeout: Duration,
-    /// [`MAX_ACCOUNTS`]. Tests lower it.
+    /// The most accounts the server keeps: [`MAX_ACCOUNTS`] outside tests.
     pub max_accounts: usize,
 }
 

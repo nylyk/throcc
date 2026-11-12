@@ -973,9 +973,8 @@ impl Hub {
         })
     }
 
-    /// Keeps a signed name and picture. Signing the name and picture already kept changes
-    /// nothing others see, so it skips the rate limit, and is kept only while no valid
-    /// signature is.
+    /// Keeps a signed name and picture. A signature over the kept ones skips the rate limit
+    /// and is stored only while no valid signature is.
     fn set_profile(
         &mut self,
         user: UserId,
