@@ -535,6 +535,7 @@ impl Worker {
             #[cfg(any(target_os = "ios", target_os = "android"))]
             Command::CloseDevices(closed) => {
                 self.close_devices();
+                self.call.mixer.clear();
                 closed.send(()).ok();
             }
             Command::MicTest(on) => self.mic_test = on,
@@ -610,10 +611,16 @@ impl Worker {
         }
     }
 
+    /// Takes what arrived into the jitter buffers. With no devices open nothing plays, so
+    /// it is dropped: kept, it would play late once they open.
     fn receive(&mut self) {
+        let playing = self.io.is_some();
         let call = &mut self.call;
         for (user, units) in &mut call.remotes {
             while let Ok(unit) = units.try_recv() {
+                if !playing {
+                    continue;
+                }
                 if let Err(e) = call
                     .mixer
                     .insert(*user, unit.timestamp, unit.data, self.played)
@@ -624,6 +631,9 @@ impl Worker {
         }
         for share in call.shares.values_mut() {
             while let Ok(unit) = share.units.try_recv() {
+                if !playing {
+                    continue;
+                }
                 share.jitter.insert(unit.timestamp, unit.data, self.played);
             }
         }

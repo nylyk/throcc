@@ -4,11 +4,13 @@ use std::sync::atomic::Ordering;
 use ndk::audio::{
     AudioCallbackResult, AudioContentType, AudioDirection, AudioError, AudioFormat,
     AudioInputPreset, AudioPerformanceMode, AudioSharingMode, AudioStream, AudioStreamBuilder,
-    AudioStreamDataCallback, AudioUsage,
+    AudioStreamDataCallback, AudioStreamState, AudioUsage,
 };
 
 use super::{DeviceCounters, DeviceError, Devices, PLAYBACK_RING_MS, RING_SECONDS};
 use crate::media::audio::SAMPLE_RATE;
+
+const STOP_WAIT_NANOS: i64 = 100_000_000;
 
 /// The running speaker stream, and the mic's where it is open.
 pub struct Streams {
@@ -18,6 +20,16 @@ pub struct Streams {
 
 // SAFETY: AAudio lets a stream be stopped and closed on any thread.
 unsafe impl Send for Streams {}
+
+impl Drop for Streams {
+    fn drop(&mut self) {
+        // A callback must not run once the streams close and free what it uses.
+        for stream in self._mic.iter().chain([&self._speaker]) {
+            let _ = stream.request_stop();
+            let _ = stream.wait_for_state_change(AudioStreamState::Stopping, STOP_WAIT_NANOS);
+        }
+    }
+}
 
 /// Opens the phone's speaker, and its mic `with_mic`, as voice-communication streams, which
 /// the platform cancels echo between. The app sets the audio mode and device first.
@@ -78,6 +90,11 @@ fn builder(counters: &Arc<DeviceCounters>) -> Result<AudioStreamBuilder, DeviceE
 /// Opens and starts the stream `builder` describes, returning it with the rate it runs at.
 fn start(builder: AudioStreamBuilder) -> Result<(AudioStream, u32), DeviceError> {
     let stream = builder.open_stream().map_err(failed)?;
+    if stream.format() != AudioFormat::PCM_Float {
+        return Err(DeviceError::Backend(
+            "the device gave a stream that isn't float".into(),
+        ));
+    }
     let rate = u32::try_from(stream.sample_rate()).unwrap_or(0);
     if rate == 0 || !rate.is_multiple_of(100) {
         return Err(DeviceError::Backend(format!(
