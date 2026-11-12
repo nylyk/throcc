@@ -383,16 +383,21 @@ fn read_verified(verified: &VerifiedStore) -> Option<String> {
     ))
 }
 
-/// The blocked people kept on this computer. Nobody counts as blocked where they can't be
-/// read.
-fn load_blocked() -> BlockedStore {
-    let Ok(dir) = keystore::config_dir() else {
-        return BlockedStore::in_memory();
+/// The blocked people kept on this computer, with why they couldn't be read if they
+/// couldn't, in which case nobody counts as blocked.
+fn load_blocked() -> (BlockedStore, Option<String>) {
+    let dir = match keystore::config_dir() {
+        Ok(dir) => dir,
+        Err(e) => return (BlockedStore::in_memory(), Some(e.to_string())),
     };
-    BlockedStore::load(&dir).unwrap_or_else(|e| {
-        tracing::warn!("no blocked people: {e:#}");
-        BlockedStore::empty(&dir)
-    })
+    match BlockedStore::load(&dir) {
+        Ok(blocked) => (blocked, None),
+        Err(e) => {
+            tracing::warn!("no blocked people: {e:#}");
+            let problem = format!("Couldn't read who you blocked ({e}), so nobody is blocked.");
+            (BlockedStore::empty(&dir), Some(problem))
+        }
+    }
 }
 
 /// Everyone in `blocked` with the picture they had when blocked, where it is still cached.
@@ -533,6 +538,8 @@ pub struct ThroccApp {
     pub blocked: BlockedStore,
     /// The blocked people as the settings page lists them.
     pub blocked_people: Vec<BlockedLook>,
+    /// Why the blocked people couldn't be read, if they couldn't.
+    pub blocked_problem: Option<String>,
     /// Why the verified people couldn't be read or saved, the last time that failed.
     pub verified_problem: Option<String>,
     pub server_looks: HashMap<String, CachedLook>,
@@ -658,8 +665,8 @@ impl ThroccApp {
         } else {
             load_verified()
         };
-        let blocked = if mock {
-            BlockedStore::in_memory()
+        let (blocked, blocked_problem) = if mock {
+            (BlockedStore::in_memory(), None)
         } else {
             load_blocked()
         };
@@ -728,6 +735,7 @@ impl ThroccApp {
             verified,
             blocked_people: blocked_people(&blocked),
             blocked,
+            blocked_problem,
             verified_problem,
             server_looks,
             users: Vec::new(),
@@ -1395,6 +1403,21 @@ impl ThroccApp {
     fn show_identity_missing(&mut self) {
         self.start_over = StartOver::NotStarted;
         self.dialog = Some(Dialog::IdentityMissing);
+    }
+
+    /// Opens `user`'s profile, or the person menu at `position` for someone blocked.
+    pub fn open_person(
+        &mut self,
+        user: UserId,
+        position: gpui::Point<gpui::Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.state.person(user).is_some_and(|p| p.blocked) {
+            self.open_person_menu(user, position, window, cx);
+        } else {
+            self.open_profile(user, cx);
+        }
     }
 
     /// Opens `user`'s profile, or our own when `user` is us.

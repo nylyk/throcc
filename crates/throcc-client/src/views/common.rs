@@ -37,6 +37,9 @@ pub fn key_changed(state: &State, user: UserId) -> bool {
 /// The name `person` was verified under, where the server now shows another: the server
 /// picks the name, so it alone doesn't say who is verified.
 pub fn verified_as(verified: &[VerifiedIdentity], person: &Person) -> Option<String> {
+    if person.blocked {
+        return None;
+    }
     let key = Fingerprint(person.identity_key.filter(|_| person.verified)?);
     let stored = &verified.iter().find(|v| v.key == key)?.name;
     (*stored != person.name).then(|| stored.clone())

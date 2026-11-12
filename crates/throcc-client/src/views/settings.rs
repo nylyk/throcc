@@ -684,6 +684,7 @@ fn blocked(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .is_empty()
                 .then(|| caption("Nobody. Right-click someone in a room to block them.")),
         )
+        .children(app.blocked_problem.clone().map(field_error))
         .into_any_element()
 }
 

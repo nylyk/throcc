@@ -441,11 +441,7 @@ fn occupant(
         .cursor_pointer()
         .hover(|s| s.bg(theme::raised()))
         .on_click(cx.listener(move |app, event: &ClickEvent, window, cx| {
-            if app.state.person(user).is_some_and(|p| p.blocked) {
-                app.open_person_menu(user, event.position(), window, cx);
-            } else {
-                app.open_profile(user, cx);
-            }
+            app.open_person(user, event.position(), window, cx);
         }))
         .on_mouse_down(
             MouseButton::Right,
