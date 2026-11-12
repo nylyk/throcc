@@ -1427,7 +1427,7 @@ impl Hub {
         let now = Instant::now();
         for id in started {
             if let Some((owner, TrackKind::Video)) = self.share_track(id)
-                && let Some(kind) = self.keyframes.request(id, Recovery::Idr, now)
+                && let Some(kind) = self.keyframes.first_picture(id, now)
             {
                 self.emit_to(owner, Event::KeyframeRequested { media_id: id, kind });
             }
@@ -1445,7 +1445,7 @@ impl Hub {
         let Some((owner, TrackKind::Video)) = self.share_track(media_id) else {
             return Err(Refusal::new(ErrorCode::Invalid, "not a video track"));
         };
-        if let Some(kind) = self.keyframes.request(media_id, kind, Instant::now()) {
+        if let Some(kind) = self.keyframes.request(media_id, user, kind, Instant::now()) {
             self.emit_to(owner, Event::KeyframeRequested { media_id, kind });
         }
         Ok(Response::Ok)

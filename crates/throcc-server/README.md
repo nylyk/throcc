@@ -19,7 +19,7 @@ The server: sign-in, rooms and presence, the key relay, and an SFU that forwards
 | `room_password.rs` | Argon2id hashes of room passwords, which run on the blocking pool, a few at a time, never under the hub lock; and the backoff for wrong guesses |
 | `limits.rs` | Token buckets, per-source connection caps, the new-connection rate and the enrollment limiter, which counts failed runs per source, network and region |
 | `refusals.rs` | Counts of connections refused or failed before sign-in, logged every 10 s instead of one line each |
-| `sfu.rs` | Ingress: the per-connection rate limits, the per-track audio allowance, the ownership check, the forwarding table and keyframe-request merging |
+| `sfu.rs` | Ingress: the per-connection rate limits, the per-track audio allowance, the ownership check, the forwarding table, and keyframe requests merged per track and backed off per watcher, so one watcher on a slow link can't have the sender make keyframes for everyone every second |
 | `egress.rs` | One task per receiver: audio first, a turn per track, then video in whole units within a 150 ms budget; receive stats |
 | `database.rs` | The SQLite schema, its migrations and every query. WAL with `synchronous=FULL`, so a commit survives a power loss and a room's epoch never rolls back |
 
