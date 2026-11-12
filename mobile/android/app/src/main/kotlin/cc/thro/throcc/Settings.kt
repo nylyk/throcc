@@ -130,6 +130,11 @@ fun VoiceSettings(model: AppModel) {
     Page(model, "Voice") { padding ->
         Form(padding) {
             Panel {
+                Text("Volume", style = titled)
+                VolumeSlider("Input volume", voice.inputVolume, { slide(voice.copy(inputVolume = it)) }, keep)
+                VolumeSlider("Output volume", voice.outputVolume, { slide(voice.copy(outputVolume = it)) }, keep)
+            }
+            Panel {
                 Text("Voice activation", style = titled)
                 Labeled("Sensitivity", decibels(voice.sensitivityDbfs))
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -144,11 +149,6 @@ fun VoiceSettings(model: AppModel) {
                 SwitchRow("Speech detection", voice.speechOnly) {
                     model.setVoice(voice.copy(speechOnly = it), keep = true)
                 }
-                Text(
-                    "Your mic sends while it is louder than the mark.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                )
             }
             Panel {
                 Text("Processing", style = titled)
@@ -167,11 +167,6 @@ fun VoiceSettings(model: AppModel) {
                 SwitchRow("Automatic gain", voice.automaticGain) {
                     model.setVoice(voice.copy(automaticGain = it), keep = true)
                 }
-            }
-            Panel {
-                Text("Volume", style = titled)
-                VolumeSlider("Input volume", voice.inputVolume, { slide(voice.copy(inputVolume = it)) }, keep)
-                VolumeSlider("Output volume", voice.outputVolume, { slide(voice.copy(outputVolume = it)) }, keep)
             }
         }
     }
@@ -209,7 +204,7 @@ private fun VolumeSlider(label: String, volume: Float, onChange: (Float) -> Unit
 
 /**
  * The mic level as a bar, in the speaking colour while the gate lets it through, with a mark at
- * `sensitivity`. Outside a call it says where the level shows.
+ * `sensitivity`. Outside a call the bar stays empty.
  */
 @Composable
 private fun LevelMeter(model: AppModel, sensitivity: Float) {
@@ -220,17 +215,15 @@ private fun LevelMeter(model: AppModel, sensitivity: Float) {
             delay(100)
         }
     }
-    val shown = level ?: return Text(
-        "Your level shows here while you're in a room.",
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
     val scheme = MaterialTheme.colorScheme
     val fraction = { dbfs: Float -> (1 - dbfs / quietestGateDbfs()).coerceIn(0f, 1f) }
     Box(Modifier.fillMaxWidth().height(8.dp).clip(CircleShape).background(scheme.surfaceContainerHighest)) {
-        Box(
-            Modifier.fillMaxWidth(fraction(shown.dbfs)).fillMaxHeight()
-                .background(if (shown.gateOpen) scheme.tertiary else scheme.onSurfaceVariant, CircleShape),
-        )
+        level?.let { shown ->
+            Box(
+                Modifier.fillMaxWidth(fraction(shown.dbfs)).fillMaxHeight()
+                    .background(if (shown.gateOpen) scheme.tertiary else scheme.onSurfaceVariant, CircleShape),
+            )
+        }
         Row(Modifier.fillMaxSize()) {
             if (fraction(sensitivity) > 0f) Spacer(Modifier.weight(fraction(sensitivity)))
             Box(Modifier.width(2.dp).fillMaxHeight().background(scheme.onSurface))
@@ -375,7 +368,7 @@ fun VerifiedPeople(model: AppModel, state: CoreState) {
     people.find { it.key.contentEquals(removing) }?.let { person ->
         Confirm(
             "Mark “${person.name}” as not verified?",
-            "To verify them again, you compare safety numbers once more.",
+            null,
             "Mark as Not Verified",
             onDismiss = { removing = null },
         ) { model.unverify(person.key) }

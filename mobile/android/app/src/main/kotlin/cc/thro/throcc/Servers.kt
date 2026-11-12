@@ -147,7 +147,7 @@ fun AddServer(model: AppModel) {
                     supportingText = {
                         Text(
                             if (wrongCode) {
-                                "That isn’t an invite code. Check it against the one you were sent."
+                                "An invite code looks like K7Q-M2XPD."
                             } else {
                                 "The code also proves you reached the real server. " +
                                     "Leave it empty for a server you’ve joined before."

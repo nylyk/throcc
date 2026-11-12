@@ -34,7 +34,7 @@ fun Onboarding(model: AppModel) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Welcome to throcc", style = MaterialTheme.typography.displaySmallEmphasized)
                     Text(
-                        "Choose the name and picture people see you as.",
+                        "Choose the name people see you as.",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodyLarge,
                     )

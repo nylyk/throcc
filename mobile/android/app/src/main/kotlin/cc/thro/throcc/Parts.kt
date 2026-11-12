@@ -398,7 +398,7 @@ private fun DangerButton(text: String, onClick: () -> Unit) {
 
 /** Asks before `action`, which can't be undone. */
 @Composable
-fun Confirm(title: String, text: String, action: String, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+fun Confirm(title: String, text: String?, action: String, onDismiss: () -> Unit, onConfirm: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
@@ -409,7 +409,7 @@ fun Confirm(title: String, text: String, action: String, onDismiss: () -> Unit, 
         },
         dismissButton = { TextButton(onDismiss) { Text("Cancel") } },
         title = { Text(title) },
-        text = { Text(text) },
+        text = text?.let { { Text(it) } },
     )
 }
 

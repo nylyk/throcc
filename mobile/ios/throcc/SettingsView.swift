@@ -107,6 +107,12 @@ private struct VoicePage: View {
         let voice = model.voice
         ThemedForm {
             Section {
+                VolumeSlider("Input volume", value: setting(\.inputVolume)) { model.setVoice(model.voice, keep: true) }
+                VolumeSlider("Output volume", value: setting(\.outputVolume)) { model.setVoice(model.voice, keep: true) }
+            } header: {
+                Text("Volume").foregroundStyle(.muted)
+            }
+            Section {
                 LabeledContent("Sensitivity") { Text(decibels(voice.sensitivityDbfs)).foregroundStyle(.muted) }
                     .foregroundStyle(.text)
                 VStack(spacing: 12) {
@@ -124,8 +130,6 @@ private struct VoicePage: View {
                     .foregroundStyle(.text)
             } header: {
                 Text("Voice activation").foregroundStyle(.muted)
-            } footer: {
-                Text("Your mic sends while it is louder than the mark.").foregroundStyle(.muted)
             }
             Section {
                 Picker("Noise suppression", selection: setting(\.noiseSuppression, keep: true)) {
@@ -139,12 +143,6 @@ private struct VoicePage: View {
                     .foregroundStyle(.text)
             } header: {
                 Text("Processing").foregroundStyle(.muted)
-            }
-            Section {
-                VolumeSlider("Input volume", value: setting(\.inputVolume)) { model.setVoice(model.voice, keep: true) }
-                VolumeSlider("Output volume", value: setting(\.outputVolume)) { model.setVoice(model.voice, keep: true) }
-            } header: {
-                Text("Volume").foregroundStyle(.muted)
             }
         }
         .navigationTitle("Voice")
@@ -169,33 +167,31 @@ private func decibels(_ dbfs: Float) -> String {
 }
 
 /// The mic level as a bar, in the good colour while the gate lets it through, with a mark at
-/// `sensitivity`. Outside a call it says where the level shows.
+/// `sensitivity`. Outside a call the bar stays empty.
 private struct LevelMeter: View {
     let level: MicLevel?
     let sensitivity: Float
 
     var body: some View {
-        if let level {
-            GeometryReader { bar in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(.line)
+        GeometryReader { bar in
+            ZStack(alignment: .leading) {
+                Capsule().fill(.line)
+                if let level {
                     Capsule()
                         .fill(level.gateOpen ? AnyShapeStyle(.good) : AnyShapeStyle(.muted))
                         .frame(width: bar.size.width * fraction(level.dbfs))
-                    Rectangle()
-                        .fill(.text)
-                        .frame(width: 2)
-                        .offset(x: bar.size.width * fraction(sensitivity) - 1)
                 }
+                Rectangle()
+                    .fill(.text)
+                    .frame(width: 2)
+                    .offset(x: bar.size.width * fraction(sensitivity) - 1)
             }
-            .frame(height: 8)
-            .clipShape(.capsule)
-            .accessibilityElement()
-            .accessibilityLabel("Mic level")
-            .accessibilityValue(level.gateOpen ? "Sending" : "Quiet")
-        } else {
-            Text("Your level shows here while you're in a room.").foregroundStyle(.muted)
         }
+        .frame(height: 8)
+        .clipShape(.capsule)
+        .accessibilityElement()
+        .accessibilityLabel("Mic level")
+        .accessibilityValue(level.map { $0.gateOpen ? "Sending" : "Quiet" } ?? "")
     }
 
     private func fraction(_ dbfs: Float) -> CGFloat {

@@ -220,10 +220,6 @@ fun Invites(model: AppModel, state: CoreState) {
     Page(model, "Invite People") { padding ->
         Form(padding) {
             if (code == null) {
-                Text(
-                    "An invite code lets one person join this server. Send it to them with the server’s address.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
                 MainButton("Create Code", onClick = create)
                 return@Form
             }
