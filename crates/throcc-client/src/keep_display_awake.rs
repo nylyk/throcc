@@ -7,7 +7,7 @@ pub use platform::KeepWindowAwake;
 #[cfg(not(windows))]
 const REASON: &str = "Watching a screen share";
 
-/// Where the whole session is kept awake at once, a window needs nothing of its own.
+/// A window's hold that holds nothing, for platforms that keep the whole session awake at once.
 #[cfg(not(target_os = "linux"))]
 pub enum NoWindowHold {}
 
