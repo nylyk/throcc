@@ -3,7 +3,9 @@ use std::sync::OnceLock;
 
 use gpui::{App, FontWeight, Hsla, Pixels, SharedString, px, rgb};
 use gpui_component::{Theme, ThemeMode};
-use throcc_client_core::settings::{self, Appearance};
+use throcc_client_core::settings::Appearance;
+use throcc_client_core::theme::{self as core, oklab};
+pub use throcc_client_core::theme::{CUSTOM, format_hex, parse_hex};
 
 /// The eight colours a theme is made of. Every other colour is mixed from them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,7 +45,7 @@ impl Palette {
         ]
     }
 
-    pub fn from_colors(c: [u32; 8]) -> Self {
+    pub const fn from_colors(c: [u32; 8]) -> Self {
         Self {
             bg: c[0],
             panel: c[1],
@@ -58,130 +60,24 @@ impl Palette {
 
     /// The eight colours as `#rrggbb`, in [`Self::LABELS`] order.
     pub fn to_hex(self) -> Vec<String> {
-        self.colors().iter().map(|c| format_hex(*c)).collect()
-    }
-
-    pub fn from_hex(colors: &[String]) -> Option<Self> {
-        let colors: Vec<u32> = colors.iter().map(|c| parse_hex(c)).collect::<Option<_>>()?;
-        Some(Self::from_colors(colors.try_into().ok()?))
+        core::to_hex(self.colors())
     }
 
     fn is_light(self) -> bool {
-        settings::is_light(self.bg)
+        core::is_light(self.bg)
     }
 }
 
-pub const PRESETS: [(&str, Palette); 7] = [
-    (
-        "Ink",
-        Palette {
-            bg: 0x0C0D11,
-            panel: 0x14161D,
-            text: 0xECEDF3,
-            muted: 0x8E92A6,
-            accent: 0xD07A93,
-            warning: 0xFFB86B,
-            good: 0x5BE3A4,
-            bad: 0xFF6B85,
-        },
-    ),
-    (
-        "Moss",
-        Palette {
-            bg: 0x0F1411,
-            panel: 0x161D18,
-            text: 0xE8EFE9,
-            muted: 0x8C9A90,
-            accent: 0x7FD1A8,
-            warning: 0xE8C468,
-            good: 0x8BE07D,
-            bad: 0xF0786E,
-        },
-    ),
-    (
-        "Dusk",
-        Palette {
-            bg: 0x15101A,
-            panel: 0x1E1724,
-            text: 0xF1EAF4,
-            muted: 0x9C8FA6,
-            accent: 0xFF8FB8,
-            warning: 0xFFC285,
-            good: 0x7FE0C4,
-            bad: 0xFF6F6F,
-        },
-    ),
-    (
-        "Tide",
-        Palette {
-            bg: 0x0B1218,
-            panel: 0x111B23,
-            text: 0xE6EEF3,
-            muted: 0x8798A6,
-            accent: 0x5CC8E8,
-            warning: 0xF2B55E,
-            good: 0x5FD9A0,
-            bad: 0xF2727F,
-        },
-    ),
-    (
-        "Ember",
-        Palette {
-            bg: 0x14100D,
-            panel: 0x1D1814,
-            text: 0xF2ECE6,
-            muted: 0xA0958A,
-            accent: 0xFF9A5C,
-            warning: 0xF5D06B,
-            good: 0x8FD88A,
-            bad: 0xFF6B6B,
-        },
-    ),
-    (
-        "Paper",
-        Palette {
-            bg: 0xF2F4F7,
-            panel: 0xFFFFFF,
-            text: 0x1C1B22,
-            muted: 0x6B6878,
-            accent: 0x5B4BDB,
-            warning: 0xD9822B,
-            good: 0x1F9D6A,
-            bad: 0xD9445E,
-        },
-    ),
-    (
-        "Sand",
-        Palette {
-            bg: 0xF3EEDF,
-            panel: 0xFCF9EE,
-            text: 0x24201A,
-            muted: 0x756C5F,
-            accent: 0x1E7F86,
-            warning: 0xC07A1F,
-            good: 0x4A8B3A,
-            bad: 0xC8414F,
-        },
-    ),
-];
-
-/// `#rrggbb`, `rrggbb` or `#rgb` as a colour.
-pub fn parse_hex(text: &str) -> Option<u32> {
-    let digits = text.trim().trim_start_matches('#');
-    if !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
+pub const PRESETS: [(&str, Palette); 7] = {
+    let mut presets = [("", Palette::from_colors([0; 8])); 7];
+    let mut i = 0;
+    while i < presets.len() {
+        let (name, colors) = core::PRESETS[i];
+        presets[i] = (name, Palette::from_colors(colors));
+        i += 1;
     }
-    let digits: String = match digits.len() {
-        3 => digits.chars().flat_map(|c| [c, c]).collect(),
-        6 => digits.to_owned(),
-        _ => return None,
-    };
-    u32::from_str_radix(&digits, 16).ok()
-}
-
-pub fn format_hex(color: u32) -> String {
-    format!("#{color:06X}")
-}
+    presets
+};
 
 thread_local! {
     static PALETTE: Cell<Palette> = const { Cell::new(PRESETS[0].1) };
@@ -196,34 +92,21 @@ pub fn translucent_sidebar() -> bool {
     TRANSLUCENT_SIDEBAR.with(Cell::get)
 }
 
-pub const CUSTOM: &str = "Custom";
-
 /// The name and palette of the theme `appearance` picks, the first preset where it picks
 /// none that exists.
 pub fn picked(appearance: &Appearance) -> (&'static str, Palette) {
-    let picked = match appearance.theme.as_deref() {
-        Some(CUSTOM) => saved_custom(appearance).map(|palette| (CUSTOM, palette)),
-        Some(name) => preset(name),
-        None => None,
-    };
-    picked.unwrap_or(PRESETS[0])
+    let (name, colors) = core::picked(appearance);
+    (name, Palette::from_colors(colors))
 }
 
 /// The preset called `name`, ignoring case.
 pub fn preset(name: &str) -> Option<(&'static str, Palette)> {
-    PRESETS
-        .iter()
-        .find(|(n, _)| n.eq_ignore_ascii_case(name))
-        .copied()
+    core::preset(name).map(|(name, colors)| (name, Palette::from_colors(colors)))
 }
 
 /// The Custom theme's colours in `appearance`, or the picked theme's until any are saved.
 pub fn custom(appearance: &Appearance) -> Palette {
-    saved_custom(appearance).unwrap_or(picked(appearance).1)
-}
-
-fn saved_custom(appearance: &Appearance) -> Option<Palette> {
-    Palette::from_hex(appearance.palette.as_ref()?)
+    Palette::from_colors(core::custom(appearance))
 }
 
 /// Makes every window show the theme and sidebar `appearance` picks.
@@ -246,15 +129,6 @@ pub fn swatch(color: u32) -> Hsla {
     hex(color)
 }
 
-fn srgb_to_linear(channel: u32) -> f32 {
-    let c = channel as f32 / 255.0;
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
-}
-
 fn linear_to_srgb(c: f32) -> u32 {
     let c = c.clamp(0.0, 1.0);
     let c = if c <= 0.003_130_8 {
@@ -263,18 +137,6 @@ fn linear_to_srgb(c: f32) -> u32 {
         1.055 * c.powf(1.0 / 2.4) - 0.055
     };
     (c * 255.0).round() as u32
-}
-
-fn oklab(color: u32) -> [f32; 3] {
-    let [r, g, b] = [color >> 16, color >> 8, color].map(|c| srgb_to_linear(c & 0xFF));
-    let l = (0.412_221_46 * r + 0.536_332_55 * g + 0.051_445_995 * b).cbrt();
-    let m = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
-    let s = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
-    [
-        0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s,
-        1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
-        0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
-    ]
 }
 
 fn from_oklab([l, a, b]: [f32; 3]) -> u32 {
@@ -598,67 +460,5 @@ mod tests {
         assert_eq!(mix(0xFFFFFF, 1.0, 0x123456), 0xFFFFFF);
         let grey = mix(0xFFFFFF, 0.5, 0x000000);
         assert!((0x60..=0x66).contains(&(grey & 0xFF)), "{grey:06X}");
-    }
-
-    #[test]
-    fn the_core_holds_the_same_presets() {
-        use throcc_client_core::settings;
-        let presets = PRESETS.map(|(name, palette)| (name, palette.colors()));
-        assert_eq!(presets, settings::PRESETS);
-        assert_eq!(CUSTOM, settings::CUSTOM_THEME);
-    }
-
-    #[test]
-    fn a_palette_survives_its_own_hex() {
-        for (_, palette) in PRESETS {
-            assert_eq!(Palette::from_hex(&palette.to_hex()), Some(palette));
-        }
-        assert_eq!(
-            Palette::from_hex(&["#000000".into(), "#FFFFFF".into()]),
-            None
-        );
-    }
-
-    #[test]
-    fn the_picked_theme_is_found_by_name() {
-        let colors = PRESETS[2].1;
-        let mut settings = Appearance {
-            theme: Some("Paper".into()),
-            palette: Some(colors.to_hex()),
-            ..Appearance::default()
-        };
-        let paper = PRESETS.iter().find(|(name, _)| *name == "Paper").copied();
-        assert_eq!(Some(picked(&settings)), paper);
-        assert_eq!(custom(&settings), colors);
-        settings.theme = Some(CUSTOM.into());
-        assert_eq!(picked(&settings), (CUSTOM, colors));
-        settings.theme = None;
-        assert_eq!(picked(&settings), PRESETS[0]);
-        settings.theme = Some("Gone".into());
-        assert_eq!(picked(&settings), PRESETS[0]);
-        settings.palette = None;
-        assert_eq!(custom(&settings), PRESETS[0].1);
-        settings.theme = Some(CUSTOM.into());
-        assert_eq!(picked(&settings), PRESETS[0]);
-    }
-
-    #[test]
-    fn hex_accepts_short_and_bare_forms() {
-        assert_eq!(parse_hex("#8C7BFF"), Some(0x8C7BFF));
-        assert_eq!(parse_hex("8c7bff"), Some(0x8C7BFF));
-        assert_eq!(parse_hex("#fa0"), Some(0xFFAA00));
-        assert_eq!(parse_hex("#12345"), None);
-        assert_eq!(parse_hex("#GGGGGG"), None);
-        assert_eq!(parse_hex("#+FFFFF"), None);
-    }
-
-    #[test]
-    fn only_paper_and_sand_are_light() {
-        let light: Vec<&str> = PRESETS
-            .iter()
-            .filter(|(_, p)| p.is_light())
-            .map(|(name, _)| *name)
-            .collect();
-        assert_eq!(light, ["Paper", "Sand"]);
     }
 }

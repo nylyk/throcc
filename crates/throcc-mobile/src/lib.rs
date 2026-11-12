@@ -1,7 +1,9 @@
 mod messages;
 mod state;
 
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 
 use anyhow::{Context, Result, anyhow, bail};
 use throcc_client_core::avatars;
@@ -10,8 +12,9 @@ use throcc_client_core::client::{self, Client, ClientApi, MockClient, UiCommand,
 use throcc_client_core::keystore::{self, Keystore};
 use throcc_client_core::profile::Profile as CoreProfile;
 use throcc_client_core::server_look::ServerLook;
-use throcc_client_core::settings::{self, CUSTOM_THEME, PRESETS, Settings};
+use throcc_client_core::settings::Settings;
 use throcc_client_core::state::BLOCKED_NAME;
+use throcc_client_core::theme;
 use throcc_client_core::verified::VerifiedStore;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, UserId};
@@ -22,7 +25,7 @@ use throcc_proto::messages::{
 };
 use throcc_proto::permissions;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 
 pub use messages::{Command, Event, NameChange, PictureChange, User};
 pub use state::{
@@ -46,7 +49,8 @@ impl From<anyhow::Error> for CoreError {
     }
 }
 
-/// Hears of every change while connected. Calls arrive on a thread of the core's.
+/// Hears of every change while connected. Calls arrive in order, one at a time, on a
+/// thread of the core's.
 #[uniffi::export(with_foreign)]
 pub trait Listener: Send + Sync {
     fn state(&self, state: CoreState);
@@ -119,30 +123,13 @@ impl From<[u32; 8]> for Palette {
     }
 }
 
-impl From<&(&str, [u32; 8])> for ThemeChoice {
-    fn from((name, colors): &(&str, [u32; 8])) -> Self {
+impl From<(&str, [u32; 8])> for ThemeChoice {
+    fn from((name, colors): (&str, [u32; 8])) -> Self {
         Self {
-            name: (*name).to_owned(),
-            palette: Palette::from(*colors),
+            name: name.to_owned(),
+            palette: Palette::from(colors),
         }
     }
-}
-
-/// The preset called `name`, ignoring case.
-fn preset(name: &str) -> Option<ThemeChoice> {
-    let preset = PRESETS
-        .iter()
-        .find(|(preset, _)| preset.eq_ignore_ascii_case(name));
-    preset.map(ThemeChoice::from)
-}
-
-/// The eight `#rrggbb` colours of a saved Custom theme.
-fn saved_custom(colors: Option<&[String]>) -> Option<Palette> {
-    let colors: Vec<u32> = colors?
-        .iter()
-        .map(|color| u32::from_str_radix(color.trim().trim_start_matches('#'), 16).ok())
-        .collect::<Option<_>>()?;
-    Some(Palette::from(<[u32; 8]>::try_from(colors).ok()?))
 }
 
 /// Someone verified on this install.
@@ -203,8 +190,22 @@ pub struct Core {
     settings: Mutex<Settings>,
     verified: VerifiedStore,
     blocked: BlockedStore,
+    /// The servers the mock has joined.
+    sample_servers: Mutex<Vec<KnownServer>>,
     listener: Arc<Mutex<Option<Arc<dyn Listener>>>>,
+    /// Queues what the listener hears, each with the number of the connection it is from.
+    told: mpsc::Sender<(u64, Told)>,
+    /// The number of the connection the listener hears, which the end of one raises.
+    connection: Arc<AtomicU64>,
+    /// Held while the connection is made or ended, so that happens one at a time.
+    switching: Mutex<()>,
     connected: Mutex<Option<Connected>>,
+}
+
+/// What the listener hears.
+enum Told {
+    State(Box<CoreState>),
+    Event(Event),
 }
 
 struct Connected {
@@ -269,63 +270,46 @@ impl Core {
             picture: profile.picture.map(Arc::from),
         };
         self.change_settings(|settings| settings.profile = Some(profile.clone()))?;
-        if let Some(connected) = &*lock(&self.connected) {
-            connected.profile.send_replace(profile.clone());
-            connected.client.command(UiCommand::SetProfile(profile));
-        }
+        self.pass_on(profile);
         Ok(())
     }
 
     /// The preset themes to pick from. The first is the default.
     pub fn themes(&self) -> Vec<ThemeChoice> {
-        PRESETS.iter().map(ThemeChoice::from).collect()
+        theme::PRESETS.into_iter().map(ThemeChoice::from).collect()
     }
 
-    /// The theme in use: a preset, or the user's own colours under the name "Custom".
+    /// The theme in use: a preset, or the user's own colours under the Custom theme's name.
     pub fn theme(&self) -> ThemeChoice {
-        let settings = lock(&self.settings);
-        let appearance = &settings.appearance;
-        let picked = match appearance.theme.as_deref() {
-            Some(CUSTOM_THEME) => {
-                saved_custom(appearance.palette.as_deref()).map(|palette| ThemeChoice {
-                    name: CUSTOM_THEME.to_owned(),
-                    palette,
-                })
-            }
-            Some(name) => preset(name),
-            None => None,
-        };
-        picked.unwrap_or_else(|| ThemeChoice::from(&PRESETS[0]))
+        theme::picked(&lock(&self.settings).appearance).into()
     }
 
     /// The colours the Custom theme starts from: the user's own once saved, else the
     /// picked theme's.
     pub fn custom_palette(&self) -> Palette {
-        let saved = saved_custom(lock(&self.settings).appearance.palette.as_deref());
-        saved.unwrap_or_else(|| self.theme().palette)
+        theme::custom(&lock(&self.settings).appearance).into()
     }
 
     /// Picks the preset theme called `name`.
     pub fn set_theme(&self, name: String) -> Result<(), CoreError> {
-        let theme = preset(&name).with_context(|| format!("there is no theme called {name}"))?;
-        self.change_settings(|settings| settings.appearance.theme = Some(theme.name))
+        let (name, _) =
+            theme::preset(&name).with_context(|| format!("there is no theme called {name}"))?;
+        self.change_settings(|settings| settings.appearance.theme = Some(name.to_owned()))
     }
 
     /// Picks the Custom theme with `palette` as its colours.
     pub fn set_custom_theme(&self, palette: Palette) -> Result<(), CoreError> {
-        let colors = palette
-            .colors()
-            .map(|rgb| format!("#{:06X}", rgb & 0xFF_FFFF));
+        let colors = theme::to_hex(palette.colors().map(|rgb| rgb & 0xFF_FFFF));
         self.change_settings(|settings| {
-            settings.appearance.theme = Some(CUSTOM_THEME.to_owned());
-            settings.appearance.palette = Some(colors.to_vec());
+            settings.appearance.theme = Some(theme::CUSTOM.to_owned());
+            settings.appearance.palette = Some(colors);
         })
     }
 
     /// The servers this install has joined.
     pub fn servers(&self) -> Result<Vec<KnownServer>, CoreError> {
         if self.mock {
-            return Ok(sample_servers());
+            return Ok(lock(&self.sample_servers).clone());
         }
         let (dir, cache) = (keystore::config_dir()?, keystore::cache_dir()?);
         let known = Keystore::default_known_servers()?;
@@ -344,12 +328,16 @@ impl Core {
         Ok(servers.collect())
     }
 
-    /// Takes the server at `address` off the list without leaving it.
+    /// Takes the server at `address` off the list without leaving it. Ending a connection
+    /// to it blocks as [`Self::disconnect`] does.
     pub fn forget_server(&self, address: String) -> Result<(), CoreError> {
+        let _switching = lock(&self.switching);
         if self.connected_to(&address) {
-            self.disconnect();
+            self.end_connection();
         }
-        if !self.mock {
+        if self.mock {
+            lock(&self.sample_servers).retain(|server| server.address != address);
+        } else {
             Keystore::default_known_servers()?.forget(&address)?;
         }
         Ok(())
@@ -361,42 +349,47 @@ impl Core {
         let Some(profile) = lock(&self.settings).profile.clone() else {
             return Err(anyhow!("set your name first").into());
         };
-        self.disconnect();
-        let (profile, kept_profile) = watch::channel(profile);
+        let invite = invite.map(|code| parse_invite(&code)).transpose()?;
+        let _switching = lock(&self.switching);
+        self.end_connection();
+        let (kept_profile, profile_changes) = watch::channel(profile.clone());
         let (verified, blocked) = (self.verified.clone(), self.blocked.clone());
         let client: Arc<dyn ClientApi> = if self.mock {
             Arc::new(MockClient::at(&address, verified, blocked))
         } else {
-            let invite = match invite {
-                Some(code) => Some(parse_invite(&code)?),
-                None => None,
-            };
             let keystore = Keystore::open_default()?;
             let connected = Client::connect(
                 &address,
                 keystore,
                 invite.as_ref(),
-                kept_profile,
+                profile_changes,
                 None,
                 verified,
                 blocked,
             );
             Arc::new(connected.map_err(anyhow::Error::from)?)
         };
-        self.forward_events(&client);
+        let events = client.events();
         let state = CoreState::from(&*client.state());
-        *lock(&self.connected) = Some(Connected { client, profile });
-        self.tell_listener(state);
+        let connection = self.connection.load(Ordering::SeqCst);
+        *lock(&self.connected) = Some(Connected {
+            client,
+            profile: kept_profile,
+        });
+        let _ = self.told.send((connection, Told::State(Box::new(state))));
+        self.forward(events, connection);
+        let saved = lock(&self.settings).profile.clone();
+        if let Some(saved_meanwhile) = saved.filter(|saved| *saved != profile) {
+            self.pass_on(saved_meanwhile);
+        }
         Ok(())
     }
 
-    /// Ends the connection, staying a member of the server.
+    /// Ends the connection, staying a member of the server. It waits for the goodbye to
+    /// the server, for up to three seconds on a dead link.
     pub fn disconnect(&self) {
-        let Some(connected) = lock(&self.connected).take() else {
-            return;
-        };
-        drop(connected);
-        self.tell_listener(CoreState::default());
+        let _switching = lock(&self.switching);
+        self.end_connection();
     }
 
     pub fn command(&self, command: Command) {
@@ -494,14 +487,44 @@ impl Core {
         verified: VerifiedStore,
         blocked: BlockedStore,
     ) -> Arc<Self> {
+        let listener = Arc::new(Mutex::new(None));
+        let connection = Arc::new(AtomicU64::new(0));
+        let (told, queue) = mpsc::channel();
+        std::thread::spawn({
+            let (listener, connection) = (listener.clone(), connection.clone());
+            move || tell(&queue, &connection, &listener)
+        });
         Arc::new(Self {
             mock,
             settings: Mutex::new(settings),
             verified,
             blocked,
-            listener: Arc::new(Mutex::new(None)),
+            sample_servers: Mutex::new(if mock { sample_servers() } else { Vec::new() }),
+            listener,
+            told,
+            connection,
+            switching: Mutex::new(()),
             connected: Mutex::new(None),
         })
+    }
+
+    /// Ends the connection there is, after which the listener hears nothing more of it.
+    fn end_connection(&self) {
+        let Some(connected) = lock(&self.connected).take() else {
+            return;
+        };
+        let next = self.connection.fetch_add(1, Ordering::SeqCst) + 1;
+        drop(connected);
+        let _ = self.told.send((next, Told::State(Box::default())));
+    }
+
+    /// Gives `profile` to the server we are connected to, and to the session for later
+    /// sign-ins.
+    fn pass_on(&self, profile: CoreProfile) {
+        if let Some(connected) = &*lock(&self.connected) {
+            connected.profile.send_replace(profile.clone());
+            connected.client.command(UiCommand::SetProfile(profile));
+        }
     }
 
     /// Changes the settings and keeps them, in memory only for the mock.
@@ -518,14 +541,6 @@ impl Core {
         Ok(())
     }
 
-    /// Gives the listener `state`, with no lock held while it runs.
-    fn tell_listener(&self, state: CoreState) {
-        let listener = lock(&self.listener).clone();
-        if let Some(listener) = listener {
-            listener.state(state);
-        }
-    }
-
     fn connected_to(&self, address: &str) -> bool {
         let connected = lock(&self.connected);
         let state = connected.as_ref().map(|connected| connected.client.state());
@@ -540,38 +555,68 @@ impl Core {
 
     /// The known servers' addresses by fingerprint.
     fn addresses(&self) -> Vec<(String, Fingerprint)> {
-        let known = self.servers().unwrap_or_default().into_iter();
+        if self.mock {
+            let servers = lock(&self.sample_servers);
+            let known = servers.iter().filter_map(|server| {
+                Some((
+                    server.address.clone(),
+                    messages::fingerprint(&server.fingerprint)?,
+                ))
+            });
+            return known.collect();
+        }
+        let Ok(known) = Keystore::default_known_servers() else {
+            return Vec::new();
+        };
+        let known = known.iter();
         known
-            .filter_map(|server| {
-                Some((server.address, messages::fingerprint(&server.fingerprint)?))
-            })
+            .map(|(address, fingerprint)| (address.to_owned(), fingerprint))
             .collect()
     }
 
-    /// Passes what `client` says on to the listener until the client is gone.
-    fn forward_events(&self, client: &Arc<dyn ClientApi>) {
-        let mut events = client.events();
-        let listener = self.listener.clone();
+    /// Queues what the client behind `events` says, as news of `connection`, until that
+    /// client is gone.
+    fn forward(&self, mut events: broadcast::Receiver<UiEvent>, connection: u64) {
+        let told = self.told.clone();
         std::thread::spawn(move || {
             loop {
-                let event = match events.blocking_recv() {
-                    Ok(event) => event,
-                    Err(RecvError::Lagged(_)) => continue,
+                let news = match events.blocking_recv() {
+                    Ok(UiEvent::State(state)) => {
+                        Some(Told::State(Box::new(CoreState::from(&*state))))
+                    }
+                    Ok(event) => Event::from_core(event).map(Told::Event),
+                    Err(RecvError::Lagged(_)) => None,
                     Err(RecvError::Closed) => return,
                 };
-                let Some(listener) = lock(&listener).clone() else {
-                    continue;
-                };
-                match event {
-                    UiEvent::State(state) => listener.state(CoreState::from(&*state)),
-                    other => {
-                        if let Some(event) = Event::from_core(other) {
-                            listener.event(event);
-                        }
-                    }
+                if let Some(news) = news
+                    && told.send((connection, news)).is_err()
+                {
+                    return;
                 }
             }
         });
+    }
+}
+
+/// Gives the listener what `queue` holds of the current connection, in order, until the
+/// core is gone.
+fn tell(
+    queue: &mpsc::Receiver<(u64, Told)>,
+    current: &AtomicU64,
+    listener: &Mutex<Option<Arc<dyn Listener>>>,
+) {
+    for (connection, told) in queue {
+        if connection != current.load(Ordering::SeqCst) {
+            continue;
+        }
+        let Some(listener) = lock(listener).clone() else {
+            continue;
+        };
+        // UniFFI turns an exception the app's listener throws into a panic.
+        let _ = catch_unwind(AssertUnwindSafe(|| match told {
+            Told::State(state) => listener.state(*state),
+            Told::Event(event) => listener.event(event),
+        }));
     }
 }
 
@@ -601,13 +646,13 @@ pub fn blocked_name() -> String {
 /// The name of the theme that holds the user's own colours.
 #[uniffi::export]
 pub fn custom_theme_name() -> String {
-    CUSTOM_THEME.to_owned()
+    theme::CUSTOM.to_owned()
 }
 
 /// Whether `palette` makes a light theme.
 #[uniffi::export]
 pub fn is_light_theme(palette: Palette) -> bool {
-    settings::is_light(palette.bg)
+    theme::is_light(palette.bg)
 }
 
 /// What `typed` is as a name, as every server judges it.
@@ -782,6 +827,64 @@ mod tests {
         next(&states, "no connection", |s| {
             s.connection == Connection::Disconnected && s.server.is_none()
         });
+    }
+
+    #[test]
+    fn a_block_outlasts_the_connection_and_a_forgotten_server_leaves_the_list() {
+        let core = Core::mock(true);
+        let (sender, states) = mpsc::channel();
+        core.set_listener(Some(Arc::new(Recorder(Mutex::new(sender)))));
+        assert!(
+            core.connect("owls.thro.cc".into(), Some("no".into()))
+                .is_err()
+        );
+        core.connect("owls.thro.cc".into(), None).unwrap();
+        let connected = next(&states, "a connection", |s| s.server.is_some());
+        let other = connected
+            .people
+            .iter()
+            .find(|p| Some(p.user) != connected.me);
+        let other = other.unwrap().user;
+        core.command(Command::Block { user: other });
+        next(&states, "them blocked", |s| {
+            s.people.iter().any(|p| p.user == other && p.blocked)
+        });
+
+        core.connect("owls.thro.cc".into(), None).unwrap();
+        next(&states, "no connection", |s| s.server.is_none());
+        let again = states.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(again.people.iter().any(|p| p.user == other && p.blocked));
+
+        core.forget_server("owls.thro.cc".into()).unwrap();
+        next(&states, "no connection", |s| s.server.is_none());
+        let listed = core.servers().unwrap();
+        assert!(listed.iter().all(|server| server.address != "owls.thro.cc"));
+        assert_eq!(listed.len(), 2);
+    }
+
+    struct PanicsOnce(Mutex<Option<mpsc::Sender<CoreState>>>, Recorder);
+
+    impl Listener for PanicsOnce {
+        fn state(&self, state: CoreState) {
+            if lock(&self.0).take().is_some() {
+                panic!("the listener threw");
+            }
+            self.1.state(state);
+        }
+
+        fn event(&self, _event: Event) {}
+    }
+
+    #[test]
+    fn a_listener_that_throws_still_hears_what_follows() {
+        let core = Core::mock(true);
+        let (sender, states) = mpsc::channel();
+        let recorder = Recorder(Mutex::new(sender.clone()));
+        let listener = PanicsOnce(Mutex::new(Some(sender)), recorder);
+        core.set_listener(Some(Arc::new(listener)));
+        core.connect("owls.thro.cc".into(), None).unwrap();
+        core.disconnect();
+        next(&states, "no connection", |s| s.server.is_none());
     }
 
     #[test]

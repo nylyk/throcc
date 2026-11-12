@@ -20,6 +20,7 @@ mod servers;
 mod session;
 pub mod settings;
 pub mod state;
+pub mod theme;
 mod trust;
 pub mod verified;
 
