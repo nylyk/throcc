@@ -47,6 +47,10 @@ windows.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd.workspace = true
+raw-window-handle.workspace = true
+wayland-backend.workspace = true
+wayland-client.workspace = true
+wayland-protocols.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 gpui-wgpu = { package = "gpui-pre-wgpu", version = "=0.3.10", features = ["test-support"] }

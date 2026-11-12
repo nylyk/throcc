@@ -10,6 +10,7 @@ use throcc_client_core::state::share_label;
 use throcc_proto::ids::UserId;
 
 use crate::app::ThroccApp;
+use crate::keep_display_awake::KeepWindowAwake;
 use crate::theme;
 use crate::video::Feeds;
 use crate::views::common::{
@@ -35,6 +36,7 @@ pub struct PopOut {
     hide_controls: Option<Task<()>>,
     traffic_lights_shown: bool,
     focus: FocusHandle,
+    _keep_awake: Option<KeepWindowAwake>,
     _released: Subscription,
 }
 
@@ -68,6 +70,7 @@ impl PopOut {
                     hide_controls: None,
                     traffic_lights_shown: true,
                     focus: cx.focus_handle(),
+                    _keep_awake: KeepWindowAwake::new(window),
                     _released: cx.on_release(move |this: &mut Self, cx| {
                         let app = this.app.clone();
                         cx.defer(move |cx| {

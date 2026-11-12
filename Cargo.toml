@@ -38,6 +38,9 @@ objc2-core-foundation = { version = "0.3.2", default-features = false }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSButton", "NSControl", "NSResponder", "NSView", "NSWindow"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSProcessInfo", "NSString"] }
 raw-window-handle = "0.6.2"
+wayland-backend = { version = "0.3.17", features = ["client_system"] }
+wayland-client = "0.31.15"
+wayland-protocols = { version = "0.32.13", features = ["client", "unstable"] }
 global-hotkey = "0.8.0"
 gpui = { package = "gpui-pre", version = "=0.3.10" }
 gpui-component = "=0.8.1"

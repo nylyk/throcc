@@ -14,6 +14,7 @@ The desktop app, built with gpui and gpui-component on top of `throcc-client-cor
 | `avatar.rs` | Profile pictures: scaled to send, decoded to draw (PNG and JPEG only, shrunk to 128 px) |
 | `hotkey.rs` | The global push-to-talk key |
 | `updates.rs` | The update check: the newest `client-v` release on GitHub, if newer than this build. It is off in a flatpak, which flatpak updates, until the user turns it on |
-| `keep_display_awake.rs` | Keeps the display on while someone else's share is watched |
+| `keep_display_awake.rs` | Keeps the display on while someone else's share is watched: the power APIs on macOS and Windows; on Linux the desktop portal, plus `idle_inhibit.rs` on each window showing a share |
+| `idle_inhibit.rs` | Wayland's idle-inhibit protocol on a window's surface, bound through a queue of our own on gpui's display. Compositors honour it while the surface is visible, and idle daemons such as hypridle and swayidle follow the compositor, so it works where the portal has no Inhibit backend, as on Hyprland |
 
 `tests/surface.rs` (wgpu on Linux, Metal on macOS) and `tests/surface_windows.rs` check that NV12 surfaces render through the vendored gpui in `third_party/`.

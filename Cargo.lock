@@ -7765,6 +7765,9 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
  "windows 0.62.2",
 ]
 

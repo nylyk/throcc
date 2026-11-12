@@ -861,7 +861,7 @@ impl ThroccApp {
                     self.dialog = None;
                 }
                 self.close_unwatched_popouts(cx);
-                self.sync_keep_display_awake(cx);
+                self.sync_keep_display_awake(window, cx);
                 if self
                     .person_menu
                     .as_ref()
@@ -1277,7 +1277,7 @@ impl ThroccApp {
         }
     }
 
-    fn sync_keep_display_awake(&mut self, cx: &App) {
+    fn sync_keep_display_awake(&mut self, window: &Window, cx: &App) {
         let watching = self.state.current.as_ref().is_some_and(|c| {
             c.watching.iter().any(|user| {
                 self.state
@@ -1286,7 +1286,7 @@ impl ThroccApp {
             })
         });
         if watching != self.keep_display_awake.is_some() {
-            self.keep_display_awake = watching.then(|| KeepDisplayAwake::new(cx));
+            self.keep_display_awake = watching.then(|| KeepDisplayAwake::new(window, cx));
         }
     }
 

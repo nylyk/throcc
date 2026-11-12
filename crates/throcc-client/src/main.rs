@@ -4,6 +4,8 @@ mod app;
 mod assets;
 mod avatar;
 mod hotkey;
+#[cfg(target_os = "linux")]
+mod idle_inhibit;
 mod keep_display_awake;
 mod popout;
 mod theme;
