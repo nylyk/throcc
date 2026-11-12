@@ -289,7 +289,7 @@ impl Default for MockClient {
 }
 
 impl MockClient {
-    /// Shows the sample people as the blocked list now says.
+    /// Shows the sample people as the blocked list says.
     fn show_blocked(&self) {
         self.update(|s| {
             for (user, sample) in &self.sample_people {
@@ -339,6 +339,7 @@ impl MockClient {
             client.keep_avatar(picture.to_vec());
         }
         client.keep_avatar(SAMPLE_SERVER_PICTURE.to_vec());
+        client.show_blocked();
         client
     }
 

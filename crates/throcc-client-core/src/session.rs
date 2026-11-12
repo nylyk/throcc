@@ -667,12 +667,7 @@ impl Session {
             .map_or("connection lost".to_owned(), |e| e.to_string());
         let mut reason = lost.clone();
         self.cue(Cue::ConnectionLost);
-        let replaced_by_close = matches!(
-            self.call.connection.close_reason(),
-            Some(quinn::ConnectionError::ApplicationClosed(c))
-                if c.error_code == quinn::VarInt::from_u32(close::SIGNED_IN_ELSEWHERE)
-        );
-        if self.replaced || replaced_by_close {
+        if self.replaced || closed_as_replaced(&self.call.connection) {
             self.shared
                 .update(|s| s.connection = ConnectionStatus::SignedInElsewhere);
             return None;
@@ -743,8 +738,13 @@ impl Session {
                 warn!("renewing the encryption key: {e:#}");
             }
             let link = match self.sign_in_unless_stale(want_room).await {
-                Ok(Some(link)) => link,
-                Ok(None) => continue,
+                Ok(SignIn::Done(link)) => *link,
+                Ok(SignIn::Stale) => continue,
+                Ok(SignIn::Replaced) => {
+                    self.shared
+                        .update(|s| s.connection = ConnectionStatus::SignedInElsewhere);
+                    return None;
+                }
                 Err(e) => {
                     let fatal = match &e {
                         SignInError::Login(LoginError::Refused(reason))
@@ -793,7 +793,10 @@ impl Session {
                     self.apply_welcome(&welcome);
                     self.push_media().await;
                     if self.room.is_some() && self.room == room_before {
-                        self.watching = watching_before;
+                        self.watching = watching_before
+                            .into_iter()
+                            .filter(|user| !self.is_blocked(*user))
+                            .collect();
                         self.push_watching().await;
                     }
                     return Some(queued);
@@ -804,21 +807,22 @@ impl Session {
         None
     }
 
-    /// Signs in again, or returns `None` where the link went stale while the server was
-    /// being reached: a machine that fell asleep mid-connect finishes connecting on waking.
-    async fn sign_in_unless_stale(
-        &self,
-        want_room: Option<RoomId>,
-    ) -> Result<Option<control::ControlLink>, SignInError> {
+    /// Signs in to the server again, unless the link has been down too long by the time
+    /// the server is reached.
+    async fn sign_in_unless_stale(&self, want_room: Option<RoomId>) -> Result<SignIn, SignInError> {
         let connected = account::reach(&self.keystore, &self.address).await?;
         if went_stale(self.last_alive, SystemTime::now()) {
             connected
                 .connection
                 .close(close::NORMAL.into(), b"asleep too long");
-            return Ok(None);
+            return Ok(SignIn::Stale);
         }
-        let link = account::sign_in_over(&self.keystore, connected, want_room).await?;
-        Ok(Some(link))
+        let connection = connected.connection.clone();
+        match account::sign_in_over(&self.keystore, connected, want_room).await {
+            Ok(link) => Ok(SignIn::Done(Box::new(link))),
+            Err(_) if closed_as_replaced(&connection) => Ok(SignIn::Replaced),
+            Err(e) => Err(e),
+        }
     }
 
     /// Leaves our room here after the server took us out of it.
@@ -1192,7 +1196,7 @@ impl Session {
         self.audio(gain_command(user, sound, SoundLevel { muted, ..level }));
     }
 
-    /// Shows, plays and watches everyone as the blocked list now says.
+    /// Shows, plays and watches everyone as the blocked list says.
     async fn show_blocked(&mut self) {
         let me = self.call.me();
         let mut changed = Vec::new();
@@ -1961,8 +1965,8 @@ impl Session {
                 // A presence keeps the block it is shown with, so what plays never parts
                 // from what shows; `show_blocked` follows the list.
                 let blocked = match self.shown.get(&p.user) {
-                    Some(shown) => shown.blocked,
-                    None => self.blocks(&p),
+                    Some(shown) if shown.key == p.identity_key => shown.blocked,
+                    _ => self.blocks(&p),
                 };
                 let (verified, identity_key) = self.trust.of(p.user);
                 let playback = self.playback_of(p.user);
@@ -1983,9 +1987,7 @@ impl Session {
                 // The key manager counts as here only who is shown, where they are shown.
                 let notices = match self.shared.state().person(p.user) {
                     Some(person) => {
-                        let mut shown = shown_as(&p, person);
-                        shown.blocked = blocked;
-                        self.shown.insert(p.user, shown);
+                        self.shown.insert(p.user, shown_as(&p, person));
                         self.call.engine.set_presence(p.user, person.room)
                     }
                     None => {
@@ -2223,6 +2225,23 @@ fn shown_as(presence: &Presence, person: &Person) -> Shown {
         avatar: presence.avatar,
         blocked: person.blocked,
     }
+}
+
+/// How [`Session::sign_in_unless_stale`] ended without failing.
+enum SignIn {
+    Done(Box<control::ControlLink>),
+    Stale,
+    /// Another device signed in while this one was signing in.
+    Replaced,
+}
+
+/// Whether the server closed `connection` because another device signed in.
+fn closed_as_replaced(connection: &quinn::Connection) -> bool {
+    matches!(
+        connection.close_reason(),
+        Some(quinn::ConnectionError::ApplicationClosed(c))
+            if c.error_code == quinn::VarInt::from_u32(close::SIGNED_IN_ELSEWHERE)
+    )
 }
 
 /// Whether a link last seen up at `last_alive` has been down too long to sign in unasked.

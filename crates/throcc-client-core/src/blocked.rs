@@ -66,7 +66,7 @@ impl BlockedStore {
         lock(&self.0).records.contains_key(&Hex(*key))
     }
 
-    /// Blocks `person`, keeping how they look now for the list.
+    /// Blocks `person`, keeping how they look for the list.
     pub fn block(&self, person: BlockedPerson) -> Result<()> {
         let record = BlockedRecord {
             name: person.name,
@@ -84,7 +84,7 @@ impl BlockedStore {
         })
     }
 
-    /// Applies `change` to the file as it is on disk, then takes what it now holds, which
+    /// Applies `change` to the file as it is on disk, then takes what the file holds, which
     /// includes changes other processes made.
     fn change(&self, change: impl FnOnce(&mut BlockedRecords)) -> Result<()> {
         let mut blocked = lock(&self.0);
