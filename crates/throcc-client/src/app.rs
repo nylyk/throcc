@@ -812,23 +812,19 @@ impl ThroccApp {
         if self.mock || !self.checks_for_updates() {
             return;
         }
-        let window_handle = window.window_handle();
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let found = cx
                 .background_executor()
                 .spawn(async { updates::newer_release() })
                 .await;
             match found {
                 Ok(newer) => {
-                    cx.update_window(window_handle, |_, window, cx| {
-                        this.update(cx, |app, cx| {
-                            app.newer_release = newer.filter(|_| app.checks_for_updates());
-                            if let Some(release) = &app.newer_release {
-                                window.push_notification(update_notification(release), cx);
-                            }
-                            cx.notify();
-                        })
-                        .ok();
+                    this.update_in(cx, |app, window, cx| {
+                        app.newer_release = newer.filter(|_| app.checks_for_updates());
+                        if let Some(release) = &app.newer_release {
+                            window.push_notification(update_notification(release), cx);
+                        }
+                        cx.notify();
                     })
                     .ok();
                 }
