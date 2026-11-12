@@ -13,8 +13,8 @@ use anyhow::{Context, Result, bail};
 use throcc_crypto::hpke::EncryptionKeyPair;
 use throcc_crypto::identity::{self, IdentityKey};
 use throcc_proto::Fingerprint;
-use throcc_proto::ids::UserId;
-use throcc_proto::messages::SignedEncryptionKey;
+use throcc_proto::ids::{Hash, UserId};
+use throcc_proto::messages::{Signature, SignedEncryptionKey};
 use tracing::warn;
 use zeroize::Zeroizing;
 
@@ -167,6 +167,18 @@ impl Keystore {
             not_after,
             sig: self.identity.sign(&message),
         }
+    }
+
+    /// The identity key's signature over `name` and `avatar` for one server and user.
+    pub fn profile_sig(
+        &self,
+        server: &Fingerprint,
+        user: UserId,
+        name: &str,
+        avatar: Option<Hash>,
+    ) -> Signature {
+        let message = identity::profile_message(&server.0, user, name, avatar);
+        self.identity.sign(&message)
     }
 
     /// Where the keys, pins and settings are kept.

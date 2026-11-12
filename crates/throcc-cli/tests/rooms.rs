@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use throcc_crypto::identity::encryption_key_message;
+use throcc_crypto::identity::{encryption_key_message, profile_message};
 use throcc_proto::framing;
 use throcc_proto::ids::{Epoch, Hash, Role, RoomId, UserId};
 use throcc_proto::limits::{MAX_ROOM_MEMBERS, MAX_ROOM_SHARES, MAX_ROOMS, MAX_WATCHED};
@@ -289,13 +289,43 @@ async fn failed_set_room_leaves_the_client_in_place() {
 }
 
 #[tokio::test]
+async fn a_profile_is_kept_only_with_its_owners_signature_and_shown_with_it() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let mut bob = invited(&server, &alice).await;
+    let general = create_room(&mut alice, "General").await;
+    alice.join(Some(general)).await;
+    bob.join(Some(general)).await;
+    let alice_id = alice.link.welcome.me;
+    let forged = signed_profile(&alice, &bob, "Alice");
+    assert_error(&alice.request(forged).await, ErrorCode::Invalid);
+    let Request::SetProfile { sig, .. } = signed_profile(&alice, &alice, "Mallory") else {
+        unreachable!()
+    };
+    let other_name = Request::SetProfile {
+        name: "Alice".into(),
+        avatar: None,
+        sig,
+    };
+    assert_error(&alice.request(other_name).await, ErrorCode::Invalid);
+    let own = signed_profile(&alice, &alice, "Alice");
+    assert_eq!(alice.request(own.clone()).await, Response::Ok);
+    let shown = bob
+        .event(|e| match e {
+            Event::PresenceChanged(p) if p.user == alice_id && p.name == "Alice" => {
+                Some(p.profile_sig)
+            }
+            _ => None,
+        })
+        .await;
+    assert!(matches!(own, Request::SetProfile { sig, .. } if shown == Some(sig)));
+}
+
+#[tokio::test]
 async fn profile_changes_are_rate_limited_and_avatars_capped() {
     let server = start_server();
     let alice = admin(&server).await;
-    let profile = |name: &str| Request::SetProfile {
-        name: name.into(),
-        avatar: None,
-    };
+    let profile = |name: &str| signed_profile(&alice, &alice, name);
     assert_eq!(alice.request(profile("Alice")).await, Response::Ok);
     let second = alice.request(profile("Alicia")).await;
     assert_error(&second, ErrorCode::RateLimited);
@@ -884,6 +914,17 @@ async fn managers_kick_lower_ranks_out_of_rooms() {
         room: RoomId(999),
     };
     assert_error(&bob.request(elsewhere).await, ErrorCode::NotFound);
+}
+
+/// Sets `client`'s name to `name`, signed by `signer` for the server `client` is connected to.
+fn signed_profile(client: &TestClient, signer: &TestClient, name: &str) -> Request {
+    let server = client.link.connected.fingerprint;
+    let message = profile_message(&server.0, client.link.welcome.me, name, None);
+    Request::SetProfile {
+        name: name.into(),
+        avatar: None,
+        sig: signer.keystore.identity().sign(&message),
+    }
 }
 
 /// `client`'s encryption key replaced by `key`, signed for the server it is connected to.

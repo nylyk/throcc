@@ -1,6 +1,6 @@
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-use throcc_proto::ids::UserId;
-use throcc_proto::messages::{PublicKey, Signature, SignedEncryptionKey};
+use throcc_proto::ids::{Hash, UserId};
+use throcc_proto::messages::{PublicKey, Signature};
 use zeroize::Zeroizing;
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -76,16 +76,45 @@ pub fn encryption_key_message(
     .concat()
 }
 
-/// Checks that `identity_key` signed `signed` for `user` on the server with the SPKI hash
-/// `server`.
-pub fn verify_encryption_key(
+/// What an identity key signs to give a name and picture: bound to one server (by its SPKI
+/// hash) and one user.
+pub fn profile_message(
+    server: &[u8; 32],
+    user: UserId,
+    name: &str,
+    avatar: Option<Hash>,
+) -> Vec<u8> {
+    let avatar = match avatar {
+        Some(hash) => [&[1][..], &hash.0].concat(),
+        None => vec![0],
+    };
+    // The name is the only part of varying length, so it stays last to keep the message
+    // unambiguous.
+    [
+        b"throcc/profile/1".as_slice(),
+        server,
+        &user.0.to_be_bytes(),
+        &avatar,
+        name.as_bytes(),
+    ]
+    .concat()
+}
+
+/// Checks that `identity_key` signed `name` and `avatar` for `user` on the server with the
+/// SPKI hash `server`.
+pub fn verify_profile(
     identity_key: &PublicKey,
     server: &[u8; 32],
     user: UserId,
-    signed: &SignedEncryptionKey,
+    name: &str,
+    avatar: Option<Hash>,
+    sig: &Signature,
 ) -> Result<(), BadSignature> {
-    let message = encryption_key_message(server, user, signed.not_after, &signed.key);
-    verify(identity_key, &message, &signed.sig)
+    verify(
+        identity_key,
+        &profile_message(server, user, name, avatar),
+        sig,
+    )
 }
 
 /// Bytes from the operating system's CSPRNG.
@@ -131,44 +160,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_encryption_key_proves_its_identity_only_for_its_server_and_user() {
-        let identity = IdentityKey::from_seed(&[3; 32]);
-        let (server, user, not_after, key) = ([1; 32], UserId(7), 99, [2; 32]);
-        let signed = SignedEncryptionKey {
-            key,
-            not_after,
-            sig: identity.sign(&encryption_key_message(&server, user, not_after, &key)),
-        };
-        let public = identity.public();
-        assert_eq!(
-            verify_encryption_key(&public, &server, user, &signed),
-            Ok(())
-        );
-        let other = IdentityKey::from_seed(&[4; 32]).public();
-        let refused = Err(BadSignature);
-        assert_eq!(
-            verify_encryption_key(&other, &server, user, &signed),
-            refused
-        );
-        assert_eq!(
-            verify_encryption_key(&public, &server, UserId(8), &signed),
-            refused
-        );
-        assert_eq!(
-            verify_encryption_key(&public, &[9; 32], user, &signed),
-            refused
-        );
-        let later = SignedEncryptionKey {
-            not_after: 100,
-            ..signed
-        };
-        assert_eq!(
-            verify_encryption_key(&public, &server, user, &later),
-            refused
-        );
-    }
-
     /// The signed encryption key is part of the protocol: peers and the server verify these exact bytes.
     #[test]
     fn encryption_key_message_and_its_signature_are_pinned() {
@@ -198,6 +189,67 @@ mod tests {
             concat!(
                 "ece8743eeedded9e657f1755b8e2e18f29428939a768067d5076f2430120a655",
                 "85f34284689dd7132236b949b5a7c2d8325322af79d91e7ffbd1e87e3da9e006",
+            )
+        );
+    }
+
+    #[test]
+    fn a_profile_verifies_only_as_signed_for_its_server_and_user() {
+        let identity = IdentityKey::from_seed(&[3; 32]);
+        let (server, user, avatar) = ([1; 32], UserId(7), Some(Hash([2; 32])));
+        let sig = identity.sign(&profile_message(&server, user, "Mara", avatar));
+        let public = identity.public();
+        assert_eq!(
+            verify_profile(&public, &server, user, "Mara", avatar, &sig),
+            Ok(())
+        );
+        let other = IdentityKey::from_seed(&[4; 32]).public();
+        for (key, server, user, name, avatar) in [
+            (other, server, user, "Mara", avatar),
+            (public, [9; 32], user, "Mara", avatar),
+            (public, server, UserId(8), "Mara", avatar),
+            (public, server, user, "Mira", avatar),
+            (public, server, user, "Mara", None),
+            (public, server, user, "Mara", Some(Hash([5; 32]))),
+        ] {
+            assert_eq!(
+                verify_profile(&key, &server, user, name, avatar, &sig),
+                Err(BadSignature)
+            );
+        }
+    }
+
+    /// The signed profile is part of the protocol: peers and the server verify these exact bytes.
+    #[test]
+    fn profile_message_and_its_signature_are_pinned() {
+        let user = UserId(0x0102_0304_0506_0708);
+        assert_eq!(
+            hex(&profile_message(&[1; 32], user, "Mara", None)),
+            concat!(
+                "7468726f63632f70726f66696c652f31",
+                "0101010101010101010101010101010101010101010101010101010101010101",
+                "0102030405060708",
+                "00",
+                "4d617261",
+            )
+        );
+        let message = profile_message(&[1; 32], user, "Mara", Some(Hash([2; 32])));
+        assert_eq!(
+            hex(&message),
+            concat!(
+                "7468726f63632f70726f66696c652f31",
+                "0101010101010101010101010101010101010101010101010101010101010101",
+                "0102030405060708",
+                "01",
+                "0202020202020202020202020202020202020202020202020202020202020202",
+                "4d617261",
+            )
+        );
+        assert_eq!(
+            hex(&IdentityKey::from_seed(&[3; 32]).sign(&message)),
+            concat!(
+                "db7ef285b9f8312061f6e1f062e2d751e9d8e942a11218baefbfb1da41b4a11a",
+                "2da8535ca89eef9d622f70080a4ed724942d66fa67e0b9cd1b6527e7733b690c",
             )
         );
     }

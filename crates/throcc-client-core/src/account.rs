@@ -1,7 +1,7 @@
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::invite::InviteCode;
-use throcc_proto::messages::Request;
+use throcc_proto::messages::{Request, Response};
 use tracing::warn;
 
 use crate::connection::{self, ConnectError, Connected};
@@ -62,15 +62,16 @@ pub async fn reach(keystore: &Keystore, address: &str) -> Result<Connected, Sign
     Ok(connection::connect(address, Some(pin)).await?)
 }
 
-/// Signs in over `connected`, then publishes the encryption key.
+/// Signs in over `connected`, then publishes the encryption key and signs our profile.
 pub async fn sign_in_over(
     keystore: &Keystore,
     connected: Connected,
     want_room: Option<RoomId>,
 ) -> Result<ControlLink, SignInError> {
-    let link = control::login(connected, keystore.identity(), want_room).await?;
+    let mut link = control::login(connected, keystore.identity(), want_room).await?;
     let server = &link.connected.fingerprint;
     publish_encryption_key(keystore, &link.requester, server, link.welcome.me).await?;
+    sign_kept_profile(keystore, &mut link).await;
     Ok(link)
 }
 
@@ -87,7 +88,7 @@ pub async fn enroll(
     // new encryption key.
     keystore.renew_encryption_key()?;
     let connected = connection::connect(address, None).await?;
-    let link = control::enroll(connected, keystore.identity(), code, name).await?;
+    let mut link = control::enroll(connected, keystore.identity(), code, name).await?;
     let server = &link.connected.fingerprint;
     keystore.known_servers.trust(address, *server)?;
     // The invite is spent by now, so this can't fail the enrollment. Floors left behind
@@ -97,7 +98,28 @@ pub async fn enroll(
         warn!("dropping the epoch floors of an earlier account: {e:#}");
     }
     publish_encryption_key(keystore, &link.requester, server, link.welcome.me).await?;
+    sign_kept_profile(keystore, &mut link).await;
     Ok(link)
+}
+
+/// Signs the name and picture the server keeps for us, unless it holds our signature
+/// already, so others can tell we chose them.
+async fn sign_kept_profile(keystore: &Keystore, link: &mut ControlLink) {
+    let (me, profile) = (link.welcome.me, &link.welcome.profile);
+    if profile.sig.is_some() {
+        return;
+    }
+    let server = &link.connected.fingerprint;
+    let sig = keystore.profile_sig(server, me, &profile.name, profile.avatar);
+    let request = Request::SetProfile {
+        name: profile.name.clone(),
+        avatar: profile.avatar,
+        sig,
+    };
+    match link.requester.request(request).await {
+        Ok(Response::Ok) => link.welcome.profile.sig = Some(sig),
+        other => warn!("signing our profile: {other:?}"),
+    }
 }
 
 /// Gives `server` our encryption key, signed for it and for us as `me`.

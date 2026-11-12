@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use throcc_client_core::account;
 use throcc_client_core::call::Call;
-use throcc_client_core::control::{ControlLink, Requester};
+use throcc_client_core::control::ControlLink;
 use throcc_client_core::keystore::{IdentityMissing, Keystore, StartedOver};
 use throcc_client_core::profile::Profile;
 use throcc_client_core::settings::Settings;
@@ -185,7 +185,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Rooms { address } => one_shot(&keystore, &address, "rooms").await?,
         Command::Join { address, room } => {
             let link = sign_in(&keystore, &address).await?;
-            run_command(&link.requester, &link.welcome, &format!("join {room}")).await?;
+            run_command(&keystore, &link, &format!("join {room}")).await?;
             interactive(&keystore, link).await?;
         }
         Command::Leave { address } => one_shot(&keystore, &address, "leave").await?,
@@ -456,7 +456,7 @@ async fn start_call(keystore: &Keystore, address: &str, room: &str) -> Result<(C
 
 async fn one_shot(keystore: &Keystore, address: &str, command: &str) -> Result<()> {
     let link = sign_in(keystore, address).await?;
-    let result = run_command(&link.requester, &link.welcome, command).await;
+    let result = run_command(keystore, &link, command).await;
     link.connected.close().await;
     result
 }
@@ -504,10 +504,11 @@ async fn run_typed(keystore: &Keystore, link: &ControlLink, line: &str) -> Resul
         }
         _ => line.to_owned(),
     };
-    run_command(&link.requester, &link.welcome, &line).await
+    run_command(keystore, link, &line).await
 }
 
-async fn run_command(requester: &Requester, welcome: &Welcome, line: &str) -> Result<()> {
+async fn run_command(keystore: &Keystore, link: &ControlLink, line: &str) -> Result<()> {
+    let welcome = &link.welcome;
     let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
     let request = match word {
         "rooms" => {
@@ -525,13 +526,18 @@ async fn run_command(requester: &Requester, welcome: &Welcome, line: &str) -> Re
             name: rest.to_owned(),
             password: None,
         },
-        "name" => Request::SetProfile {
-            name: rest.to_owned(),
-            avatar: welcome.profile.avatar,
-        },
+        "name" => {
+            let avatar = welcome.profile.avatar;
+            let server = &link.connected.fingerprint;
+            Request::SetProfile {
+                name: rest.to_owned(),
+                avatar,
+                sig: keystore.profile_sig(server, welcome.me, rest, avatar),
+            }
+        }
         other => bail!("unknown command {other}"),
     };
-    match requester.request(request).await? {
+    match link.requester.request(request).await? {
         Response::Ok => println!("ok"),
         Response::Err { code, message } => bail!("{message} ({code:?})"),
         Response::Placement(placement) => match placement.room {
@@ -767,6 +773,7 @@ mod tests {
             profile: UserProfile {
                 name: "Ilse".into(),
                 avatar: None,
+                sig: None,
             },
         }
     }
@@ -782,7 +789,7 @@ mod tests {
             sharing: false,
             role: Role::User,
             identity_key: [0; 32],
-            encryption_key: None,
+            profile_sig: None,
         }
     }
 

@@ -140,6 +140,10 @@ pub struct Welcome {
 pub struct UserProfile {
     pub name: String,
     pub avatar: Option<Hash>,
+    /// Our identity key's signature over `name` and `avatar` for this server and user, once
+    /// we have given one.
+    #[serde(with = "optional_sig")]
+    pub sig: Option<Signature>,
 }
 
 /// The server's own name and picture, which admins set.
@@ -189,9 +193,12 @@ pub enum Request {
     },
     /// Moves us out of our room, into the lobby.
     LeaveRoom,
+    /// Sets our name and picture, signed by our identity key for this server and user.
     SetProfile {
         name: String,
         avatar: Option<Hash>,
+        #[serde(with = "sig")]
+        sig: Signature,
     },
     UploadAvatar(Vec<u8>),
     FetchAvatar(Hash),
@@ -424,11 +431,12 @@ pub struct Presence {
     pub deafened: bool,
     pub sharing: bool,
     pub role: Role,
-    /// The identity key the server knows this user by, which `encryption_key` proves.
+    /// The identity key the server knows this user by, which `profile_sig` proves.
     pub identity_key: PublicKey,
-    /// The user's encryption key, signed by `identity_key` for this server and user, once
-    /// they have given one.
-    pub encryption_key: Option<SignedEncryptionKey>,
+    /// The signature of `identity_key` over `name` and `avatar` for this server and user,
+    /// once they have given one.
+    #[serde(with = "optional_sig")]
+    pub profile_sig: Option<Signature>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -480,6 +488,23 @@ mod sig {
             }
         }
         d.deserialize_bytes(SigVisitor)
+    }
+}
+
+mod optional_sig {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::Signature;
+
+    #[derive(Serialize, Deserialize)]
+    struct Sig(#[serde(with = "super::sig")] Signature);
+
+    pub fn serialize<S: Serializer>(sig: &Option<Signature>, s: S) -> Result<S::Ok, S::Error> {
+        sig.map(Sig).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Signature>, D::Error> {
+        Ok(Option::<Sig>::deserialize(d)?.map(|Sig(sig)| sig))
     }
 }
 

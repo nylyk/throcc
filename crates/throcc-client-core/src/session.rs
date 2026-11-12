@@ -10,8 +10,8 @@ use throcc_proto::ids::{Hash, MediaId, RoomId, UserId};
 use throcc_proto::limits::{MAX_ROOM_MEMBERS, MAX_ROOM_SHARES};
 use throcc_proto::messages::{
     Audiences, AuthError, ErrorCode, Event as ServerEvent, MediaState, Peer, Placement, Presence,
-    PublicKey, Recovery, Request, Response, ShareConfig, ShareTracks, Tracks, User, UserProfile,
-    Welcome,
+    PublicKey, Recovery, Request, Response, ShareConfig, ShareTracks, Signature, Tracks, User,
+    UserProfile, Welcome,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{Semaphore, broadcast, mpsc, watch};
@@ -368,8 +368,8 @@ struct LastCounts {
 struct Shown {
     /// The identity key the server names for them, which blocks follow.
     key: PublicKey,
-    /// Whether their signed encryption key proves the account holds `key`. Only a proven
-    /// key is blocked or unblocked from a room.
+    /// Whether their signature proves the account holds `key` and chose this name and
+    /// picture. Only a proven key is blocked or unblocked from a room.
     proven: bool,
     name: String,
     avatar: Option<Hash>,
@@ -462,9 +462,11 @@ impl Session {
     async fn push_profile(&mut self) {
         self.too_soon_profile = None;
         self.take_kept_profile();
+        let (name, avatar) = (self.profile.name.clone(), self.profile.avatar());
         let wanted = UserProfile {
-            name: self.profile.name.clone(),
-            avatar: self.profile.avatar(),
+            sig: Some(self.profile_sig(&name, avatar)),
+            name,
+            avatar,
         };
         if wanted == self.server_profile {
             return self.shared.emit(UiEvent::ProfileSaved);
@@ -490,6 +492,7 @@ impl Session {
         let request = Request::SetProfile {
             name: wanted.name.clone(),
             avatar: wanted.avatar,
+            sig: self.profile_sig(&wanted.name, wanted.avatar),
         };
         match self.call.request(request).await {
             Ok(Response::Ok) => {
@@ -502,6 +505,12 @@ impl Session {
             }) => self.too_soon_profile = Some(wanted),
             other => self.profile_refused(other),
         }
+    }
+
+    /// Our identity key's signature over `name` and `avatar` for this server and for us.
+    fn profile_sig(&self, name: &str, avatar: Option<Hash>) -> Signature {
+        self.keystore
+            .profile_sig(&self.call.server(), self.call.me(), name, avatar)
     }
 
     /// Tells the UI the server refused our profile. A push the closing connection cut off
@@ -2264,12 +2273,19 @@ fn shown_as(presence: &Presence, person: &Person, server: &Fingerprint) -> Shown
     }
 }
 
-/// Whether `presence` carries an encryption key its identity key signed for its user on
-/// the server `server`, which only the holder of that identity key can make.
+/// Whether the identity key of `presence` signed its name and picture for its user on the
+/// server `server`, which only the holder of that identity key can do.
 fn proves_identity(presence: &Presence, server: &Fingerprint) -> bool {
-    presence.encryption_key.is_some_and(|signed| {
-        identity::verify_encryption_key(&presence.identity_key, &server.0, presence.user, &signed)
-            .is_ok()
+    presence.profile_sig.is_some_and(|sig| {
+        identity::verify_profile(
+            &presence.identity_key,
+            &server.0,
+            presence.user,
+            &presence.name,
+            presence.avatar,
+            &sig,
+        )
+        .is_ok()
     })
 }
 
@@ -2544,21 +2560,18 @@ mod tests {
 
     #[test]
     fn a_presence_proves_its_identity_key_only_with_its_own_signature() {
-        use throcc_crypto::identity::{IdentityKey, encryption_key_message};
+        use throcc_crypto::identity::{IdentityKey, profile_message};
         use throcc_proto::ids::Role;
-        use throcc_proto::messages::SignedEncryptionKey;
 
         let server = Fingerprint([1; 32]);
         let (holder, other) = (
             IdentityKey::from_seed(&[3; 32]),
             IdentityKey::from_seed(&[4; 32]),
         );
-        let signed_by = |key: &IdentityKey, user: UserId| SignedEncryptionKey {
-            key: [2; 32],
-            not_after: 99,
-            sig: key.sign(&encryption_key_message(&server.0, user, 99, &[2; 32])),
+        let signed_by = |key: &IdentityKey, user: UserId, name: &str| {
+            Some(key.sign(&profile_message(&server.0, user, name, None)))
         };
-        let presence = |identity_key, encryption_key| Presence {
+        let presence = |identity_key, profile_sig| Presence {
             user: UserId(7),
             name: "mara".into(),
             avatar: None,
@@ -2568,17 +2581,26 @@ mod tests {
             sharing: false,
             role: Role::User,
             identity_key,
-            encryption_key,
+            profile_sig,
         };
-        let own = Some(signed_by(&holder, UserId(7)));
+        let own = signed_by(&holder, UserId(7), "mara");
         assert!(proves_identity(&presence(holder.public(), own), &server));
         assert!(!proves_identity(&presence(holder.public(), None), &server));
         assert!(!proves_identity(&presence(other.public(), own), &server));
-        let someone_elses = Some(signed_by(&holder, UserId(8)));
-        assert!(!proves_identity(
-            &presence(holder.public(), someone_elses),
-            &server
-        ));
+        for forged in [
+            signed_by(&holder, UserId(8), "mara"),
+            signed_by(&holder, UserId(7), "troll"),
+        ] {
+            assert!(!proves_identity(
+                &presence(holder.public(), forged),
+                &server
+            ));
+        }
+        let pictured = Presence {
+            avatar: Some(Hash([5; 32])),
+            ..presence(holder.public(), own)
+        };
+        assert!(!proves_identity(&pictured, &server));
         assert!(!proves_identity(
             &presence(holder.public(), own),
             &Fingerprint([9; 32])

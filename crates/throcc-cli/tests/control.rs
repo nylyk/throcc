@@ -127,6 +127,7 @@ async fn unknown_reply_id_closes_the_connection() {
             profile: UserProfile {
                 name: "Ilse".into(),
                 avatar: None,
+                sig: None,
             },
         };
         send.write_all(&framing::encode(&AuthResult::Ok(Box::new(welcome))).unwrap())

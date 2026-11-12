@@ -13,8 +13,8 @@ use throcc_proto::limits::{
 use throcc_proto::messages::{
     Audience, Audiences, AuthError, ErrorCode, Event, MAX_AVATAR_BYTES, MAX_NAME_CHARS,
     MAX_PASSWORD_CHARS, MediaState, Peer, Placement, Presence, Recovery, Request, Response, Room,
-    ServerMessage, ServerProfile, ShareTracks, SignedEncryptionKey, Tracks, UserProfile, Welcome,
-    valid_name, valid_password,
+    ServerMessage, ServerProfile, ShareTracks, Signature, SignedEncryptionKey, Tracks, UserProfile,
+    Welcome, valid_name, valid_password,
 };
 use throcc_proto::permissions;
 use throcc_proto::transport::close;
@@ -360,6 +360,7 @@ impl Hub {
         let profile = UserProfile {
             name: row.name.clone(),
             avatar: row.avatar,
+            sig: row.profile_sig,
         };
         self.sessions.insert(
             user,
@@ -475,7 +476,7 @@ impl Hub {
             Request::SetRoomPassword { room, password } => {
                 return self.set_room_password(user, room, password);
             }
-            Request::SetProfile { name, avatar } => self.set_profile(user, name, avatar),
+            Request::SetProfile { name, avatar, sig } => self.set_profile(user, name, avatar, sig),
             Request::UploadAvatar(bytes) => self.set_avatar(user, bytes),
             Request::FetchAvatar(hash) => self.get_avatar(hash),
             Request::SetEncryptionKey(encryption_key) => {
@@ -972,13 +973,35 @@ impl Hub {
         })
     }
 
-    fn set_profile(&mut self, user: UserId, name: String, avatar: Option<Hash>) -> Outcome {
+    /// Keeps a signed name and picture. Signing the name and picture already kept changes
+    /// nothing others see, so it skips the rate limit, and only a first signature is kept.
+    fn set_profile(
+        &mut self,
+        user: UserId,
+        name: String,
+        avatar: Option<Hash>,
+        sig: Signature,
+    ) -> Outcome {
         let name = checked_name(&name)?;
         self.require_picture(avatar)?;
         let session = self.session(user)?;
-        if session
-            .last_profile
-            .is_some_and(|t| t.elapsed() < PROFILE_INTERVAL)
+        identity::verify_profile(
+            &session.row.pubkey,
+            &self.fingerprint.0,
+            user,
+            &name,
+            avatar,
+            &sig,
+        )
+        .map_err(|_| Refusal::new(ErrorCode::Invalid, "the profile's signature is wrong"))?;
+        let renames = (session.row.name.as_str(), session.row.avatar) != (name.as_str(), avatar);
+        if !renames && session.row.profile_sig.is_some() {
+            return Ok(Response::Ok);
+        }
+        if renames
+            && session
+                .last_profile
+                .is_some_and(|t| t.elapsed() < PROFILE_INTERVAL)
         {
             return Err(Refusal::new(
                 ErrorCode::RateLimited,
@@ -989,12 +1012,15 @@ impl Hub {
             ));
         }
         self.db
-            .set_profile(user, &name, avatar)
+            .set_profile(user, &name, avatar, &sig)
             .map_err(Refusal::internal)?;
         let session = self.session_mut(user)?;
         session.row.name = name;
         session.row.avatar = avatar;
-        session.last_profile = Some(Instant::now());
+        session.row.profile_sig = Some(sig);
+        if renames {
+            session.last_profile = Some(Instant::now());
+        }
         self.announce_presence(user);
         Ok(Response::Ok)
     }
@@ -1746,7 +1772,7 @@ fn presence(session: &Session) -> Option<Presence> {
         sharing: session.media.share.is_some(),
         role: session.row.role,
         identity_key: session.row.pubkey,
-        encryption_key: session.row.encryption_key,
+        profile_sig: session.row.profile_sig,
     })
 }
 
