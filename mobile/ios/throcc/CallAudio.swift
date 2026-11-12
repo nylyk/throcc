@@ -10,9 +10,10 @@ final class CallAudio {
     private var interrupted = false
     /// Whether an interruption ended without leave to resume, so the audio reopens once the app is in front again.
     private var resumesWhenActive = false
-    /// Whether the session is set up for a room with its audio open. A failed start is tried
-    /// again once the app is in front.
+    /// Whether the session is set up for a room, also where the audio in it failed to open.
     private var started = false
+    /// Whether opening the audio failed, which the app coming to the front tries again.
+    private var failed = false
     private var withMic = false
     /// The last of the steps, which run one after another in the order asked.
     private var lastStep: Task<Void, Never>?
@@ -75,8 +76,15 @@ final class CallAudio {
         if resumesWhenActive {
             resumesWhenActive = false
             interrupted = false
+            enqueue { await self.settle() }
         }
-        enqueue { await self.settle() }
+        if failed {
+            enqueue {
+                if self.started, self.failed, !self.interrupted {
+                    await self.start()
+                }
+            }
+        }
     }
 
     private func routeChanged(_ reason: AVAudioSession.RouteChangeReason?) {
@@ -130,7 +138,7 @@ final class CallAudio {
         if !withMic {
             core.command(command: .setMic(on: false))
         }
-        started = await run { [core, withMic] in
+        failed = await !run { [core, withMic] in
             let session = AVAudioSession.sharedInstance()
             if withMic {
                 try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP, .defaultToSpeaker])
@@ -143,7 +151,7 @@ final class CallAudio {
     }
 
     private func reopen() async {
-        await run { [core, withMic] in
+        failed = await !run { [core, withMic] in
             core.closeAudio()
             try core.openAudio(withMic: withMic)
         }
@@ -151,6 +159,7 @@ final class CallAudio {
 
     private func stop(deactivating: Bool) async {
         started = false
+        failed = false
         await run { [core] in
             core.closeAudio()
             if deactivating {
