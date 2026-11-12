@@ -71,7 +71,7 @@ pub fn preset(name: &str) -> Option<(&'static str, [u32; 8])> {
 
 /// The Custom theme's colours in `appearance`, or the picked theme's until any are saved.
 pub fn custom(appearance: &Appearance) -> [u32; 8] {
-    saved_custom(appearance).unwrap_or(picked(appearance).1)
+    saved_custom(appearance).unwrap_or_else(|| picked(appearance).1)
 }
 
 fn saved_custom(appearance: &Appearance) -> Option<[u32; 8]> {

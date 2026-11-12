@@ -924,7 +924,6 @@ impl Session {
         self.shown = shown.collect();
         // The key manager hears of people only from what is shown, here and as presences
         // change, so it can trust nobody the state leaves out.
-        let state = self.shared.state();
         let shown = state.people.iter().map(|(user, p)| (*user, p.room));
         let notices = self.call.engine.set_presences(shown);
         self.notices(notices);
