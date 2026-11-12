@@ -3,7 +3,7 @@ use std::sync::Arc;
 use gpui::{
     Context, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton,
     ObjectFit, ParentElement, Pixels, Point, RenderImage, SharedString, Stateful,
-    StatefulInteractiveElement, Styled, StyledImage, Task, TitlebarOptions,
+    StatefulInteractiveElement, Styled, StyledImage, Task, TitlebarOptions, Window,
     WindowBackgroundAppearance, WindowOptions, div, img, px, relative,
 };
 use gpui_component::button::{Button, ButtonVariants};
@@ -463,6 +463,26 @@ pub fn moves_window<E: InteractiveElement>(element: E) -> E {
 pub const CONTROLS_LINGER: std::time::Duration = std::time::Duration::from_secs(2);
 /// How long a tile's overlay stays after the pointer leaves the tile.
 pub const OVERLAY_LINGER: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Redraws once `delay` has passed, so the controls over a share hide, and hides the cursor
+/// with them until it moves, while it is over `window` and `over_share` still holds there.
+pub fn hide_controls_after<T: 'static>(
+    delay: std::time::Duration,
+    over_share: impl Fn(&T) -> bool + 'static,
+    window: &Window,
+    cx: &mut Context<T>,
+) -> Task<()> {
+    cx.spawn_in(window, async move |this, cx| {
+        cx.background_executor().timer(delay).await;
+        this.update_in(cx, |this, window, cx| {
+            if window.is_window_hovered() && over_share(this) {
+                cx.hide_cursor_until_mouse_moves();
+            }
+            cx.notify();
+        })
+        .ok();
+    })
+}
 
 pub fn notify_after<T: 'static>(delay: std::time::Duration, cx: &mut Context<T>) -> Task<()> {
     cx.spawn(async move |this, cx| {

@@ -95,7 +95,7 @@ fn fullscreen(app: &mut ThroccApp, user: UserId, cx: &mut Context<ThroccApp>) ->
         .size_full()
         .relative()
         .bg(theme::player_bg())
-        .on_mouse_move(cx.listener(|app, _, _, cx| app.show_controls(cx)))
+        .on_mouse_move(cx.listener(|app, _, window, cx| app.show_controls(window, cx)))
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |app, event: &MouseDownEvent, window, cx| {

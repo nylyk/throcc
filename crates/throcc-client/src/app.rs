@@ -36,8 +36,8 @@ use crate::theme;
 use crate::updates::{self, Release};
 use crate::views;
 use crate::views::common::{
-    CONTROLS_LINGER, OVERLAY_LINGER, Typeset, UpdateNotification, notify_after, slider_gain,
-    slider_value, update_notification, volume_slider,
+    CONTROLS_LINGER, OVERLAY_LINGER, Typeset, UpdateNotification, hide_controls_after,
+    notify_after, slider_gain, slider_value, update_notification, volume_slider,
 };
 
 actions!(throcc, [ToggleMic, ToggleDeafen, CloseDialog]);
@@ -1065,7 +1065,7 @@ impl ThroccApp {
     /// Fills the window with `user`'s share and makes the window fullscreen.
     pub fn enter_fullscreen(&mut self, user: UserId, window: &mut Window, cx: &mut Context<Self>) {
         self.fullscreen = Some(user);
-        self.show_controls(cx);
+        self.show_controls(window, cx);
         if !window.is_fullscreen() {
             window.toggle_fullscreen();
             self.made_window_fullscreen = true;
@@ -1170,9 +1170,10 @@ impl ThroccApp {
         cx.notify();
     }
 
-    pub fn show_controls(&mut self, cx: &mut Context<Self>) {
+    pub fn show_controls(&mut self, window: &Window, cx: &mut Context<Self>) {
         self.controls_until = Instant::now() + CONTROLS_LINGER;
-        self.hide_controls = Some(notify_after(CONTROLS_LINGER, cx));
+        let fullscreen = |app: &Self| app.fullscreen_stream().is_some();
+        self.hide_controls = Some(hide_controls_after(CONTROLS_LINGER, fullscreen, window, cx));
         cx.notify();
     }
 

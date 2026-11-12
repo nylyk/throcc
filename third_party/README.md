@@ -36,6 +36,10 @@ BGRA on the UI thread:
   still being drawn. A pixel buffer in any other format, or one CoreVideo can't map, is skipped
   instead of panicking.
 
+One more change, in **gpui-pre:** `App::hide_cursor_until_mouse_moves` makes public what every
+platform already does when typing hides the cursor, so a share's cursor can go with its
+controls.
+
 The BGRA image path these replace cost 37 ms of UI-thread CPU per 2560×1440 frame, more than
 a 60 fps frame lasts; the NV12 surface costs 2 ms. On an Apple GPU, a release build took 5 ms
 for the conversion alone, and takes 0.55 ms to upload and draw the NV12 surface.
