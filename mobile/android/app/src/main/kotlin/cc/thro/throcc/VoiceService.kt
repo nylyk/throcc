@@ -101,15 +101,21 @@ class VoiceService : Service() {
             if (withMic == null) stopSelf()
             return START_NOT_STICKY
         }
-        val mic = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        if (!promote(notification(described(model.state.value)), mic)) {
-            if (withMic == null) stopSelf()
-            return START_NOT_STICKY
+        val granted = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        val notification = notification(described(model.state.value))
+        // The system refuses the microphone type to a service started while the app is off screen.
+        val mic = when {
+            promote(notification, granted) -> granted
+            granted && promote(notification, false) -> false
+            else -> {
+                if (withMic == null) stopSelf()
+                return START_NOT_STICKY
+            }
         }
         if (withMic == null) setUp(model) else if (interrupted) regainFocus()
         if (withMic != mic) {
             withMic = mic
-            model.micDenied = !mic
+            model.micDenied = !granted
             if (!mic) model.core.command(Command.SetMic(false))
             open()
         }
@@ -145,7 +151,7 @@ class VoiceService : Service() {
     private fun setUp(model: AppModel) {
         this.model = model
         audio.mode = AudioManager.MODE_IN_COMMUNICATION
-        audio.requestAudioFocus(focus)
+        interrupted = audio.requestAudioFocus(focus) != AudioManager.AUDIOFOCUS_REQUEST_GRANTED
         audio.addOnCommunicationDeviceChangedListener(mainExecutor, routed)
         audio.registerAudioDeviceCallback(devices, null)
         route()

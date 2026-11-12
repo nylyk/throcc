@@ -10,7 +10,8 @@ final class CallAudio {
     private var interrupted = false
     /// Whether an interruption ended without leave to resume, so the audio reopens once the app is in front again.
     private var resumesWhenActive = false
-    /// Whether the session is set up for a room, also where the audio in it failed to open.
+    /// Whether the session is set up for a room with its audio open. A failed start is tried
+    /// again once the app is in front.
     private var started = false
     private var withMic = false
     /// The last of the steps, which run one after another in the order asked.
@@ -30,7 +31,9 @@ final class CallAudio {
             let options = AVAudioSession.InterruptionOptions(
                 rawValue: note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
             )
-            DispatchQueue.main.async { self?.interruptionChanged(type, options) }
+            let reason = (note.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt)
+                .flatMap(AVAudioSession.InterruptionReason.init(rawValue:))
+            DispatchQueue.main.async { self?.interruptionChanged(type, options, reason) }
         }
         center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil) { [weak self] note in
             let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt)
@@ -52,12 +55,17 @@ final class CallAudio {
         enqueue { await self.settle() }
     }
 
-    private func interruptionChanged(_ type: AVAudioSession.InterruptionType?, _ options: AVAudioSession.InterruptionOptions) {
+    private func interruptionChanged(
+        _ type: AVAudioSession.InterruptionType?,
+        _ options: AVAudioSession.InterruptionOptions,
+        _ reason: AVAudioSession.InterruptionReason?
+    ) {
         switch type {
-        case .began:
+        // iOS reports the suspension of an app that already lost the session late, once it runs again.
+        case .began where reason != .appWasSuspended:
             interrupted = true
             resumesWhenActive = false
-        case .ended where options.contains(.shouldResume):
+        case .ended where options.contains(.shouldResume) || UIApplication.shared.applicationState == .active:
             interrupted = false
         case .ended:
             resumesWhenActive = true
@@ -68,10 +76,13 @@ final class CallAudio {
         enqueue { await self.settle() }
     }
 
+    /// Resumes after an interruption that ended in the background, and tries again to open
+    /// audio that failed to open.
     private func becameActive() {
-        guard resumesWhenActive else { return }
-        resumesWhenActive = false
-        interrupted = false
+        if resumesWhenActive {
+            resumesWhenActive = false
+            interrupted = false
+        }
         enqueue { await self.settle() }
     }
 
@@ -126,7 +137,7 @@ final class CallAudio {
         if !withMic {
             core.command(command: .setMic(on: false))
         }
-        await run { [core, withMic] in
+        started = await run { [core, withMic] in
             let session = AVAudioSession.sharedInstance()
             if withMic {
                 try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP, .defaultToSpeaker])
@@ -155,14 +166,17 @@ final class CallAudio {
         }
     }
 
-    /// Runs `work` off the main actor, and shows why it failed.
-    private func run(_ work: @escaping @Sendable () throws -> Void) async {
+    /// Runs `work` off the main actor, and shows why it failed. True if it didn't.
+    @discardableResult
+    private func run(_ work: @escaping @Sendable () throws -> Void) async -> Bool {
         do {
             try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, Error>) in
                 DispatchQueue.global(qos: .userInitiated).async { done.resume(with: Result(catching: work)) }
             }
+            return true
         } catch {
             showFailure("The room has no sound: \(error.explanation)")
+            return false
         }
     }
 }
