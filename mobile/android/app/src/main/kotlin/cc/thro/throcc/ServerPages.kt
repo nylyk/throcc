@@ -58,7 +58,6 @@ import cc.thro.throcc.core.canRemove
 import cc.thro.throcc.core.canSetRole
 import cc.thro.throcc.core.fingerprintShort
 import cc.thro.throcc.core.fingerprintText
-import cc.thro.throcc.core.permissionsOf
 import kotlinx.coroutines.launch
 
 @Composable
@@ -67,10 +66,10 @@ fun ServerOverview(model: AppModel, state: CoreState) {
     Page(model, "Server") { padding ->
         if (server == null) return@Page
         Form(padding) {
-            if (state.role?.let(::permissionsOf)?.editServer == true) {
+            if (state.permissions?.editServer == true) {
                 EditServer(model, server)
             } else {
-                val name = server.name ?: server.address
+                val name = server.title
                 Row(Modifier, Arrangement.spacedBy(16.dp), Alignment.CenterVertically) {
                     Avatar(model.picture(server.avatar), name, 80.dp)
                     Text(name, style = MaterialTheme.typography.headlineSmallEmphasized)
@@ -215,7 +214,7 @@ fun Invites(model: AppModel, state: CoreState) {
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
     val code = model.invite
-    val cap = state.role?.let(::permissionsOf)?.inviteCap
+    val cap = state.permissions?.inviteCap
     val create = { model.core.command(Command.CreateInvite) }
     Page(model, "Invite People") { padding ->
         Form(padding) {

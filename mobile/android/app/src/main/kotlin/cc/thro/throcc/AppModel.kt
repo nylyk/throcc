@@ -24,6 +24,7 @@ import cc.thro.throcc.core.User
 import cc.thro.throcc.core.VerifiedPerson
 import cc.thro.throcc.core.Voice
 import cc.thro.throcc.core.customThemeName
+import cc.thro.throcc.core.permissionsOf
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.channels.Channel
@@ -50,6 +51,8 @@ sealed interface ServerSave {
 val CUSTOM = customThemeName()
 
 fun CoreState.connectedTo(address: String) = connection == Connection.Connected && server?.address == address
+
+val CoreState.permissions get() = role?.let(::permissionsOf)
 
 /** The room `this` has us in while the link is up or the core is bringing it back. */
 fun CoreState.voiceRoom(): ULong? = when (connection) {
@@ -265,7 +268,6 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
         }
     }
 
-    /** Picks the preset called `name`, or with `CUSTOM` the user's own colours. */
     /** Applies `voice` to the call at once, and keeps it when `keep`. */
     fun setVoice(voice: Voice, keep: Boolean) {
         this.voice = voice
@@ -276,6 +278,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
         }
     }
 
+    /** Picks the preset called `name`, or with `CUSTOM` the user's own colours. */
     fun pickTheme(name: String) {
         changeTheme { if (name == CUSTOM) core.setCustomTheme(core.customPalette()) else core.setTheme(name) }
     }

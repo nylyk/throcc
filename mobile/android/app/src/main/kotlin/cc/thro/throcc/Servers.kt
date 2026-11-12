@@ -62,7 +62,7 @@ fun Servers(model: AppModel, state: CoreState) {
     }
     model.servers.find { it.address == removing }?.let { server ->
         Confirm(
-            "Remove “${server.name ?: server.address}”?",
+            "Remove “${server.title}”?",
             "It leaves your list, but you stay a member. Adding it again needs an invite. " +
                 "To end your membership, connect and choose Leave Server.",
             "Remove",
@@ -87,7 +87,7 @@ private fun AddServerButton(onClick: () -> Unit) {
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun ServerRow(model: AppModel, server: KnownServer, index: Int, connected: Boolean, onRemove: () -> Unit) {
-    val title = server.name ?: server.address
+    val title = server.title
     GroupRow(
         index,
         model.servers.size,

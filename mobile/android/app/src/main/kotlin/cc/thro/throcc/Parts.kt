@@ -90,8 +90,10 @@ import androidx.compose.ui.unit.dp
 import androidx.window.core.layout.WindowSizeClass
 import cc.thro.throcc.core.Connection
 import cc.thro.throcc.core.CoreState
+import cc.thro.throcc.core.KnownServer
 import cc.thro.throcc.core.NameCheck
 import cc.thro.throcc.core.Person
+import cc.thro.throcc.core.Server
 import cc.thro.throcc.core.checkName
 import cc.thro.throcc.core.limits
 import kotlinx.coroutines.launch
@@ -323,6 +325,10 @@ fun TrustLabel(trust: Trust) {
 }
 
 fun people(count: Int) = if (count == 1) "1 person" else "$count people"
+
+val Server.title get() = name ?: address
+
+val KnownServer.title get() = name ?: address
 
 /** The name a server keeps for `typed`, or null where it refuses it. */
 fun validName(typed: String) = (checkName(typed) as? NameCheck.Fine)?.name

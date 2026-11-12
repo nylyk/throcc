@@ -46,7 +46,6 @@ import cc.thro.throcc.core.Person
 import cc.thro.throcc.core.Room
 import cc.thro.throcc.core.isValidPassword
 import cc.thro.throcc.core.limits
-import cc.thro.throcc.core.permissionsOf
 import java.io.Serializable
 
 private sealed interface RoomDialog : Serializable {
@@ -58,11 +57,11 @@ private sealed interface RoomDialog : Serializable {
 
 @Composable
 fun Rooms(model: AppModel, state: CoreState) {
-    val permissions = state.role?.let(::permissionsOf)
+    val permissions = state.permissions
     val managesRooms = permissions?.manageRooms == true
     var dialog by rememberSaveable { mutableStateOf<RoomDialog?>(null) }
     var leaving by rememberSaveable { mutableStateOf(false) }
-    val server = state.server?.let { it.name ?: it.address }.orEmpty()
+    val server = state.server?.title.orEmpty()
     val pages = listOfNotNull(
         "Server" to Screen.Server,
         ("Members" to Screen.Members).takeIf { permissions?.listUsers == true },

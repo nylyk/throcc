@@ -41,7 +41,7 @@ private val WANTED_DEVICES = listOf(
 
 /** The name of the room `state` has us in and of its server, or null outside a room. */
 private fun described(state: CoreState): Pair<String, String>? = state.voiceRoom()?.let { room ->
-    state.rooms.find { it.id == room }?.name.orEmpty() to state.server?.let { it.name ?: it.address }.orEmpty()
+    state.rooms.find { it.id == room }?.name.orEmpty() to state.server?.title.orEmpty()
 }
 
 /** The service that runs the sound of the room we are in, also while the app is off screen. */
