@@ -99,8 +99,8 @@ fn wrap(env: &mut Env, seed: &[u8]) -> jni::errors::Result<Vec<u8>> {
     let mut wrapped = env.convert_byte_array(&nonce)?;
     let plain = env.byte_array_from_slice(seed)?;
     let sealed = do_final(env, &cipher, &plain);
-    clear(env, &plain)?;
-    wrapped.extend_from_slice(&env.convert_byte_array(&sealed?)?);
+    let sealed = once_cleared(env, &plain, sealed)?;
+    wrapped.extend_from_slice(&env.convert_byte_array(&sealed)?);
     Ok(wrapped)
 }
 
@@ -133,8 +133,7 @@ fn unwrap(
     let sealed = env.byte_array_from_slice(sealed)?;
     let plain = do_final(env, &cipher, &sealed)?;
     let seed = env.convert_byte_array(&plain).map(Zeroizing::new);
-    clear(env, &plain)?;
-    seed.map(Some)
+    once_cleared(env, &plain, seed).map(Some)
 }
 
 fn cipher<'local>(env: &mut Env<'local>) -> jni::errors::Result<JObject<'local>> {
@@ -164,10 +163,18 @@ fn do_final<'local>(
     env.cast_local::<JByteArray>(output)
 }
 
-/// Overwrites a Java array that held the seed.
-fn clear(env: &Env, array: &JByteArray) -> jni::errors::Result<()> {
-    let len = array.len(env)?;
-    array.set_region(env, 0, &vec![0; len])
+/// The `result` of a call that used `held_seed`, once that Java array is overwritten.
+fn once_cleared<T>(
+    env: &Env,
+    held_seed: &JByteArray,
+    result: jni::errors::Result<T>,
+) -> jni::errors::Result<T> {
+    // JNI allows no array write while an exception is pending.
+    let thrown = env.exception_catch();
+    let len = held_seed.len(env)?;
+    held_seed.set_region(env, 0, &vec![0; len])?;
+    thrown?;
+    result
 }
 
 /// The Keystore's key for wrapping the seed, or `None` while it holds none.
