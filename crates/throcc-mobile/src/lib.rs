@@ -328,8 +328,8 @@ impl Core {
         Ok(servers.collect())
     }
 
-    /// Takes the server at `address` off the list without leaving it. Ending a connection
-    /// to it blocks as [`Self::disconnect`] does.
+    /// Takes the server at `address` off the list without leaving it. It blocks as
+    /// [`Self::disconnect`] does.
     pub fn forget_server(&self, address: String) -> Result<(), CoreError> {
         let _switching = lock(&self.switching);
         if self.connected_to(&address) {
@@ -385,8 +385,8 @@ impl Core {
         Ok(())
     }
 
-    /// Ends the connection, staying a member of the server. It waits for the goodbye to
-    /// the server, for up to three seconds on a dead link.
+    /// Ends the connection, staying a member of the server. It waits for a `connect` under
+    /// way, and then up to three seconds for the goodbye to the server.
     pub fn disconnect(&self) {
         let _switching = lock(&self.switching);
         self.end_connection();

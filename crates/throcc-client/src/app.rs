@@ -1078,6 +1078,15 @@ impl ThroccApp {
         self.command(UiCommand::VerifiedChanged);
     }
 
+    /// Lists the blocked people again. A list with someone on it was read, whatever went
+    /// wrong before.
+    fn list_blocked(&mut self) {
+        self.blocked_people = blocked_people(&self.blocked);
+        if !self.blocked_people.is_empty() {
+            self.blocked_problem = None;
+        }
+    }
+
     /// Takes the block off whoever holds `key`, on every server.
     pub fn unblock(&mut self, key: Fingerprint, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(e) = self.blocked.unblock(&key) {
@@ -1085,7 +1094,7 @@ impl ThroccApp {
             let notice = format!("Couldn't unblock them: {e}");
             window.push_notification(Notification::new().message(notice), cx);
         }
-        self.blocked_people = blocked_people(&self.blocked);
+        self.list_blocked();
         self.command(UiCommand::BlockedChanged);
     }
 
@@ -1747,7 +1756,7 @@ impl ThroccApp {
                 self.command(UiCommand::ListUsers);
             }
             Screen::Settings(SettingsPage::Blocked) => {
-                self.blocked_people = blocked_people(&self.blocked);
+                self.list_blocked();
             }
             _ => {}
         }

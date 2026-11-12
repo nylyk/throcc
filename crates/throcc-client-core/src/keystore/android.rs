@@ -171,6 +171,9 @@ fn once_cleared<T>(
 ) -> jni::errors::Result<T> {
     // JNI allows no array write while an exception is pending.
     let thrown = env.exception_catch();
+    if env.exception_check() {
+        env.exception_clear();
+    }
     let len = held_seed.len(env)?;
     held_seed.set_region(env, 0, &vec![0; len])?;
     thrown?;

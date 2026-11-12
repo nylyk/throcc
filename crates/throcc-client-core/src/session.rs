@@ -55,6 +55,9 @@ const RENEWAL_CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
 /// for the user. A sign-in pushes any other device of ours off the server, and a machine
 /// that slept through that never heard of it.
 const RECONNECT_WINDOW: Duration = Duration::from_secs(5 * 60);
+/// How long a failed sign-in waits for the server's close code, which says whether
+/// another device took over.
+const REPLACED_CLOSE_WAIT: Duration = Duration::from_secs(1);
 const MAX_QUEUED_WHILE_RECONNECTING: usize = 64;
 /// How many pictures are fetched from the server at once.
 const AVATAR_FETCHES: usize = 8;
@@ -818,10 +821,16 @@ impl Session {
             return Ok(SignIn::Stale);
         }
         let connection = connected.connection.clone();
-        match account::sign_in_over(&self.keystore, connected, want_room).await {
-            Ok(link) => Ok(SignIn::Done(Box::new(link))),
-            Err(_) if closed_as_replaced(&connection) => Ok(SignIn::Replaced),
-            Err(e) => Err(e),
+        let failed = match account::sign_in_over(&self.keystore, connected, want_room).await {
+            Ok(link) => return Ok(SignIn::Done(Box::new(link))),
+            Err(e) => e,
+        };
+        // The server ends a replaced link's stream before it closes the connection.
+        let _ = tokio::time::timeout(REPLACED_CLOSE_WAIT, connection.closed()).await;
+        if closed_as_replaced(&connection) {
+            Ok(SignIn::Replaced)
+        } else {
+            Err(failed)
         }
     }
 
@@ -1964,9 +1973,11 @@ impl Session {
                 self.room_cue(p.user, p.room);
                 // A presence keeps the block it is shown with, so what plays never parts
                 // from what shows; `show_blocked` follows the list.
-                let blocked = match self.shown.get(&p.user) {
-                    Some(shown) if shown.key == p.identity_key => shown.blocked,
-                    _ => self.blocks(&p),
+                let shown_before = self.shown.get(&p.user);
+                let key_changed = shown_before.is_some_and(|shown| shown.key != p.identity_key);
+                let blocked = match shown_before {
+                    Some(shown) => shown.blocked,
+                    None => self.blocks(&p),
                 };
                 let (verified, identity_key) = self.trust.of(p.user);
                 let playback = self.playback_of(p.user);
@@ -1997,6 +2008,9 @@ impl Session {
                 };
                 self.notices(notices);
                 self.refresh_trust();
+                if key_changed {
+                    self.show_blocked().await;
+                }
                 self.follow_room().await;
             }
             ServerEvent::PresenceEnded(user) => {
