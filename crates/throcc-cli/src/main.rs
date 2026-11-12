@@ -434,8 +434,9 @@ fn given_code(arg: Option<String>, env: Option<String>) -> Option<String> {
     }
 }
 
+/// Signs in to `address`, and signs the kept profile there if the server keeps it unsigned.
 async fn sign_in(keystore: &Keystore, address: &str) -> Result<ControlLink> {
-    let link = account::sign_in(keystore, address, None)
+    let mut link = account::sign_in(keystore, address, None)
         .await
         .inspect_err(|e| {
             if let Some((expected, actual)) = e.pin_mismatch() {
@@ -445,6 +446,9 @@ async fn sign_in(keystore: &Keystore, address: &str) -> Result<ControlLink> {
                 eprintln!("Re-enroll with a fresh invite code to trust the new key.");
             }
         })?;
+    if let Some(profile) = Settings::load(keystore.dir())?.profile {
+        account::sign_profile_if_kept(keystore, &mut link, &profile.name, profile.avatar()).await;
+    }
     Ok(link)
 }
 

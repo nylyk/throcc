@@ -1,7 +1,7 @@
 use throcc_proto::Fingerprint;
-use throcc_proto::ids::{RoomId, UserId};
+use throcc_proto::ids::{Hash, RoomId, UserId};
 use throcc_proto::invite::InviteCode;
-use throcc_proto::messages::{Request, Response};
+use throcc_proto::messages::{Request, Response, valid_name};
 use tracing::warn;
 
 use crate::connection::{self, ConnectError, Connected};
@@ -62,16 +62,15 @@ pub async fn reach(keystore: &Keystore, address: &str) -> Result<Connected, Sign
     Ok(connection::connect(address, Some(pin)).await?)
 }
 
-/// Signs in over `connected`, then publishes the encryption key and signs our profile.
+/// Signs in over `connected`, then publishes the encryption key.
 pub async fn sign_in_over(
     keystore: &Keystore,
     connected: Connected,
     want_room: Option<RoomId>,
 ) -> Result<ControlLink, SignInError> {
-    let mut link = control::login(connected, keystore.identity(), want_room).await?;
+    let link = control::login(connected, keystore.identity(), want_room).await?;
     let server = &link.connected.fingerprint;
     publish_encryption_key(keystore, &link.requester, server, link.welcome.me).await?;
-    sign_kept_profile(keystore, &mut link).await;
     Ok(link)
 }
 
@@ -98,22 +97,27 @@ pub async fn enroll(
         warn!("dropping the epoch floors of an earlier account: {e:#}");
     }
     publish_encryption_key(keystore, &link.requester, server, link.welcome.me).await?;
-    sign_kept_profile(keystore, &mut link).await;
+    sign_profile_if_kept(keystore, &mut link, valid_name(name).unwrap_or(name), None).await;
     Ok(link)
 }
 
-/// Signs the name and picture the server keeps for us, unless it holds our signature
-/// already, so others can tell we chose them.
-async fn sign_kept_profile(keystore: &Keystore, link: &mut ControlLink) {
-    let (me, profile) = (link.welcome.me, &link.welcome.profile);
-    if profile.sig.is_some() {
+/// Signs `name` and `avatar` if they are the profile the server keeps for us and it holds
+/// no signature for it yet, so others can tell we chose them.
+pub async fn sign_profile_if_kept(
+    keystore: &Keystore,
+    link: &mut ControlLink,
+    name: &str,
+    avatar: Option<Hash>,
+) {
+    let kept = &link.welcome.profile;
+    if kept.sig.is_some() || (kept.name.as_str(), kept.avatar) != (name, avatar) {
         return;
     }
     let server = &link.connected.fingerprint;
-    let sig = keystore.profile_sig(server, me, &profile.name, profile.avatar);
+    let sig = keystore.profile_sig(server, link.welcome.me, name, avatar);
     let request = Request::SetProfile {
-        name: profile.name.clone(),
-        avatar: profile.avatar,
+        name: name.to_owned(),
+        avatar,
         sig,
     };
     match link.requester.request(request).await {

@@ -974,7 +974,8 @@ impl Hub {
     }
 
     /// Keeps a signed name and picture. Signing the name and picture already kept changes
-    /// nothing others see, so it skips the rate limit, and only a first signature is kept.
+    /// nothing others see, so it skips the rate limit, and is kept only while no valid
+    /// signature is.
     fn set_profile(
         &mut self,
         user: UserId,
@@ -985,17 +986,25 @@ impl Hub {
         let name = checked_name(&name)?;
         self.require_picture(avatar)?;
         let session = self.session(user)?;
-        identity::verify_profile(
-            &session.row.pubkey,
-            &self.fingerprint.0,
-            user,
-            &name,
-            avatar,
-            &sig,
-        )
-        .map_err(|_| Refusal::new(ErrorCode::Invalid, "the profile's signature is wrong"))?;
+        let signed = |sig: &Signature| {
+            identity::verify_profile(
+                &session.row.pubkey,
+                &self.fingerprint.0,
+                user,
+                &name,
+                avatar,
+                sig,
+            )
+            .is_ok()
+        };
+        if !signed(&sig) {
+            return Err(Refusal::new(
+                ErrorCode::Invalid,
+                "the profile's signature is wrong",
+            ));
+        }
         let renames = (session.row.name.as_str(), session.row.avatar) != (name.as_str(), avatar);
-        if !renames && session.row.profile_sig.is_some() {
+        if !renames && session.row.profile_sig.as_ref().is_some_and(signed) {
             return Ok(Response::Ok);
         }
         if renames
