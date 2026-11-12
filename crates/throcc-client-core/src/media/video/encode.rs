@@ -24,6 +24,9 @@ use crate::media::capture::PixelBuffer;
 
 /// A GOP cap of this many seconds bounds how long a picture stays broken without a request.
 const GOP_SECONDS: i32 = 4;
+/// NVENC's intra refresh sweeps the picture once per GOP and never ends a GOP with an IDR,
+/// so a picture broken by a loss heals within this many seconds without any keyframe.
+const REFRESH_SECONDS: i32 = 1;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EncodeError {
@@ -836,7 +839,11 @@ fn open_candidate(
     let bitrate = i64::from(config.kbps) * 1000;
     ctx.set_bit_rate(bitrate);
     ctx.set_max_b_frames(0);
-    ctx.set_gop_size(config.fps as i32 * GOP_SECONDS);
+    let gop_seconds = match candidate.backend {
+        Backend::Nvenc => REFRESH_SECONDS,
+        _ => GOP_SECONDS,
+    };
+    ctx.set_gop_size(config.fps as i32 * gop_seconds);
     // VideoToolbox's low-latency mode holds 2 to 4 frames when the height isn't a multiple
     // of 16, where its normal mode holds one.
     if candidate.backend != Backend::VideoToolbox || config.height.is_multiple_of(16) {
