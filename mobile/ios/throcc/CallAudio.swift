@@ -1,4 +1,5 @@
 import AVFAudio
+import UIKit
 
 /// Runs the sound of the room we are in: the audio session, and the core's audio inside it.
 @MainActor
@@ -7,6 +8,8 @@ final class CallAudio {
     private let showFailure: (String) -> Void
     private var inRoom = false
     private var interrupted = false
+    /// Whether an interruption ended without leave to resume, so the audio reopens once the app is in front again.
+    private var resumesWhenActive = false
     /// Whether the session is set up for a room, also where the audio in it failed to open.
     private var started = false
     private var withMic = false
@@ -37,6 +40,9 @@ final class CallAudio {
         center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: nil) { [weak self] _ in
             DispatchQueue.main.async { self?.mediaServicesWereReset() }
         }
+        center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: nil) { [weak self] _ in
+            DispatchQueue.main.async { self?.becameActive() }
+        }
     }
 
     /// Opens the audio once we are in a room, and closes it once we are out of one.
@@ -50,11 +56,22 @@ final class CallAudio {
         switch type {
         case .began:
             interrupted = true
+            resumesWhenActive = false
         case .ended where options.contains(.shouldResume):
             interrupted = false
+        case .ended:
+            resumesWhenActive = true
+            return
         default:
             return
         }
+        enqueue { await self.settle() }
+    }
+
+    private func becameActive() {
+        guard resumesWhenActive else { return }
+        resumesWhenActive = false
+        interrupted = false
         enqueue { await self.settle() }
     }
 
@@ -87,6 +104,7 @@ final class CallAudio {
     private func settle() async {
         if !inRoom {
             interrupted = false
+            resumesWhenActive = false
         }
         let wanted = inRoom && !interrupted
         if wanted, !started {

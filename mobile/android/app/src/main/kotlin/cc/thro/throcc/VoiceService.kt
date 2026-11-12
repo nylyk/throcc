@@ -54,7 +54,7 @@ class VoiceService : Service() {
     /** Whether the sound is open with the mic, or null until the service has set up the room's audio. */
     private var withMic: Boolean? = null
 
-    /** Whether something else holds the audio for a while, as a phone call does. */
+    /** Whether something else holds the audio, for a while as a phone call does, or for good. */
     private var interrupted = false
 
     private val focus = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
@@ -66,7 +66,7 @@ class VoiceService : Service() {
         )
         .setOnAudioFocusChangeListener { change ->
             when (change) {
-                AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                AudioManager.AUDIOFOCUS_LOSS, AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                     interrupted = true
                     model.closeAudio()
                 }
@@ -106,7 +106,7 @@ class VoiceService : Service() {
             if (withMic == null) stopSelf()
             return START_NOT_STICKY
         }
-        if (withMic == null) setUp(model)
+        if (withMic == null) setUp(model) else if (interrupted) regainFocus()
         if (withMic != mic) {
             withMic = mic
             model.micDenied = !mic
@@ -153,6 +153,14 @@ class VoiceService : Service() {
             model.state.map(::described).distinctUntilChanged().collect { room ->
                 if (room == null) stopSelf() else notifications.notify(NOTIFICATION, notification(room))
             }
+        }
+    }
+
+    /** Asks for the audio again, as the app comes to the front after another app took it for good. */
+    private fun regainFocus() {
+        if (audio.requestAudioFocus(focus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+            interrupted = false
+            open()
         }
     }
 
