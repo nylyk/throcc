@@ -31,9 +31,7 @@ final class CallAudio {
             let options = AVAudioSession.InterruptionOptions(
                 rawValue: note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
             )
-            let reason = (note.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt)
-                .flatMap(AVAudioSession.InterruptionReason.init(rawValue:))
-            DispatchQueue.main.async { self?.interruptionChanged(type, options, reason) }
+            DispatchQueue.main.async { self?.interruptionChanged(type, options) }
         }
         center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil) { [weak self] note in
             let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt)
@@ -55,14 +53,9 @@ final class CallAudio {
         enqueue { await self.settle() }
     }
 
-    private func interruptionChanged(
-        _ type: AVAudioSession.InterruptionType?,
-        _ options: AVAudioSession.InterruptionOptions,
-        _ reason: AVAudioSession.InterruptionReason?
-    ) {
+    private func interruptionChanged(_ type: AVAudioSession.InterruptionType?, _ options: AVAudioSession.InterruptionOptions) {
         switch type {
-        // iOS reports the suspension of an app that already lost the session late, once it runs again.
-        case .began where reason != .appWasSuspended:
+        case .began:
             interrupted = true
             resumesWhenActive = false
         case .ended where options.contains(.shouldResume) || UIApplication.shared.applicationState == .active:
@@ -166,7 +159,7 @@ final class CallAudio {
         }
     }
 
-    /// Runs `work` off the main actor, and shows why it failed. True if it didn't.
+    /// Runs `work` off the main actor and returns whether it succeeded. A failure shows as a notice.
     @discardableResult
     private func run(_ work: @escaping @Sendable () throws -> Void) async -> Bool {
         do {

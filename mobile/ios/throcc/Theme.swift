@@ -3,7 +3,7 @@ import SwiftUI
 /// The colours of a palette and the ones mixed from them. The muted, accent and status
 /// colours read at 4.5:1 on every surface where the palette's text colour does.
 struct Theme: Equatable {
-    let bg, panel, raised, line, text, muted, accent, warning, good, bad: Color
+    let bg, panel, raised, line, text, muted, accent, good, bad: Color
     let isDark: Bool
 
     init(_ palette: Palette) {
@@ -23,7 +23,6 @@ struct Theme: Equatable {
         line = panel.mix(with: text, by: 0.16)
         muted = readable(palette.muted)
         accent = readable(palette.accent)
-        warning = readable(palette.warning)
         good = readable(palette.good)
         bad = readable(palette.bad)
         isDark = !isLightTheme(palette: palette)
