@@ -20,6 +20,8 @@ packaging/licenses/notices.sh client   # third-party notices the packages ship; 
 packaging/macos/bundle.sh              # macOS: target/macos/throcc.dmg
 packaging/flatpak/cargo-sources.sh     # the flatpak's offline crates, before flatpak-builder
 mobile/ios/build-core.sh               # iOS: ThroccCore.xcframework and the Swift bindings, before Xcode builds
+just ios-sim [device] [args]           # iOS: core, app and launch in a simulator, iPhone 17 by default
+just ios-device <name> [args]          # iOS: core, signed app, install and launch on a connected device
 mobile/android/gradlew -p mobile/android assembleDebug   # Android: builds the core with cargo-ndk, then the APK
 xcrun simctl launch booted cc.thro.throcc --mock --screen <name>   # iOS sample screens; names in `Sample.swift`
 adb shell am start -S -n cc.thro.throcc/.MainActivity --ez mock true --es screen <name>   # Android sample screens; names in `AppModel.kt`
