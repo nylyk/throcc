@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use throcc_crypto::identity::random;
+use throcc_crypto::identity::{self, random};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, MediaId, RoomId, UserId};
 use throcc_proto::limits::{MAX_ROOM_MEMBERS, MAX_ROOM_SHARES};
@@ -368,6 +368,9 @@ struct LastCounts {
 struct Shown {
     /// The identity key the server names for them, which blocks follow.
     key: PublicKey,
+    /// Whether their signed encryption key proves the account holds `key`. Only a proven
+    /// key is blocked or unblocked from a room.
+    proven: bool,
     name: String,
     avatar: Option<Hash>,
     /// Whether they are shown, played and watched as blocked. Only
@@ -907,7 +910,7 @@ impl Session {
         let state = self.shared.state();
         let shown = welcome.presence.iter().filter_map(|p| {
             let person = state.person(p.user)?;
-            Some((p.user, shown_as(p, person)))
+            Some((p.user, shown_as(p, person, &fingerprint)))
         });
         self.shown = shown.collect();
         // The key manager hears of people only from what is shown, here and as presences
@@ -1443,6 +1446,12 @@ impl Session {
             UiCommand::Block(user) => {
                 let me = self.call.me();
                 if let Some(shown) = self.shown.get(&user).filter(|_| user != me) {
+                    if !shown.proven {
+                        self.shared.notice(
+                            "Couldn't block them: the server gave no proof of who they are.",
+                        );
+                        return ControlFlow::Continue(());
+                    }
                     let person = BlockedPerson {
                         key: Fingerprint(shown.key),
                         name: shown.name.clone(),
@@ -1457,6 +1466,12 @@ impl Session {
             }
             UiCommand::Unblock(user) => {
                 if let Some(shown) = self.shown.get(&user) {
+                    if !shown.proven {
+                        self.shared.notice(
+                            "Couldn't unblock them here: the server gave no proof of who they are. Unblock them in settings.",
+                        );
+                        return ControlFlow::Continue(());
+                    }
                     match self.blocked.unblock(&Fingerprint(shown.key)) {
                         Ok(()) => self.show_blocked().await,
                         Err(e) => self.shared.notice(format!("Couldn't unblock them: {e:#}")),
@@ -2003,7 +2018,8 @@ impl Session {
                 // The key manager counts as here only who is shown, where they are shown.
                 let notices = match self.shared.state().person(p.user) {
                     Some(person) => {
-                        self.shown.insert(p.user, shown_as(&p, person));
+                        let shown = shown_as(&p, person, &self.call.server());
+                        self.shown.insert(p.user, shown);
                         self.call.engine.set_presence(p.user, person.room)
                     }
                     None => {
@@ -2236,14 +2252,25 @@ fn drop_unwanted_share(started: StartResult) {
     }
 }
 
-/// What is kept of `presence` beside the `person` the state shows for it.
-fn shown_as(presence: &Presence, person: &Person) -> Shown {
+/// What is kept of `presence` on the server `server` beside the `person` the state shows
+/// for it.
+fn shown_as(presence: &Presence, person: &Person, server: &Fingerprint) -> Shown {
     Shown {
         key: presence.identity_key,
+        proven: proves_identity(presence, server),
         name: person_name(presence.user, &presence.name),
         avatar: presence.avatar,
         blocked: person.blocked,
     }
+}
+
+/// Whether `presence` carries an encryption key its identity key signed for its user on
+/// the server `server`, which only the holder of that identity key can make.
+fn proves_identity(presence: &Presence, server: &Fingerprint) -> bool {
+    presence.encryption_key.is_some_and(|signed| {
+        identity::verify_encryption_key(&presence.identity_key, &server.0, presence.user, &signed)
+            .is_ok()
+    })
 }
 
 /// How [`Session::sign_in_unless_stale`] ended without failing.
@@ -2513,6 +2540,49 @@ mod tests {
             Some(ErrorCode::Full)
         );
         assert!(share_start_refusal(&Err(anyhow::anyhow!("timed out")), share, None).is_none());
+    }
+
+    #[test]
+    fn a_presence_proves_its_identity_key_only_with_its_own_signature() {
+        use throcc_crypto::identity::{IdentityKey, encryption_key_message};
+        use throcc_proto::ids::Role;
+        use throcc_proto::messages::SignedEncryptionKey;
+
+        let server = Fingerprint([1; 32]);
+        let (holder, other) = (
+            IdentityKey::from_seed(&[3; 32]),
+            IdentityKey::from_seed(&[4; 32]),
+        );
+        let signed_by = |key: &IdentityKey, user: UserId| SignedEncryptionKey {
+            key: [2; 32],
+            not_after: 99,
+            sig: key.sign(&encryption_key_message(&server.0, user, 99, &[2; 32])),
+        };
+        let presence = |identity_key, encryption_key| Presence {
+            user: UserId(7),
+            name: "mara".into(),
+            avatar: None,
+            room: None,
+            mic: true,
+            deafened: false,
+            sharing: false,
+            role: Role::User,
+            identity_key,
+            encryption_key,
+        };
+        let own = Some(signed_by(&holder, UserId(7)));
+        assert!(proves_identity(&presence(holder.public(), own), &server));
+        assert!(!proves_identity(&presence(holder.public(), None), &server));
+        assert!(!proves_identity(&presence(other.public(), own), &server));
+        let someone_elses = Some(signed_by(&holder, UserId(8)));
+        assert!(!proves_identity(
+            &presence(holder.public(), someone_elses),
+            &server
+        ));
+        assert!(!proves_identity(
+            &presence(holder.public(), own),
+            &Fingerprint([9; 32])
+        ));
     }
 
     #[test]

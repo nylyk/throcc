@@ -1,6 +1,6 @@
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use throcc_proto::ids::UserId;
-use throcc_proto::messages::{PublicKey, Signature};
+use throcc_proto::messages::{PublicKey, Signature, SignedEncryptionKey};
 use zeroize::Zeroizing;
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -76,6 +76,18 @@ pub fn encryption_key_message(
     .concat()
 }
 
+/// Checks that `identity_key` signed `signed` for `user` on the server with the SPKI hash
+/// `server`.
+pub fn verify_encryption_key(
+    identity_key: &PublicKey,
+    server: &[u8; 32],
+    user: UserId,
+    signed: &SignedEncryptionKey,
+) -> Result<(), BadSignature> {
+    let message = encryption_key_message(server, user, signed.not_after, &signed.key);
+    verify(identity_key, &message, &signed.sig)
+}
+
 /// Bytes from the operating system's CSPRNG.
 pub fn random<const N: usize>() -> [u8; N] {
     let mut out = [0u8; N];
@@ -116,6 +128,44 @@ mod tests {
                 "20cf9e1910d859fabedd3b31ee3cfbf430e2e485c456c2f119a0794f04614010",
                 "c7fbab7ff0174574efe9e9d2bce68d02b9a3494209538356a9996de007a4e900",
             )
+        );
+    }
+
+    #[test]
+    fn an_encryption_key_proves_its_identity_only_for_its_server_and_user() {
+        let identity = IdentityKey::from_seed(&[3; 32]);
+        let (server, user, not_after, key) = ([1; 32], UserId(7), 99, [2; 32]);
+        let signed = SignedEncryptionKey {
+            key,
+            not_after,
+            sig: identity.sign(&encryption_key_message(&server, user, not_after, &key)),
+        };
+        let public = identity.public();
+        assert_eq!(
+            verify_encryption_key(&public, &server, user, &signed),
+            Ok(())
+        );
+        let other = IdentityKey::from_seed(&[4; 32]).public();
+        let refused = Err(BadSignature);
+        assert_eq!(
+            verify_encryption_key(&other, &server, user, &signed),
+            refused
+        );
+        assert_eq!(
+            verify_encryption_key(&public, &server, UserId(8), &signed),
+            refused
+        );
+        assert_eq!(
+            verify_encryption_key(&public, &[9; 32], user, &signed),
+            refused
+        );
+        let later = SignedEncryptionKey {
+            not_after: 100,
+            ..signed
+        };
+        assert_eq!(
+            verify_encryption_key(&public, &server, user, &later),
+            refused
         );
     }
 

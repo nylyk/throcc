@@ -782,6 +782,7 @@ mod tests {
             sharing: false,
             role: Role::User,
             identity_key: [0; 32],
+            encryption_key: None,
         }
     }
 

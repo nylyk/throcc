@@ -424,9 +424,11 @@ pub struct Presence {
     pub deafened: bool,
     pub sharing: bool,
     pub role: Role,
-    /// The identity key the server knows this user by. Nothing signs it here; only a
-    /// [`Peer`]'s signed encryption key proves an identity.
+    /// The identity key the server knows this user by, which `encryption_key` proves.
     pub identity_key: PublicKey,
+    /// The user's encryption key, signed by `identity_key` for this server and user, once
+    /// they have given one.
+    pub encryption_key: Option<SignedEncryptionKey>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

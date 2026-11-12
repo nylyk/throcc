@@ -1746,6 +1746,7 @@ fn presence(session: &Session) -> Option<Presence> {
         sharing: session.media.share.is_some(),
         role: session.row.role,
         identity_key: session.row.pubkey,
+        encryption_key: session.row.encryption_key,
     })
 }
 

@@ -18,6 +18,7 @@ use crate::verified::VerifiedStore;
 const EVENTS: usize = 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum CallEvent {
     Server(Event),
     Key(KeyNotice),
