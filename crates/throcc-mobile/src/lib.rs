@@ -883,8 +883,11 @@ mod tests {
         let listener = PanicsOnce(Mutex::new(Some(sender)), recorder);
         core.set_listener(Some(Arc::new(listener)));
         core.connect("owls.thro.cc".into(), None).unwrap();
-        core.disconnect();
-        next(&states, "no connection", |s| s.server.is_none());
+        let room = core.state().rooms[0].id;
+        core.command(Command::Join { room: Some(room) });
+        next(&states, "us in the room", |s| {
+            s.current.as_ref().is_some_and(|c| c.room == room)
+        });
     }
 
     #[test]
