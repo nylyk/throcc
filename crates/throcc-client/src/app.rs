@@ -1089,6 +1089,8 @@ impl ThroccApp {
             tracing::warn!("could not save who is blocked: {e:#}");
             let notice = format!("Couldn't unblock them: {e}");
             window.push_notification(Notification::new().message(notice), cx);
+        } else {
+            self.blocked_problem = None;
         }
         self.list_blocked();
         self.command(UiCommand::BlockedChanged);
@@ -1350,13 +1352,18 @@ impl ThroccApp {
     }
 
     fn sync_keep_display_awake(&mut self, window: &Window, cx: &App) {
-        let watching = self.state.current.as_ref().is_some_and(|c| {
-            c.watching.iter().any(|user| {
-                self.state
-                    .person(*user)
-                    .is_some_and(|p| p.sharing.is_some())
-            })
-        });
+        let live = matches!(
+            self.state.connection,
+            ConnectionStatus::Connected | ConnectionStatus::Reconnecting { .. }
+        );
+        let watching = live
+            && self.state.current.as_ref().is_some_and(|c| {
+                c.watching.iter().any(|user| {
+                    self.state
+                        .person(*user)
+                        .is_some_and(|p| p.sharing.is_some())
+                })
+            });
         if watching != self.keep_display_awake.is_some() {
             self.keep_display_awake = watching.then(|| KeepDisplayAwake::new(window, cx));
         }
