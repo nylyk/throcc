@@ -2483,6 +2483,7 @@ mod tests {
             fps: 60,
             kbps: 8000,
             audio: true,
+            recovery: Recovery::Idr,
         });
         let limited = || {
             Ok(Response::Err {

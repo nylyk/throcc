@@ -6,7 +6,7 @@ use throcc_crypto::safety;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
 use throcc_proto::invite::InviteCode;
-use throcc_proto::messages::{Codec, PublicKey, ShareConfig, User};
+use throcc_proto::messages::{Codec, PublicKey, Recovery, ShareConfig, User};
 use tokio::sync::{broadcast, mpsc, watch};
 use tracing::warn;
 
@@ -655,6 +655,7 @@ fn sample_state() -> State {
         width: 2560,
         height: 1440,
         fps: 60,
+        recovery: Recovery::Idr,
     };
     for (id, name, room) in [
         (1, "nori", None),

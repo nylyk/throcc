@@ -71,10 +71,11 @@ fn control_messages_encode_to_pinned_bytes() {
                     width: 2560,
                     height: 1440,
                     fps: 60,
+                    recovery: Recovery::Idr,
                 }),
             }),
         },
-        "00ac020601000101c03e038014a00b3c",
+        "00ac020601000101c03e038014a00b3c01",
     );
     pinned(
         ClientMessage::Request {

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
 use throcc_proto::limits::{MAX_ROOMS, MAX_SIGNED_IN};
-use throcc_proto::messages::{Codec, PublicKey, Room, ShareConfig, valid_name};
+use throcc_proto::messages::{Codec, PublicKey, Recovery, Room, ShareConfig, valid_name};
 
 pub(crate) const MIC_KBPS: u32 = 64;
 pub(crate) const SHARE_AUDIO_KBPS: u32 = crate::media::share_audio::KBPS;
@@ -392,6 +392,7 @@ impl ShareChoice {
     }
 
     /// The share to ask for. Its size is a 16:9 box the sender fits the screen's shape in.
+    /// The encoder decides its codec and recovery.
     pub fn config(self, codec: Codec, audio: bool) -> ShareConfig {
         let height = self.resolution.height();
         ShareConfig {
@@ -401,6 +402,7 @@ impl ShareChoice {
             width: height / 9 * 16,
             height,
             fps: self.fps,
+            recovery: Recovery::Idr,
         }
     }
 }

@@ -1138,9 +1138,9 @@ impl Hub {
         if applied.share != stored.share {
             self.broadcast_peers(room, None);
         }
-        // Audiences list only running shares, so a share starting or ending changes them.
-        if applied.deafened != stored.deafened || applied.share.is_some() != stored.share.is_some()
-        {
+        // Audiences list only running shares, so a share starting or ending changes them, and
+        // routes carry a share's recovery.
+        if applied.deafened != stored.deafened || applied.share != stored.share {
             self.rebuild_routes();
         }
         self.announce_presence(user);
@@ -1451,7 +1451,7 @@ impl Hub {
         self.rebuild_routes();
         let now = Instant::now();
         for id in started {
-            if let Some((owner, TrackKind::Video)) = self.share_track(id)
+            if let Some((owner, TrackKind::Video(_))) = self.share_track(id)
                 && let Some(kind) = self.keyframes.first_picture(id, now)
             {
                 self.emit_to(owner, Event::KeyframeRequested { media_id: id, kind });
@@ -1467,7 +1467,7 @@ impl Hub {
                 "you aren't watching that track",
             ));
         }
-        let Some((owner, TrackKind::Video)) = self.share_track(media_id) else {
+        let Some((owner, TrackKind::Video(_))) = self.share_track(media_id) else {
             return Err(Refusal::new(ErrorCode::Invalid, "not a video track"));
         };
         if let Some(kind) = self.keyframes.request(media_id, user, kind, Instant::now()) {
@@ -1476,9 +1476,28 @@ impl Hub {
         Ok(Response::Ok)
     }
 
-    /// Forwards keyframe requests that waited out their interval.
+    /// Asks for a keyframe for every track a receiver's egress holds back, as that receiver
+    /// would, and forwards the requests that waited out their interval.
     pub fn flush_keyframes(&mut self) {
-        for (media_id, kind) in self.keyframes.due(Instant::now()) {
+        let now = Instant::now();
+        let held: Vec<(UserId, MediaId)> = self
+            .sessions
+            .values()
+            .flat_map(|s| {
+                let held = s.handle.egress.held();
+                held.into_iter()
+                    .filter(|id| s.watching.contains(id))
+                    .map(|id| (s.row.id, id))
+            })
+            .collect();
+        for (user, media_id) in held {
+            if let Some((owner, TrackKind::Video(_))) = self.share_track(media_id)
+                && let Some(kind) = self.keyframes.request(media_id, user, Recovery::Idr, now)
+            {
+                self.emit_to(owner, Event::KeyframeRequested { media_id, kind });
+            }
+        }
+        for (media_id, kind) in self.keyframes.due(now) {
             match self.share_track(media_id) {
                 Some((owner, _)) => {
                     self.emit_to(owner, Event::KeyframeRequested { media_id, kind })
@@ -1536,7 +1555,7 @@ impl Hub {
                 .iter()
                 .find(|sh| sh.video == media_id || sh.audio == media_id)?;
             let kind = if share.video == media_id {
-                TrackKind::Video
+                TrackKind::Video(recovery_of(s))
             } else {
                 TrackKind::Audio
             };
@@ -1587,9 +1606,8 @@ impl Hub {
                         .filter(|m| sees(m) || hears(m))
                         .map(|m| m.row.id)
                         .collect();
-                    table
-                        .routes
-                        .insert(share.video, route(owner, TrackKind::Video, video));
+                    let kind = TrackKind::Video(recovery_of(sender));
+                    table.routes.insert(share.video, route(owner, kind, video));
                     table
                         .routes
                         .insert(share.audio, route(owner, TrackKind::Audio, audio));
@@ -1694,6 +1712,15 @@ fn send(session: &Session, event: Event) {
             .connection
             .close(close::PROTOCOL_ERROR.into(), b"control queue full");
     }
+}
+
+/// How the sender's share heals a broken picture. A share that ended has no video left to
+/// hold back.
+fn recovery_of(sender: &Session) -> Recovery {
+    sender
+        .media
+        .share
+        .map_or(Recovery::Refresh, |share| share.recovery)
 }
 
 fn route<'a>(

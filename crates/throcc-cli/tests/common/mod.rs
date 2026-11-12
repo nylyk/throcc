@@ -31,8 +31,8 @@ use throcc_proto::ids::{MediaId, RoomId};
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
     AuthResult, ClientHello, Codec, ErrorCode, Event, MediaState, PROTOCOL, PakeFinish, PakeReply,
-    PakeStep, Placement, Request, Response, ServerHello, ShareConfig, ShareTracks, SignIn, Tracks,
-    Welcome,
+    PakeStep, Placement, Recovery, Request, Response, ServerHello, ShareConfig, ShareTracks,
+    SignIn, Tracks, Welcome,
 };
 use throcc_server::database::Database;
 use throcc_server::identity::ServerIdentity;
@@ -394,6 +394,8 @@ pub async fn watch(viewer: &Call, video: MediaId, capacity: usize) -> mpsc::Rece
     units
 }
 
+/// A share whose video the SFU never holds back, as synthetic units need: only their first
+/// is a keyframe. A real encoder's share announces its own recovery.
 pub const fn share_1080p60(codec: Codec, kbps: u32) -> ShareConfig {
     ShareConfig {
         audio: false,
@@ -402,6 +404,7 @@ pub const fn share_1080p60(codec: Codec, kbps: u32) -> ShareConfig {
         width: 1920,
         height: 1080,
         fps: 60,
+        recovery: Recovery::Refresh,
     }
 }
 

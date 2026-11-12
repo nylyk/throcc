@@ -10,7 +10,7 @@ use throcc_client_core::media::fragment::{
 };
 use throcc_proto::frame::{AUDIO_CLOCK_HZ, VIDEO_CLOCK_HZ};
 use throcc_proto::ids::{MediaId, RoomId, UserId};
-use throcc_proto::messages::{Codec, Event, MediaState, Presence, Request, ShareConfig};
+use throcc_proto::messages::{Codec, Event, MediaState, Presence, Recovery, Request, ShareConfig};
 use tokio::sync::mpsc;
 
 use crate::unit::{is_unit, unit};
@@ -101,6 +101,8 @@ pub async fn send(call: &mut Call, room: RoomId, options: SendOptions) -> Result
         width: 1920,
         height: 1080,
         fps: 60,
+        // Only the first unit is a keyframe, so the SFU must never hold the rest back.
+        recovery: Recovery::Refresh,
     });
     let media = MediaState {
         mic: with_audio || matches!(track, Track::Mic),

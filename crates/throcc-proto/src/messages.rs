@@ -379,6 +379,10 @@ pub struct ShareConfig {
     pub width: u16,
     pub height: u16,
     pub fps: u8,
+    /// How the sender heals a picture a loss broke. The SFU holds an `Idr` share's video back
+    /// from a receiver it dropped a unit for, until a keyframe, and asks for one; a `Refresh`
+    /// share heals by itself, so its video keeps flowing.
+    pub recovery: Recovery,
 }
 
 /// Announced by the sender, never negotiated.
@@ -390,6 +394,7 @@ pub enum Codec {
     Vp9,
 }
 
+/// A way to heal a broken picture: an intra refresh that sweeps it, or a keyframe.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Recovery {
     Refresh,
