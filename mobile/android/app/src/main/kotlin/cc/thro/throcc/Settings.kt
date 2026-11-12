@@ -38,8 +38,8 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -55,7 +55,6 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import cc.thro.throcc.core.CoreState
 import cc.thro.throcc.core.Palette
-import cc.thro.throcc.core.VerifiedPerson
 import cc.thro.throcc.core.fingerprintShort
 
 private const val SOURCE = "https://github.com/nylyk/throcc"
@@ -94,9 +93,7 @@ fun Profile(model: AppModel) {
                 PictureField(model, picture, name) { picture = it }
                 NameField(name) { name = it }
             }
-            MainButton("Save", changed && validName(name) != null) {
-                if (model.saveProfile(name, picture)) model.back()
-            }
+            MainButton("Save", changed && validName(name) != null) { model.saveProfile(name, picture) }
         }
     }
 }
@@ -206,11 +203,11 @@ private fun ColorField(label: String, rgb: UInt, onChange: (UInt) -> Unit) {
 
 @Composable
 fun VerifiedPeople(model: AppModel, state: CoreState) {
-    var removed by remember { mutableIntStateOf(0) }
-    var removing by remember { mutableStateOf<VerifiedPerson?>(null) }
-    val people = remember(state.people.map { it.verified }, removed) { model.core.verified() }
+    var removing by rememberSaveable { mutableStateOf<ByteArray?>(null) }
+    LaunchedEffect(state.people.map { it.verified }) { model.loadVerified() }
+    val people = model.verified.orEmpty()
     Page(model, "Verified People") { padding ->
-        if (people.isEmpty()) {
+        if (model.verified?.isEmpty() == true) {
             val hint = "Nobody yet. Compare safety numbers with someone to verify them."
             Hint(Icons.Default.VerifiedUser, hint, Modifier.padding(padding))
         }
@@ -220,7 +217,7 @@ fun VerifiedPeople(model: AppModel, state: CoreState) {
                     index,
                     people.size,
                     trailing = {
-                        IconButton({ removing = person }) {
+                        IconButton({ removing = person.key }) {
                             Icon(Icons.Default.RemoveModerator, "Mark as Not Verified")
                         }
                     },
@@ -234,22 +231,22 @@ fun VerifiedPeople(model: AppModel, state: CoreState) {
             }
         }
     }
-    removing?.let { person ->
+    people.find { it.key.contentEquals(removing) }?.let { person ->
         Confirm(
             "Mark “${person.name}” as not verified?",
             "To verify them again, you compare safety numbers once more.",
             "Mark as Not Verified",
             onDismiss = { removing = null },
-        ) { if (model.tell { model.core.unverify(person.key) }) removed++ }
+        ) { model.unverify(person.key) }
     }
 }
 
 @Composable
 fun BlockedPeople(model: AppModel, state: CoreState) {
-    var removed by remember { mutableIntStateOf(0) }
-    val people = remember(state.people.map { it.blocked }, removed) { model.core.blocked() }
+    LaunchedEffect(state.people.map { it.blocked }) { model.loadBlocked() }
+    val people = model.blocked.orEmpty()
     Page(model, "Blocked People") { padding ->
-        if (people.isEmpty()) {
+        if (model.blocked?.isEmpty() == true) {
             Hint(Icons.Default.Block, "Nobody. Tap someone in a room to block them.", Modifier.padding(padding))
         }
         LazyColumn(Modifier.pageWidth(), contentPadding = padding) {
@@ -257,10 +254,8 @@ fun BlockedPeople(model: AppModel, state: CoreState) {
                 GroupRow(
                     index,
                     people.size,
-                    leading = { Avatar(remember(person) { person.picture?.toImage() }, person.name, 40.dp) },
-                    trailing = {
-                        TextButton({ if (model.tell { model.core.unblock(person.key) }) removed++ }) { Text("Unblock") }
-                    },
+                    leading = { Avatar(model.picture(person), person.name, 40.dp) },
+                    trailing = { TextButton({ model.unblock(person.key) }) { Text("Unblock") } },
                     supporting = {
                         Column {
                             person.server?.let { Text(it) }
@@ -287,7 +282,13 @@ fun About(model: AppModel) {
                 GroupRow(
                     1,
                     2,
-                    { links.openUri(SOURCE) },
+                    {
+                        try {
+                            links.openUri(SOURCE)
+                        } catch (_: IllegalArgumentException) {
+                            model.notices.trySend("No app on this device opens web pages.")
+                        }
+                    },
                     trailing = { Icon(Icons.AutoMirrored.Filled.OpenInNew, null) },
                     supporting = { Text(SOURCE) },
                 ) { Text("Source") }

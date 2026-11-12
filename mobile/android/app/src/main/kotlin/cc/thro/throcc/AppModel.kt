@@ -9,6 +9,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import cc.thro.throcc.core.BlockedPerson
 import cc.thro.throcc.core.Command
 import cc.thro.throcc.core.Connection
 import cc.thro.throcc.core.Core
@@ -20,7 +21,12 @@ import cc.thro.throcc.core.Listener
 import cc.thro.throcc.core.Palette
 import cc.thro.throcc.core.Profile
 import cc.thro.throcc.core.User
+import cc.thro.throcc.core.VerifiedPerson
 import cc.thro.throcc.core.customThemeName
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.read
+import kotlin.concurrent.write
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -35,12 +41,19 @@ enum class Screen {
     Room,
 }
 
-const val SAVING = "Saving…"
+/** How saving the server's name and picture went. */
+sealed interface ServerSave {
+    data object Saving : ServerSave
+    data object Saved : ServerSave
+    data class Refused(val reason: String) : ServerSave
+}
 
 /** The name of the theme made of the user's own colours. */
 val CUSTOM = customThemeName()
 
-class AppModel(val core: Core, sample: String?) : ViewModel(), Listener {
+fun CoreState.connectedTo(address: String) = connection == Connection.Connected && server?.address == address
+
+class AppModel(val core: Core, sample: String?) : ViewModel() {
     private val shown = MutableStateFlow(core.state())
     val state = shown.asStateFlow()
 
@@ -50,8 +63,7 @@ class AppModel(val core: Core, sample: String?) : ViewModel(), Listener {
     /** Whether a narrow window shows our room in front of the pages. */
     var roomInFront by mutableStateOf(false)
 
-    /** Whose sheet is open. */
-    var sheet by mutableStateOf<ULong?>(null)
+    var sheetPerson by mutableStateOf<ULong?>(null)
 
     var profile by mutableStateOf(core.profile())
         private set
@@ -60,8 +72,15 @@ class AppModel(val core: Core, sample: String?) : ViewModel(), Listener {
     var servers by mutableStateOf(emptyList<KnownServer>())
         private set
 
-    /** The address being signed in to. */
-    var connecting by mutableStateOf<String?>(null)
+    /** Everyone verified on this install, once read. */
+    var verified by mutableStateOf<List<VerifiedPerson>?>(null)
+        private set
+
+    /** Everyone blocked on this install, once read. */
+    var blocked by mutableStateOf<List<BlockedPerson>?>(null)
+        private set
+
+    var connectingTo by mutableStateOf<String?>(null)
         private set
     var users by mutableStateOf(emptyList<User>())
         private set
@@ -69,39 +88,55 @@ class AppModel(val core: Core, sample: String?) : ViewModel(), Listener {
         private set
     var passwordRefused by mutableStateOf<String?>(null)
 
-    /** How saving the server's name and picture went: `SAVING`, "Saved" or why it was refused. */
-    var serverSaved by mutableStateOf<String?>(null)
+    var serverSaved by mutableStateOf<ServerSave?>(null)
 
     val notices = Channel<String>(Channel.BUFFERED)
     val snackbars = SnackbarHostState()
 
-    private val pictures = mutableStateMapOf<String, ImageBitmap>()
+    private val pictures = mutableStateMapOf<String, Picture>()
+    private var serverPictures by mutableStateOf(emptyMap<String, Picture>())
+    private var blockedPictures by mutableStateOf(emptyMap<String, Picture>())
 
     /** The connection a sample shows in place of the mock's. */
     private var sampleConnection: Connection? = null
 
+    private val coreHandle = ReentrantReadWriteLock()
+    private var closed = false
+
+    private val listener = object : Listener {
+        override fun state(state: CoreState) {
+            unlessClosed { loadPictures(state) }
+            viewModelScope.launch { show(state) }
+        }
+
+        override fun event(event: Event) {
+            if (event is Event.AvatarReady) {
+                unlessClosed { loadPicture(event.hash) }
+            } else {
+                viewModelScope.launch { handle(event) }
+            }
+        }
+    }
+
     init {
-        core.setListener(this)
+        core.setListener(listener)
         viewModelScope.launch { loadServers() }
         sample?.let(::showSample)
     }
 
     override fun onCleared() {
         core.setListener(null)
-        core.close()
-    }
-
-    override fun state(state: CoreState) {
-        loadPictures(state)
-        viewModelScope.launch { show(state) }
-    }
-
-    override fun event(event: Event) {
-        if (event is Event.AvatarReady) loadPicture(event.hash) else viewModelScope.launch { handle(event) }
+        CoroutineScope(Dispatchers.IO).launch {
+            coreHandle.write {
+                closed = true
+                core.close()
+            }
+        }
     }
 
     fun open(screen: Screen) {
         roomInFront = false
+        if (screen == Screen.Server) serverSaved = null
         if (screen !in stack) stack += screen
     }
 
@@ -111,21 +146,20 @@ class AppModel(val core: Core, sample: String?) : ViewModel(), Listener {
 
     /** Opens the rooms of the server at `address`, signing in unless we are connected there. */
     fun openServer(address: String) {
-        if (state.value.server?.address == address) open(Screen.Rooms) else connect(address)
+        if (state.value.connectedTo(address)) open(Screen.Rooms) else connect(address)
     }
 
     /** Signs in at `address` and opens its rooms, or says why it couldn't. */
     fun connect(address: String, invite: String? = null) {
-        if (connecting != null) return
+        if (connectingTo != null) return
         viewModelScope.launch {
-            connecting = address
-            val failure = signIn(address, invite)
-            connecting = null
+            connectingTo = address
+            val signedIn = signIn(address, invite)
+            connectingTo = null
             when {
-                failure == null -> showPages(Screen.Rooms)
+                signedIn -> showPages(Screen.Rooms)
                 Screen.Rooms in stack -> showPages()
             }
-            failure?.let(notices::trySend)
         }
     }
 
@@ -139,48 +173,101 @@ class AppModel(val core: Core, sample: String?) : ViewModel(), Listener {
     fun disconnect() {
         showPages()
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { core.disconnect() }
+            ask { core.disconnect() }
             loadServers()
         }
     }
 
     fun forgetServer(address: String) {
-        tell { core.forgetServer(address) }
-        viewModelScope.launch { loadServers() }
+        viewModelScope.launch {
+            ask { core.forgetServer(address) }
+            loadServers()
+        }
     }
 
-    fun saveProfile(name: String, picture: ByteArray?): Boolean {
-        val saved = tell { core.setProfile(Profile(name, picture)) }
-        profile = core.profile()
-        return saved
+    /** Our name and picture are kept and the profile page closes, or a notice says why not. */
+    fun saveProfile(name: String, picture: ByteArray?) {
+        viewModelScope.launch {
+            val saved = ask { core.setProfile(Profile(name, picture)) } != null
+            profile = ask { core.profile() }
+            if (saved) stack.remove(Screen.Profile)
+        }
     }
 
     /** Picks the preset called `name`, or with `CUSTOM` the user's own colours. */
     fun pickTheme(name: String) {
-        tell { if (name == CUSTOM) core.setCustomTheme(core.customPalette()) else core.setTheme(name) }
-        theme = core.theme()
+        changeTheme { if (name == CUSTOM) core.setCustomTheme(core.customPalette()) else core.setTheme(name) }
     }
 
     fun pickCustomTheme(palette: Palette) {
-        tell { core.setCustomTheme(palette) }
-        theme = core.theme()
+        changeTheme { core.setCustomTheme(palette) }
     }
 
-    /** Whether `action` on the core worked. A failure shows as a notice. */
-    fun tell(action: () -> Unit): Boolean = try {
-        action()
-        true
-    } catch (failure: CoreException) {
-        notices.trySend(failure.message.orEmpty())
-        false
+    fun loadVerified() {
+        viewModelScope.launch { ask { core.verified() }?.let { verified = it } }
+    }
+
+    fun unverify(key: ByteArray) {
+        viewModelScope.launch {
+            ask { core.unverify(key) }
+            loadVerified()
+        }
+    }
+
+    fun loadBlocked() {
+        viewModelScope.launch {
+            val kept = blockedPictures
+            val (people, peoplePictures) = ask {
+                val people = core.blocked()
+                people to decoded(people.map { it.key to it.picture }, kept)
+            } ?: return@launch
+            blocked = people
+            blockedPictures = peoplePictures
+        }
+    }
+
+    fun unblock(key: ByteArray) {
+        viewModelScope.launch {
+            ask { core.unblock(key) }
+            loadBlocked()
+        }
     }
 
     /** The decoded picture behind `hash`, once it has arrived. */
-    fun picture(hash: ByteArray?): ImageBitmap? = hash?.let { pictures[it.toHexString()] }
+    fun picture(hash: ByteArray?): ImageBitmap? = hash?.let { pictures[it.toHexString()]?.image }
+
+    /** The picture file behind `hash`, once it has arrived. */
+    fun pictureFile(hash: ByteArray?): ByteArray? = hash?.let { pictures[it.toHexString()]?.file }
+
+    fun picture(server: KnownServer): ImageBitmap? = serverPictures[server.fingerprint.toHexString()]?.image
+
+    fun picture(person: BlockedPerson): ImageBitmap? = blockedPictures[person.key.toHexString()]?.image
+
+    /** What `action` gave off the main thread, or null where it failed, which shows as a notice. */
+    private suspend fun <T> ask(action: () -> T): T? = withContext(Dispatchers.IO) {
+        unlessClosed {
+            try {
+                action()
+            } catch (failure: CoreException) {
+                notices.trySend(failure.message.orEmpty())
+                null
+            }
+        }
+    }
+
+    /** The result of `action`, run while the core's handle is held open, or null once the handle is closed. */
+    private fun <T> unlessClosed(action: () -> T): T? = coreHandle.read { if (closed) null else action() }
+
+    private fun changeTheme(change: () -> Unit) {
+        viewModelScope.launch {
+            ask(change)
+            ask { core.theme() }?.let { theme = it }
+        }
+    }
 
     private fun show(state: CoreState) {
         if (state.current?.room != shown.value.current?.room) roomInFront = state.current != null
-        if (state.people.none { it.user == sheet }) sheet = null
+        if (state.people.none { it.user == sheetPerson }) sheetPerson = null
         shown.value = sampleConnection?.let { state.copy(connection = it) } ?: state
     }
 
@@ -195,8 +282,8 @@ class AppModel(val core: Core, sample: String?) : ViewModel(), Listener {
             }
             Event.LeftServer -> disconnect()
             is Event.PasswordRefused -> passwordRefused = event.reason
-            Event.ServerProfileSaved -> if (serverSaved == SAVING) serverSaved = "Saved"
-            is Event.ServerProfileRefused -> serverSaved = event.reason
+            Event.ServerProfileSaved -> if (serverSaved == ServerSave.Saving) serverSaved = ServerSave.Saved
+            is Event.ServerProfileRefused -> serverSaved = ServerSave.Refused(event.reason)
             is Event.ProfileRefused -> notices.trySend("This server refused your profile: ${event.reason}")
             Event.ProfileSaved, is Event.AvatarReady -> {}
         }
@@ -208,37 +295,37 @@ class AppModel(val core: Core, sample: String?) : ViewModel(), Listener {
         stack += pages
     }
 
-    private suspend fun signIn(address: String, invite: String?): String? {
+    /** Whether signing in at `address` worked. A failure shows as a notice. */
+    private suspend fun signIn(address: String, invite: String?): Boolean {
         sampleConnection = null
         users = emptyList()
         this.invite = null
-        val failure = withContext(Dispatchers.IO) {
-            try {
-                core.connect(address, invite)
-                // The core's first state arrives before it hands out pictures.
-                loadPictures(core.state())
-                null
-            } catch (failure: CoreException) {
-                failure.message.orEmpty()
-            }
-        }
+        val signedIn = ask { core.connect(address, invite) } != null
         show(core.state())
         loadServers()
-        return failure
+        return signedIn
     }
 
     private suspend fun loadServers() {
-        withContext(Dispatchers.IO) { tell { servers = core.servers() } }
+        val kept = serverPictures
+        val (listed, listedPictures) = ask {
+            val listed = core.servers()
+            listed to decoded(listed.map { it.fingerprint to it.picture }, kept)
+        } ?: return
+        servers = listed
+        serverPictures = listedPictures
     }
 
     private fun loadPictures(state: CoreState) {
-        (state.people.map { it.avatar } + state.server?.avatar).filterNotNull().forEach(::loadPicture)
+        val named = (state.people.map { it.avatar } + state.server?.avatar).filterNotNull()
+        pictures.keys.retainAll(named.map { it.toHexString() }.toSet())
+        named.forEach(::loadPicture)
     }
 
     private fun loadPicture(hash: ByteArray) {
         val key = hash.toHexString()
         if (key in pictures) return
-        core.avatar(hash)?.toImage()?.let { pictures[key] = it }
+        core.avatar(hash)?.let { pictures[key] = Picture(it) }
     }
 
     /** Opens the sample `name` over the mock's server, as the `screen` extra asks. */
@@ -263,8 +350,8 @@ class AppModel(val core: Core, sample: String?) : ViewModel(), Listener {
             if (name in listOf("room", "blocked", "person", "personblocked")) core.command(Command.Join(1u))
             if (name in listOf("blocked", "personblocked", "blockedpeople")) core.command(Command.Block(3u))
             when (name) {
-                "person" -> sheet = 2u
-                "personblocked" -> sheet = 3u
+                "person" -> sheetPerson = 2u
+                "personblocked" -> sheetPerson = 3u
                 "invites" -> core.command(Command.CreateInvite)
                 "reconnect" -> sampleConnection = Connection.AwaitingReconnect
                 "elsewhere" -> sampleConnection = Connection.SignedInElsewhere

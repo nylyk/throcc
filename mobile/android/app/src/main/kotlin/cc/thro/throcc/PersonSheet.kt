@@ -1,6 +1,7 @@
 package cc.thro.throcc
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -31,6 +32,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderState
+import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberBottomSheetState
@@ -38,6 +40,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -59,32 +62,37 @@ import kotlin.math.roundToInt
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PersonSheet(model: AppModel, state: CoreState, person: Person) {
-    val close = { model.sheet = null }
+    val close = { model.sheetPerson = null }
     MaterialTheme(colorScheme = raised(MaterialTheme.colorScheme)) {
         ModalBottomSheet(
             close,
             sheetState = rememberBottomSheetState(SheetValue.Hidden, setOf(SheetValue.Hidden, SheetValue.Expanded)),
             containerColor = MaterialTheme.colorScheme.surface,
         ) {
-            Column(
-                Modifier.verticalScroll(rememberScrollState()).padding(start = 16.dp, end = 16.dp, bottom = 24.dp),
-                Arrangement.spacedBy(16.dp),
-            ) {
-                Row(Modifier.padding(start = 8.dp), Arrangement.spacedBy(16.dp), Alignment.CenterVertically) {
-                    PersonPicture(model, person, 72.dp)
-                    Column(Modifier.weight(1f)) {
-                        Text(person.name, style = MaterialTheme.typography.headlineSmallEmphasized)
-                        if (!person.blocked) Text(person.role.label, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        if (!person.blocked && person.user != state.me) TrustLabel(state.trust(person))
+            Box {
+                Column(
+                    Modifier.verticalScroll(rememberScrollState()).padding(start = 16.dp, end = 16.dp, bottom = 24.dp),
+                    Arrangement.spacedBy(16.dp),
+                ) {
+                    Row(Modifier.padding(start = 8.dp), Arrangement.spacedBy(16.dp), Alignment.CenterVertically) {
+                        PersonPicture(model, person, 72.dp)
+                        Column(Modifier.weight(1f)) {
+                            Text(person.name, style = MaterialTheme.typography.headlineSmallEmphasized)
+                            if (!person.blocked) {
+                                Text(person.role.label, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            if (!person.blocked && person.user != state.me) TrustLabel(state.trust(person))
+                        }
+                        IconButton(close, Modifier.align(Alignment.Top)) { Icon(Icons.Default.Close, "Close") }
                     }
-                    IconButton(close, Modifier.align(Alignment.Top)) { Icon(Icons.Default.Close, "Close") }
+                    when {
+                        person.blocked -> MainButton("Unblock") { model.core.command(Command.Unblock(person.user)) }
+                        person.user == state.me -> Own(model)
+                        else -> Other(model, state, person)
+                    }
+                    Moderation(model, state, person)
                 }
-                when {
-                    person.blocked -> MainButton("Unblock") { model.core.command(Command.Unblock(person.user)) }
-                    person.user == state.me -> Own(model)
-                    else -> Other(model, state, person)
-                }
-                Moderation(model, state, person)
+                SnackbarHost(model.snackbars, Modifier.align(Alignment.BottomCenter))
             }
         }
     }
@@ -99,7 +107,7 @@ private fun Own(model: AppModel) {
         MaterialTheme.colorScheme.onSurfaceVariant,
     )
     FilledTonalButton({
-        model.sheet = null
+        model.sheetPerson = null
         model.open(Screen.Profile)
     }) { Text("Edit Profile") }
 }
@@ -189,11 +197,8 @@ private fun Volume(model: AppModel, person: Person, sound: Sound, label: String,
                 { set(SoundLevel(volume.value, it)) },
                 IconButtonDefaults.toggleableShapes(),
             ) {
-                if (level.muted) {
-                    Icon(Icons.AutoMirrored.Filled.VolumeOff, "Unmute")
-                } else {
-                    Icon(Icons.AutoMirrored.Filled.VolumeUp, "Mute")
-                }
+                val icon = if (level.muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp
+                Icon(icon, "Mute")
             }
         }
         Slider(volume, {
@@ -209,7 +214,7 @@ private class Action(val icon: ImageVector, val label: String, val danger: Boole
 @Composable
 private fun Moderation(model: AppModel, state: CoreState, person: Person) {
     if (person.user == state.me) return
-    var removing by remember { mutableStateOf(false) }
+    var removing by rememberSaveable(person.user) { mutableStateOf(false) }
     val role = state.role
     val room = person.room
     val actions = listOfNotNull(
@@ -232,7 +237,7 @@ private fun Moderation(model: AppModel, state: CoreState, person: Person) {
     if (removing) {
         RemoveDialog(person.name, { removing = false }) { cascade ->
             model.core.command(Command.RemoveUser(person.user, cascade))
-            model.sheet = null
+            model.sheetPerson = null
         }
     }
 }

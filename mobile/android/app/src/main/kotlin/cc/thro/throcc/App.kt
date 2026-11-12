@@ -33,7 +33,7 @@ fun App(model: AppModel) {
         Surface(Modifier.fillMaxSize()) {
             if (model.profile == null) Onboarding(model) else Panes(model, state)
         }
-        state.people.find { it.user == model.sheet }?.let { PersonSheet(model, state, it) }
+        state.people.find { it.user == model.sheetPerson }?.let { PersonSheet(model, state, it) }
     }
 }
 

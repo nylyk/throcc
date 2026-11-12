@@ -32,7 +32,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -47,20 +47,21 @@ import cc.thro.throcc.core.Room
 import cc.thro.throcc.core.isValidPassword
 import cc.thro.throcc.core.limits
 import cc.thro.throcc.core.permissionsOf
+import java.io.Serializable
 
-private sealed interface RoomDialog {
+private sealed interface RoomDialog : Serializable {
     data object New : RoomDialog
-    data class Edit(val room: Room) : RoomDialog
-    data class Delete(val room: Room) : RoomDialog
-    data class Password(val room: Room) : RoomDialog
+    data class Edit(val room: ULong) : RoomDialog
+    data class Delete(val room: ULong) : RoomDialog
+    data class Password(val room: ULong) : RoomDialog
 }
 
 @Composable
 fun Rooms(model: AppModel, state: CoreState) {
     val permissions = state.role?.let(::permissionsOf)
     val managesRooms = permissions?.manageRooms == true
-    var dialog by remember { mutableStateOf<RoomDialog?>(null) }
-    var leaving by remember { mutableStateOf(false) }
+    var dialog by rememberSaveable { mutableStateOf<RoomDialog?>(null) }
+    var leaving by rememberSaveable { mutableStateOf(false) }
     val server = state.server?.let { it.name ?: it.address }.orEmpty()
     val pages = listOfNotNull(
         "Server" to Screen.Server,
@@ -73,7 +74,7 @@ fun Rooms(model: AppModel, state: CoreState) {
             state.current?.room == room.id -> model.roomInFront = true
             room.locked && !managesRooms -> {
                 model.passwordRefused = null
-                dialog = RoomDialog.Password(room)
+                dialog = RoomDialog.Password(room.id)
             }
             else -> model.core.command(Command.Join(room.id))
         }
@@ -99,22 +100,22 @@ fun Rooms(model: AppModel, state: CoreState) {
             }
         },
     ) { padding ->
-        if (state.server != null && state.rooms.isEmpty()) {
-            Hint(Icons.AutoMirrored.Filled.VolumeUp, "No rooms yet.", Modifier.padding(padding))
-        }
         LazyColumn(Modifier.pageWidth(), contentPadding = padding) {
             item("connection") { ConnectionBanner(model, state) }
+            if (state.server != null && state.rooms.isEmpty()) {
+                item("hint") { Hint(Icons.AutoMirrored.Filled.VolumeUp, "No rooms yet.") }
+            }
             items(state.rooms, { "room ${it.id}" }) { room ->
                 RoomCard(model, state, room, { join(room) }) {
                     if (managesRooms) {
                         OverflowMenu { close ->
                             DropdownMenuItem({ Text("Edit Room…") }, {
                                 close()
-                                dialog = RoomDialog.Edit(room)
+                                dialog = RoomDialog.Edit(room.id)
                             })
                             DangerItem("Delete Room") {
                                 close()
-                                dialog = RoomDialog.Delete(room)
+                                dialog = RoomDialog.Delete(room.id)
                             }
                         }
                     }
@@ -131,21 +132,26 @@ fun Rooms(model: AppModel, state: CoreState) {
             }
         }
     }
+    fun room(id: ULong) = state.rooms.find { it.id == id }
     when (val open = dialog) {
         null -> {}
         RoomDialog.New -> NewRoom(model) { dialog = null }
-        is RoomDialog.Edit -> EditRoom(model, open.room) { dialog = null }
-        is RoomDialog.Delete -> Confirm(
-            "Delete “${open.room.name}”?",
-            if (state.people.any { it.room == open.room.id }) {
-                "Everyone in it goes back to the lobby. This can’t be undone."
-            } else {
-                "This can’t be undone."
-            },
-            "Delete",
-            onDismiss = { dialog = null },
-        ) { model.core.command(Command.DeleteRoom(open.room.id)) }
-        is RoomDialog.Password -> JoinLocked(model, open.room, state.current?.room == open.room.id) { dialog = null }
+        is RoomDialog.Edit -> room(open.room)?.let { EditRoom(model, it) { dialog = null } }
+        is RoomDialog.Delete -> room(open.room)?.let { room ->
+            Confirm(
+                "Delete “${room.name}”?",
+                if (state.people.any { it.room == room.id }) {
+                    "Everyone in it goes back to the lobby. This can’t be undone."
+                } else {
+                    "This can’t be undone."
+                },
+                "Delete",
+                onDismiss = { dialog = null },
+            ) { model.core.command(Command.DeleteRoom(room.id)) }
+        }
+        is RoomDialog.Password -> room(open.room)?.let { room ->
+            JoinLocked(model, room, state.current?.room == room.id) { dialog = null }
+        }
     }
     if (leaving) {
         Confirm(
@@ -202,7 +208,7 @@ private fun PersonRow(model: AppModel, state: CoreState, person: Person) {
     Row(
         Modifier
             .fillMaxWidth()
-            .clickable { model.sheet = person.user }
+            .clickable { model.sheetPerson = person.user }
             .heightIn(min = 48.dp)
             .padding(horizontal = 20.dp),
         Arrangement.spacedBy(12.dp),
@@ -274,8 +280,8 @@ private fun RoomForm(
 
 @Composable
 private fun NewRoom(model: AppModel, onDismiss: () -> Unit) {
-    var name by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
+    var name by rememberSaveable { mutableStateOf("") }
+    var password by rememberSaveable { mutableStateOf("") }
     val valid = validName(name)
     RoomForm(
         "New Room",
@@ -291,9 +297,9 @@ private fun NewRoom(model: AppModel, onDismiss: () -> Unit) {
 
 @Composable
 private fun EditRoom(model: AppModel, room: Room, onDismiss: () -> Unit) {
-    var name by remember { mutableStateOf(room.name) }
-    var password by remember { mutableStateOf("") }
-    var locked by remember { mutableStateOf(room.locked) }
+    var name by rememberSaveable(room.id) { mutableStateOf(room.name) }
+    var password by rememberSaveable(room.id) { mutableStateOf("") }
+    var locked by rememberSaveable(room.id) { mutableStateOf(room.locked) }
     val valid = validName(name)
     RoomForm(
         "Edit Room",
@@ -323,7 +329,7 @@ private fun EditRoom(model: AppModel, room: Room, onDismiss: () -> Unit) {
 
 @Composable
 private fun JoinLocked(model: AppModel, room: Room, joined: Boolean, onDismiss: () -> Unit) {
-    var password by remember { mutableStateOf("") }
+    var password by rememberSaveable(room.id) { mutableStateOf("") }
     LaunchedEffect(joined) {
         if (joined) onDismiss()
     }

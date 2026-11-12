@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
@@ -70,6 +71,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -79,7 +81,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.semantics.Role as Semantics
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -90,13 +92,12 @@ import cc.thro.throcc.core.Connection
 import cc.thro.throcc.core.CoreState
 import cc.thro.throcc.core.NameCheck
 import cc.thro.throcc.core.Person
-import cc.thro.throcc.core.Role
 import cc.thro.throcc.core.checkName
 import cc.thro.throcc.core.limits
 import kotlinx.coroutines.launch
 
-/** The width and side margins of a page's content, kept narrow in a wide window. */
-fun Modifier.pageWidth() = widthIn(max = 640.dp).padding(horizontal = 16.dp)
+/** The width and side margins of a page's content, kept narrow in the middle of a wide window. */
+fun Modifier.pageWidth() = fillMaxWidth().wrapContentWidth().widthIn(max = 640.dp).padding(horizontal = 16.dp)
 
 /** A page under a large title that shrinks as the content scrolls. A short window gets the small title. */
 @Composable
@@ -111,9 +112,13 @@ fun Page(
     buttonPosition: FabPosition = FabPosition.End,
     content: @Composable (PaddingValues) -> Unit,
 ) {
-    val scroll = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     val tall = currentWindowAdaptiveInfoV2().windowSizeClass
         .isHeightAtLeastBreakpoint(WindowSizeClass.HEIGHT_DP_MEDIUM_LOWER_BOUND)
+    val scroll = if (tall) {
+        TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+    } else {
+        TopAppBarDefaults.pinnedScrollBehavior()
+    }
     val name = @Composable {
         Text(title, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
@@ -137,7 +142,7 @@ fun Page(
                 TopAppBar(name, navigationIcon = back, actions = actions, colors = colors, scrollBehavior = scroll)
             }
         },
-        snackbarHost = { if (notices) SnackbarHost(model.snackbars) },
+        snackbarHost = { if (notices && model.sheetPerson == null) SnackbarHost(model.snackbars) },
         floatingActionButton = floatingButton,
         floatingActionButtonPosition = buttonPosition,
         contentWindowInsets = WindowInsets.safeDrawing,
@@ -319,13 +324,6 @@ fun TrustLabel(trust: Trust) {
 
 fun people(count: Int) = if (count == 1) "1 person" else "$count people"
 
-val Role.label
-    get() = when (this) {
-        Role.USER -> "User"
-        Role.MANAGER -> "Manager"
-        Role.ADMIN -> "Admin"
-    }
-
 /** The name a server keeps for `typed`, or null where it refuses it. */
 fun validName(typed: String) = (checkName(typed) as? NameCheck.Fine)?.name
 
@@ -418,7 +416,7 @@ fun Confirm(title: String, text: String, action: String, onDismiss: () -> Unit, 
 /** Asks before removing `name` from the server, and whether to remove everyone they invited too. */
 @Composable
 fun RemoveDialog(name: String, onDismiss: () -> Unit, onRemove: (cascade: Boolean) -> Unit) {
-    var cascade by remember { mutableStateOf(false) }
+    var cascade by rememberSaveable { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
@@ -433,7 +431,7 @@ fun RemoveDialog(name: String, onDismiss: () -> Unit, onRemove: (cascade: Boolea
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("They are disconnected at once and need a new invite to come back.")
                 Row(
-                    Modifier.heightIn(min = 48.dp).toggleable(cascade, role = Semantics.Checkbox) { cascade = it },
+                    Modifier.heightIn(min = 48.dp).toggleable(cascade, role = Role.Checkbox) { cascade = it },
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
@@ -449,7 +447,7 @@ fun RemoveDialog(name: String, onDismiss: () -> Unit, onRemove: (cascade: Boolea
 @Composable
 fun ConnectionBanner(model: AppModel, state: CoreState) {
     val signIn = { state.server?.let { model.connect(it.address) } ?: Unit }
-    val signingIn = model.connecting != null
+    val signingIn = model.connectingTo != null
     when (val connection = state.connection) {
         Connection.Connected, Connection.Disconnected -> {}
         is Connection.Reconnecting -> Banner(

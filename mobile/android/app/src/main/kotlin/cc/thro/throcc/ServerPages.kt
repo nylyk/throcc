@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -19,6 +20,7 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ButtonGroup
+import androidx.compose.material3.ButtonGroupScope
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
@@ -40,6 +42,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
@@ -87,30 +90,42 @@ fun ServerOverview(model: AppModel, state: CoreState) {
 
 @Composable
 private fun EditServer(model: AppModel, server: Server) {
-    val kept = remember(server.avatar?.toHexString()) { server.avatar?.let(model.core::avatar) }
+    val kept = model.pictureFile(server.avatar)
     var name by rememberSaveable { mutableStateOf(server.name.orEmpty()) }
-    var picture by rememberSaveable { mutableStateOf(kept) }
+    var chosen by rememberSaveable { mutableStateOf<ByteArray?>(null) }
+    var edited by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(kept) {
+        if (chosen.contentEquals(kept)) edited = false
+    }
+    val picture = if (edited) chosen else kept
     val named = validName(name)
     val renamed = named != server.name
     val repainted = !picture.contentEquals(kept)
-    LaunchedEffect(Unit) { model.serverSaved = null }
     Panel {
-        PictureField(model, picture, name.ifBlank { server.address }) { picture = it }
+        PictureField(model, picture, name.ifBlank { server.address }) {
+            chosen = it
+            edited = true
+        }
         NameField(name) { name = it }
     }
-    MainButton("Save", (renamed || repainted) && nameError(name) == null, model.serverSaved == SAVING) {
-        model.serverSaved = SAVING
+    MainButton("Save", (renamed || repainted) && nameError(name) == null, model.serverSaved == ServerSave.Saving) {
+        model.serverSaved = ServerSave.Saving
         val name = if (renamed) NameChange.Set(named) else NameChange.Keep
         val picture = if (repainted) PictureChange.Set(picture) else PictureChange.Keep
         model.core.command(Command.SetServerProfile(name, picture))
     }
-    model.serverSaved?.takeIf { it != SAVING }?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+    val outcome = when (val saved = model.serverSaved) {
+        null, ServerSave.Saving -> null
+        ServerSave.Saved -> "Saved"
+        is ServerSave.Refused -> saved.reason
+    }
+    outcome?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant) }
 }
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun Members(model: AppModel, state: CoreState) {
-    var removing by remember { mutableStateOf<User?>(null) }
+    var removing by rememberSaveable { mutableStateOf<Long?>(null) }
     LaunchedEffect(Unit) { model.core.command(Command.ListUsers) }
     Page(model, "Members") { padding ->
         LazyColumn(Modifier.pageWidth(), contentPadding = padding) {
@@ -122,11 +137,11 @@ fun Members(model: AppModel, state: CoreState) {
                 }
             }
             itemsIndexed(model.users, { _, user -> user.id.toLong() }) { index, user ->
-                Member(model, state, user, index) { removing = user }
+                Member(model, state, user, index) { removing = user.id.toLong() }
             }
         }
     }
-    removing?.let { user ->
+    model.users.find { it.id.toLong() == removing }?.let { user ->
         RemoveDialog(user.name, { removing = null }) { cascade ->
             model.core.command(Command.RemoveUser(user.id, cascade))
         }
@@ -167,6 +182,13 @@ private fun Member(model: AppModel, state: CoreState, user: User, index: Int, on
         },
     ) { Text(if (user.id == state.me) "${user.name} (you)" else user.name) }
 }
+
+val Role.label
+    get() = when (this) {
+        Role.USER -> "User"
+        Role.MANAGER -> "Manager"
+        Role.ADMIN -> "Admin"
+    }
 
 @Composable
 private fun RoleMenu(current: Role, roles: List<Role>, onPick: (Role) -> Unit) {
@@ -219,38 +241,38 @@ fun Invites(model: AppModel, state: CoreState) {
                 )
                 ButtonGroup({}, Modifier.fillMaxWidth()) {
                     customItem({
-                        val presses = remember { MutableInteractionSource() }
-                        FilledTonalButton(
-                            {
-                                val copied = ClipEntry(ClipData.newPlainText("Invite code", code))
-                                scope.launch { clipboard.setClipEntry(copied) }
-                            },
-                            Modifier.weight(1f).animateWidth(presses),
-                            interactionSource = presses,
-                        ) {
-                            Icon(Icons.Default.ContentCopy, null, Modifier.padding(end = 8.dp).size(18.dp))
-                            Text("Copy")
+                        CodeButton(Icons.Default.ContentCopy, "Copy", filled = false) {
+                            val copied = ClipEntry(ClipData.newPlainText("Invite code", code))
+                            scope.launch { clipboard.setClipEntry(copied) }
                         }
                     }, {})
                     customItem({
-                        val presses = remember { MutableInteractionSource() }
-                        Button(
-                            {
-                                val send = Intent(Intent.ACTION_SEND).setType("text/plain")
-                                send.putExtra(Intent.EXTRA_TEXT, code)
-                                context.startActivity(Intent.createChooser(send, null))
-                            },
-                            Modifier.weight(1f).animateWidth(presses),
-                            interactionSource = presses,
-                        ) {
-                            Icon(Icons.Default.Share, null, Modifier.padding(end = 8.dp).size(18.dp))
-                            Text("Share")
+                        CodeButton(Icons.Default.Share, "Share", filled = true) {
+                            val send = Intent(Intent.ACTION_SEND).setType("text/plain")
+                            send.putExtra(Intent.EXTRA_TEXT, code)
+                            context.startActivity(Intent.createChooser(send, null))
                         }
                     }, {})
                 }
             }
             TextButton(create, Modifier.align(Alignment.CenterHorizontally)) { Text("New Code") }
         }
+    }
+}
+
+/** One of the buttons that share an invite code, filled for the main one. */
+@Composable
+private fun ButtonGroupScope.CodeButton(icon: ImageVector, text: String, filled: Boolean, onClick: () -> Unit) {
+    val presses = remember { MutableInteractionSource() }
+    val width = Modifier.weight(1f).animateWidth(presses)
+    val label: @Composable RowScope.() -> Unit = {
+        Icon(icon, null, Modifier.padding(end = 8.dp).size(18.dp))
+        Text(text)
+    }
+    if (filled) {
+        Button(onClick, width, interactionSource = presses, content = label)
+    } else {
+        FilledTonalButton(onClick, width, interactionSource = presses, content = label)
     }
 }
 
@@ -274,7 +296,7 @@ fun Keys(model: AppModel, state: CoreState) {
                 GroupRow(
                     index,
                     others.size,
-                    { model.sheet = person.user },
+                    { model.sheetPerson = person.user },
                     leading = { PersonPicture(model, person, 40.dp) },
                     trailing = { if (!person.blocked) TrustLabel(state.trust(person)) },
                     supporting = person.identityKey?.let { key ->

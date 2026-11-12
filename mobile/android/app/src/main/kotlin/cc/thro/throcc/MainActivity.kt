@@ -1,5 +1,6 @@
 package cc.thro.throcc
 
+import android.content.pm.ApplicationInfo
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -36,10 +37,11 @@ private fun StartFailure(reason: String) {
 class MainActivity : ComponentActivity() {
     private var model: AppModel? = null
 
-    /** Opens the core, or with the `mock` extra the sample one at the page the `screen` extra names. */
+    /** Opens the core, or in a debuggable build with the `mock` extra the sample one at the page `screen` names. */
     private val models = viewModelFactory {
         initializer {
-            val mock = intent.getBooleanExtra("mock", false)
+            val debuggable = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+            val mock = debuggable && intent.getBooleanExtra("mock", false)
             val sample = intent.getStringExtra("screen").takeIf { mock }
             AppModel(if (mock) Core.mock(onboarded = sample != "onboarding") else Core(), sample)
         }

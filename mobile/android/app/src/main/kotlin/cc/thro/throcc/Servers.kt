@@ -27,7 +27,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -43,7 +42,7 @@ import cc.thro.throcc.core.isInviteCode
 
 @Composable
 fun Servers(model: AppModel, state: CoreState) {
-    var removing by remember { mutableStateOf<KnownServer?>(null) }
+    var removing by rememberSaveable { mutableStateOf<String?>(null) }
     Page(
         model,
         "Servers",
@@ -56,12 +55,12 @@ fun Servers(model: AppModel, state: CoreState) {
         }
         LazyColumn(Modifier.pageWidth(), contentPadding = padding) {
             itemsIndexed(model.servers, key = { _, server -> server.address }) { index, server ->
-                ServerRow(model, server, index, state.server?.address == server.address) { removing = server }
+                ServerRow(model, server, index, state.connectedTo(server.address)) { removing = server.address }
             }
             item { Spacer(Modifier.height(88.dp)) }
         }
     }
-    removing?.let { server ->
+    model.servers.find { it.address == removing }?.let { server ->
         Confirm(
             "Remove “${server.name ?: server.address}”?",
             "It leaves your list, but you stay a member. Adding it again needs an invite. " +
@@ -93,10 +92,10 @@ private fun ServerRow(model: AppModel, server: KnownServer, index: Int, connecte
         index,
         model.servers.size,
         { model.openServer(server.address) },
-        leading = { Avatar(remember(server) { server.picture?.toImage() }, title, 40.dp) },
+        leading = { Avatar(model.picture(server), title, 40.dp) },
         trailing = {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (model.connecting == server.address) LoadingIndicator(Modifier.size(32.dp))
+                if (model.connectingTo == server.address) LoadingIndicator(Modifier.size(32.dp))
                 OverflowMenu { close ->
                     DangerItem("Remove from List") {
                         close()
@@ -160,7 +159,7 @@ fun AddServer(model: AppModel) {
                     singleLine = true,
                 )
             }
-            MainButton("Join", address.isNotBlank() && !wrongCode, model.connecting != null) {
+            MainButton("Join", address.isNotBlank() && !wrongCode, model.connectingTo != null) {
                 model.connect(address.trim(), code.trim().ifEmpty { null })
             }
         }

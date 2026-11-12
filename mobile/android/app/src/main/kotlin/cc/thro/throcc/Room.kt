@@ -89,7 +89,7 @@ private fun PersonCard(model: AppModel, person: Person) {
         panelColors()
     }
     val ring = if (person.speaking) scheme.tertiary else Color.Transparent
-    Card({ model.sheet = person.user }, shape = MaterialTheme.shapes.extraLarge, colors = colors) {
+    Card({ model.sheetPerson = person.user }, shape = MaterialTheme.shapes.extraLarge, colors = colors) {
         Column(
             Modifier.fillMaxWidth().padding(16.dp),
             Arrangement.spacedBy(8.dp),
@@ -139,10 +139,10 @@ private fun RoomControls(model: AppModel, state: CoreState) {
     )
     HorizontalFloatingToolbar(expanded = true) {
         FilledTonalIconToggleButton(!state.mic, { model.core.command(Command.SetMic(!it)) }, shapes, size) {
-            if (state.mic) Icon(Icons.Default.Mic, "Mute") else Icon(Icons.Default.MicOff, "Unmute")
+            Icon(if (state.mic) Icons.Default.Mic else Icons.Default.MicOff, "Mute")
         }
         FilledTonalIconToggleButton(state.deafened, { model.core.command(Command.SetDeafened(it)) }, shapes, size) {
-            if (state.deafened) Icon(Icons.Default.HeadsetOff, "Undeafen") else Icon(Icons.Default.Headset, "Deafen")
+            Icon(if (state.deafened) Icons.Default.HeadsetOff else Icons.Default.Headset, "Deafen")
         }
         FilledIconButton(
             { model.core.command(Command.Join(null)) },
