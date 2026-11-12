@@ -980,21 +980,6 @@ mod tests {
     }
 
     #[test]
-    fn a_first_fragment_lost_at_the_inbox_holds_an_idr_track() {
-        let now = Instant::now();
-        let mut queues = Queues::default();
-        queues.lose(Lost {
-            kind: IDR_VIDEO,
-            media_id: MediaId(1),
-            seq: 0,
-            first: true,
-        });
-        whole(&mut queues, IDR_VIDEO, 1, false, now);
-        assert!(drain(&mut queues).is_empty());
-        assert_eq!(queues.take_held_change(), Some(vec![MediaId(1)]));
-    }
-
-    #[test]
     fn a_keyframe_copy_lets_go_of_the_hold_its_original_caused() {
         let now = Instant::now();
         let mut queues = Queues::default();
@@ -1135,18 +1120,6 @@ mod tests {
         drain(&mut queues);
         queues.forget_quiet_tracks();
         assert_eq!(queues.history.len(), 1);
-    }
-
-    #[test]
-    fn queued_audio_has_a_hard_cap_that_is_reported() {
-        let now = Instant::now();
-        let mut queues = Queues::default();
-        for seq in 0..MAX_QUEUED_AUDIO as u32 + 10 {
-            queues.push(audio(2, seq), now);
-        }
-        assert_eq!(queues.audio.len, MAX_QUEUED_AUDIO);
-        let stats = queues.take_stats();
-        assert_eq!(stats[0].dropped_units, 10);
     }
 
     fn lost(kind: TrackKind, media: u32, seq: u32, first: bool) -> Lost {

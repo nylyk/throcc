@@ -21,22 +21,19 @@ fn closed_with(connection: &quinn::Connection) -> Option<u32> {
 async fn signing_in_again_replaces_the_earlier_connection() {
     let server = start_server();
     let alice = admin(&server).await;
-    let bob = invited(&server, &alice).await;
-    let mut bob_again = account::sign_in(&bob.keystore, &server.addr, None)
-        .await
-        .unwrap();
+    let mut bob = invited(&server, &alice).await;
 
-    let bob_third = account::sign_in(&bob.keystore, &server.addr, None)
+    let bob_again = account::sign_in(&bob.keystore, &server.addr, None)
         .await
         .unwrap();
-    let last = tokio::time::timeout(Duration::from_secs(5), bob_again.events.recv())
+    let last = tokio::time::timeout(Duration::from_secs(5), bob.link.events.recv())
         .await
         .unwrap();
     assert_eq!(last, Some(Event::SignedInElsewhere));
-    bob_again.connected.connection.closed().await;
+    bob.link.connected.connection.closed().await;
     assert_eq!(
-        closed_with(&bob_again.connected.connection),
+        closed_with(&bob.link.connected.connection),
         Some(close::SIGNED_IN_ELSEWHERE)
     );
-    assert!(bob_third.connected.connection.close_reason().is_none());
+    assert!(bob_again.connected.connection.close_reason().is_none());
 }

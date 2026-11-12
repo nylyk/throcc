@@ -644,16 +644,7 @@ fn a_new_key_for_a_verified_persons_user_id_is_warned_of_and_still_hears_us() {
     let rebuilt = ProcessLikeServer::start(rebuilt_dir.path(), addr);
     let alice = client_in(alice_dir.path(), &address, Some(&rebuilt.admin_invite()));
     wait_connected(&alice, "alice on the rebuilt server");
-    let room = create_room(&alice);
-    alice.command(UiCommand::CreateRoom("Elsewhere".into(), None));
-    wait_for(&alice, "the other room", |s| s.rooms.len() == 2);
-    let elsewhere = alice
-        .state()
-        .rooms
-        .iter()
-        .find(|r| r.id != room)
-        .unwrap()
-        .id;
+    let (room, elsewhere) = room_and_elsewhere(&alice);
     alice.command(UiCommand::Join(Some(room)));
     wait_for(&alice, "alice in the room", |s| s.current.is_some());
     let alice_id = alice.state().me.unwrap();

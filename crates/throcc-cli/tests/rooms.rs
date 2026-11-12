@@ -289,22 +289,6 @@ async fn failed_set_room_leaves_the_client_in_place() {
 }
 
 #[tokio::test]
-async fn reconnect_returns_to_the_wanted_room_with_fresh_tracks() {
-    let server = start_server();
-    let mut alice = admin(&server).await;
-    let general = create_room(&mut alice, "General").await;
-    let mut bob = invited(&server, &alice).await;
-    let first = bob.join(Some(general)).await;
-
-    bob.reconnect(&server.addr, Some(general)).await;
-    let placement = bob.link.welcome.placement;
-    assert_eq!(placement.room, Some(general));
-    assert!(placement.epoch > first.epoch);
-    let (old, new) = (first.tracks.unwrap(), placement.tracks.unwrap());
-    assert!(new.mic > old.shares[0].audio);
-}
-
-#[tokio::test]
 async fn profile_changes_are_rate_limited_and_avatars_capped() {
     let server = start_server();
     let alice = admin(&server).await;
@@ -323,23 +307,35 @@ async fn profile_changes_are_rate_limited_and_avatars_capped() {
     assert_error(&empty_name, ErrorCode::Invalid);
 }
 
+/// A reconnect returns to the wanted room with fresh tracks and a newer epoch, and media ids
+/// keep growing across a server restart.
 #[tokio::test]
-async fn media_ids_never_repeat_across_a_restart() {
+async fn reconnects_get_fresh_tracks_and_media_ids_never_repeat_across_a_restart() {
     let first = ProcessLikeServer::start_temp();
     let addr = first.addr.to_string();
     let mut alice = enroll_at(&addr, &first.admin_invite()).await;
     let general = create_room(&mut alice, "General").await;
-    let before = alice.join(Some(general)).await.tracks.unwrap();
-    let _second = first.restart(|_| {});
+    let joined = alice.join(Some(general)).await;
 
     alice.reconnect(&addr, Some(general)).await;
-    let placement = &alice.link.welcome.placement;
-    let after = placement.tracks.as_ref().unwrap();
+    let reconnected = alice.link.welcome.placement.clone();
+    assert_eq!(reconnected.room, Some(general));
+    assert!(reconnected.epoch > joined.epoch);
+    let (before, after) = (joined.tracks.unwrap(), reconnected.tracks.unwrap());
     assert!(
         after.mic > before.shares[0].audio,
         "{before:?} then {after:?}"
     );
-    assert!(placement.epoch > Epoch(1));
+
+    let _second = first.restart(|_| {});
+    alice.reconnect(&addr, Some(general)).await;
+    let restarted = &alice.link.welcome.placement;
+    let latest = restarted.tracks.as_ref().unwrap();
+    assert!(
+        latest.mic > after.shares[0].audio,
+        "{after:?} then {latest:?}"
+    );
+    assert!(restarted.epoch > reconnected.epoch);
 }
 
 /// A relay that forwards both ways until the returned flag is set.

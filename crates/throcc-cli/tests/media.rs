@@ -290,11 +290,7 @@ async fn keyframes_arrive_whole_through_two_percent_loss() {
     );
     let video_id = first_share(&bob, &alice).await.video;
     let mut units = watch(&bob, video_id, KEYFRAMES as usize).await;
-    wait_for("both at one epoch with keys", || {
-        let epoch = alice.engine.keys().epoch();
-        epoch == bob.engine.keys().epoch() && bob.engine.keys().recv_key(video_id, epoch).is_some()
-    })
-    .await;
+    wait_for_keys(&alice, &bob, video_id).await;
 
     relay.lossy.store(true, Ordering::Relaxed);
     for index in 0..KEYFRAMES {
@@ -339,11 +335,7 @@ async fn a_unit_lost_on_the_way_asks_its_sender_for_a_refresh() {
     start_sharing(&alice).await;
     let video_id = first_share(&bob, &alice).await.video;
     let _units = watch(&bob, video_id, UNITS as usize).await;
-    wait_for("both at one epoch with keys", || {
-        let epoch = alice.engine.keys().epoch();
-        epoch == bob.engine.keys().epoch() && bob.engine.keys().recv_key(video_id, epoch).is_some()
-    })
-    .await;
+    wait_for_keys(&alice, &bob, video_id).await;
 
     relay.lossy.store(true, Ordering::Relaxed);
     let abandoned = || bob.engine.stats.abandoned_units.load(Ordering::Relaxed);
@@ -383,11 +375,7 @@ async fn a_receiver_too_slow_for_an_idr_share_has_a_keyframe_asked_for_it() {
         kind: Recovery::Idr,
     };
     server_event(&mut alice, |e| (e == idr).then_some(())).await;
-    wait_for("both at one epoch with keys", || {
-        let epoch = alice.engine.keys().epoch();
-        epoch == bob.engine.keys().epoch() && bob.engine.keys().recv_key(video_id, epoch).is_some()
-    })
-    .await;
+    wait_for_keys(&alice, &bob, video_id).await;
 
     relay.kbps.store(500, Ordering::Relaxed);
     let sender = alice.engine.clone();

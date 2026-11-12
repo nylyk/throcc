@@ -282,6 +282,33 @@ pub async fn create_room(client: &mut TestClient, name: &str) -> RoomId {
         .await
 }
 
+/// Waits until `viewer` and `sender` share an epoch and `viewer` holds the key for `track`.
+pub async fn wait_for_keys(sender: &Call, viewer: &Call, track: MediaId) {
+    wait_for("both at one epoch with keys", || {
+        let epoch = sender.engine.keys().epoch();
+        epoch == viewer.engine.keys().epoch()
+            && viewer.engine.keys().recv_key(track, epoch).is_some()
+    })
+    .await;
+}
+
+/// Has every keyframe request the server sends `call` recover `sender`'s share.
+#[cfg(feature = "ffmpeg")]
+pub fn forward_keyframe_requests(
+    call: &mut Call,
+    sender: Arc<throcc_client_core::media::share::ShareSender>,
+) {
+    let (_, closed) = mpsc::channel(1);
+    let mut events = std::mem::replace(&mut call.events, closed);
+    tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            if let CallEvent::Server(Event::KeyframeRequested { kind, .. }) = event {
+                sender.recover(kind);
+            }
+        }
+    });
+}
+
 pub async fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(15);
     while !ready() {

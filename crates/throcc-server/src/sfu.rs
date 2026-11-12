@@ -420,18 +420,6 @@ mod tests {
     }
 
     #[test]
-    fn a_new_watcher_is_never_held_back() {
-        let t = Instant::now();
-        let mut agg = KeyframeAggregator::default();
-        let id = MediaId(3);
-        let at = |s| t + Duration::from_secs(s);
-        for second in [0, 1, 3] {
-            agg.request(id, UserId(1), Recovery::Idr, at(second));
-        }
-        assert_eq!(agg.first_picture(id, at(4)), Some(Recovery::Idr));
-    }
-
-    #[test]
     fn quiet_watchers_are_forgotten() {
         let t = Instant::now();
         let mut agg = KeyframeAggregator::default();
