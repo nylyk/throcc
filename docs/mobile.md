@@ -15,7 +15,8 @@ Native iOS and Android clients on top of `throcc-client-core`. Same servers, sam
 | Features | Voice, rooms, watching shares and sending shares on both platforms. Room admin, profiles and verification as on desktop |
 | Talking | Voice activity with a mute toggle. No push-to-talk |
 | Echo | The platform's voice-processing I/O: VoiceProcessingIO on iOS, `VOICE_COMMUNICATION` on Android. sonora's echo canceller is skipped there |
-| Codecs | Platform decoders for all four codecs, with dav1d and libvpx filling the gaps. No ffmpeg, no codec negotiation. See [Codecs](#codecs) |
+| Codecs | Platform codecs on iOS, Android and macOS, with dav1d and libvpx filling the gaps. ffmpeg stays only on Linux and Windows. No codec negotiation. See [Codecs](#codecs) and [macOS without ffmpeg](#macos-without-ffmpeg) |
+| Video crate | `media/video/` becomes its own crate, `throcc-video`, with a backend per platform behind one encoder and decoder. See [Core changes](#core-changes) |
 | Devices | At onboarding, a phone either creates its own identity or imports one from another device by QR. One device per identity is online at a time. See [Devices](#devices) |
 | Invites | `https://thro.cc/join#<address+code>` on every platform. Verified links open the mobile apps; desktop gets `throcc://`. See [Invite links](#invite-links) |
 | iOS distribution | App Store, TestFlight for betas |
@@ -28,6 +29,7 @@ Native iOS and Android clients on top of `throcc-client-core`. Same servers, sam
 
 ```
 crates/throcc-mobile/     UniFFI layer: cdylib for Android, staticlib for iOS
+crates/throcc-video/      Encoders, decoders and frames, a backend per platform
 mobile/ios/               Xcode project: app, broadcast upload extension
 mobile/android/           Gradle project: app
 ```
@@ -47,9 +49,10 @@ Each one follows the existing pattern of a backend per OS behind the same type.
 1. **Paths.** `directories` has no Android support. The app passes its data and cache directories in at start; desktop keeps `ProjectDirs`.
 2. **Keystore.** On iOS, the identity key goes to the keychain as a this-device-only item, readable after first unlock so a background reconnect on a locked phone works. `keyring` 4 itself has no iOS store, so the core uses the protected-data store of `apple-native-keyring-store`, from the same project. On Android, the identity file in app-private storage is wrapped with an Android Keystore key. If the Keystore loses that key, the identity counts as missing and the user can start over. Both apps exclude their data from backups: a restore would roll the epoch floors back under the same key.
 3. **Audio I/O.** New iOS and Android backends next to cpal: a VoiceProcessingIO audio unit, and AAudio with the voice-communication usage and input preset. Callbacks follow the same rules as desktop.
-4. **Video without ffmpeg.** Video sits behind the `ffmpeg` feature today: `media/video/` is ffmpeg only, and `session.rs` gates video on it in 22 places. A `video` feature splits out from the ffmpeg backend, so a build has video with ffmpeg on desktop and with platform codecs on mobile. This is the first step of phase 5.
-5. **Video decode.** VideoToolbox through `objc2` on iOS, MediaCodec through the `ndk` crate on Android. MediaCodec decodes straight into the Surface the app hands over. On iOS, decoded pixel buffers go to an `AVSampleBufferDisplayLayer` uncopied, as they reach gpui uncopied on macOS. VideoToolbox takes length-prefixed NAL units and a format description built from the parameter sets, so H.264 and HEVC access units are converted from what desktop sends. dav1d and libvpx output NV12 into pixel buffers for the same path. A decoder rebuilds when the codec, size or pixel format changes, and never writes a picture into a buffer made for another format.
+4. **A video crate.** Video sits behind the `ffmpeg` feature today: `media/video/` is ffmpeg only, and `session.rs` gates video on it in 22 places. `media/video/` moves into `throcc-video`: the encoders, the decoders, the NV12 frames and their conversions, behind one `Encoder` and `Decoder` with a backend per platform. Apple (VideoToolbox, macOS and iOS), Android (MediaCodec) and ffmpeg (Linux and Windows), with dav1d and libvpx where the platform lacks a codec. The crate knows the codecs and frames, nothing of sessions, keys or the wire beyond `Codec`. The core always depends on it. A Linux or Windows build without the `ffmpeg` feature has a crate with no backend, whose `Encoder` and `Decoder` report none, so the client does voice only there without a single `cfg` in the core: the 22 gates in `session.rs` go. Every backend's dependencies stay in one crate, `cargo test -p throcc-video` covers them alone, and `check-server-deps.sh` has one crate to keep out of the server. This is the first step of phase 5, with the ffmpeg backend moved in unchanged.
+5. **Video decode.** VideoToolbox through `objc2` on macOS and iOS, one backend for both; MediaCodec through the `ndk` crate on Android. MediaCodec decodes straight into the Surface the app hands over. Decoded pixel buffers reach gpui uncopied on macOS, as they do today, and an `AVSampleBufferDisplayLayer` uncopied on iOS. VideoToolbox takes length-prefixed NAL units and a format description built from the parameter sets, so H.264 and HEVC access units are converted from what senders send. dav1d and libvpx output NV12 into pixel buffers for the same path. A decoder rebuilds when the codec, size or pixel format changes, and never writes a picture into a buffer made for another format.
 6. **Video encode and capture.** Hardware HEVC, then H.264.
+   - macOS: ScreenCaptureKit's pixel buffers go straight into a VideoToolbox compression session, in Rust through `objc2`. See [macOS without ffmpeg](#macos-without-ffmpeg).
    - Android: MediaProjection feeds a MediaCodec input surface directly; AudioPlaybackCapture gives system audio.
    - iOS: a ReplayKit broadcast upload extension, Swift only to stay under its memory cap, encodes with VideoToolbox and passes access units and app audio to the main app over a Unix socket in the App Group container. The socket path must fit 104 bytes. The extension can't connect by itself: a second sign-in would kick the main app. The core gains an ingest path for these pre-encoded access units; the main app seals and sends them as usual and passes keyframe requests back. Broadcasting needs the main app in a room, which keeps it alive in the background.
 7. **Reconnects.** See [Devices](#devices). This changes desktop too.
@@ -64,18 +67,32 @@ Each one follows the existing pattern of a backend per OS behind the same type.
 
 ## Codecs
 
-Senders announce their codec and receivers must decode it. Desktop sends AV1, HEVC or H.264 in hardware, and VP9 in software only when it has no hardware encoder.
+Senders announce their codec and receivers must decode it. Linux and Windows send AV1, HEVC or H.264 in hardware; macOS sends HEVC or H.264, since Apple has no AV1 encoder. Every desktop sends VP9 in software only when it has no hardware encoder.
 
-| Codec | Android decode | iOS decode |
-| --- | --- | --- |
-| H.264 | MediaCodec, hardware | VideoToolbox, hardware |
-| HEVC | MediaCodec, hardware | VideoToolbox, hardware |
-| AV1 | MediaCodec, since Android 10; the platform's software decoder where the chip has none | VideoToolbox on A17 Pro, M3 and newer; dav1d otherwise |
-| VP9 | MediaCodec, since Android 4.4; hardware or the platform's software decoder | libvpx; iOS has no public VP9 decoder |
+| Codec | Android decode | iOS decode | macOS decode |
+| --- | --- | --- | --- |
+| H.264 | MediaCodec, hardware | VideoToolbox, hardware | VideoToolbox |
+| HEVC | MediaCodec, hardware | VideoToolbox, hardware | VideoToolbox |
+| AV1 | MediaCodec, since Android 10; the platform's software decoder where the chip has none | VideoToolbox on A17 Pro, M3 and newer; dav1d otherwise | VideoToolbox on M3 and newer; dav1d otherwise |
+| VP9 | MediaCodec, since Android 4.4; hardware or the platform's software decoder | libvpx; iOS has no public VP9 decoder | libvpx |
+
+VideoToolbox on macOS falls back to Apple's own software H.264 and HEVC decoders where the Mac lacks hardware, so macOS needs no software decoder of ours for either.
 
 Each decoder is picked at runtime from what the device reports. On Android that includes the size: the platform's software AV1 and VP9 decoders may not take 2560 wide, so the app checks `isSizeSupported` and falls back to a bundled dav1d or libvpx. dav1d and libvpx are BSD-licensed and build from source on both platforms.
 
 Phones send hardware HEVC, then H.264. They never encode AV1 or VP9.
+
+## macOS without ffmpeg
+
+The Apple backend that decodes on iOS also decodes on macOS, and macOS encodes with VideoToolbox directly. ffmpeg leaves macOS in phase 5, in one step, so no build has both.
+
+- **Encode:** a VideoToolbox compression session fed ScreenCaptureKit's IOSurface pixel buffers as they come, in real-time mode with low-latency rate control. Hardware HEVC, then H.264, then libvpx's VP9 encoder, as today. Recovery stays IDR on request, as for every encoder but NVENC.
+- **Decode:** see [Codecs](#codecs). A hardware failure needs no swap to software, since VideoToolbox picks its own software decoder for H.264 and HEVC, and dav1d and libvpx are software already.
+- **Video always on:** the `ffmpeg` feature means nothing on macOS. Every macOS build, debug ones and CI included, has video.
+- **One binary:** dav1d and libvpx build from source and link statically, as on the phones. `bundle.sh` stops building ffmpeg, setting `FFMPEG_PKG_CONFIG_PATH` and building with `--features ffmpeg`; with no dylibs left to bundle, its `bundle()`, the rpaths, `Contents/Frameworks` and the separate signing of libraries all go.
+- **CI:** the macOS test job drops `brew install ffmpeg@8`, its `features` and `ffmpeg_pkg_config`, and tests video by default. `packaging.yml` drops the macOS ffmpeg cache and build.
+- **Licenses:** the macOS notices lose FFmpeg's LGPL text, and the dmg no longer ships a library users must be able to relink. dav1d's and libvpx's BSD notices stay. `native.txt` splits by platform.
+- **Code that goes:** the macOS paths through ffmpeg: in `encode.rs` the VideoToolbox hardware frames context, `pixel_buffer_pool` and the `sw_pix_fmt` setup, in `decode.rs` `full_range_pixel_buffer`. The macOS ffmpeg note in `CLAUDE.md` goes too.
 
 ## Devices
 
@@ -138,7 +155,7 @@ This is security-critical code. A subagent that didn't write it reviews it befor
 2. **Protocol 2, devices and blocking.** `SignedInElsewhere`, identity keys in presences, per-session protocol on the server, the higher key-change burst, and a server release. The reconnect window, the `leave_server` fix, blocking and the `people.json` migration. Desktop gets all of it.
 3. **Shell on mock data.** Starts once phase 2 lands, since it mirrors the `State` that phase changes. The UniFFI layer and every screen against `MockClient` on both platforms: onboarding, server list, rooms, room, person sheet, profile, settings, verified people, server pages. Each screen is laid out for any window width, since an iPad or tablet window can be resized.
 4. **Voice.** Audio backends and the app audio work. Join a real server and talk.
-5. **Watching shares.** First the `video` feature split, then platform decoders, dav1d and libvpx, fullscreen and rotation.
+5. **Watching shares.** First `throcc-video` with the ffmpeg backend moved in unchanged. Then the Apple backend, which decodes on iOS and replaces ffmpeg on macOS for decode and encode, then MediaCodec, dav1d and libvpx, fullscreen and rotation.
 6. **Invite links.** The web page with its phone fallback and verification files, links on all five platforms, the desktop's single instance and dialog change.
 7. **Identity transfer.** Export on desktop and mobile, import on mobile, security review.
 8. **Sending shares.** Android first, then the iOS broadcast extension.
@@ -153,7 +170,7 @@ A mobile release follows the desktop steps with its own tag. `ios-vX.Y.Z` upload
 ## Risks
 
 - **F-Droid and AI.** [fdroid/admin#641](https://gitlab.com/fdroid/admin/-/issues/641) proposes an anti-feature tag for apps that use AI. Unsettled; a tag wouldn't block inclusion.
-- **Software decoding.** 1440p60 AV1 or VP9 in software may drop frames and drain battery on older phones.
+- **Software decoding.** 1440p60 AV1 or VP9 in software may drop frames and drain battery on older phones, and on Macs before M3 for AV1.
 - **Portrait shares.** A phone share is portrait, at most 1440 tall. Desktop tiles, fullscreen and pop-outs have to handle it.
 - **iOS extension memory.** Broadcast extensions are capped at about 50 MB. Encoding stays in hardware and buffers stay small.
 - **iOS share audio.** VoiceProcessingIO may duck or degrade share audio while a call runs. ReplayKit's app audio may include throcc's own voice playback, which desktop keeps out of shares.
