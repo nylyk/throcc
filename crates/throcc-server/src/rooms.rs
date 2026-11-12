@@ -1519,8 +1519,10 @@ impl Hub {
             .sessions
             .values()
             .flat_map(|s| {
-                let held = s.handle.egress.held();
-                held.into_iter()
+                s.handle
+                    .egress
+                    .held()
+                    .into_iter()
                     .filter(|id| s.watching.contains(id))
                     .map(|id| (s.row.id, id))
             })

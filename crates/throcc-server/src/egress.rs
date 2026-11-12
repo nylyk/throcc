@@ -284,8 +284,8 @@ impl Queues {
 
     /// Holds an `Idr` track back from the unit lost at `seq` on. Its queued units after the
     /// loss go, up to a keyframe queued after it. A keyframe from after the loss, queued or
-    /// already sent, heals the picture: then there is nothing to hold. The loss already counted, so neither these nor the units the
-    /// hold turns away count again.
+    /// already sent, heals the picture: then there is nothing to hold. The loss already
+    /// counted, so neither these nor the units the hold turns away count again.
     fn hold(&mut self, media_id: MediaId, seq: u32) {
         let healed = self.sent_keyframes.get(&media_id).is_some_and(|&k| k > seq);
         if !self.idr_tracks.contains(&media_id) || healed {
@@ -297,15 +297,15 @@ impl Queues {
             .filter(|u| u.media_id == media_id && u.first_seq >= seq && !u.stray)
             .collect();
         after.sort_by_key(|u| u.first_seq);
-        let healed = after.iter().position(|u| u.keyframe);
-        let undecodable: Vec<u64> = after[..healed.unwrap_or(after.len())]
+        let keyframe = after.iter().position(|u| u.keyframe);
+        let undecodable: Vec<u64> = after[..keyframe.unwrap_or(after.len())]
             .iter()
             .map(|u| u.id)
             .collect();
         for id in undecodable {
             self.finish(id, Fate::Dropped);
         }
-        if healed.is_some() {
+        if keyframe.is_some() {
             return;
         }
         let hold = self.held.entry(media_id).or_insert_with(|| {
