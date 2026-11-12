@@ -20,14 +20,7 @@ packaging/licenses/notices.sh client   # third-party notices the packages ship; 
 packaging/macos/bundle.sh              # macOS: target/macos/throcc.dmg
 packaging/flatpak/cargo-sources.sh     # the flatpak's offline crates, before flatpak-builder
 mobile/ios/build-core.sh               # iOS: ThroccCore.xcframework and the Swift bindings, before Xcode builds
-just                                   # lists the recipes below and the ones they build on
-just desktop [args]                    # desktop app in release with ffmpeg, building ffmpeg first if missing
-just server [data] [args]              # server in release, data in target/throcc-data by default
-just server-invite [data]              # admin invite for that server
-just ios-sim [device] [args]           # iOS: core, app and launch in a simulator, iPhone 17 by default
-just ios-device <name> [args]          # iOS: core, signed app, install and launch on a connected device
-just android-emulator [avd]            # Android: boots Pixel_10_Pro by default, without host audio
-just android [extras]                  # Android: core, APK, install and launch on the one adb device
+just                                   # lists the recipes that build and run the desktop app, the server and the phone apps
 mobile/android/gradlew -p mobile/android assembleDebug   # Android: builds the core with cargo-ndk, then the APK
 xcrun simctl launch booted cc.thro.throcc --mock --screen <name>   # iOS sample screens; names in `Sample.swift`
 adb shell am start -S -n cc.thro.throcc/.MainActivity --ez mock true --es screen <name>   # Android sample screens; names in `AppModel.kt`
