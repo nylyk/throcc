@@ -39,7 +39,7 @@ mobile/android/           Gradle project: app
 
 The key manager wraps our sender secret only to people `State` shows (`Call::start_shown`), so nobody gets our key unseen. The apps keep that promise: every person `State` puts in a room appears on that room's screen, including blocked people and people in a room we're watching a share from fullscreen.
 
-The iOS build makes an XCFramework from `aarch64-apple-ios` and `aarch64-apple-ios-sim`. The Android build runs cargo-ndk from Gradle for `arm64-v8a` and `x86_64` into one APK. There is no 32-bit build. UniFFI's Kotlin bindings use JNA.
+The iOS build makes an XCFramework from `aarch64-apple-ios` and `aarch64-apple-ios-sim`, or from one of them when only the simulator or a device needs it. The Android build runs cargo-ndk from Gradle for `arm64-v8a` and `x86_64` into one APK, or only for the device an install from Android Studio or `just android` targets. There is no 32-bit build. UniFFI's Kotlin bindings use JNA.
 
 `throcc-mobile` gets a `README.md` like every crate, and `--mock` sample screens exist on both platforms: a launch argument on iOS, an intent extra on Android, both backed by `MockClient`.
 

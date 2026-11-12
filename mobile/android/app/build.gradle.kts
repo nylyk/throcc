@@ -5,6 +5,8 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+val abis = listOf("arm64-v8a", "x86_64")
+
 android {
     namespace = "cc.thro.throcc"
     compileSdk = 37
@@ -17,7 +19,7 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64")
+            abiFilters += abis
         }
     }
 
@@ -40,8 +42,11 @@ dependencies {
     }
 }
 
-/** Builds throcc-mobile for both ABIs and generates its Kotlin bindings. */
+/** Builds throcc-mobile for `abis` and generates its Kotlin bindings. */
 abstract class BuildCore @Inject constructor(private val exec: ExecOperations) : DefaultTask() {
+    @get:Input
+    abstract val abis: ListProperty<String>
+
     @get:Internal
     abstract val repository: DirectoryProperty
 
@@ -56,14 +61,15 @@ abstract class BuildCore @Inject constructor(private val exec: ExecOperations) :
 
     @TaskAction
     fun build() {
+        val targets = abis.get().flatMap { listOf("-t", it) }
         cargo(
-            "ndk", "-t", "arm64-v8a", "-t", "x86_64", "-P", "31", "-o", libraries.get().asFile.path,
+            "ndk", *targets.toTypedArray(), "-P", "31", "-o", libraries.get().asFile.path,
             "build", "--locked", "-p", "throcc-mobile", "--release",
         )
         cargo(
             "run", "--locked", "-p", "throcc-mobile", "--features", "bindgen", "--bin", "uniffi-bindgen", "--",
             "generate", "--language", "kotlin", "--no-format", "--out-dir", bindings.get().asFile.path,
-            libraries.file("arm64-v8a/libthrocc_mobile.so").get().asFile.path,
+            libraries.file("${abis.get().first()}/libthrocc_mobile.so").get().asFile.path,
         )
     }
 
@@ -77,8 +83,14 @@ abstract class BuildCore @Inject constructor(private val exec: ExecOperations) :
     }
 }
 
+/** The ABI an install from Android Studio or `just android` targets, else every ABI. */
+val coreAbis = providers.gradleProperty("android.injected.build.abi")
+    .map { device -> device.split(",").filter { it in abis }.take(1).ifEmpty { abis } }
+    .orElse(abis)
+
 androidComponents.onVariants { variant ->
     val buildCore = tasks.register<BuildCore>("build${variant.name.replaceFirstChar(Char::uppercase)}Core") {
+        abis = coreAbis
         repository = rootDir.resolve("../..")
         ndk = androidComponents.sdkComponents.ndkDirectory
         outputs.upToDateWhen { false }
