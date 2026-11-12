@@ -10,7 +10,7 @@ use throcc_client_core::verified::VerifiedStore;
 use throcc_proto::frame::{DATAGRAM_PAYLOAD_FLOOR, Flags, Header, TAG_BYTES, VIDEO_CLOCK_HZ};
 use throcc_proto::ids::{Epoch, MediaId, UserId};
 use throcc_proto::messages::{
-    Audience, Codec, Event, MediaState, Recovery, Request, Response, ShareConfig,
+    Audience, Codec, Event, MediaState, Recovery, Request, Response, ShareConfig, TrackStats,
 };
 use throcc_proto::transport::close;
 use throcc_server::{AUDIO_BURST_PACKETS, AUDIO_PACKETS_PER_SECOND};
@@ -499,16 +499,29 @@ async fn a_datagram_larger_than_any_client_seals_is_not_forwarded() {
             .unwrap();
     }
 
-    let forwarded = bob
+    let mic_forwarded = |tracks: &[TrackStats]| {
+        tracks
+            .iter()
+            .find(|t| t.media_id == mic)
+            .map_or(0, |t| t.forwarded)
+    };
+    let first = bob
         .event(|event| match event {
             Event::ReceiveStats { tracks } => tracks
                 .iter()
-                .find(|t| t.media_id == mic)
-                .map(|t| t.forwarded),
+                .any(|t| t.media_id == mic)
+                .then(|| mic_forwarded(tracks)),
             _ => None,
         })
         .await;
-    assert_eq!(forwarded, 1);
+    let next_report = bob.event(|event| match event {
+        Event::ReceiveStats { tracks } => Some(mic_forwarded(tracks)),
+        _ => None,
+    });
+    let next = tokio::time::timeout(Duration::from_secs(3), next_report)
+        .await
+        .unwrap_or(0);
+    assert_eq!(first + next, 1);
 }
 
 #[tokio::test]

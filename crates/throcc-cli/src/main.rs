@@ -446,7 +446,7 @@ async fn sign_in(keystore: &Keystore, address: &str) -> Result<ControlLink> {
                 eprintln!("Re-enroll with a fresh invite code to trust the new key.");
             }
         })?;
-    if let Some(profile) = Settings::load(keystore.dir())?.profile {
+    if let Some(profile) = Settings::load(keystore.dir()).ok().and_then(|s| s.profile) {
         account::sign_profile_if_kept(keystore, &mut link, &profile.name, profile.avatar()).await;
     }
     Ok(link)
@@ -531,7 +531,10 @@ async fn run_command(keystore: &Keystore, link: &ControlLink, line: &str) -> Res
             password: None,
         },
         "name" => {
-            let avatar = welcome.profile.avatar;
+            let kept = Settings::load(keystore.dir())?.profile;
+            let avatar = kept
+                .and_then(|profile| profile.avatar())
+                .filter(|kept| welcome.profile.avatar == Some(*kept));
             let server = &link.connected.fingerprint;
             Request::SetProfile {
                 name: rest.to_owned(),
