@@ -544,9 +544,8 @@ impl KeyManager {
         (request, refused.into_iter().map(|(user, _)| user).collect())
     }
 
-    /// Stores a peer's sender secret. One that arrives before its room state or before its
-    /// sender is trusted is held as [`keeps_early`] says. One for an earlier epoch is accepted
-    /// only within the grace period after our epoch moved on, and expires with it.
+    /// Stores a peer's sender secret, holding an early one as [`keeps_early`] says. One for an
+    /// earlier epoch is kept only within the grace period after our epoch moved on.
     pub fn sender_key(
         &mut self,
         from: UserId,

@@ -369,7 +369,7 @@ struct Shown {
     /// The identity key the server names for them, which blocks follow.
     key: PublicKey,
     /// Whether their signature proves the account holds `key` and chose this name and
-    /// picture. Only a proven key is blocked or unblocked from a room.
+    /// picture. A block from a room also needs the room to hear them under `key`.
     proven: bool,
     name: String,
     avatar: Option<Hash>,

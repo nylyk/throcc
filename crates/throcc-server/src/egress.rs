@@ -285,8 +285,8 @@ impl Queues {
         self.hold(media_id, seq);
     }
 
-    /// Holds an `Idr` track back from the unit lost at `seq` on, dropping its waiting units
-    /// from there up to a keyframe. A keyframe from after the loss, waiting or sent, heals it.
+    /// Holds an `Idr` track back from the unit lost at `seq`, dropping its waiting units up
+    /// to a keyframe. A keyframe from after the loss, waiting or sent, heals the track.
     fn hold(&mut self, media_id: MediaId, seq: u32) {
         let healed = self.sent_keyframes.get(&media_id).is_some_and(|&k| k > seq);
         if !self.idr_tracks.contains(&media_id) || healed {
