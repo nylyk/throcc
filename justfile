@@ -25,12 +25,12 @@ server *args:
 server-invite:
     cargo run --release -p throcc-server -- admin-invite --data "{{ server_data }}"
 
-# Builds the Rust core and its Swift bindings into ThroccCore.xcframework.
-ios-core:
-    mobile/ios/build-core.sh
+# Builds the Rust core and its Swift bindings into ThroccCore.xcframework, for `device`, `simulator` or both.
+ios-core *slices:
+    mobile/ios/build-core.sh {{ slices }}
 
 # Builds the iOS app for the simulator.
-ios-build-sim: ios-core
+ios-build-sim: (ios-core "simulator")
     xcodebuild -quiet -project {{ ios_project }} -scheme throcc -configuration Debug \
         -destination 'generic/platform=iOS Simulator' -derivedDataPath {{ ios_build }} build
 
@@ -42,7 +42,7 @@ ios-sim *args: ios-build-sim
     xcrun simctl launch --terminate-running-process "{{ sim }}" {{ app_id }} {{ args }}
 
 # Builds the iOS app for a connected iPhone or iPad by name, registering it with the team.
-ios-build-device device: ios-core
+ios-build-device device: (ios-core "device")
     xcodebuild -quiet -project {{ ios_project }} -scheme throcc -configuration Debug \
         -destination "platform=iOS,name={{ device }}" -derivedDataPath {{ ios_build }} \
         -allowProvisioningUpdates -allowProvisioningDeviceRegistration build
@@ -66,5 +66,6 @@ android-emulator avd="Pixel_10_Pro":
 
 # Builds and installs the Android app with its Rust core, then starts it with any intent extras such as `--ez mock true --es screen rooms`.
 android *args:
-    ANDROID_HOME="{{ android_sdk }}" JAVA_HOME="{{ java_home }}" mobile/android/gradlew -p mobile/android installDebug
+    ANDROID_HOME="{{ android_sdk }}" JAVA_HOME="{{ java_home }}" mobile/android/gradlew -p mobile/android installDebug \
+        -Pandroid.injected.build.abi="$("{{ adb }}" shell getprop ro.product.cpu.abilist | tr -d '\r')"
     "{{ adb }}" shell am start -S -n {{ app_id }}/.MainActivity {{ args }}
