@@ -13,6 +13,7 @@ Native iOS and Android clients on top of `throcc-client-core`. Same servers, sam
 | Look | Native components and the system font, with system mono for keys, fingerprints, safety numbers and invite codes. The colours are the desktop's: the picked theme's eight colours, and what the apps mix from them |
 | Theme | Pickable as on desktop: the seven presets, or a Custom theme of the user's own eight colours. The default is the desktop default. The picked theme decides light or dark |
 | Features | Voice, rooms, watching shares and sending shares on both platforms. Room admin, profiles and verification as on desktop |
+| Watching | One share at a time. Watching another stops the one before, so a phone runs one decoder and one video surface, and its link carries one share. Desktop keeps watching several |
 | Talking | Voice activity with a mute toggle. No push-to-talk |
 | Echo | The platform's voice-processing I/O: VoiceProcessingIO on iOS, `VOICE_COMMUNICATION` on Android. sonora's echo canceller is skipped there |
 | Codecs | Platform codecs on iOS, Android and macOS, with dav1d and libvpx filling the gaps. ffmpeg stays only on Linux and Windows. No codec negotiation. See [Codecs](#codecs) and [macOS without ffmpeg](#macos-without-ffmpeg) |
@@ -23,7 +24,7 @@ Native iOS and Android clients on top of `throcc-client-core`. Same servers, sam
 | Android distribution | Signed APK on the GitHub release, and F-Droid's main repo with reproducible builds so it ships the same signature. IzzyOnDroid is out: it rejects apps partly written by generative AI |
 | Releases | Separate versions and tags per platform: `ios-vX.Y.Z`, `android-vX.Y.Z` |
 | License | AGPL-3.0 plus a section 7 additional permission for app store distribution |
-| Protocol | One bump, to 2: a "signed in on another device" event and identity keys in presences. `MIN_PROTOCOL` stays 1: every server version supports the current protocol and the one before it. It ships as a server release before the mobile apps. See [Protocol 2](#protocol-2) |
+| Protocol | One bump, to 2: a "signed in on another device" event, identity keys in presences, and each share's recovery. `MIN_PROTOCOL` becomes 2 as well: protocol 2 alone drops the protocol before it, so 0.1 clients must update. It ships as a server release before the mobile apps. See [Protocol 2](#protocol-2) |
 
 ## Layout
 
@@ -108,7 +109,8 @@ One bump, shipped as a server release before the mobile apps. Desktop and CLI mo
 
 - `Event::SignedInElsewhere`, last in `Event`, and a new close code in `throcc_proto::transport::close`.
 - `Presence` carries the person's identity key, so clients refer to people by identity everywhere, not only in a shared room. The key is the server's word, not signed: it decides how someone is drawn and whether a block applies. Trust and verification still come only from the signed encryption key in a shared room. Every member of a server now sees every member's identity key.
-- `PROTOCOL` becomes 2 and `MIN_PROTOCOL` stays 1. Every server version supports the current protocol and the one before it. The server keeps each session's protocol after the hello, and sends a protocol 1 session the protocol 1 shapes: `RemovedFromServer` in place of `SignedInElsewhere`, and presences without identity keys.
+- `ShareConfig` carries the sender's `Recovery`: `Refresh` for NVENC's intra refresh, `Idr` for every other encoder, phones included. Once the SFU loses a unit of an `Idr` share on the way to a receiver, it queues nothing more of that video for the receiver until a keyframe, since nothing in between would decode, and asks the sender for one through the receiver's keyframe backoff. A `Refresh` share heals by itself, so its video keeps flowing.
+- `PROTOCOL` and `MIN_PROTOCOL` both become 2. Keeping protocol 1 would mean its own shapes for presences, peers, placements and the share request; 0.1 clients see the server's range and ask to be updated. From protocol 3 on, every server version supports the current protocol and the one before it again.
 - The encryption-key change burst rises from 3 to 6.
 
 ## Blocking
@@ -152,10 +154,10 @@ This is security-critical code. A subagent that didn't write it reviews it befor
 ## Phases
 
 1. **Groundwork.** Update the scope line in `CLAUDE.md`, and add the rule that a server supports the current protocol and the one before. Add the section 7 permission. Create `throcc-mobile` and both projects. Injected paths and the mobile keystores, so the core cross-builds for all four targets in CI from the start. Register the app ids under the Apple team and create the Android signing key, which the verified links need.
-2. **Protocol 2, devices and blocking.** `SignedInElsewhere`, identity keys in presences, per-session protocol on the server, the higher key-change burst, and a server release. The reconnect window, the `leave_server` fix, blocking and the `people.json` migration. Desktop gets all of it.
+2. **Protocol 2, devices and blocking.** `SignedInElsewhere`, identity keys in presences, each share's recovery and the SFU holding back `Idr` video until a keyframe, dropping protocol 1, the higher key-change burst, and a server release. The reconnect window, the `leave_server` fix, blocking and the `people.json` migration. Desktop gets all of it.
 3. **Shell on mock data.** Starts once phase 2 lands, since it mirrors the `State` that phase changes. The UniFFI layer and every screen against `MockClient` on both platforms: onboarding, server list, rooms, room, person sheet, profile, settings, verified people, server pages. Each screen is laid out for any window width, since an iPad or tablet window can be resized.
 4. **Voice.** Audio backends and the app audio work. Join a real server and talk.
-5. **Watching shares.** First `throcc-video` with the ffmpeg backend moved in unchanged. Then the Apple backend, which decodes on iOS and replaces ffmpeg on macOS for decode and encode, then MediaCodec, dav1d and libvpx, fullscreen and rotation.
+5. **Watching shares,** one at a time. First `throcc-video` with the ffmpeg backend moved in unchanged. Then the Apple backend, which decodes on iOS and replaces ffmpeg on macOS for decode and encode, then MediaCodec, dav1d and libvpx, fullscreen and rotation.
 6. **Invite links.** The web page with its phone fallback and verification files, links on all five platforms, the desktop's single instance and dialog change.
 7. **Identity transfer.** Export on desktop and mobile, import on mobile, security review.
 8. **Sending shares.** Android first, then the iOS broadcast extension.
