@@ -80,7 +80,7 @@ pub struct Person {
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct Share {
-    /// "1440p60 AV1" for the share.
+    /// The share's height, frame rate and codec, such as "1440p60 AV1".
     pub label: String,
     pub audio: bool,
 }

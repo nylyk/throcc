@@ -828,7 +828,6 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc;
     use std::time::Duration;
 
     use super::*;
