@@ -58,12 +58,13 @@ pub(crate) enum CallCommand {
 
 enum Command {
     Settings(VoiceSettings),
-    /// Closes the open devices, then opens these, `None` being the system default.
+    /// Closes the open devices, then opens what `open` opens.
     OpenDevices {
-        input: Option<String>,
-        output: Option<String>,
+        open: Box<dyn FnOnce() -> Result<Devices, DeviceError> + Send>,
         opened: std_mpsc::Sender<Result<(), DeviceError>>,
     },
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    CloseDevices,
     /// Plays the processed mic back locally, for the settings screen's mic test.
     MicTest(bool),
     PushToTalk(bool),
@@ -133,11 +134,32 @@ impl AudioEngine {
 
     /// Plays and captures through these devices, `None` being the system default, once the
     /// ones open before are closed. On an error the engine runs without devices.
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     pub fn open_devices(&self, input: Option<&str>, output: Option<&str>) -> anyhow::Result<()> {
+        let (input, output) = (input.map(str::to_owned), output.map(str::to_owned));
+        self.open(move || devices::open(input.as_deref(), output.as_deref()))
+    }
+
+    /// Plays through the phone's speaker and captures from its mic `with_mic`, once what
+    /// was open before is closed. On an error the engine runs without devices.
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    pub fn open_devices(&self, with_mic: bool) -> anyhow::Result<()> {
+        self.open(move || devices::open(with_mic))
+    }
+
+    /// Closes the open devices, which frees the mic and the speaker for other apps.
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    pub fn close_devices(&self) {
+        self.send(Command::CloseDevices);
+    }
+
+    fn open(
+        &self,
+        open: impl FnOnce() -> Result<Devices, DeviceError> + Send + 'static,
+    ) -> anyhow::Result<()> {
         let (opened, result) = std_mpsc::channel();
         self.send(Command::OpenDevices {
-            input: input.map(str::to_owned),
-            output: output.map(str::to_owned),
+            open: Box::new(open),
             opened,
         });
         Ok(result.recv()??)
@@ -490,24 +512,25 @@ impl Worker {
         }
     }
 
+    fn close_devices(&mut self) {
+        self.io = None;
+        self.chain.reset_levels();
+        self.last_capture = [0.0; PULL];
+    }
+
     fn apply(&mut self, command: Command) {
         match command {
             Command::Settings(settings) => {
                 self.chain.apply(&settings);
                 self.settings = settings;
             }
-            Command::OpenDevices {
-                input,
-                output,
-                opened,
-            } => {
-                self.io = None;
-                self.chain.reset_levels();
-                self.last_capture = [0.0; PULL];
-                let result = devices::open(input.as_deref(), output.as_deref());
-                let result = result.map(|devices| self.io = Some(DeviceIo::new(devices)));
+            Command::OpenDevices { open, opened } => {
+                self.close_devices();
+                let result = open().map(|devices| self.io = Some(DeviceIo::new(devices)));
                 opened.send(result).ok();
             }
+            #[cfg(any(target_os = "ios", target_os = "android"))]
+            Command::CloseDevices => self.close_devices(),
             Command::MicTest(on) => self.mic_test = on,
             Command::PushToTalk(down) => self.push_to_talk = down,
             Command::Cue(cue) => {
