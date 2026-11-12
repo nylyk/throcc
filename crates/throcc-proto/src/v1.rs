@@ -10,6 +10,9 @@ use crate::messages::{
 /// What protocol 1 tells a connection that another one replaced.
 pub const SIGNED_IN_ELSEWHERE: &str = "you signed in from somewhere else";
 
+/// The close code protocol 1 gets for [`SIGNED_IN_ELSEWHERE`], having no code of its own.
+pub const SIGNED_IN_ELSEWHERE_CLOSE: u32 = crate::transport::close::REMOVED;
+
 /// Postcard's index of `AuthResult::Ok`.
 const AUTH_OK: u32 = 0;
 /// Postcard's index of `ServerMessage::Event`.
@@ -20,16 +23,35 @@ const PRESENCE_CHANGED: u32 = 0;
 /// The frame of `message` in the shapes of protocol 1: a presence without its identity
 /// key, and `RemovedFromServer` in place of `SignedInElsewhere`.
 pub fn encode_server_message(message: &ServerMessage) -> Result<Vec<u8>, FrameError> {
-    match message {
-        ServerMessage::Event(Event::PresenceChanged(presence)) => {
+    let ServerMessage::Event(event) = message else {
+        return framing::encode(message);
+    };
+    match event {
+        Event::PresenceChanged(presence) => {
             framing::encode(&(EVENT, PRESENCE_CHANGED, PresenceV1::from(presence)))
         }
-        ServerMessage::Event(Event::SignedInElsewhere) => {
+        Event::SignedInElsewhere => {
             framing::encode(&ServerMessage::Event(Event::RemovedFromServer {
                 reason: SIGNED_IN_ELSEWHERE.to_owned(),
             }))
         }
-        _ => framing::encode(message),
+        Event::PresenceEnded(_)
+        | Event::RoomCreated(_)
+        | Event::RoomRenamed { .. }
+        | Event::RoomDeleted(_)
+        | Event::RoomLockChanged { .. }
+        | Event::PeersChanged { .. }
+        | Event::SenderKeyPublished { .. }
+        | Event::KeyframeRequested { .. }
+        | Event::ReceiveStats { .. }
+        | Event::UserAdded(_)
+        | Event::RoleChanged { .. }
+        | Event::UserRemoved(_)
+        | Event::InviteSpent { .. }
+        | Event::RemovedFromServer { .. }
+        | Event::ServerProfileChanged(_)
+        | Event::KickedFromRoom { .. }
+        | Event::AudiencesChanged(_) => framing::encode(message),
     }
 }
 

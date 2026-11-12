@@ -206,10 +206,9 @@ impl ConnectionHandle {
                 };
                 (event, close::REMOVED, reason)
             }
-            // Protocol 1 has no close code for this and takes `REMOVED`.
             Kick::Replaced => {
                 let code = match self.protocol {
-                    1 => close::REMOVED,
+                    1 => v1::SIGNED_IN_ELSEWHERE_CLOSE,
                     _ => close::SIGNED_IN_ELSEWHERE,
                 };
                 (Event::SignedInElsewhere, code, v1::SIGNED_IN_ELSEWHERE)
