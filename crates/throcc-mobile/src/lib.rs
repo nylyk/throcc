@@ -6,7 +6,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use throcc_client_core::avatars;
 use throcc_client_core::blocked::BlockedStore;
 use throcc_client_core::client::{self, Client, ClientApi, MockClient, UiCommand, UiEvent};
@@ -456,11 +456,8 @@ impl Core {
     }
 
     pub fn command(&self, command: Command) {
-        let Some(command) = command.into_core() else {
-            return;
-        };
-        if let Some(connected) = &*lock(&self.connected) {
-            connected.client.command(command);
+        if let Some(command) = command.into_core() {
+            self.tell_client(command);
         }
     }
 
@@ -634,8 +631,8 @@ impl Core {
         let Ok(known) = Keystore::default_known_servers() else {
             return Vec::new();
         };
-        let known = known.iter();
         known
+            .iter()
             .map(|(address, fingerprint)| (address.to_owned(), fingerprint))
             .collect()
     }
@@ -794,10 +791,7 @@ pub fn can_set_role(actor: Role, target: Role, new: Role) -> bool {
 }
 
 fn parse_invite(code: &str) -> Result<InviteCode> {
-    match code.trim().parse() {
-        Ok(code) => Ok(code),
-        Err(_) => bail!("that is no invite code"),
-    }
+    code.trim().parse().ok().context("that is no invite code")
 }
 
 fn address_of(addresses: &[(String, Fingerprint)], server: &Fingerprint) -> String {
