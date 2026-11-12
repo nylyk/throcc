@@ -239,7 +239,8 @@ impl Backoff {
 
 /// Merges keyframe requests: at most one per track per [`KEYFRAME_INTERVAL`], and an
 /// `Idr` beats a `Refresh` within one interval. A watcher that keeps starting requests backs
-/// off on top, so a picture broken for everyone at once costs no one their backoff.
+/// off on top. Joining a waiting request is free, so a picture broken for everyone at once
+/// charges only the one or two watchers that start the requests, not the room.
 #[derive(Default)]
 pub struct KeyframeAggregator {
     tracks: HashMap<MediaId, Pending>,

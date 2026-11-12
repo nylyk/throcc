@@ -362,8 +362,8 @@ async fn a_unit_lost_on_the_way_asks_its_sender_for_a_refresh() {
     server_event(&mut alice, |e| (e == refresh).then_some(())).await;
 }
 
-/// A receiver whose link can't carry an `Idr` share gets none of it after a loss, which
-/// nothing would decode, and the server asks the sender for a keyframe on its behalf.
+/// When the server drops a unit of an `Idr` share for a receiver whose link can't carry it,
+/// the server asks the sender for a keyframe on that receiver's behalf.
 #[tokio::test]
 async fn a_receiver_too_slow_for_an_idr_share_has_a_keyframe_asked_for_it() {
     const UNITS: u32 = 3_000;

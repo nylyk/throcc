@@ -107,6 +107,8 @@ enum Fate {
     Queued(u64),
     Sent,
     Dropped,
+    /// Turned away by a hold: never counted, so a copy undoes nothing.
+    HeldBack,
 }
 
 struct VideoUnit {
@@ -241,6 +243,8 @@ pub struct Queues {
     /// the loss is queued until a keyframe, since nothing in between would decode.
     held: BTreeMap<MediaId, Hold>,
     held_changed: bool,
+    /// The first `seq` of each video track's newest keyframe that started sending.
+    sent_keyframes: HashMap<MediaId, u32>,
     next_id: u64,
     stats: BTreeMap<MediaId, Counters>,
     video_bytes: usize,
@@ -279,11 +283,12 @@ impl Queues {
     }
 
     /// Holds an `Idr` track back from the unit lost at `seq` on. Its queued units after the
-    /// loss go, up to a keyframe queued after it, which would heal the picture: then there
-    /// is nothing to hold. The loss already counted, so neither these nor the units the
+    /// loss go, up to a keyframe queued after it. A keyframe from after the loss, queued or
+    /// already sent, heals the picture: then there is nothing to hold. The loss already counted, so neither these nor the units the
     /// hold turns away count again.
     fn hold(&mut self, media_id: MediaId, seq: u32) {
-        if !self.idr_tracks.contains(&media_id) {
+        let healed = self.sent_keyframes.get(&media_id).is_some_and(|&k| k > seq);
+        if !self.idr_tracks.contains(&media_id) || healed {
             return;
         }
         let mut after: Vec<&VideoUnit> = self
@@ -314,14 +319,15 @@ impl Queues {
         hold.last = hold.last.max(seq);
     }
 
-    /// Holds a track that lost packets nobody recorded, from the newest unit seen on.
+    /// Holds a track that lost packets nobody recorded. They may be from after anything
+    /// seen, so the hold starts past the newest unit.
     fn hold_after_newest(&mut self, media_id: MediaId) {
         let newest = self
             .history
             .get(&media_id)
             .and_then(|h| h.keys().next_back());
         if let Some(&newest) = newest {
-            self.hold(media_id, newest);
+            self.hold(media_id, newest.saturating_add(1));
         }
     }
 
@@ -348,15 +354,15 @@ impl Queues {
         self.active_tracks.insert(media_id);
         let keyframe = flags.contains(Flags::KEYFRAME);
         if flags.contains(Flags::FIRST) {
+            let history = self.history.entry(media_id).or_default();
+            if history.get(&seq) == Some(&Fate::HeldBack) {
+                return;
+            }
             if let Some(hold) = self.held.get(&media_id)
                 && seq >= hold.first
             {
                 if !keyframe || seq < hold.last {
-                    remember(
-                        self.history.entry(media_id).or_default(),
-                        seq,
-                        Fate::Dropped,
-                    );
+                    remember(history, seq, Fate::HeldBack);
                     return;
                 }
                 self.release(media_id);
@@ -414,7 +420,7 @@ impl Queues {
                     ..VideoUnit::new(id, media_id, seq, packet.bytes, now)
                 });
             }
-            Some(Fate::Dropped) | None => {}
+            Some(Fate::Dropped | Fate::HeldBack) | None => {}
         }
     }
 
@@ -459,7 +465,7 @@ impl Queues {
                 remember(history, first_seq, Fate::Dropped);
                 self.break_track(media_id, first_seq);
             }
-            Some((_, Fate::Dropped)) => {}
+            Some((_, Fate::Dropped | Fate::HeldBack)) => {}
             None => {
                 remember(history, seq, Fate::Dropped);
                 self.break_track(media_id, seq);
@@ -589,6 +595,7 @@ impl Queues {
         let kept = |id: &MediaId| self.active_tracks.contains(id) || queued.contains(id);
         self.history.retain(|id, _| kept(id));
         self.idr_tracks.retain(|id| kept(id));
+        self.sent_keyframes.retain(|id, _| kept(id));
         let held = self.held.len();
         self.held.retain(|id, _| kept(id));
         self.held_changed |= self.held.len() != held;
@@ -629,6 +636,10 @@ impl Queues {
                     self.strays.pop_front();
                 }
                 unit.started = true;
+                if unit.keyframe {
+                    let newest = self.sent_keyframes.entry(unit.media_id).or_default();
+                    *newest = (*newest).max(unit.first_seq);
+                }
                 if !unit.stray && !unit.copy {
                     self.stats.entry(unit.media_id).or_default().forwarded += 1;
                 }
@@ -1005,6 +1016,41 @@ mod tests {
         queues.forget_quiet_tracks();
         queues.forget_quiet_tracks();
         assert_eq!(queues.take_held_change(), Some(vec![]));
+    }
+
+    #[test]
+    fn a_keyframe_sent_after_a_unit_cut_short_leaves_nothing_to_hold() {
+        let now = Instant::now();
+        let mut queues = Queues::default();
+        queues.push(packet(IDR_VIDEO, 1, 1, Flags::FIRST, 1000), now);
+        whole(&mut queues, IDR_VIDEO, 2, true, now);
+        assert_eq!(drain(&mut queues), [1, 2]);
+        queues.enforce_budget(now + UNIT_IDLE + IDLE_CHECK);
+        whole(&mut queues, IDR_VIDEO, 3, false, now + UNIT_IDLE);
+        assert_eq!(drain(&mut queues), [3]);
+        assert_eq!(queues.take_held_change(), None);
+    }
+
+    #[test]
+    fn a_copy_of_a_unit_held_back_undoes_no_drop() {
+        let mut queues = Queues::default();
+        let late = drop_after_two(&mut queues, IDR_VIDEO, Instant::now());
+        whole(&mut queues, IDR_VIDEO, 3, false, late);
+        whole(&mut queues, IDR_VIDEO, 4, true, late);
+        whole(&mut queues, IDR_VIDEO, 3, false, late);
+        assert_eq!(drain(&mut queues), [4]);
+        assert_eq!(queues.stats[&MediaId(1)].dropped_units, 1);
+    }
+
+    #[test]
+    fn losses_nobody_recorded_hold_from_past_the_newest_unit() {
+        let now = Instant::now();
+        let mut queues = Queues::default();
+        whole(&mut queues, IDR_VIDEO, 0, true, now);
+        queues.hold_after_newest(MediaId(1));
+        whole(&mut queues, IDR_VIDEO, 1, false, now);
+        assert_eq!(drain(&mut queues), [0]);
+        assert_eq!(queues.take_held_change(), Some(vec![MediaId(1)]));
     }
 
     #[test]
