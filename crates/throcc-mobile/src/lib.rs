@@ -415,7 +415,8 @@ impl Core {
         Ok(())
     }
 
-    /// Closes the speaker and the mic, which frees them for other apps.
+    /// Closes the speaker and the mic, which frees them for other apps. It blocks until
+    /// they are closed.
     pub fn close_audio(&self) {
         #[cfg(any(target_os = "ios", target_os = "android"))]
         if let Some(audio) = self.audio() {

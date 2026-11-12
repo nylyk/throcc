@@ -872,6 +872,7 @@ impl Session {
         self.remember_server(welcome.server.name.clone(), welcome.server.avatar);
         let address = self.address.clone();
         let media = self.media;
+        let room = welcome.placement.room;
         let people: Vec<Person> = welcome
             .presence
             .iter()
@@ -897,7 +898,11 @@ impl Session {
             for (p, person) in welcome.presence.iter().zip(people) {
                 s.add_person(p.user, person);
             }
-            s.current = None;
+            s.current = room.map(|room| CurrentRoom {
+                room,
+                sharing: None,
+                watching: vec![],
+            });
         });
         let state = self.shared.state();
         let shown = welcome.presence.iter().filter_map(|p| {

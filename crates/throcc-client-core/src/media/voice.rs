@@ -64,7 +64,7 @@ enum Command {
         opened: std_mpsc::Sender<Result<(), DeviceError>>,
     },
     #[cfg(any(target_os = "ios", target_os = "android"))]
-    CloseDevices,
+    CloseDevices(std_mpsc::Sender<()>),
     /// Plays the processed mic back locally, for the settings screen's mic test.
     MicTest(bool),
     PushToTalk(bool),
@@ -147,10 +147,13 @@ impl AudioEngine {
         self.open(move || devices::open(with_mic))
     }
 
-    /// Closes the open devices, which frees the mic and the speaker for other apps.
+    /// Closes the open devices, which frees the mic and the speaker for other apps, and
+    /// waits until they are closed.
     #[cfg(any(target_os = "ios", target_os = "android"))]
     pub fn close_devices(&self) {
-        self.send(Command::CloseDevices);
+        let (closed, done) = std_mpsc::channel();
+        self.send(Command::CloseDevices(closed));
+        done.recv().ok();
     }
 
     fn open(
@@ -530,7 +533,10 @@ impl Worker {
                 opened.send(result).ok();
             }
             #[cfg(any(target_os = "ios", target_os = "android"))]
-            Command::CloseDevices => self.close_devices(),
+            Command::CloseDevices(closed) => {
+                self.close_devices();
+                closed.send(()).ok();
+            }
             Command::MicTest(on) => self.mic_test = on,
             Command::PushToTalk(down) => self.push_to_talk = down,
             Command::Cue(cue) => {
