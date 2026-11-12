@@ -108,12 +108,12 @@ pub fn verify_profile(
     user: UserId,
     name: &str,
     avatar: Option<Hash>,
-    sig: &Signature,
+    signature: &Signature,
 ) -> Result<(), BadSignature> {
     verify(
         identity_key,
         &profile_message(server, user, name, avatar),
-        sig,
+        signature,
     )
 }
 
