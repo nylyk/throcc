@@ -394,6 +394,9 @@ impl Core {
         if let Some(saved_meanwhile) = saved.filter(|saved| *saved != profile) {
             self.pass_on(saved_meanwhile);
         }
+        if let Some(audio) = self.audio() {
+            audio.apply(lock(&self.settings).audio.voice);
+        }
         Ok(())
     }
 

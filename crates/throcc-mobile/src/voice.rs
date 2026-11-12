@@ -48,10 +48,16 @@ impl Voice {
         }
     }
 
-    /// Puts these choices into `settings`, with voice activation and every value in range.
+    /// Puts these choices into `settings`, with voice activation and every value in range. A
+    /// value that is no number leaves the setting as it was.
     pub(crate) fn apply_to(self, settings: &mut VoiceSettings) {
+        let kept = Self::of(settings);
         settings.transmit = Transmit::VoiceActivity {
-            threshold_dbfs: self.sensitivity_dbfs.clamp(QUIETEST_GATE_DBFS, 0.0),
+            threshold_dbfs: in_range(
+                self.sensitivity_dbfs,
+                QUIETEST_GATE_DBFS..=0.0,
+                kept.sensitivity_dbfs,
+            ),
         };
         settings.speech_only = self.speech_only;
         settings.noise_suppression = match self.noise_suppression {
@@ -61,8 +67,16 @@ impl Voice {
             NoiseSuppression::High => Some(settings::NoiseSuppression::High),
         };
         settings.automatic_gain = self.automatic_gain;
-        settings.input_volume = self.input_volume.clamp(0.0, MAX_VOLUME);
-        settings.output_volume = self.output_volume.clamp(0.0, MAX_VOLUME);
+        settings.input_volume = in_range(self.input_volume, 0.0..=MAX_VOLUME, kept.input_volume);
+        settings.output_volume = in_range(self.output_volume, 0.0..=MAX_VOLUME, kept.output_volume);
+    }
+}
+
+fn in_range(value: f32, range: std::ops::RangeInclusive<f32>, kept: f32) -> f32 {
+    if value.is_nan() {
+        kept
+    } else {
+        value.clamp(*range.start(), *range.end())
     }
 }
 
@@ -120,6 +134,22 @@ mod tests {
         assert_eq!(
             (settings.input_volume, settings.output_volume),
             (MAX_VOLUME, 0.0)
+        );
+
+        let no_number = Voice {
+            sensitivity_dbfs: f32::NAN,
+            input_volume: f32::NAN,
+            output_volume: f32::NAN,
+            ..voice
+        };
+        no_number.apply_to(&mut settings);
+        assert_eq!(
+            (
+                Voice::of(&settings).sensitivity_dbfs,
+                settings.input_volume,
+                settings.output_volume
+            ),
+            (QUIETEST_GATE_DBFS, MAX_VOLUME, 0.0)
         );
     }
 }
