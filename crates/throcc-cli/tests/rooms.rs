@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use throcc_crypto::identity::{encryption_key_message, profile_message};
+use throcc_crypto::identity::encryption_key_message;
 use throcc_proto::framing;
 use throcc_proto::ids::{Epoch, Hash, Role, RoomId, UserId};
 use throcc_proto::limits::{MAX_ROOM_MEMBERS, MAX_ROOM_SHARES, MAX_ROOMS, MAX_WATCHED};
@@ -299,13 +299,13 @@ async fn a_profile_is_kept_only_with_its_owners_signature_and_shown_with_it() {
     let alice_id = alice.link.welcome.me;
     let forged = signed_profile(&alice, &bob, "Alice");
     assert_error(&alice.request(forged).await, ErrorCode::Invalid);
-    let Request::SetProfile { sig, .. } = signed_profile(&alice, &alice, "Mallory") else {
-        unreachable!()
-    };
+    let server_fingerprint = &alice.link.connected.fingerprint;
     let other_name = Request::SetProfile {
         name: "Alice".into(),
         avatar: None,
-        sig,
+        sig: alice
+            .keystore
+            .profile_sig(server_fingerprint, alice_id, "Mallory", None),
     };
     assert_error(&alice.request(other_name).await, ErrorCode::Invalid);
     let own = signed_profile(&alice, &alice, "Alice");
@@ -918,12 +918,13 @@ async fn managers_kick_lower_ranks_out_of_rooms() {
 
 /// Sets `client`'s name to `name`, signed by `signer` for the server `client` is connected to.
 fn signed_profile(client: &TestClient, signer: &TestClient, name: &str) -> Request {
-    let server = client.link.connected.fingerprint;
-    let message = profile_message(&server.0, client.link.welcome.me, name, None);
+    let server = &client.link.connected.fingerprint;
     Request::SetProfile {
         name: name.into(),
         avatar: None,
-        sig: signer.keystore.identity().sign(&message),
+        sig: signer
+            .keystore
+            .profile_sig(server, client.link.welcome.me, name, None),
     }
 }
 

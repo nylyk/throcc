@@ -911,10 +911,11 @@ fn a_blocked_person_stays_in_the_room_unnamed_and_still_gets_our_key() {
             p.blocked && p.name == BLOCKED_NAME && p.avatar.is_none() && p.room == Some(room)
         })
     };
-    wait_for(&alice, "bob by name", |s| {
+    let shown_by_name = |s: &State| {
         s.person(bob.me())
             .is_some_and(|p| p.name == "Ilse" && !p.blocked)
-    });
+    };
+    wait_for(&alice, "bob by name", shown_by_name);
 
     alice.command(UiCommand::Block(bob.me()));
     wait_for(&alice, "bob blocked but still shown", shown_blocked);
@@ -928,8 +929,5 @@ fn a_blocked_person_stays_in_the_room_unnamed_and_still_gets_our_key() {
     });
 
     alice.command(UiCommand::Unblock(bob.me()));
-    wait_for(&alice, "bob by name again", |s| {
-        s.person(bob.me())
-            .is_some_and(|p| p.name == "Ilse" && !p.blocked)
-    });
+    wait_for(&alice, "bob by name again", shown_by_name);
 }
