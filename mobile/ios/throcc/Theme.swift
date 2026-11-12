@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// The colours of a palette and the ones mixed from them. The text and status colours
-/// read at 4.5:1 on every surface.
+/// The colours of a palette and the ones mixed from them. The muted, accent and status
+/// colours read at 4.5:1 on every surface where the palette's text colour does.
 struct Theme: Equatable {
     let bg, panel, raised, line, text, muted, accent, warning, good, bad: Color
     let isDark: Bool
@@ -75,7 +75,6 @@ extension ShapeStyle where Self == ThemeColor {
     static var line: ThemeColor { ThemeColor { $0.line } }
     static var text: ThemeColor { ThemeColor { $0.text } }
     static var muted: ThemeColor { ThemeColor { $0.muted } }
-    static var warning: ThemeColor { ThemeColor { $0.warning } }
     static var good: ThemeColor { ThemeColor { $0.good } }
     static var bad: ThemeColor { ThemeColor { $0.bad } }
 }
@@ -123,6 +122,32 @@ struct DestructiveButton: View {
     }
 }
 
+/// A text field in the text colour, with its title as the prompt in the muted colour.
+struct ThemedField: View {
+    @Environment(\.theme) private var theme
+    let title: LocalizedStringKey
+    @Binding var text: String
+    let isSecret: Bool
+
+    init(_ title: LocalizedStringKey, text: Binding<String>, isSecret: Bool = false) {
+        self.title = title
+        _text = text
+        self.isSecret = isSecret
+    }
+
+    var body: some View {
+        let prompt = Text(title).foregroundStyle(theme.muted)
+        Group {
+            if isSecret {
+                SecureField(title, text: $text, prompt: prompt)
+            } else {
+                TextField(title, text: $text, prompt: prompt)
+            }
+        }
+        .foregroundStyle(.text)
+    }
+}
+
 /// A sheet's confirming button, filled with the accent and titled in the background colour.
 struct ConfirmButton: View {
     @Environment(\.theme) private var theme
@@ -166,7 +191,7 @@ struct ThemedList<Content: View>: View {
     }
 }
 
-/// A form coloured as [`ThemedList`] colours a list.
+/// A form coloured as `ThemedList` colours a list.
 struct ThemedForm<Content: View>: View {
     @Environment(\.theme) private var theme
     @ViewBuilder let content: Content

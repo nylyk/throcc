@@ -11,6 +11,7 @@ struct RoomView: View {
                     ForEach(state.people.filter { $0.room == room.id }, id: \.user) { person in
                         Button { model.sheet = .person(person.user) } label: { PersonCard(person: person) }
                             .buttonStyle(.plain)
+                            .accessibilityValue(person.speaking ? "Speaking" : "")
                     }
                 }
                 .padding(16)

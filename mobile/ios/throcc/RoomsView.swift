@@ -6,7 +6,6 @@ struct RoomsView: View {
     @State private var asksPassword = false
     @State private var password = ""
     @State private var deleted: Room?
-    @State private var confirmsDelete = false
     @State private var confirmsLeave = false
 
     var body: some View {
@@ -20,11 +19,8 @@ struct RoomsView: View {
                     Button { enter(room, unasked: managesRooms) } label: { label(for: room) }
                         .swipeActions {
                             if managesRooms {
-                                Button("Delete", systemImage: "trash") {
-                                    deleted = room
-                                    confirmsDelete = true
-                                }
-                                .tint(.red)
+                                Button("Delete", systemImage: "trash") { deleted = room }
+                                    .tint(.red)
                                 Button("Edit", systemImage: "pencil") { model.sheet = .editRoom(room) }
                             }
                         }
@@ -87,7 +83,7 @@ struct RoomsView: View {
         }
         .confirmationDialog(
             "Delete “\(deleted?.name ?? "")”?",
-            isPresented: $confirmsDelete,
+            isPresented: $deleted.isPresent(),
             titleVisibility: .visible,
             presenting: deleted
         ) { room in
@@ -156,8 +152,12 @@ private struct LostConnectionSection: View {
 
     var body: some View {
         switch model.state.connection {
-        case .connected, .disconnected:
+        case .connected:
             EmptyView()
+        case .disconnected:
+            if model.connecting != nil {
+                Section { ProgressView() }
+            }
         case .reconnecting(let attempt, let reason):
             Section {
                 Label {
@@ -256,16 +256,14 @@ struct RoomEditor: View {
         NavigationStack {
             ThemedForm {
                 Section {
-                    TextField("Name", text: $name, prompt: Text("Name").foregroundStyle(theme.muted))
-                        .foregroundStyle(.text)
+                    ThemedField("Name", text: $name)
                 } footer: {
                     if let problem = check.problem {
                         Text(problem).foregroundStyle(.bad)
                     }
                 }
                 Section {
-                    SecureField("Password", text: $password, prompt: Text("Password").foregroundStyle(theme.muted))
-                        .foregroundStyle(.text)
+                    ThemedField("Password", text: $password, isSecret: true)
                     if let room, room.locked {
                         DestructiveButton("Remove Password") {
                             model.core.command(command: .setRoomPassword(room: room.id, password: nil))
@@ -292,7 +290,7 @@ struct RoomEditor: View {
                         save(name: check.name)
                         dismiss()
                     }
-                    .disabled(!passwordFits || check.problem != nil || (room == nil && check.name == nil))
+                    .disabled(!passwordFits || check.name == nil)
                 }
             }
             .onAppear { name = room?.name ?? "" }

@@ -19,11 +19,12 @@ struct ServerPageView: View {
 
 private struct ServerOverview: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.theme) private var theme
     @State private var name = ""
     @State private var picture: Data?
     /// The picture the server had when this page loaded or last saved it.
     @State private var keptPicture: Data?
+    /// The picture that the save under way asks the server to keep.
+    @State private var sentPicture: Data?
 
     var body: some View {
         if let server = model.state.server {
@@ -34,8 +35,7 @@ private struct ServerOverview: View {
                 Section {
                     if editable {
                         PictureEditor(picture: $picture, name: server.title)
-                        TextField("Name", text: $name, prompt: Text("Name").foregroundStyle(theme.muted))
-                            .foregroundStyle(.text)
+                        ThemedField("Name", text: $name)
                     } else {
                         LabeledContent("Name") {
                             Avatar(picture: model.picture(in: picture), name: server.title, size: 28)
@@ -77,6 +77,12 @@ private struct ServerOverview: View {
                 name = server.name ?? ""
                 picture = server.avatar.flatMap { model.core.avatar(hash: $0) }
                 keptPicture = picture
+                model.serverSave = nil
+            }
+            .onChange(of: model.serverSave) {
+                if model.serverSave == .saved {
+                    keptPicture = sentPicture
+                }
             }
         }
     }
@@ -85,7 +91,7 @@ private struct ServerOverview: View {
         let name: NameChange = name == server.name ? .keep : .set(name: name)
         let picture: PictureChange = picture == keptPicture ? .keep : .set(picture: picture)
         model.core.command(command: .setServerProfile(name: name, picture: picture))
-        keptPicture = self.picture
+        sentPicture = self.picture
         model.serverSave = .saving
     }
 }
@@ -93,7 +99,6 @@ private struct ServerOverview: View {
 private struct MembersPage: View {
     @Environment(AppModel.self) private var model
     @State private var removal: Removal?
-    @State private var confirmsRemoval = false
 
     var body: some View {
         let state = model.state
@@ -123,11 +128,8 @@ private struct MembersPage: View {
                     }
                     .swipeActions {
                         if editable {
-                            Button("Remove", systemImage: "minus.circle") {
-                                removal = Removal(user: user.id, name: user.name)
-                                confirmsRemoval = true
-                            }
-                            .tint(.red)
+                            Button("Remove", systemImage: "minus.circle") { removal = Removal(user: user.id, name: user.name) }
+                                .tint(.red)
                         }
                     }
                 }
@@ -137,7 +139,7 @@ private struct MembersPage: View {
         }
         .navigationTitle("Members")
         .onAppear { model.core.command(command: .listUsers) }
-        .modifier(RemovalConfirmation(removal: removal, isPresented: $confirmsRemoval))
+        .modifier(RemovalConfirmation(removal: $removal))
     }
 
     @ViewBuilder

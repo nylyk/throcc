@@ -209,6 +209,7 @@ enum Told {
 }
 
 struct Connected {
+    address: String,
     client: Arc<dyn ClientApi>,
     /// Carries a profile saved while the client runs to its session.
     profile: watch::Sender<CoreProfile>,
@@ -373,6 +374,7 @@ impl Core {
         let state = CoreState::from(&*client.state());
         let connection = self.connection.load(Ordering::SeqCst);
         *lock(&self.connected) = Some(Connected {
+            address,
             client,
             profile: kept_profile,
         });
@@ -543,8 +545,7 @@ impl Core {
 
     fn connected_to(&self, address: &str) -> bool {
         let connected = lock(&self.connected);
-        let state = connected.as_ref().map(|connected| connected.client.state());
-        state.is_some_and(|state| state.server.as_ref().is_some_and(|s| s.address == address))
+        connected.as_ref().is_some_and(|c| c.address == address)
     }
 
     fn tell_client(&self, command: UiCommand) {

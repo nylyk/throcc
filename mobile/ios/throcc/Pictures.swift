@@ -1,3 +1,4 @@
+import ImageIO
 import PhotosUI
 import SwiftUI
 
@@ -76,7 +77,9 @@ struct PictureEditor: View {
         .task(id: picked) {
             guard let picked else { return }
             let chosen = try? await picked.loadTransferable(type: Data.self)
-            if let fitted = chosen.flatMap(UIImage.init(data:)).flatMap(profilePicture(from:)) {
+            let fitted = await Task.detached { chosen.flatMap(profilePicture(from:)) }.value
+            guard !Task.isCancelled, self.picked == picked else { return }
+            if let fitted {
                 picture = fitted
             } else {
                 model.notice = "That picture couldn’t be read. Choose another one."
@@ -86,8 +89,33 @@ struct PictureEditor: View {
     }
 }
 
-/// The centre square of `image` at 256 px, as a JPEG of at most 64 KiB.
-func profilePicture(from image: UIImage) -> Data? {
+/// The picture in `file` at no more than 256 px a side, or nil where it claims over 512 px
+/// a side or can't be read.
+func shownPicture(in file: Data) -> UIImage? {
+    guard let source = CGImageSourceCreateWithData(file as CFData, nil),
+          let claimed = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+          let width = claimed[kCGImagePropertyPixelWidth] as? Int,
+          let height = claimed[kCGImagePropertyPixelHeight] as? Int,
+          max(width, height) <= 512
+    else { return nil }
+    return thumbnail(of: source, within: 256)
+}
+
+/// The first picture in `source`, upright and decoded at no more than `side` pixels a side.
+private func thumbnail(of source: CGImageSource, within side: Int) -> UIImage? {
+    let options: [CFString: Any] = [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+        kCGImageSourceThumbnailMaxPixelSize: side,
+    ]
+    return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary).map(UIImage.init(cgImage:))
+}
+
+/// The centre square of the picture in `file` at 256 px, as a JPEG of at most 64 KiB.
+func profilePicture(from file: Data) -> Data? {
+    guard let source = CGImageSourceCreateWithData(file as CFData, nil),
+          let image = thumbnail(of: source, within: 1024)
+    else { return nil }
     let side: CGFloat = 256
     let scale = side / min(image.size.width, image.size.height)
     let scaled = CGSize(width: image.size.width * scale, height: image.size.height * scale)

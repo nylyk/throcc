@@ -43,7 +43,6 @@ struct SettingsView: View {
 
 private struct ProfilePage: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.theme) private var theme
     @State private var name = ""
     @State private var picture: Data?
     @State private var status: SaveStatus?
@@ -54,8 +53,7 @@ private struct ProfilePage: View {
         ThemedForm {
             Section {
                 PictureEditor(picture: $picture, name: name)
-                TextField("Name", text: $name, prompt: Text("Name").foregroundStyle(theme.muted))
-                    .foregroundStyle(.text)
+                ThemedField("Name", text: $name)
                     .textContentType(.nickname)
                     .autocorrectionDisabled()
             } footer: {
@@ -100,7 +98,6 @@ struct SaveStatusText: View {
 
 private struct AppearancePage: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.self) private var environment
 
     var body: some View {
         let custom = ThemeChoice(name: customThemeName(), palette: model.customPalette)
@@ -141,6 +138,7 @@ private struct AppearancePage: View {
             }
         }
         .navigationTitle("Appearance")
+        .onDisappear { model.saveCustomTheme() }
     }
 
     private func pick(_ choice: ThemeChoice) {
@@ -156,7 +154,7 @@ private struct AppearancePage: View {
             Color(rgb: model.customPalette[keyPath: color])
         } set: { picked in
             var palette = model.customPalette
-            palette[keyPath: color] = picked.resolve(in: environment).rgb
+            palette[keyPath: color] = picked.resolve(in: EnvironmentValues()).rgb
             if palette != model.customPalette {
                 model.useCustomTheme(palette)
             }

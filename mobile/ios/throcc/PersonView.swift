@@ -8,7 +8,6 @@ struct PersonView: View {
     @State private var number: String?
     @State private var keyChangedWhileOpen = false
     @State private var removal: Removal?
-    @State private var confirmsRemoval = false
 
     var body: some View {
         Group {
@@ -66,7 +65,7 @@ struct PersonView: View {
             }
         }
         .onChange(of: person.identityKey, initial: true) { follow(person.identityKey) }
-        .modifier(RemovalConfirmation(removal: removal, isPresented: $confirmsRemoval))
+        .modifier(RemovalConfirmation(removal: $removal))
     }
 
     @ViewBuilder
@@ -127,10 +126,7 @@ struct PersonView: View {
                     }
                 }
                 if canRemove(actor: role, target: person.role) {
-                    DestructiveButton("Remove from Server") {
-                        removal = Removal(user: user, name: person.name)
-                        confirmsRemoval = true
-                    }
+                    DestructiveButton("Remove from Server") { removal = Removal(user: user, name: person.name) }
                 }
             }
         }
@@ -146,11 +142,13 @@ struct PersonView: View {
 }
 
 private struct SafetyNumber: View {
+    @Environment(\.dynamicTypeSize) private var typeSize
     let number: String
 
     var body: some View {
         let groups = stride(from: 0, to: number.count, by: 5).map { number.dropFirst($0).prefix(5) }
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 4), spacing: 8) {
+        let columns = typeSize.isAccessibilitySize ? 2 : 4
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: columns), spacing: 8) {
             ForEach(groups.indices, id: \.self) { Text(groups[$0]).speechSpellsOutCharacters() }
         }
         .font(.title3)
@@ -174,7 +172,7 @@ private struct SoundControl: View {
         self.user = user
         self.sound = sound
         self.level = level
-        _volume = SwiftUI.State(initialValue: min(level.volume, 2))
+        _volume = State(initialValue: min(level.volume, 2))
     }
 
     var body: some View {
@@ -200,13 +198,12 @@ struct Removal {
 
 struct RemovalConfirmation: ViewModifier {
     @Environment(AppModel.self) private var model
-    let removal: Removal?
-    @Binding var isPresented: Bool
+    @Binding var removal: Removal?
 
     func body(content: Content) -> some View {
         content.confirmationDialog(
             "Remove “\(removal?.name ?? "")”?",
-            isPresented: $isPresented,
+            isPresented: $removal.isPresent(),
             titleVisibility: .visible,
             presenting: removal
         ) { removal in

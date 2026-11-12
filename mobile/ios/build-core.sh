@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Builds throcc-mobile for iOS devices and the simulator into ThroccCore.xcframework, and
-# generates its Swift bindings into throcc/Generated.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 

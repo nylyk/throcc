@@ -3,18 +3,14 @@ import SwiftUI
 struct ServersView: View {
     @Environment(AppModel.self) private var model
     @State private var removed: KnownServer?
-    @State private var confirmsRemoval = false
 
     var body: some View {
         ThemedList {
             ForEach(model.servers, id: \.address) { server in
                 Button { model.open(server.address) } label: { row(for: server) }
                     .swipeActions {
-                        Button("Remove", systemImage: "minus.circle") {
-                            removed = server
-                            confirmsRemoval = true
-                        }
-                        .tint(.red)
+                        Button("Remove", systemImage: "minus.circle") { removed = server }
+                            .tint(.red)
                     }
             }
         }
@@ -42,7 +38,7 @@ struct ServersView: View {
         }
         .confirmationDialog(
             "Remove “\(removed?.title ?? "")”?",
-            isPresented: $confirmsRemoval,
+            isPresented: $removed.isPresent(),
             titleVisibility: .visible,
             presenting: removed
         ) { server in
@@ -82,6 +78,7 @@ struct AddServerView: View {
     @State private var address = ""
     @State private var code = ""
     @State private var problem: String?
+    @State private var joining = false
 
     var body: some View {
         let address = address.trimmingCharacters(in: .whitespaces)
@@ -89,10 +86,10 @@ struct AddServerView: View {
         NavigationStack {
             ThemedForm {
                 Section {
-                    TextField("Address", text: $address, prompt: Text("Address").foregroundStyle(theme.muted))
+                    ThemedField("Address", text: $address)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
-                    TextField("Invite code", text: $code, prompt: Text("Invite code").foregroundStyle(theme.muted))
+                    ThemedField("Invite code", text: $code)
                         .monospaced()
                         .textInputAutocapitalization(.characters)
                 } footer: {
@@ -100,7 +97,6 @@ struct AddServerView: View {
                         .foregroundStyle(.muted)
                 }
                 .autocorrectionDisabled()
-                .foregroundStyle(.text)
                 if let problem {
                     Text(problem).foregroundStyle(.bad)
                 }
@@ -111,6 +107,7 @@ struct AddServerView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(role: .cancel) { dismiss() }
                         .tint(theme.text)
+                        .disabled(joining)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     if model.connecting == nil {
@@ -121,11 +118,14 @@ struct AddServerView: View {
                     }
                 }
             }
+            .interactiveDismissDisabled(joining)
         }
     }
 
     private func join(_ address: String) {
         Task {
+            joining = true
+            defer { joining = false }
             do {
                 try await model.connect(to: address, code: code.isEmpty ? nil : code)
                 dismiss()

@@ -2,7 +2,6 @@ import SwiftUI
 
 struct OnboardingView: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.theme) private var theme
     @State private var name = ""
     @State private var picture: Data?
     @State private var refusal: String?
@@ -13,8 +12,7 @@ struct OnboardingView: View {
             ThemedForm {
                 Section {
                     PictureEditor(picture: $picture, name: name)
-                    TextField("Name", text: $name, prompt: Text("Name").foregroundStyle(theme.muted))
-                        .foregroundStyle(.text)
+                    ThemedField("Name", text: $name)
                         .textContentType(.nickname)
                         .autocorrectionDisabled()
                 } footer: {
