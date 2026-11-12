@@ -536,6 +536,12 @@ impl Worker {
             Command::CloseDevices(closed) => {
                 self.close_devices();
                 self.call.mixer.clear();
+                for share in self.call.shares.values_mut() {
+                    if let Ok(jitter) = JitterBuffer::new(ropus::Channels::Stereo) {
+                        share.jitter = jitter;
+                    }
+                    share.playout.set(None);
+                }
                 closed.send(()).ok();
             }
             Command::MicTest(on) => self.mic_test = on,

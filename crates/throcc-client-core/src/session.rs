@@ -1454,7 +1454,7 @@ impl Session {
             UiCommand::Block(user) => {
                 let me = self.call.me();
                 if let Some(shown) = self.shown.get(&user).filter(|_| user != me) {
-                    if !shown.proven {
+                    if !proves_whom_we_hear(shown, self.peers.get(&user)) {
                         self.shared.notice(
                             "Couldn't block them: the server gave no proof of who they are.",
                         );
@@ -1474,7 +1474,7 @@ impl Session {
             }
             UiCommand::Unblock(user) => {
                 if let Some(shown) = self.shown.get(&user) {
-                    if !shown.proven {
+                    if !proves_whom_we_hear(shown, self.peers.get(&user)) {
                         self.shared.notice(
                             "Couldn't unblock them here: the server gave no proof of who they are. Unblock them in settings.",
                         );
@@ -2272,6 +2272,12 @@ fn shown_as(presence: &Presence, person: &Person, server: &Fingerprint) -> Shown
     }
 }
 
+/// Whether `shown` is proven, and `peer`, the room peer we hear under the same user, if any,
+/// presents the same identity key.
+fn proves_whom_we_hear(shown: &Shown, peer: Option<&Peer>) -> bool {
+    shown.proven && peer.is_none_or(|peer| peer.identity_key == shown.key)
+}
+
 /// Whether the identity key of `presence` signed its name and picture for its user on the
 /// server `server`, which only the holder of that identity key can do.
 fn proves_identity(presence: &Presence, server: &Fingerprint) -> bool {
@@ -2555,6 +2561,37 @@ mod tests {
             Some(ErrorCode::Full)
         );
         assert!(share_start_refusal(&Err(anyhow::anyhow!("timed out")), share, None).is_none());
+    }
+
+    #[test]
+    fn a_block_needs_the_room_to_hear_them_under_the_key_their_presence_proves() {
+        use throcc_proto::messages::SignedEncryptionKey;
+
+        let shown = |proven| Shown {
+            key: [3; 32],
+            proven,
+            name: "mara".into(),
+            avatar: None,
+            blocked: false,
+        };
+        let peer = |identity_key| Peer {
+            user: UserId(7),
+            tracks: Tracks {
+                mic: MediaId(1),
+                shares: vec![],
+            },
+            share: None,
+            identity_key,
+            encryption_key: SignedEncryptionKey {
+                key: [0; 32],
+                not_after: 0,
+                sig: [0; 64],
+            },
+        };
+        assert!(proves_whom_we_hear(&shown(true), None));
+        assert!(proves_whom_we_hear(&shown(true), Some(&peer([3; 32]))));
+        assert!(!proves_whom_we_hear(&shown(true), Some(&peer([4; 32]))));
+        assert!(!proves_whom_we_hear(&shown(false), None));
     }
 
     #[test]
