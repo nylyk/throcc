@@ -14,8 +14,6 @@ use super::capture::{Capture, CaptureConfig, CaptureError, FrameLimiter};
 use super::engine::{Kind, MediaEngine, Outgoing, Received};
 use super::share_audio::{Playout, STEREO_FRAME, ShareAudioEncoder, due_frames};
 use super::video::{Picture, PreviewDemand};
-#[cfg(target_os = "macos")]
-use throcc_video::EncodeError;
 #[cfg(target_os = "linux")]
 use throcc_video::Refusal;
 use throcc_video::frame::{VideoFrame, share_size};
@@ -340,9 +338,8 @@ impl Sending {
         true
     }
 
-    /// Encodes the next frame from the pixel buffer it was captured into. A picture of
-    /// another size than the encoder's sends this and later frames down the copying path.
-    /// True if there was one.
+    /// Encodes the next frame from the pixel buffer it was captured into, uncopied. True if
+    /// there was one.
     #[cfg(target_os = "macos")]
     fn send_pixel_buffer(&mut self) -> bool {
         let Some(picture) = self.capture.next_pixel_buffer() else {
@@ -357,10 +354,6 @@ impl Sending {
         }
         match self.encoder.encode_pixel_buffer(&picture) {
             Ok(units) => self.send_units(units),
-            Err(e @ EncodeError::OtherSize(..)) => {
-                warn!("copying captured pictures from here on: {e}");
-                self.pixel_buffers = false;
-            }
             Err(e) => warn!("encoding failed: {e}"),
         }
         true

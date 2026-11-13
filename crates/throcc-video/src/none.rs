@@ -4,8 +4,6 @@ use std::convert::Infallible;
 
 use throcc_proto::messages::{Codec, Recovery};
 
-#[cfg(target_os = "macos")]
-use crate::PixelBuffer;
 use crate::frame::VideoFrame;
 use crate::{DecodeError, EncodeError, EncodedUnit, EncoderConfig, Frame, MaxSize};
 #[cfg(target_os = "linux")]
@@ -48,19 +46,6 @@ impl Encoder {
         _frame: &DmaBuf,
         _preview_width: Option<usize>,
     ) -> Result<GpuEncoded, EncodeError> {
-        match self.0 {}
-    }
-
-    #[cfg(target_os = "macos")]
-    pub fn takes_pixel_buffers(&self) -> bool {
-        match self.0 {}
-    }
-
-    #[cfg(target_os = "macos")]
-    pub fn encode_pixel_buffer(
-        &mut self,
-        _picture: &PixelBuffer,
-    ) -> Result<Vec<EncodedUnit>, EncodeError> {
         match self.0 {}
     }
 }

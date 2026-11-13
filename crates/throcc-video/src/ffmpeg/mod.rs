@@ -1,5 +1,5 @@
-//! Encode and decode through ffmpeg, hardware first: NVENC, Media Foundation, VA-API and
-//! VideoToolbox, then libvpx and dav1d in software.
+//! Encode and decode through ffmpeg on Linux and Windows, hardware first: NVENC, Media
+//! Foundation and VA-API, then libvpx and dav1d in software.
 
 pub mod decode;
 pub mod encode;

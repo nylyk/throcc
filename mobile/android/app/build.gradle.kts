@@ -1,3 +1,5 @@
+import java.io.ByteArrayOutputStream
+import java.io.OutputStream
 import javax.inject.Inject
 
 plugins {
@@ -72,24 +74,42 @@ abstract class BuildCore @Inject constructor(private val exec: ExecOperations) :
 
     @TaskAction
     fun build() {
+        val codecs = codecs()
         val targets = abis.get().flatMap { listOf("-t", it) }
         cargo(
-            "ndk", *targets.toTypedArray(), "-P", "31", "-o", libraries.get().asFile.path,
+            codecs, "ndk", *targets.toTypedArray(), "-P", "31", "-o", libraries.get().asFile.path,
             "build", "--locked", "-p", "throcc-mobile", "--release",
         )
         cargo(
-            "run", "--locked", "-p", "throcc-mobile", "--features", "bindgen", "--bin", "uniffi-bindgen", "--",
+            codecs, "run", "--locked", "-p", "throcc-mobile", "--features", "bindgen", "--bin", "uniffi-bindgen", "--",
             "generate", "--language", "kotlin", "--no-format", "--out-dir", bindings.get().asFile.path,
             libraries.file("${abis.get().first()}/libthrocc_mobile.so").get().asFile.path,
         )
     }
 
-    private fun cargo(vararg arguments: String) {
+    /** The Rust target each ABI builds for. */
+    private val rustTargets = mapOf("arm64-v8a" to "aarch64-linux-android", "x86_64" to "x86_64-linux-android")
+
+    /** Builds dav1d and libvpx for any ABI that lacks them, and returns how cargo links them. */
+    private fun codecs(): Map<String, String> {
+        val root = repository.get().dir("deps/codecs").asFile
+        val missing = abis.get().map { rustTargets.getValue(it) }.filter { !root.resolve("$it/lib/libvpx.a").exists() }
+        if (missing.isNotEmpty()) run(emptyMap(), "packaging/codecs/build.sh", root.path, *missing.toTypedArray())
+        val printed = ByteArrayOutputStream()
+        run(emptyMap(), "packaging/codecs/env.sh", root.path, output = printed)
+        return printed.toString().lines().filter { "=" in it }.associate { it.substringBefore("=") to it.substringAfter("=") }
+    }
+
+    private fun cargo(environment: Map<String, String>, vararg arguments: String) = run(environment, "cargo", *arguments)
+
+    private fun run(environment: Map<String, String>, vararg command: String, output: OutputStream? = null) {
         exec.exec {
             workingDir = repository.get().asFile
             environment("ANDROID_NDK_HOME", ndk.get().asFile.path)
             environment("PATH", "${System.getProperty("user.home")}/.cargo/bin${File.pathSeparator}${System.getenv("PATH")}")
-            commandLine("cargo", *arguments)
+            environment(environment)
+            if (output != null) standardOutput = output
+            commandLine(*command)
         }
     }
 }

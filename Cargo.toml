@@ -29,6 +29,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 cpal = "0.18.2"
 embed-resource = "3.0.12"
 ed25519-dalek = { version = "3.0.0", features = ["zeroize"] }
+dav1d-sys = "0.8.3"
 directories = "6.0.0"
 futures-core = "0.3.34"
 getrandom = "0.4.3"
@@ -40,6 +41,9 @@ keyring-core = "1.0.1"
 libc = "0.2.191"
 objc2 = "0.6.5"
 objc2-core-foundation = { version = "0.3.2", default-features = false }
+objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-video", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime"] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVReturn"] }
+objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-media", "objc2-core-video", "VTBase", "VTCompressionProperties", "VTCompressionSession", "VTDecompressionProperties", "VTDecompressionSession", "VTErrors", "VTPixelTransferProperties", "VTPixelTransferSession", "VTSession", "VTUtilities"] }
 objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = ["std", "AUComponent", "AudioComponent", "AudioOutputUnit", "AudioUnitProperties", "objc2-core-audio-types"] }
 objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSButton", "NSControl", "NSResponder", "NSView", "NSWindow"] }
@@ -62,7 +66,6 @@ proptest = "1.12.0"
 quinn = { version = "0.11.12", default-features = false, features = ["log", "runtime-tokio", "rustls-ring"] }
 # The version spake2 0.4 takes for its seeded starts.
 rand_core = "0.6.4"
-rav1d = { version = "1.1.0", default-features = false, features = ["asm", "asm_arm64_dotprod", "asm_arm64_i8mm", "bitdepth_8", "bitdepth_16"] }
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }
 rustls-native-certs = "0.8.5"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }

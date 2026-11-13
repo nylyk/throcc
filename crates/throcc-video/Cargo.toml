@@ -11,21 +11,26 @@ workspace = true
 [features]
 ffmpeg = ["dep:rsmpeg"]
 # dav1d and libvpx on platforms that don't need them, to test them there.
-software = ["dep:rav1d", "dep:vpx-sys"]
+software = ["dep:dav1d-sys", "dep:vpx-sys"]
 
 [dependencies]
 throcc-proto.workspace = true
 bytes.workspace = true
+dav1d-sys = { workspace = true, optional = true }
 libc.workspace = true
-rav1d = { workspace = true, optional = true }
-rsmpeg = { workspace = true, optional = true }
 thiserror.workspace = true
 tracing.workspace = true
 vpx-sys = { workspace = true, optional = true }
 
+[target.'cfg(not(any(target_vendor = "apple", target_os = "android")))'.dependencies]
+rsmpeg = { workspace = true, optional = true }
+
 [target.'cfg(any(target_vendor = "apple", target_os = "android"))'.dependencies]
-rav1d.workspace = true
+dav1d-sys.workspace = true
 vpx-sys.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
-screencapturekit.workspace = true
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2-core-foundation = { workspace = true, features = ["std", "CFArray", "CFBase", "CFDictionary", "CFNumber", "CFString"] }
+objc2-core-media.workspace = true
+objc2-core-video.workspace = true
+objc2-video-toolbox.workspace = true

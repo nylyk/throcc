@@ -31,9 +31,7 @@ fn software_decoder(codec: Codec) -> &'static CStr {
 
 /// Hardware decoding devices on this platform, tried in order before software.
 fn devices() -> &'static [ffi::AVHWDeviceType] {
-    if cfg!(target_os = "macos") {
-        &[ffi::AV_HWDEVICE_TYPE_VIDEOTOOLBOX]
-    } else if cfg!(target_os = "linux") {
+    if cfg!(target_os = "linux") {
         &[ffi::AV_HWDEVICE_TYPE_VAAPI, ffi::AV_HWDEVICE_TYPE_CUDA]
     } else if cfg!(windows) {
         &[ffi::AV_HWDEVICE_TYPE_D3D11VA, ffi::AV_HWDEVICE_TYPE_CUDA]
@@ -215,11 +213,6 @@ impl Decoder {
         let Some(frame) = newest else {
             return Ok(None);
         };
-        #[cfg(target_os = "macos")]
-        if let Some(buffer) = full_range_pixel_buffer(&frame) {
-            let picture = crate::PixelBuffer { buffer, timestamp };
-            return Ok(Some(Frame::PixelBuffer(picture)));
-        }
         let frame = if frame.hw_frames_ctx.is_null() {
             &frame
         } else {
@@ -253,27 +246,8 @@ fn decoded_format(frame: &AVFrame) -> ffi::AVPixelFormat {
     unsafe { (*(*frame.hw_frames_ctx).data.cast::<ffi::AVHWFramesContext>()).sw_format }
 }
 
-/// The pixel buffer a VideoToolbox frame was decoded into, when renderers can draw it as it
-/// is: full-range NV12 holding exactly the frame's picture, with no padding cropped away.
-#[cfg(target_os = "macos")]
-fn full_range_pixel_buffer(frame: &AVFrame) -> Option<screencapturekit::cv::CVPixelBuffer> {
-    use crate::FULL_RANGE_NV12;
-
-    if frame.format != ffi::AV_PIX_FMT_VIDEOTOOLBOX {
-        return None;
-    }
-    // SAFETY: a VideoToolbox frame carries its CVPixelBufferRef in data[3], live while the
-    // frame is, and the wrapper takes a reference of its own.
-    let buffer =
-        unsafe { screencapturekit::cv::CVPixelBuffer::from_raw_borrowed(frame.data[3].cast()) }?;
-    let size = (frame.width as usize, frame.height as usize);
-    (buffer.pixel_format() == FULL_RANGE_NV12 && (buffer.width(), buffer.height()) == size)
-        .then_some(buffer)
-}
-
 fn device_name(device_type: ffi::AVHWDeviceType) -> &'static str {
     match device_type {
-        ffi::AV_HWDEVICE_TYPE_VIDEOTOOLBOX => "VideoToolbox",
         ffi::AV_HWDEVICE_TYPE_VAAPI => "VA-API",
         ffi::AV_HWDEVICE_TYPE_CUDA => "NVDEC",
         ffi::AV_HWDEVICE_TYPE_D3D11VA => "D3D11VA",

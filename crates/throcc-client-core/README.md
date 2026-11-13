@@ -31,7 +31,7 @@ Trust follows identity keys, not servers. The key manager wraps our sender secre
 | `media/capture/` | Screen and system-audio capture per OS: ScreenCaptureKit, Windows Graphics Capture with process loopback, the portal with PipeWire. The portal keeps nothing of what was picked, so every share asks again |
 | `media/video.rs` | The newest picture of each share as the UI gets it, and when the UI last drew our own preview. The codecs and frames are in `throcc-video`; on macOS, our own share's preview and VideoToolbox-decoded pictures reach the UI as the pixel buffers they are in, uncopied |
 
-Video needs a backend in `throcc-video`: its `ffmpeg` feature, which this crate's `ffmpeg` feature turns on. Without one the client does voice only. Audio and capture callbacks never block, allocate, lock or panic; they reach tokio only through bounded rings that drop when full.
+Video needs a backend in `throcc-video`: VideoToolbox on macOS and iOS, or on Linux and Windows its `ffmpeg` feature, which this crate's `ffmpeg` feature turns on. Without one the client does voice only. Audio and capture callbacks never block, allocate, lock or panic; they reach tokio only through bounded rings that drop when full.
 
 ## Manual hardware tests
 

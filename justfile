@@ -3,7 +3,6 @@ ios_project := "mobile/ios/throcc.xcodeproj"
 ios_build := "mobile/ios/build"
 android_sdk := env("ANDROID_HOME", home_directory() / "Library/Android/sdk")
 adb := android_sdk / "platform-tools/adb"
-ffmpeg := "deps/ffmpeg-lgpl"
 java_home := env("JAVA_HOME", "/Applications/Android Studio.app/Contents/jbr/Contents/Home")
 server_data := "target/throcc-data"
 sim := "iPhone 17"
@@ -14,8 +13,12 @@ default:
 
 # Runs the desktop app in release, with any app arguments such as `--mock --screen rooms`.
 desktop *args:
-    [ -f {{ ffmpeg }}/lib/pkgconfig/libavcodec.pc ] || packaging/ffmpeg/build.sh {{ ffmpeg }}
-    FFMPEG_PKG_CONFIG_PATH="$PWD/{{ ffmpeg }}/lib/pkgconfig" cargo run --release -p throcc-client --features ffmpeg -- {{ args }}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    host=$(rustc -vV | sed -n 's/^host: //p')
+    [ -f "deps/codecs/$host/lib/libvpx.a" ] || packaging/codecs/build.sh deps/codecs "$host"
+    set -a; eval "$(packaging/codecs/env.sh deps/codecs)"; set +a
+    cargo run --release -p throcc-client -- {{ args }}
 
 # Runs the server in release, keeping its key and database in `server_data`, with any server options such as `--listen [::]:8477`.
 server *args:

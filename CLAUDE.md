@@ -16,7 +16,7 @@ cargo deny check
 throcc-server admin-invite --data <dir>   # single-use admin invite, works while the server runs
 throcc-client --mock --screen <name>   # sample data, no server; names in `ThroccApp::show_sample`
 ./scripts/screens.sh                   # macOS: README screenshots into docs/screens/
-packaging/licenses/notices.sh client   # third-party notices the packages ship (also `server`, `android`); needs cargo-about
+packaging/licenses/notices.sh client   # third-party notices the packages ship (also `client-macos`, `server`, `android`); needs cargo-about
 packaging/macos/bundle.sh              # macOS: target/macos/throcc.dmg
 packaging/flatpak/cargo-sources.sh     # the flatpak's offline crates, before flatpak-builder
 mobile/ios/build-core.sh [device] [simulator]   # iOS: ThroccCore.xcframework and the Swift bindings, before Xcode builds; both slices by default
@@ -26,7 +26,7 @@ xcrun simctl launch booted cc.thro.throcc --mock --screen <name>   # iOS sample 
 adb shell am start -S -n cc.thro.throcc/.MainActivity --ez mock true --es screen <name>   # Android sample screens; names in `AppModel.kt`
 ```
 
-On macOS, building with `--features ffmpeg` needs `FFMPEG_PKG_CONFIG_PATH=$PWD/deps/ffmpeg-lgpl/lib/pkgconfig` (built by `packaging/ffmpeg/build.sh deps/ffmpeg-lgpl`).
+macOS, iOS and Android link dav1d and libvpx statically: `packaging/codecs/build.sh deps/codecs <rust-target>...` builds them, then `set -a; eval "$(packaging/codecs/env.sh deps/codecs)"; set +a` before cargo. macOS needs no ffmpeg; Linux and Windows video needs `--features ffmpeg`.
 
 ## Crates
 

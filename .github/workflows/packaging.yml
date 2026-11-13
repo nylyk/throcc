@@ -8,6 +8,7 @@ on:
       - 'packaging/**'
       - 'crates/throcc-client/build.rs'
       - 'crates/throcc-video/**'
+      - 'packaging/codecs/**'
       - 'crates/throcc-client-core/src/media/capture/**'
       - 'scripts/ci-run.sh'
       - '.github/workflows/packaging.yml'
@@ -17,6 +18,7 @@ on:
       - 'packaging/**'
       - 'crates/throcc-client/build.rs'
       - 'crates/throcc-video/**'
+      - 'packaging/codecs/**'
       - 'crates/throcc-client-core/src/media/capture/**'
       - 'scripts/ci-run.sh'
       - '.github/workflows/packaging.yml'
@@ -45,12 +47,14 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/develop' }}
       - run: cargo install cargo-about --locked --version 0.9.3 --features cli
-      - run: ./scripts/ci-run.sh packaging/licenses/notices.sh client
+      - run: |
+          ./scripts/ci-run.sh packaging/licenses/notices.sh client
+          ./scripts/ci-run.sh packaging/licenses/notices.sh client-macos
         shell: bash
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: notices
-          path: packaging/licenses/client-notices.txt
+          path: packaging/licenses/client*-notices.txt
           retention-days: 7
 
   macos-app:
@@ -64,13 +68,11 @@ jobs:
         with:
           name: notices
           path: packaging/licenses
-      - run: brew install dav1d libvpx pkgconf
-      - id: dav1d
-        run: echo "version=$(brew list --versions dav1d libvpx | tr ' \n' '--')" >>"$GITHUB_OUTPUT"
+      - run: brew install meson ninja
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: deps/ffmpeg-lgpl
-          key: macos-ffmpeg-${{ steps.dav1d.outputs.version }}-${{ hashFiles('packaging/ffmpeg/build.sh', 'packaging/ffmpeg/patches/*') }}
+          path: deps/codecs
+          key: codecs-macos-${{ hashFiles('packaging/codecs/*') }}
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
@@ -239,7 +241,12 @@ jobs:
       - name: host libraries for uniffi-bindgen
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev
+          sudo apt-get install -y libasound2-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev \
+            meson ninja-build nasm
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: deps/codecs
+          key: codecs-android-${{ hashFiles('packaging/codecs/*') }}
       - run: rustup toolchain install && rustup target add aarch64-linux-android x86_64-linux-android
       - run: |
           cargo install cargo-ndk --version 4.1.2 --locked

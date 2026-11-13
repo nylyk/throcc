@@ -1,4 +1,4 @@
-These are the Android libraries in this app, with their licenses.
+These are the libraries in this app besides its Rust crates, with their licenses.
 
 ================================================================================
 Android Jetpack and Jetpack Compose

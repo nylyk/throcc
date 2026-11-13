@@ -175,7 +175,9 @@ impl MacCapture {
     fn pop(&mut self) -> Option<PixelBuffer> {
         let (buffer, at) = self.frames.pop().ok()?;
         let timestamp = self.clock.video(at)?;
-        Some(PixelBuffer { buffer, timestamp })
+        // SAFETY: `buffer` holds a live CVPixelBufferRef while the call takes its own
+        // reference.
+        unsafe { PixelBuffer::retaining(buffer.as_ptr(), timestamp) }
     }
 }
 

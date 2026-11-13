@@ -36,18 +36,30 @@ jobs:
         include:
           - os: ubuntu-latest
           - os: macos-26
-            features: --features throcc-client/ffmpeg,throcc-cli/ffmpeg
-            ffmpeg_pkg_config: /opt/homebrew/opt/ffmpeg@8/lib/pkgconfig
           - os: windows-2022
     runs-on: ${{ matrix.os }}
-    env:
-      FFMPEG_PKG_CONFIG_PATH: ${{ matrix.ffmpeg_pkg_config }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # macOS links dav1d and libvpx statically, built from source.
       - if: runner.os == 'macOS'
-        run: brew update && brew install ffmpeg@8
+        id: codecs
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: deps/codecs
+          key: codecs-macos-${{ hashFiles('packaging/codecs/*') }}
+      - if: runner.os == 'macOS' && steps.codecs.outputs.cache-hit != 'true'
+        run: |
+          brew install meson ninja
+          packaging/codecs/build.sh deps/codecs aarch64-apple-darwin
+      - if: runner.os == 'macOS' && steps.codecs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: deps/codecs
+          key: ${{ steps.codecs.outputs.cache-primary-key }}
+      - if: runner.os == 'macOS'
+        run: packaging/codecs/env.sh deps/codecs >>"$GITHUB_ENV"
       - if: runner.os == 'Linux'
         run: |
           sudo apt-get update
@@ -115,6 +127,10 @@ jobs:
         shell: bash
       - run: ./scripts/ci-run.sh cargo test -p throcc-video --features ffmpeg --lib
         shell: bash
+      - run: ./scripts/ci-run.sh cargo clippy -p throcc-video --features software --all-targets -- -D warnings
+        shell: bash
+      - run: ./scripts/ci-run.sh cargo test -p throcc-video --features software --lib
+        shell: bash
       - run: ./scripts/ci-run.sh cargo test -p throcc-client-core --features ffmpeg --lib -- media::share
         shell: bash
 
@@ -148,6 +164,25 @@ jobs:
         run: |
           cargo install cargo-ndk --version 4.1.2 --locked
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >>"$GITHUB_ENV"
+      - id: codecs
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: deps/codecs
+          key: codecs-${{ matrix.platform }}-${{ hashFiles('packaging/codecs/*') }}
+      - if: steps.codecs.outputs.cache-hit != 'true'
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            brew install meson ninja
+          else
+            sudo apt-get update && sudo apt-get install -y meson ninja-build nasm
+          fi
+          packaging/codecs/build.sh deps/codecs ${{ matrix.targets }}
+      - if: steps.codecs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: deps/codecs
+          key: ${{ steps.codecs.outputs.cache-primary-key }}
+      - run: packaging/codecs/env.sh deps/codecs >>"$GITHUB_ENV"
       - run: ./scripts/ci-run.sh ${{ matrix.cargo }} clippy --locked -p throcc-mobile ${{ matrix.target_flags }} -- -D warnings
         shell: bash
       - run: ./scripts/ci-run.sh ${{ matrix.cargo }} build --locked -p throcc-mobile ${{ matrix.target_flags }}

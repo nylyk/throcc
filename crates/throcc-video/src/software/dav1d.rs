@@ -1,13 +1,9 @@
-//! AV1 through rav1d, the Rust port of dav1d, with its C API.
+//! AV1 through dav1d.
 
 use std::mem::MaybeUninit;
-use std::ptr::NonNull;
 
-use rav1d::include::dav1d::data::Dav1dData;
-use rav1d::include::dav1d::dav1d::{Dav1dContext, Dav1dSettings};
-use rav1d::include::dav1d::headers::DAV1D_PIXEL_LAYOUT_I420;
-use rav1d::include::dav1d::picture::Dav1dPicture;
-use rav1d::src::lib as dav1d;
+use dav1d_sys as dav1d;
+use dav1d_sys::{DAV1D_PIXEL_LAYOUT_I420, Dav1dContext, Dav1dData, Dav1dPicture, Dav1dSettings};
 
 use super::{Plane, i420_to_nv12};
 use crate::frame::VideoFrame;
@@ -18,7 +14,7 @@ const AGAIN: i32 = -(libc::EAGAIN);
 
 /// An AV1 decoder that hands out each picture as soon as it is decoded.
 pub struct Decoder {
-    ctx: Option<Dav1dContext>,
+    ctx: *mut Dav1dContext,
     max_size: MaxSize,
 }
 
@@ -31,7 +27,7 @@ impl Decoder {
         let mut settings = MaybeUninit::<Dav1dSettings>::uninit();
         // SAFETY: dav1d_default_settings writes every field.
         let mut settings = unsafe {
-            dav1d::dav1d_default_settings(NonNull::new_unchecked(settings.as_mut_ptr()));
+            dav1d::dav1d_default_settings(settings.as_mut_ptr());
             settings.assume_init()
         };
         // One frame of delay: each picture comes out as soon as it is decoded.
@@ -39,16 +35,11 @@ impl Decoder {
         settings.n_threads =
             std::thread::available_parallelism().map_or(1, |n| n.get().min(8)) as i32;
         settings.frame_size_limit = u32::try_from(max_size.pixels()).unwrap_or(u32::MAX);
-        let mut ctx = None;
+        let mut ctx = std::ptr::null_mut();
         // SAFETY: both pointers are to live locals.
-        let result = unsafe {
-            dav1d::dav1d_open(
-                Some(NonNull::from(&mut ctx)),
-                Some(NonNull::from(&mut settings)),
-            )
-        };
-        if result.0 != 0 || ctx.is_none() {
-            return Err(DecodeError::Dav1d(result.0));
+        let result = unsafe { dav1d::dav1d_open(&mut ctx, &settings) };
+        if result != 0 || ctx.is_null() {
+            return Err(DecodeError::Dav1d(result));
         }
         Ok(Self { ctx, max_size })
     }
@@ -60,10 +51,10 @@ impl Decoder {
         timestamp: u32,
         mut spare: Option<VideoFrame>,
     ) -> Result<Option<VideoFrame>, DecodeError> {
-        let mut data = Dav1dData::default();
+        // SAFETY: an all-zero Dav1dData is dav1d's empty data.
+        let mut data: Dav1dData = unsafe { std::mem::zeroed() };
         // SAFETY: dav1d_data_create allocates `len` bytes for `data` and returns them.
-        let buffer =
-            unsafe { dav1d::dav1d_data_create(Some(NonNull::from(&mut data)), unit.len()) };
+        let buffer = unsafe { dav1d::dav1d_data_create(&mut data, unit.len()) };
         if buffer.is_null() {
             return Err(DecodeError::Dav1d(-libc::ENOMEM));
         }
@@ -73,13 +64,13 @@ impl Decoder {
         let mut newest = None;
         let result = loop {
             // SAFETY: the context is open and `data` was created above.
-            let sent = unsafe { dav1d::dav1d_send_data(self.ctx, Some(NonNull::from(&mut data))) };
-            match sent.0 {
+            let sent = unsafe { dav1d::dav1d_send_data(self.ctx, &mut data) };
+            match sent {
                 0 if data.sz == 0 => break Ok(()),
                 0 | AGAIN => {
                     if let Some(frame) = self.take_pictures(timestamp, &mut spare)? {
                         newest = Some(frame);
-                    } else if sent.0 == AGAIN {
+                    } else if sent == AGAIN {
                         break Err(DecodeError::Dav1d(AGAIN));
                     }
                 }
@@ -88,7 +79,7 @@ impl Decoder {
         };
         if data.sz > 0 {
             // SAFETY: what dav1d didn't take is still ours to release.
-            unsafe { dav1d::dav1d_data_unref(Some(NonNull::from(&mut data))) };
+            unsafe { dav1d::dav1d_data_unref(&mut data) };
         }
         result?;
         if let Some(frame) = self.take_pictures(timestamp, &mut spare)? {
@@ -105,18 +96,18 @@ impl Decoder {
     ) -> Result<Option<VideoFrame>, DecodeError> {
         let mut newest = None;
         loop {
-            let mut picture = Dav1dPicture::default();
+            // SAFETY: an all-zero Dav1dPicture is dav1d's empty picture.
+            let mut picture: Dav1dPicture = unsafe { std::mem::zeroed() };
             // SAFETY: the context is open and `picture` is a live, empty picture.
-            let got =
-                unsafe { dav1d::dav1d_get_picture(self.ctx, Some(NonNull::from(&mut picture))) };
-            match got.0 {
+            let got = unsafe { dav1d::dav1d_get_picture(self.ctx, &mut picture) };
+            match got {
                 0 => {}
                 AGAIN => return Ok(newest),
                 error => return Err(DecodeError::Dav1d(error)),
             }
             let copied = self.copy_out(&picture, timestamp, spare.take().or(newest.take()));
             // SAFETY: the picture came from dav1d_get_picture and is released once.
-            unsafe { dav1d::dav1d_picture_unref(Some(NonNull::from(&mut picture))) };
+            unsafe { dav1d::dav1d_picture_unref(&mut picture) };
             newest = Some(copied?);
         }
     }
@@ -135,8 +126,9 @@ impl Decoder {
             return Err(DecodeError::Format(picture.p.layout as i32));
         }
         let plane = |index: usize, stride: isize| {
-            picture.data[index].map(|data| Plane {
-                data: data.as_ptr().cast::<u8>().cast_const(),
+            let data = picture.data[index].cast::<u8>().cast_const();
+            (!data.is_null()).then_some(Plane {
+                data,
                 stride: stride as usize,
             })
         };
@@ -157,7 +149,7 @@ impl Decoder {
 impl Drop for Decoder {
     fn drop(&mut self) {
         // SAFETY: the context came from dav1d_open and is closed once.
-        unsafe { dav1d::dav1d_close(Some(NonNull::from(&mut self.ctx))) };
+        unsafe { dav1d::dav1d_close(&mut self.ctx) };
     }
 }
 

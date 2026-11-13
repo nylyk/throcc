@@ -1,4 +1,4 @@
-//! Software codecs for platforms whose own codecs lack one: dav1d (as rav1d) for AV1 and
+//! Software codecs for platforms whose own codecs lack one: dav1d for AV1 and
 //! libvpx for VP9. Both are BSD-licensed and link statically.
 
 pub mod dav1d;

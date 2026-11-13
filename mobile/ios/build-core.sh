@@ -10,6 +10,7 @@ generated=mobile/ios/throcc/Generated
 framework=mobile/ios/ThroccCore.xcframework
 
 targets=()
+triples=()
 libraries=()
 xcframework=()
 for slice in "$@"; do
@@ -20,9 +21,20 @@ for slice in "$@"; do
     esac
     library=target/$triple/release/libthrocc_mobile.a
     targets+=(--target "$triple")
+    triples+=("$triple")
     libraries+=("$library")
     xcframework+=(-library "$library" -headers "$headers")
 done
+
+# dav1d and libvpx link statically, built once per slice.
+missing=()
+for triple in "${triples[@]}"; do
+    [ -f "deps/codecs/$triple/lib/libvpx.a" ] || missing+=("$triple")
+done
+[ ${#missing[@]} -eq 0 ] || packaging/codecs/build.sh deps/codecs "${missing[@]}"
+set -a
+eval "$(packaging/codecs/env.sh deps/codecs)"
+set +a
 
 cargo build --locked -p throcc-mobile --release "${targets[@]}"
 

@@ -1,48 +1,51 @@
 //! Video encoders and decoders, and the NV12 pictures between them. One [`Encoder`] and one
-//! [`Decoder`] with a backend per platform; a build without one has an encoder and a decoder
+//! [`Decoder`] with a backend per platform: VideoToolbox on macOS and iOS, ffmpeg on Linux
+//! and Windows with the `ffmpeg` feature. A build without one has an encoder and a decoder
 //! that never open.
 
 #[cfg(target_os = "linux")]
 mod dmabuf;
 pub mod frame;
-#[cfg(target_os = "macos")]
-mod pixel_buffer;
-
-#[cfg(feature = "ffmpeg")]
-mod ffmpeg;
-#[cfg(not(feature = "ffmpeg"))]
-mod none;
+#[cfg(any(target_vendor = "apple", test))]
+mod nal;
 #[cfg(software)]
 pub mod software;
+
+#[cfg(target_vendor = "apple")]
+mod apple;
+#[cfg(ffmpeg)]
+mod ffmpeg;
+#[cfg(not(any(target_vendor = "apple", ffmpeg)))]
+mod none;
 
 use bytes::Bytes;
 use throcc_proto::messages::Codec;
 
+#[cfg(target_vendor = "apple")]
+pub use apple::{Decoder, Encoder, FULL_RANGE_NV12, PixelBuffer};
 #[cfg(target_os = "linux")]
 pub use dmabuf::{DmaBuf, DmaBufPlane, MAX_PLANES};
-#[cfg(feature = "ffmpeg")]
+#[cfg(ffmpeg)]
 pub use ffmpeg::decode::Decoder;
-#[cfg(feature = "ffmpeg")]
+#[cfg(ffmpeg)]
 pub use ffmpeg::encode::Encoder;
-#[cfg(all(feature = "ffmpeg", target_os = "linux"))]
+#[cfg(all(ffmpeg, target_os = "linux"))]
 pub use ffmpeg::encode::tries_gpu_input_first;
-#[cfg(all(feature = "ffmpeg", target_os = "linux"))]
+#[cfg(all(ffmpeg, target_os = "linux"))]
 pub use ffmpeg::vaapi::VaError;
-#[cfg(all(not(feature = "ffmpeg"), target_os = "linux"))]
+#[cfg(all(not(ffmpeg), target_os = "linux"))]
 pub use none::tries_gpu_input_first;
-#[cfg(not(feature = "ffmpeg"))]
+#[cfg(not(any(target_vendor = "apple", ffmpeg)))]
 pub use none::{Decoder, Encoder};
-#[cfg(target_os = "macos")]
-pub use pixel_buffer::{FULL_RANGE_NV12, PixelBuffer};
 
 /// Whether this build has a video backend at all. Without one, nothing encodes or decodes.
-pub const HAS_BACKEND: bool = cfg!(feature = "ffmpeg");
+pub const HAS_BACKEND: bool = cfg!(any(target_vendor = "apple", ffmpeg));
 
-/// A picture as handed to the renderer: NV12 in memory, or on macOS the pixel buffer in GPU
-/// memory it was captured or decoded into.
+/// A picture as handed to the renderer: NV12 in memory, or on Apple platforms the pixel
+/// buffer in GPU memory it was captured or decoded into.
 pub enum Frame {
     Planes(frame::VideoFrame),
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     PixelBuffer(PixelBuffer),
 }
 
@@ -50,7 +53,7 @@ impl Frame {
     pub fn timestamp(&self) -> u32 {
         match self {
             Frame::Planes(frame) => frame.timestamp,
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             Frame::PixelBuffer(buffer) => buffer.timestamp,
         }
     }
@@ -59,7 +62,7 @@ impl Frame {
     pub fn size(&self) -> (usize, usize) {
         match self {
             Frame::Planes(frame) => (frame.width, frame.height),
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             Frame::PixelBuffer(buffer) => (buffer.width(), buffer.height()),
         }
     }
@@ -68,7 +71,7 @@ impl Frame {
     pub fn planes(&self) -> Option<&frame::VideoFrame> {
         match self {
             Frame::Planes(frame) => Some(frame),
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             Frame::PixelBuffer(_) => None,
         }
     }
@@ -77,7 +80,7 @@ impl Frame {
     pub fn into_planes(self) -> Option<frame::VideoFrame> {
         match self {
             Frame::Planes(frame) => Some(frame),
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             Frame::PixelBuffer(_) => None,
         }
     }
@@ -86,7 +89,7 @@ impl Frame {
     pub fn copied_to_memory(&self) -> frame::VideoFrame {
         match self {
             Frame::Planes(frame) => frame.clone(),
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             Frame::PixelBuffer(buffer) => buffer.copied_to_memory(),
         }
     }
@@ -154,7 +157,7 @@ impl MaxSize {
 pub enum EncodeError {
     #[error("no usable video encoder on this machine")]
     NoEncoder,
-    #[cfg(feature = "ffmpeg")]
+    #[cfg(ffmpeg)]
     #[error("ffmpeg: {0}")]
     Ffmpeg(#[from] rsmpeg::error::RsmpegError),
     #[error("can't scale the picture to the encoder's size")]
@@ -168,13 +171,16 @@ pub enum EncodeError {
     #[cfg(software)]
     #[error("libvpx: {0}")]
     Vpx(String),
-    #[cfg(all(feature = "ffmpeg", target_os = "linux"))]
+    #[cfg(target_vendor = "apple")]
+    #[error("VideoToolbox failed with {0}")]
+    VideoToolbox(i32),
+    #[cfg(all(ffmpeg, target_os = "linux"))]
     #[error("importing a frame in GPU memory: {0}")]
     Import(VaError),
-    #[cfg(all(feature = "ffmpeg", target_os = "linux"))]
+    #[cfg(all(ffmpeg, target_os = "linux"))]
     #[error("GPU video processing: {0}")]
     Gpu(VaError),
-    #[cfg(all(feature = "ffmpeg", target_os = "linux"))]
+    #[cfg(all(ffmpeg, target_os = "linux"))]
     #[error("the preview came back in pixel format {0}, which throcc doesn't present")]
     PreviewFormat(i32),
 }
@@ -195,9 +201,9 @@ impl EncodeError {
     /// `None` for errors that may pass, which cost only that frame.
     pub fn refusal(&self, modifier: u64) -> Option<Refusal> {
         match self {
-            #[cfg(feature = "ffmpeg")]
+            #[cfg(ffmpeg)]
             EncodeError::Import(_) => Some(Refusal::Modifier(modifier)),
-            #[cfg(feature = "ffmpeg")]
+            #[cfg(ffmpeg)]
             EncodeError::Gpu(_) => Some(Refusal::All),
             EncodeError::NoGpuInput => Some(Refusal::All),
             _ => {
@@ -216,12 +222,17 @@ pub enum DecodeError {
     Format(i32),
     #[error("a {0}×{1} picture is larger than this share may send")]
     TooLarge(i32, i32),
-    #[cfg(feature = "ffmpeg")]
+    #[cfg(ffmpeg)]
     #[error("ffmpeg: {0}")]
     Ffmpeg(#[from] rsmpeg::error::RsmpegError),
     #[cfg(software)]
     #[error("dav1d failed with {0}")]
     Dav1d(i32),
+    #[cfg(target_vendor = "apple")]
+    #[error("VideoToolbox failed with {0}")]
+    VideoToolbox(i32),
+    #[error("waiting for a keyframe")]
+    NoKeyframe,
     #[cfg(software)]
     #[error("libvpx: {0}")]
     Vpx(String),
@@ -249,14 +260,14 @@ mod tests {
         assert_eq!(EncodeError::NoSurfaces.refusal(7), None);
     }
 
-    #[cfg(all(feature = "ffmpeg", target_os = "linux"))]
+    #[cfg(all(ffmpeg, target_os = "linux"))]
     #[test]
     fn a_layout_that_fails_to_import_is_refused_alone() {
         let import = EncodeError::Import(VaError::Format(0));
         assert_eq!(import.refusal(7), Some(Refusal::Modifier(7)));
     }
 
-    #[cfg(all(feature = "ffmpeg", target_os = "linux"))]
+    #[cfg(all(ffmpeg, target_os = "linux"))]
     #[test]
     fn a_gpu_that_cant_process_them_refuses_all() {
         let processing = EncodeError::Gpu(VaError::Call {
@@ -266,7 +277,7 @@ mod tests {
         assert_eq!(processing.refusal(7), Some(Refusal::All));
     }
 
-    #[cfg(all(feature = "ffmpeg", target_os = "linux"))]
+    #[cfg(all(ffmpeg, target_os = "linux"))]
     #[test]
     fn a_passing_error_costs_only_the_frame() {
         let send = EncodeError::Ffmpeg(rsmpeg::error::RsmpegError::SendFrameAgainError);

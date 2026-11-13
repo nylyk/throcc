@@ -9,14 +9,18 @@ A build with no backend still has both types. They never open: `Encoder::open` f
 | `lib.rs` | `Frame` as the renderer gets it, the encoder's config and its access units, `MaxSize`, the errors, and which frames in GPU memory an encoder refuses after one fails |
 | `frame.rs` | NV12 pictures in memory: test patterns, shrinking, conversion from 4-byte RGB and to BGRA, copying planes with strides, and the sizes a share is fitted to |
 | `dmabuf.rs` | Linux: a captured picture still in GPU memory, as DRM PRIME planes |
-| `pixel_buffer.rs` | macOS: a captured or decoded picture in a full-range NV12 CoreVideo pixel buffer |
-| `ffmpeg/` | The `ffmpeg` feature's backend: hardware AV1, HEVC and H.264 through NVENC, Media Foundation, VA-API and VideoToolbox, then VP9 in libvpx; decoding on the hardware device where there is one, else in software with dav1d for AV1. On Linux a VA-API encoder takes DMA-BUFs and scales them on the GPU (`vaapi.rs`); on macOS VideoToolbox takes captured pixel buffers and decodes into them, uncopied |
+| `nal.rs` | H.264 and HEVC access units between Annex B, as senders send them with the parameter sets before each keyframe, and VideoToolbox's 4-byte length-prefixed NAL units with the parameter sets in a format description |
+| `apple/` | macOS and iOS, whatever the features: VideoToolbox decodes H.264 and HEVC into full-range NV12 pixel buffers renderers draw uncopied (`pixel_buffer.rs`), falling back to Apple's own software decoders where the hardware lacks them, and encodes hardware HEVC, then H.264, from captured pixel buffers, flushing each frame before the next. Pictures of another size are scaled into the encoder's on the GPU with black bars (`transfer.rs`). AV1 and VP9 decode in dav1d and libvpx, into pixel buffers too, and macOS encodes VP9 in libvpx where it has no hardware encoder |
+| `software/` | dav1d for AV1 and libvpx for VP9, linked statically on Apple and Android (built by `packaging/codecs/build.sh`), and anywhere with the `software` feature for their tests |
+| `ffmpeg/` | Linux and Windows with the `ffmpeg` feature: hardware AV1, HEVC and H.264 through NVENC, Media Foundation and VA-API, then VP9 in libvpx; decoding on the hardware device where there is one, else in software with dav1d for AV1. A VA-API encoder takes DMA-BUFs and scales them on the GPU (`vaapi.rs`) |
 | `none.rs` | The backend of a build without one |
 
 Encoders hold to low latency everywhere: no B-frames, no lookahead, a VBV of about two frames, and recovery by NVENC's intra refresh where it runs, else by an IDR on request. Decoders refuse pictures larger than the share announced, and a hardware decoder that keeps failing for three seconds is swapped for software.
 
 ```sh
-cargo test -p throcc-video --features ffmpeg
+cargo test -p throcc-video --features ffmpeg     # Linux, Windows
+cargo test -p throcc-video --features software   # dav1d and libvpx, from the system's
+cargo test -p throcc-video                       # macOS, after packaging/codecs/build.sh and env.sh
 ```
 
-Tests of a hardware encoder print `skipped:` where the hardware is missing.
+Tests of an ffmpeg hardware encoder print `skipped:` where the hardware is missing. The VideoToolbox tests open Apple's software encoders, which CI's virtual Macs have, and fail rather than skip.

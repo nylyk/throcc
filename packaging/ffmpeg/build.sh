@@ -35,9 +35,6 @@ pkg-config --exists --print-errors vpx ||
     { echo "vpx not found by pkg-config; VP9 can't be encoded or decoded" >&2; exit 1; }
 flags+=(--enable-libvpx)
 case "$(uname -s)" in
-    Darwin)
-        flags+=(--enable-videotoolbox)
-        ;;
     Linux)
         have ffnvcodec && flags+=(--enable-ffnvcodec --enable-nvenc --enable-nvdec)
         have libva && flags+=(--enable-vaapi)
