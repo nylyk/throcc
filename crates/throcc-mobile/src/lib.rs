@@ -1020,7 +1020,7 @@ pub fn initial(name: String) -> String {
 /// Whether a server takes `typed` as a room password.
 #[uniffi::export]
 pub fn is_valid_password(typed: String) -> bool {
-    core_profile::password_problem(&typed).is_none()
+    !typed.is_empty() && core_profile::password_problem(&typed).is_none()
 }
 
 /// Whether `typed` has the shape of an invite code.

@@ -66,9 +66,10 @@ pub fn check_name(typed: &str) -> NameCheck {
     }
 }
 
-/// Why a server would refuse `typed` as a room password, if it would.
+/// Why a server would refuse `typed` as a room password, if it would. Nothing typed is no
+/// password, which is no problem.
 pub fn password_problem(typed: &str) -> Option<String> {
-    (!valid_password(typed))
+    (!typed.is_empty() && !valid_password(typed))
         .then(|| format!("Passwords can be at most {MAX_PASSWORD_CHARS} characters."))
 }
 
@@ -149,6 +150,7 @@ mod tests {
     #[test]
     fn passwords_are_judged_as_servers_judge_them() {
         assert_eq!(check_password(""), Ok(None));
+        assert_eq!(password_problem(""), None);
         assert_eq!(check_password(" "), Ok(Some(" ".into())));
         let longest = "p".repeat(MAX_PASSWORD_CHARS);
         assert_eq!(check_password(&longest), Ok(Some(longest.clone())));

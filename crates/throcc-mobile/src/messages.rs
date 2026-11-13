@@ -69,17 +69,6 @@ pub enum Command {
         user: u64,
         cascade: bool,
     },
-    /// Verifies the identity key whose safety number the user compared, or takes it off.
-    SetVerified {
-        user: u64,
-        key: Vec<u8>,
-        verified: bool,
-    },
-    /// Stops warning that this user's verified key changed. `shown` is the key looked at.
-    DismissKeyChange {
-        user: u64,
-        shown: Option<Vec<u8>>,
-    },
     Block {
         user: u64,
     },
@@ -153,22 +142,6 @@ impl Command {
             Self::RemoveUser { user, cascade } => UiCommand::RemoveUser {
                 user: UserId(user),
                 cascade,
-            },
-            Self::SetVerified {
-                user,
-                key,
-                verified,
-            } => UiCommand::SetVerified {
-                user: UserId(user),
-                key: fingerprint(&key)?,
-                verified,
-            },
-            Self::DismissKeyChange { user, shown } => UiCommand::DismissKeyChange {
-                user: UserId(user),
-                shown: match shown {
-                    Some(shown) => Some(fingerprint(&shown)?),
-                    None => None,
-                },
             },
             Self::Block { user } => UiCommand::Block(UserId(user)),
             Self::Unblock { user } => UiCommand::Unblock(UserId(user)),
