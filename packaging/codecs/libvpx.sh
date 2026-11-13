@@ -45,6 +45,10 @@ case "$target" in
         if [ "$target" = aarch64-linux-android ]; then
             flags+=(--target=arm64-android-gcc)
         else
+            # configure checks nasm's output with a plain `readelf`, which a Mac lacks.
+            mkdir "$work/bin"
+            ln -s "$toolchain/llvm-readelf" "$work/bin/readelf"
+            export PATH="$work/bin:$PATH"
             flags+=(--target=x86_64-android-gcc --as=nasm)
         fi
         ;;
