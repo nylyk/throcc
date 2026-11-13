@@ -93,21 +93,23 @@ impl SafetyCheck {
         !self.key_changed && self.shown_key() == presented.map(Fingerprint)
     }
 
-    /// Marks the key on screen verified, or not verified where it is, if the user may now.
-    pub fn mark(&self, state: &State) -> Option<UiCommand> {
+    /// Marks the key on screen verified, or not verified for `verify` false, if the user may
+    /// now. The caller says which, as its button showed it, so a second tap before the screen
+    /// catches up repeats the choice rather than undoing it.
+    pub fn mark(&self, state: &State, verify: bool) -> Option<UiCommand> {
         let key = self.shown_key().filter(|_| self.current(state))?;
-        let verified = state.person(self.user)?.verified;
         Some(UiCommand::SetVerified {
             user: self.user,
             key,
-            verified: !verified,
+            verified: verify,
         })
     }
 
     /// Dismisses the warning that the person's verified key changed, for the key on screen,
-    /// if the user may now.
+    /// if there is one and the user may now. Dismissing unties the verified key from this
+    /// person, so it is never sent without a warning standing.
     pub fn dismiss_warning(&self, state: &State) -> Option<UiCommand> {
-        self.current(state).then(|| UiCommand::DismissKeyChange {
+        (state.key_changed(self.user) && self.current(state)).then(|| UiCommand::DismissKeyChange {
             user: self.user,
             shown: self.shown_key(),
         })
@@ -177,7 +179,8 @@ mod tests {
         assert!(!check.follow(&state, number));
         assert_eq!(check.number(), None);
         assert!(check.groups().is_empty());
-        assert_eq!(check.mark(&state), None);
+        assert_eq!(check.mark(&state, true), None);
+        assert_eq!(check.dismiss_warning(&state), None);
         assert_eq!(check.explanation(&state, "mara"), None);
     }
 
@@ -187,8 +190,9 @@ mod tests {
         let state = state_with(Some([1; 32]), false);
         assert!(check.follow(&state, number));
         assert_eq!(check.groups().len(), 12);
+        assert_eq!(check.dismiss_warning(&state), None, "no warning stands");
         assert_eq!(
-            check.mark(&state),
+            check.mark(&state, true),
             Some(UiCommand::SetVerified {
                 user: MARA,
                 key: Fingerprint([1; 32]),
@@ -205,10 +209,9 @@ mod tests {
         assert!(check.follow(&changed, number));
         assert!(check.key_changed_while_open());
         assert_eq!(check.shown_key(), Some(Fingerprint([2; 32])));
-        assert_eq!(check.mark(&changed), None);
-        assert_eq!(check.dismiss_warning(&changed), None);
+        assert_eq!(check.mark(&changed, true), None);
         check.compare_again();
-        let marked = check.mark(&changed).unwrap();
+        let marked = check.mark(&changed, true).unwrap();
         assert!(
             matches!(marked, UiCommand::SetVerified { key, .. } if key == Fingerprint([2; 32]))
         );
@@ -219,8 +222,7 @@ mod tests {
         let mut check = SafetyCheck::new(MARA);
         check.follow(&state_with(Some([1; 32]), true), number);
         let moved_on = state_with(Some([2; 32]), true);
-        assert_eq!(check.mark(&moved_on), None);
-        assert_eq!(check.dismiss_warning(&moved_on), None);
+        assert_eq!(check.mark(&moved_on, false), None);
     }
 
     #[test]
@@ -233,6 +235,9 @@ mod tests {
             now: Fingerprint([2; 32]),
         });
         check.follow(&state, number);
+        let mut moved_on = state_with(Some([3; 32]), false);
+        moved_on.key_warnings = state.key_warnings.clone();
+        assert_eq!(check.dismiss_warning(&moved_on), None);
         assert!(check.new_key_shown(&state));
         let explanation = check.explanation(&state, "mara").unwrap();
         assert!(explanation.starts_with("This number belongs to mara’s new key."));

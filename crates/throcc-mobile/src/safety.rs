@@ -47,12 +47,14 @@ impl SafetyCheck {
 
     /// Whether Mark as Verified, or Not Verified, may be used now.
     pub fn can_mark(&self) -> bool {
-        self.with_state(|check, state| check.mark(state)).is_some()
+        self.with_state(|check, state| check.mark(state, true))
+            .is_some()
     }
 
-    /// Marks the key whose number is on screen verified, or not verified where it is.
-    pub fn mark(&self) {
-        if let Some(command) = self.with_state(|check, state| check.mark(state)) {
+    /// Marks the key whose number is on screen verified, or not verified for `verify` false,
+    /// as the button the user tapped said.
+    pub fn mark(&self, verify: bool) {
+        if let Some(command) = self.with_state(|check, state| check.mark(state, verify)) {
             self.core.tell_client(command);
         }
     }

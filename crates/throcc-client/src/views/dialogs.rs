@@ -548,7 +548,7 @@ fn profile(app: &mut ThroccApp, check: SafetyCheck, cx: &mut Context<ThroccApp>)
         );
     }
     let groups = check.groups();
-    let mark_command = check.mark(&state);
+    let mark_command = check.mark(&state, !verified);
     let mark = if verified {
         secondary("mark-verified", "Mark as Not Verified")
     } else {
