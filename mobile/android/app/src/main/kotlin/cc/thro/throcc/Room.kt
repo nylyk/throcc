@@ -5,9 +5,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -25,6 +28,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FabPosition
 import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconToggleButton
 import androidx.compose.material3.HorizontalFloatingToolbar
 import androidx.compose.material3.Icon
@@ -34,15 +38,16 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cc.thro.throcc.core.Command
 import cc.thro.throcc.core.CoreState
 import cc.thro.throcc.core.Person
+import cc.thro.throcc.core.Share
 
 /** The room we are in, with `onBack` where it covers the pages. */
 @Composable
@@ -60,6 +65,7 @@ fun RoomPane(model: AppModel, state: CoreState, onBack: (() -> Unit)?) {
         return
     }
     val people = state.people.filter { it.room == room.id }
+    val watching = state.current?.watching.orEmpty()
     Page(
         model,
         room.name,
@@ -78,18 +84,18 @@ fun RoomPane(model: AppModel, state: CoreState, onBack: (() -> Unit)?) {
         ) {
             if (onBack != null) item(span = { GridItemSpan(maxLineSpan) }) { ConnectionBanner(model, state) }
             for (person in people) {
-                val share = person.sharing.takeUnless { person.blocked } ?: continue
+                val share = person.sharing.takeUnless { person.blocked || person.user !in watching } ?: continue
                 item("share-${person.user}", span = { GridItemSpan(maxLineSpan) }) {
                     ShareTile(model, state, person, share)
                 }
             }
-            items(people, { it.user.toLong() }) { PersonCard(model, it) }
+            items(people, { it.user.toLong() }) { PersonCard(model, it, it.user in watching) }
         }
     }
 }
 
 @Composable
-private fun PersonCard(model: AppModel, person: Person) {
+private fun PersonCard(model: AppModel, person: Person, watched: Boolean) {
     val scheme = MaterialTheme.colorScheme
     val colors = if (person.blocked) {
         CardDefaults.cardColors(scheme.surfaceContainerLow, scheme.onSurfaceVariant)
@@ -116,27 +122,26 @@ private fun PersonCard(model: AppModel, person: Person) {
                 MutedIcon(person)
             }
             // Held empty for those not sharing, so every card has the same height.
-            val sharing = person.sharing
-            Sharing(
-                sharing?.label.orEmpty(),
-                if (sharing == null) Modifier.alpha(0f).clearAndSetSemantics {} else Modifier,
-            )
+            val share = person.sharing.takeUnless { person.blocked }
+            if (share == null) Spacer(Modifier.height(WATCH_HEIGHT)) else WatchButton(model, person, share, watched)
         }
     }
 }
 
+private val WATCH_HEIGHT = 32.dp
+
+/** Starts watching `person`'s share in the room, or says it is the one being watched. */
 @Composable
-private fun Sharing(label: String, modifier: Modifier = Modifier) {
-    val quiet = MaterialTheme.colorScheme.onSurfaceVariant
-    Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        Icon(Icons.AutoMirrored.Filled.ScreenShare, "Sharing", Modifier.size(16.dp), quiet)
-        Text(
-            label,
-            color = quiet,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            style = MaterialTheme.typography.labelLarge,
-        )
+private fun WatchButton(model: AppModel, person: Person, share: Share, watched: Boolean) {
+    FilledTonalButton(
+        { model.core.watchOnly(person.user) },
+        Modifier.height(WATCH_HEIGHT).semantics { contentDescription = "Watch ${person.name}’s share, ${share.label}" },
+        enabled = !watched,
+        contentPadding = PaddingValues(horizontal = 12.dp),
+    ) {
+        Icon(Icons.AutoMirrored.Filled.ScreenShare, null, Modifier.size(16.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(if (watched) "Watching" else "Watch", style = MaterialTheme.typography.labelLarge)
     }
 }
 

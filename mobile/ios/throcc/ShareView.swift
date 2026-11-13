@@ -52,63 +52,47 @@ struct ShareSurface: UIViewRepresentable {
     }
 }
 
-/// A share in the room: watched in place, with a way to fullscreen it, or offered to watch.
+/// The share being watched in the room, at most `maxHeight` tall, with a way to fullscreen it.
 struct ShareTile: View {
     let person: Person
     let share: Share
+    let maxHeight: CGFloat
     @Environment(AppModel.self) private var model
-
-    private var watching: Bool {
-        model.state.current?.watching.contains(person.user) ?? false
-    }
 
     var body: some View {
         ZStack {
-            if watching {
-                Color.black
-                // Kept under fullscreen, so the share goes back to it unchanged.
-                ShareSurface(user: person.user)
-                Loading(user: person.user)
-                VStack {
-                    HStack(spacing: 8) {
-                        if let warning = ShareWarning(health: model.state.health, user: person.user) {
-                            WarningPill(warning: warning)
-                        }
-                        Spacer()
-                        Button("Fullscreen", systemImage: "arrow.up.left.and.arrow.down.right") {
-                            model.fullscreenShare = person.user
-                        }
-                        Button("Stop Watching", systemImage: "xmark") {
-                            model.core.command(command: .unwatch(user: person.user))
-                        }
+            Color.black
+            // Kept under fullscreen, so the share goes back to it unchanged.
+            ShareSurface(user: person.user)
+            Loading(user: person.user)
+            VStack {
+                HStack(spacing: 8) {
+                    if let warning = ShareWarning(health: model.state.health, user: person.user) {
+                        WarningPill(warning: warning)
                     }
-                    .labelStyle(.iconOnly)
-                    .buttonStyle(.bordered)
-                    .buttonBorderShape(.circle)
-                    .tint(.white)
                     Spacer()
-                    HStack {
-                        Sharer(person: person)
-                        Spacer()
+                    Button("Fullscreen", systemImage: "arrow.up.left.and.arrow.down.right") {
+                        model.fullscreenShare = person.user
+                    }
+                    Button("Stop Watching", systemImage: "xmark") {
+                        model.core.command(command: .unwatch(user: person.user))
                     }
                 }
-                .padding(8)
-            } else {
-                VStack(spacing: 8) {
-                    Image(systemName: "rectangle.on.rectangle").font(.title)
-                    Text("\(person.name) is sharing").lineLimit(1)
-                    Text(share.label).font(.footnote).foregroundStyle(.muted)
-                    Button("Watch") { model.core.watchOnly(user: person.user) }
-                        .buttonStyle(.bordered)
+                .labelStyle(.iconOnly)
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.circle)
+                .tint(.white)
+                Spacer()
+                HStack {
+                    Sharer(person: person)
+                    Spacer()
                 }
-                .foregroundStyle(.text)
-                .padding(16)
             }
+            .padding(8)
         }
-        .aspectRatio(CGFloat(max(share.aspect, 0.75)), contentMode: .fit)
-        .frame(maxWidth: .infinity)
-        .background(.panel, in: .rect(cornerRadius: 16))
+        .aspectRatio(CGFloat(max(share.aspect, 0.5)), contentMode: .fit)
         .clipShape(.rect(cornerRadius: 16))
+        .frame(maxWidth: .infinity, maxHeight: maxHeight)
     }
 }
 

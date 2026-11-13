@@ -21,20 +21,19 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.ScreenShare
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -54,7 +53,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -179,19 +180,20 @@ private fun Sharer(model: AppModel, person: Person, modifier: Modifier = Modifie
     }
 }
 
-/** A share in the room: watched in place, with a way to fullscreen it, or offered to watch. */
+/** The share being watched in the room, at most [MAX_TILE_HEIGHT] of the window's height, with a way to fullscreen it. */
 @Composable
 fun ShareTile(model: AppModel, state: CoreState, person: Person, share: Share) {
-    val watching = state.current?.watching?.contains(person.user) == true
     val warning = shareWarning(state, person.user)
-    Card(
-        Modifier.fillMaxWidth().aspectRatio(share.aspect.coerceAtLeast(0.75f)),
-        shape = MaterialTheme.shapes.extraLarge,
-        colors = panelColors(),
-    ) {
-        Box(Modifier.fillMaxSize()) {
-            if (watching) {
-                Box(Modifier.fillMaxSize().background(Color.Black), Alignment.Center) {
+    val window = LocalWindowInfo.current.containerSize
+    val maxHeight = with(LocalDensity.current) { window.height.toDp() } * MAX_TILE_HEIGHT
+    Box(Modifier.fillMaxWidth(), Alignment.Center) {
+        Card(
+            Modifier.heightIn(max = maxHeight).aspectRatio(share.aspect.coerceAtLeast(0.5f)),
+            shape = MaterialTheme.shapes.extraLarge,
+            colors = panelColors(),
+        ) {
+            Box(Modifier.fillMaxSize().background(Color.Black)) {
+                Box(Modifier.fillMaxSize(), Alignment.Center) {
                     // Kept under fullscreen, so the codec never goes without a surface.
                     ShareSurface(model, person.user, Modifier.aspectRatio(share.aspect))
                     Loading(state, person.user)
@@ -206,26 +208,13 @@ fun ShareTile(model: AppModel, state: CoreState, person: Person, share: Share) {
                         Icon(Icons.Default.Close, "Stop Watching")
                     }
                 }
-            } else {
-                Column(
-                    Modifier.align(Alignment.Center).padding(16.dp),
-                    Arrangement.spacedBy(8.dp),
-                    Alignment.CenterHorizontally,
-                ) {
-                    Icon(Icons.AutoMirrored.Filled.ScreenShare, null, Modifier.size(32.dp))
-                    Text(
-                        "${person.name} is sharing",
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.titleMedium,
-                    )
-                    Text(share.label, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    FilledTonalButton({ model.core.watchOnly(person.user) }) { Text("Watch") }
-                }
             }
         }
     }
 }
+
+/** The share tile's height at most, as a share of the window's: a tall share stays on screen. */
+private const val MAX_TILE_HEIGHT = 0.6f
 
 /**
  * The share `model.fullscreenShare` over the whole window, in its shape, turning with the phone. A tap

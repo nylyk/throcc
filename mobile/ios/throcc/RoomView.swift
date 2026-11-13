@@ -11,26 +11,28 @@ struct RoomView: View {
         let state = model.state
         if let current = state.current, let room = state.rooms.first(where: { $0.id == current.room }) {
             let people = state.people.filter { $0.room == room.id }
-            let sharing = people.filter { !$0.blocked && $0.sharing != nil }
-            ScrollView {
-                if !sharing.isEmpty {
-                    VStack(spacing: 12) {
-                        ForEach(sharing, id: \.user) { person in
-                            if let share = person.sharing {
-                                ShareTile(person: person, share: share)
-                            }
+            let watched = people.filter { !$0.blocked && $0.sharing != nil && current.watching.contains($0.user) }
+            GeometryReader { window in
+                ScrollView {
+                    ForEach(watched, id: \.user) { person in
+                        if let share = person.sharing {
+                            ShareTile(person: person, share: share, maxHeight: window.size.height * 0.6)
+                                .padding([.horizontal, .top], 16)
                         }
                     }
-                    .padding([.horizontal, .top], 16)
-                }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
-                    ForEach(people, id: \.user) { person in
-                        Button { model.sheet = .person(person.user) } label: { PersonCard(person: person) }
-                            .buttonStyle(.plain)
-                            .accessibilityValue(person.speaking ? "Speaking" : "")
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
+                        ForEach(people, id: \.user) { person in
+                            PersonCard(person: person, watched: current.watching.contains(person.user))
+                                .contentShape(.rect(cornerRadius: 16))
+                                .onTapGesture { model.sheet = .person(person.user) }
+                                .accessibilityElement(children: .contain)
+                                .accessibilityAddTraits(.isButton)
+                                .accessibilityAction { model.sheet = .person(person.user) }
+                                .accessibilityValue(person.speaking ? "Speaking" : "")
+                        }
                     }
+                    .padding(16)
                 }
-                .padding(16)
             }
             .background(.bg)
             .fullScreenCover(isPresented: fullscreen) {
@@ -66,6 +68,8 @@ struct RoomView: View {
 
 private struct PersonCard: View {
     let person: Person
+    let watched: Bool
+    @Environment(AppModel.self) private var model
 
     var body: some View {
         VStack(spacing: 8) {
@@ -82,11 +86,22 @@ private struct PersonCard: View {
             }
             .foregroundStyle(person.blocked ? ThemeColor.muted : .text)
             // Held empty for those not sharing, so every card has the same height.
-            Text(person.sharing.map { "Sharing \($0.label)" } ?? " ")
-                .font(.caption)
-                .foregroundStyle(.muted)
-                .lineLimit(1)
-                .accessibilityHidden(person.sharing == nil)
+            if let share = person.sharing, !person.blocked {
+                Button {
+                    model.core.watchOnly(user: person.user)
+                } label: {
+                    Label(watched ? "Watching" : "Watch", systemImage: "rectangle.on.rectangle")
+                        .font(.caption.weight(.medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(watched)
+                .frame(height: 28)
+                .accessibilityLabel("Watch \(person.name)’s share")
+                .accessibilityValue(share.label)
+            } else {
+                Color.clear.frame(height: 28)
+            }
         }
         .frame(maxWidth: .infinity, minHeight: 140)
         .padding(8)
