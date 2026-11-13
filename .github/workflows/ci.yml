@@ -187,6 +187,25 @@ jobs:
         shell: bash
       - run: ./scripts/ci-run.sh ${{ matrix.cargo }} build --locked -p throcc-mobile ${{ matrix.target_flags }}
         shell: bash
+      # The apps themselves, for the simulator and the emulator's ABI: Swift and Kotlin compile.
+      - if: matrix.platform == 'ios'
+        run: |
+          ./scripts/ci-run.sh mobile/ios/build-core.sh simulator
+          ./scripts/ci-run.sh xcodebuild -quiet -project mobile/ios/throcc.xcodeproj -scheme throcc \
+            -configuration Debug -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath mobile/ios/build CODE_SIGNING_ALLOWED=NO build
+        shell: bash
+      - if: matrix.platform == 'android'
+        run: |
+          # uniffi-bindgen runs on the host and links what the core links there.
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev
+          ndk=$(sed -n 's/^ *ndkVersion = "\(.*\)"$/\1/p' mobile/android/app/build.gradle.kts)
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$ndk" >/dev/null
+          export JAVA_HOME=$JAVA_HOME_21_X64
+          ./scripts/ci-run.sh mobile/android/gradlew -p mobile/android compileDebugKotlin \
+            -Pandroid.injected.build.abi=x86_64
+        shell: bash
 
   surface:
     runs-on: ubuntu-latest
