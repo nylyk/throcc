@@ -66,8 +66,8 @@ use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThre
 use windows::core::{HRESULT, IInspectable, Interface, Owned, Ref, implement};
 
 use super::audio_ring::{AudioConsumer, AudioProducer, audio_ring};
-use super::clock::{FrameLimiter, ShareClock};
-use super::{Capture, CaptureConfig, CaptureError, copy_nv12, failed};
+use super::clock::ShareClock;
+use super::{Capture, CaptureConfig, CaptureError, FrameLimiter, copy_nv12, failed};
 use crate::media::audio::SAMPLE_RATE;
 use crate::media::share_audio::STEREO_FRAME;
 use crate::media::video::frame::{VideoFrame, share_size};
