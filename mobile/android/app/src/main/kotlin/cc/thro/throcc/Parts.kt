@@ -111,13 +111,14 @@ fun Page(
     title: String,
     onBack: (() -> Unit)? = model::back,
     subtitle: String? = null,
+    largeTitle: Boolean = true,
     notices: Boolean = true,
     actions: @Composable RowScope.() -> Unit = {},
     floatingButton: @Composable () -> Unit = {},
     buttonPosition: FabPosition = FabPosition.End,
     content: @Composable (PaddingValues) -> Unit,
 ) {
-    val tall = currentWindowAdaptiveInfoV2().windowSizeClass
+    val tall = largeTitle && currentWindowAdaptiveInfoV2().windowSizeClass
         .isHeightAtLeastBreakpoint(WindowSizeClass.HEIGHT_DP_MEDIUM_LOWER_BOUND)
     val scroll = if (tall) {
         TopAppBarDefaults.exitUntilCollapsedScrollBehavior()

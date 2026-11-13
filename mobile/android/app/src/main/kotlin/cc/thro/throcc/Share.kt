@@ -217,7 +217,7 @@ fun ShareTile(model: AppModel, state: CoreState, person: Person, share: Share) {
 
 /**
  * The share `model.fullscreenShare` over the whole window, in its shape, turning with the phone. A tap
- * shows the controls; everyone in the room stays shown along the bottom.
+ * shows the controls, with everyone in the room and the call's controls along the bottom.
  */
 @Composable
 fun ShareFullscreen(model: AppModel, state: CoreState) {
@@ -260,17 +260,26 @@ fun ShareFullscreen(model: AppModel, state: CoreState) {
             // Shown with or without the controls, as the desktop does.
             TooSlow(Modifier.align(Alignment.TopEnd).safeDrawingPadding().padding(12.dp))
         }
-        RoomStrip(model, state.people.filter { it.room == room }, Modifier.align(Alignment.BottomCenter))
+        AnimatedVisibility(controls, Modifier.align(Alignment.BottomCenter), enter = fadeIn(), exit = fadeOut()) {
+            Column(
+                Modifier.safeDrawingPadding().padding(8.dp),
+                Arrangement.spacedBy(12.dp),
+                Alignment.CenterHorizontally,
+            ) {
+                RoomStrip(model, state.people.filter { it.room == room })
+                RoomControls(model, state)
+            }
+        }
     }
 }
 
-/** Everyone in the room, small, so nobody listens unseen while a share fills the window. */
+/** Everyone in the room, small. */
 @Composable
-private fun RoomStrip(model: AppModel, people: List<Person>, modifier: Modifier) {
+private fun RoomStrip(model: AppModel, people: List<Person>) {
     val scheme = MaterialTheme.colorScheme
     // Wraps, so a full room of 30 stays on screen.
     FlowRow(
-        modifier.safeDrawingPadding().padding(8.dp)
+        Modifier
             .background(scheme.surfaceContainer.copy(alpha = 0.8f), MaterialTheme.shapes.extraLarge)
             .padding(horizontal = 8.dp, vertical = 4.dp),
         Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally),

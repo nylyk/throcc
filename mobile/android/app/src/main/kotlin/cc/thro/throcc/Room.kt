@@ -64,7 +64,7 @@ fun RoomPane(model: AppModel, state: CoreState, onBack: (() -> Unit)?) {
         model,
         room.name,
         onBack,
-        people(people.size),
+        largeTitle = false,
         notices = onBack != null,
         floatingButton = { RoomControls(model, state) },
         buttonPosition = FabPosition.Center,
@@ -142,7 +142,7 @@ private fun Sharing(label: String, modifier: Modifier = Modifier) {
 
 /** The mic, sound and leave controls, floating over the room. */
 @Composable
-private fun RoomControls(model: AppModel, state: CoreState) {
+fun RoomControls(model: AppModel, state: CoreState) {
     val scheme = MaterialTheme.colorScheme
     val size = Modifier.padding(horizontal = 4.dp).size(IconButtonDefaults.mediumContainerSize())
     val shapes = IconButtonDefaults.toggleableShapes(

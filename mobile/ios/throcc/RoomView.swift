@@ -9,7 +9,6 @@ struct RoomView: View {
 
     var body: some View {
         let state = model.state
-        let micOn = state.mic && !model.micDenied
         if let current = state.current, let room = state.rooms.first(where: { $0.id == current.room }) {
             let people = state.people.filter { $0.room == room.id }
             let sharing = people.filter { !$0.blocked && $0.sharing != nil }
@@ -43,25 +42,10 @@ struct RoomView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItemGroup(placement: .bottomBar) {
-                    Button("Microphone", systemImage: micOn ? "mic.fill" : "mic.slash.fill") {
-                        if model.micDenied {
-                            model.notice = "To talk, allow the microphone for throcc in Settings."
-                        } else {
-                            model.core.command(command: .setMic(on: !state.mic))
-                        }
-                    }
-                    .tint(micOn ? model.theme.text : model.theme.bad)
-                    .accessibilityValue(micOn ? "On" : "Off")
-                    Button("Sound", systemImage: state.deafened ? "speaker.slash.fill" : "speaker.wave.2.fill") {
-                        model.core.command(command: .setDeafened(on: !state.deafened))
-                    }
-                    .tint(state.deafened ? model.theme.bad : model.theme.text)
-                    .accessibilityValue(state.deafened ? "Off" : "On")
+                    MicButton()
+                    SoundButton()
                     Spacer()
-                    Button("Leave Room", systemImage: "phone.down.fill") {
-                        model.core.command(command: .join(room: nil))
-                    }
-                    .tint(model.theme.bad)
+                    LeaveButton()
                 }
             }
         } else {
@@ -112,5 +96,46 @@ private struct PersonCard: View {
                 RoundedRectangle(cornerRadius: 16).strokeBorder(.panel)
             }
         }
+    }
+}
+
+struct MicButton: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let on = model.state.mic && !model.micDenied
+        Button("Microphone", systemImage: on ? "mic.fill" : "mic.slash.fill") {
+            if model.micDenied {
+                model.notice = "To talk, allow the microphone for throcc in Settings."
+            } else {
+                model.core.command(command: .setMic(on: !model.state.mic))
+            }
+        }
+        .tint(on ? model.theme.text : model.theme.bad)
+        .accessibilityValue(on ? "On" : "Off")
+    }
+}
+
+struct SoundButton: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let deafened = model.state.deafened
+        Button("Sound", systemImage: deafened ? "speaker.slash.fill" : "speaker.wave.2.fill") {
+            model.core.command(command: .setDeafened(on: !deafened))
+        }
+        .tint(deafened ? model.theme.bad : model.theme.text)
+        .accessibilityValue(deafened ? "Off" : "On")
+    }
+}
+
+struct LeaveButton: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        Button("Leave Room", systemImage: "phone.down.fill") {
+            model.core.command(command: .join(room: nil))
+        }
+        .tint(model.theme.bad)
     }
 }

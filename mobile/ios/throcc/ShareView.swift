@@ -37,6 +37,7 @@ struct ShareSurface: UIViewRepresentable {
     func makeUIView(context: Context) -> SampleBufferView {
         let view = SampleBufferView()
         view.backgroundColor = .black
+        view.isUserInteractionEnabled = false
         view.displayLayer.videoGravity = .resizeAspect
         // The core takes over a reference to the layer.
         let layer = UInt64(UInt(bitPattern: Unmanaged.passRetained(view.displayLayer).toOpaque()))
@@ -112,7 +113,7 @@ struct ShareTile: View {
 }
 
 /// The share `model.fullscreenShare` over the whole screen, turning with the phone. A tap shows
-/// the controls; everyone in the room stays shown along the bottom.
+/// the controls, with everyone in the room and the call's buttons along the bottom.
 struct ShareFullscreen: View {
     let user: UInt64
     @Environment(AppModel.self) private var model
@@ -148,7 +149,21 @@ struct ShareFullscreen: View {
                     }
                 }
                 Spacer()
-                RoomStrip(people: state.people.filter { $0.room == state.current?.room })
+                if controls {
+                    VStack(spacing: 12) {
+                        RoomStrip(people: state.people.filter { $0.room == state.current?.room })
+                        HStack(spacing: 16) {
+                            MicButton()
+                            SoundButton()
+                            LeaveButton()
+                        }
+                        .labelStyle(.iconOnly)
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.circle)
+                        .controlSize(.large)
+                    }
+                    .transition(.opacity)
+                }
             }
             .padding(12)
         }
@@ -191,7 +206,7 @@ private struct Sharer: View {
     }
 }
 
-/// Everyone in the room, small, so nobody listens unseen while a share fills the screen.
+/// Everyone in the room, small.
 private struct RoomStrip: View {
     let people: [Person]
 
