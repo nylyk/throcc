@@ -37,7 +37,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -52,11 +54,14 @@ import cc.thro.throcc.core.Command
 import cc.thro.throcc.core.CoreState
 import cc.thro.throcc.core.KeyWarning
 import cc.thro.throcc.core.Person
+import cc.thro.throcc.core.SafetyCheck
 import cc.thro.throcc.core.Sound
 import cc.thro.throcc.core.SoundLevel
 import cc.thro.throcc.core.canKickFromRoom
 import cc.thro.throcc.core.canRemove
 import cc.thro.throcc.core.fingerprintShort
+import cc.thro.throcc.core.gainToLoudness
+import cc.thro.throcc.core.loudnessToGain
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -81,7 +86,19 @@ fun PersonSheet(model: AppModel, state: CoreState, person: Person) {
                             if (!person.blocked) {
                                 Text(person.role.label, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
-                            if (!person.blocked && person.user != state.me) TrustLabel(state.trust(person))
+                            if (!person.blocked && person.user != state.me) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    TrustLabel(person.trust)
+                                    person.verifiedAs?.let {
+                                        Text(
+                                            "Verified as $it",
+                                            Modifier.padding(start = 8.dp),
+                                            MaterialTheme.colorScheme.onSurfaceVariant,
+                                            style = MaterialTheme.typography.labelLarge,
+                                        )
+                                    }
+                                }
+                            }
                         }
                         IconButton(close, Modifier.align(Alignment.Top)) { Icon(Icons.Default.Close, "Close") }
                     }
@@ -112,11 +129,32 @@ private fun Own(model: AppModel) {
     }) { Text("Edit Profile") }
 }
 
+/** What the profile shows of the safety-number comparison, read from `check` at once. */
+private class Comparison(check: SafetyCheck, name: String) {
+    val groups = check.groups()
+    val keyChangedWhileOpen = check.keyChangedWhileOpen()
+    val canMark = check.canMark()
+    val canDismissWarning = check.canDismissWarning()
+    val explanation = check.explanation(name)
+}
+
 @Composable
 private fun Other(model: AppModel, state: CoreState, person: Person) {
+    val check = remember(person.user) { model.core.safetyCheck(person.user).apply { follow() } }
+    // Counts changes to the comparison that no new state brings, so what shows is read again.
+    var changes by remember(check) { mutableIntStateOf(0) }
+    LaunchedEffect(check, state) {
+        if (check.follow()) changes++
+    }
+    val shown = remember(check, state, changes, person.name) { Comparison(check, person.name) }
+    val changing = { change: () -> Unit ->
+        change()
+        changes++
+    }
     val warning = state.keyWarnings.find { it.user == person.user }
-    if (warning != null) KeyChanged(model, person, warning)
-    Panel { SafetyNumber(model, person, warning) }
+    if (warning != null) KeyChanged(person, warning, shown.canDismissWarning) { changing(check::dismissWarning) }
+    if (shown.keyChangedWhileOpen) ChangedWhileOpen(person) { changing(check::compareAgain) }
+    Panel { SafetyNumber(person, shown) { changing { check.mark(!person.verified) } } }
     Panel {
         Volume(model, person, Sound.VOICE, "Voice", person.voice)
         if (person.sharing?.audio == true) Volume(model, person, Sound.SHARE, "Stream audio", person.shareAudio)
@@ -124,7 +162,7 @@ private fun Other(model: AppModel, state: CoreState, person: Person) {
 }
 
 @Composable
-private fun KeyChanged(model: AppModel, person: Person, warning: KeyWarning) {
+private fun KeyChanged(person: Person, warning: KeyWarning, canDismiss: Boolean, onDismiss: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
     val colors = CardDefaults.cardColors(scheme.errorContainer, scheme.onErrorContainer)
     Card(shape = MaterialTheme.shapes.extraLarge, colors = colors) {
@@ -141,52 +179,55 @@ private fun KeyChanged(model: AppModel, person: Person, warning: KeyWarning) {
                 }
             }
             TextButton(
-                { model.core.command(Command.DismissKeyChange(person.user, person.identityKey)) },
+                onDismiss,
                 Modifier.align(Alignment.End),
+                canDismiss,
                 colors = ButtonDefaults.textButtonColors(contentColor = scheme.onErrorContainer),
             ) { Text("Dismiss Warning") }
         }
     }
 }
 
+/** Says the number on screen is a new one, which the user compares again before acting on it. */
 @Composable
-private fun SafetyNumber(model: AppModel, person: Person, warning: KeyWarning?) {
-    val key = person.identityKey
-    val number = remember(key?.toHexString()) { key?.let(model.core::safetyNumber) }
-    val quiet = MaterialTheme.colorScheme.onSurfaceVariant
-    if (key == null || number == null) {
-        Text("Their safety number appears once you share a room.", color = quiet)
-        return
+private fun ChangedWhileOpen(person: Person, onCompareAgain: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    Card(shape = MaterialTheme.shapes.extraLarge, colors = CardDefaults.cardColors(scheme.surfaceContainerHigh)) {
+        Column(Modifier.fillMaxWidth().padding(20.dp), Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(Icons.Default.Warning, null, tint = LocalWarning.current)
+                Text("${person.name}’s key changed while this was open, so this is a new number. Compare it again.")
+            }
+            TextButton(onCompareAgain, Modifier.align(Alignment.End)) { Text("Compare Again") }
+        }
     }
-    Text(
-        number.chunked(5).chunked(4).joinToString("\n") { it.joinToString(" ") },
-        Modifier.fillMaxWidth(),
-        fontFamily = FontFamily.Monospace,
-        textAlign = TextAlign.Center,
-        style = MaterialTheme.typography.titleMedium,
-    )
-    Text(
-        if (warning?.now.contentEquals(key)) {
-            "This number belongs to ${person.name}’s new key. " +
-                "Compare it with theirs in person or through another app before you trust it."
-        } else {
-            "To check that your calls with ${person.name} are end-to-end encrypted, " +
-                "compare these numbers with theirs in person or through another app."
-        },
-        color = quiet,
-        style = MaterialTheme.typography.bodyMedium,
-    )
-    val mark = { model.core.command(Command.SetVerified(person.user, key, !person.verified)) }
-    if (person.verified) {
-        OutlinedButton(mark, Modifier.fillMaxWidth()) { Text("Mark as Not Verified") }
+}
+
+@Composable
+private fun SafetyNumber(person: Person, shown: Comparison, onMark: () -> Unit) {
+    val quiet = MaterialTheme.colorScheme.onSurfaceVariant
+    if (shown.groups.isEmpty()) {
+        Text("Their safety number appears once you share a room.", color = quiet)
     } else {
-        MainButton("Mark as Verified", onClick = mark)
+        Text(
+            shown.groups.chunked(4).joinToString("\n") { it.joinToString(" ") },
+            Modifier.fillMaxWidth(),
+            fontFamily = FontFamily.Monospace,
+            textAlign = TextAlign.Center,
+            style = MaterialTheme.typography.titleMedium,
+        )
+    }
+    shown.explanation?.let { Text(it, color = quiet, style = MaterialTheme.typography.bodyMedium) }
+    if (person.verified) {
+        OutlinedButton(onMark, Modifier.fillMaxWidth(), shown.canMark) { Text("Mark as Not Verified") }
+    } else {
+        MainButton("Mark as Verified", shown.canMark, onClick = onMark)
     }
 }
 
 @Composable
 private fun Volume(model: AppModel, person: Person, sound: Sound, label: String, level: SoundLevel) {
-    val volume = remember(person.user, sound) { SliderState(level.volume.coerceIn(0f, 2f), trackRange = 0f..2f) }
+    val volume = remember(person.user, sound) { SliderState(gainToLoudness(level.volume), trackRange = 0f..2f) }
     val set = { changed: SoundLevel -> model.core.command(Command.SetSoundLevel(person.user, sound, changed)) }
     Column {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -194,7 +235,7 @@ private fun Volume(model: AppModel, person: Person, sound: Sound, label: String,
             Text("${(volume.value * 100).roundToInt()}%", color = MaterialTheme.colorScheme.onSurfaceVariant)
             FilledTonalIconToggleButton(
                 level.muted,
-                { set(SoundLevel(volume.value, it)) },
+                { set(SoundLevel(level.volume, it)) },
                 IconButtonDefaults.toggleableShapes(),
             ) {
                 val icon = if (level.muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp
@@ -203,7 +244,7 @@ private fun Volume(model: AppModel, person: Person, sound: Sound, label: String,
         }
         Slider(volume, {
             volume.value = it
-            set(SoundLevel(it, level.muted))
+            set(SoundLevel(loudnessToGain(it), level.muted))
         })
     }
 }

@@ -68,6 +68,11 @@ import cc.thro.throcc.core.NoiseSuppression
 import cc.thro.throcc.core.Palette
 import cc.thro.throcc.core.Voice
 import cc.thro.throcc.core.fingerprintShort
+import cc.thro.throcc.core.formatColor
+import cc.thro.throcc.core.gainToLoudness
+import cc.thro.throcc.core.initial
+import cc.thro.throcc.core.loudnessToGain
+import cc.thro.throcc.core.parseColor
 import cc.thro.throcc.core.quietestGateDbfs
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
@@ -88,6 +93,7 @@ fun Settings(model: AppModel) {
     )
     Page(model, "Settings") { padding ->
         Form(padding) {
+            model.storeProblems.settings?.let { ErrorText(it, Modifier.padding(horizontal = 16.dp)) }
             Column {
                 pages.forEachIndexed { index, (icon, title, screen) ->
                     GroupRow(index, pages.size, { model.open(screen) }, leading = { Icon(icon, null) }) { Text(title) }
@@ -193,12 +199,13 @@ private fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Un
     }
 }
 
-/** A volume from 0 to 200 % with its percentage, which calls `done` once let go. */
+/** A volume from 0 to 200 % loudness with its percentage, which calls `done` once let go. It sets the gain. */
 @Composable
-private fun VolumeSlider(label: String, volume: Float, onChange: (Float) -> Unit, done: () -> Unit) {
+private fun VolumeSlider(label: String, gain: Float, onChange: (Float) -> Unit, done: () -> Unit) {
+    val position = gainToLoudness(gain)
     Column {
-        Labeled(label, "${(volume * 100).roundToInt()}%")
-        Slider(volume.coerceIn(0f, 2f), onChange, valueRange = 0f..2f, onValueChangeFinished = done)
+        Labeled(label, "${(position * 100).roundToInt()}%")
+        Slider(position, { onChange(loudnessToGain(it)) }, valueRange = 0f..2f, onValueChangeFinished = done)
     }
 }
 
@@ -316,19 +323,19 @@ private fun CustomColors(model: AppModel, palette: Palette) {
 
 @Composable
 private fun ColorField(label: String, rgb: UInt, onChange: (UInt) -> Unit) {
-    var hex by rememberSaveable { mutableStateOf(rgb.toString(16).padStart(6, '0').uppercase()) }
+    var hex by rememberSaveable { mutableStateOf(formatColor(rgb)) }
     val shape = MaterialTheme.shapes.small
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
         Box(Modifier.size(40.dp).background(color(rgb), shape).border(1.dp, MaterialTheme.colorScheme.outline, shape))
         OutlinedTextField(
             hex,
             { typed ->
-                hex = typed.filter { it in "0123456789abcdefABCDEF" }.take(6).uppercase()
-                hex.takeIf { it.length == 6 }?.toUIntOrNull(16)?.let(onChange)
+                hex = typed
+                parseColor(typed)?.let(onChange)
             },
             Modifier.weight(1f),
             label = { Text(label) },
-            prefix = { Text("#") },
+            isError = parseColor(hex) == null,
             keyboardOptions = KeyboardOptions(KeyboardCapitalization.Characters, autoCorrectEnabled = false),
             singleLine = true,
         )
@@ -346,6 +353,7 @@ fun VerifiedPeople(model: AppModel, state: CoreState) {
             Hint(Icons.Default.VerifiedUser, hint, Modifier.padding(padding))
         }
         LazyColumn(Modifier.pageWidth(), contentPadding = padding) {
+            model.storeProblems.verified?.let { item { StoreProblem(it) } }
             itemsIndexed(people) { index, person ->
                 GroupRow(
                     index,
@@ -384,11 +392,12 @@ fun BlockedPeople(model: AppModel, state: CoreState) {
             Hint(Icons.Default.Block, "Nobody. Tap someone in a room to block them.", Modifier.padding(padding))
         }
         LazyColumn(Modifier.pageWidth(), contentPadding = padding) {
+            model.storeProblems.blocked?.let { item { StoreProblem(it) } }
             itemsIndexed(people) { index, person ->
                 GroupRow(
                     index,
                     people.size,
-                    leading = { Avatar(model.picture(person), person.name, 40.dp) },
+                    leading = { Avatar(model.picture(person), initial(person.name), 40.dp) },
                     trailing = { TextButton({ model.unblock(person.key) }) { Text("Unblock") } },
                     supporting = {
                         Column {
@@ -400,6 +409,12 @@ fun BlockedPeople(model: AppModel, state: CoreState) {
             }
         }
     }
+}
+
+/** Why a list this install keeps couldn't be read, above what of it there is. */
+@Composable
+private fun StoreProblem(problem: String) {
+    ErrorText(problem, Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp))
 }
 
 @Composable

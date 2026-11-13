@@ -58,6 +58,7 @@ fun App(model: AppModel) {
             if (model.profile == null) Onboarding(model) else Panes(model, state)
         }
         state.people.find { it.user == model.sheetPerson }?.let { PersonSheet(model, state, it) }
+        model.signInProblem?.let { SignInProblemDialog(model, it) }
     }
 }
 

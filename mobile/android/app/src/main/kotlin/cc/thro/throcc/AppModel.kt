@@ -2,7 +2,6 @@ package cc.thro.throcc
 
 import android.Manifest
 import android.os.Build
-import android.view.Surface
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -21,9 +20,11 @@ import cc.thro.throcc.core.KnownServer
 import cc.thro.throcc.core.Listener
 import cc.thro.throcc.core.Palette
 import cc.thro.throcc.core.Profile
+import cc.thro.throcc.core.StartedOver
 import cc.thro.throcc.core.User
 import cc.thro.throcc.core.VerifiedPerson
 import cc.thro.throcc.core.Voice
+import cc.thro.throcc.core.connectionNotice
 import cc.thro.throcc.core.customThemeName
 import cc.thro.throcc.core.permissionsOf
 import kotlinx.coroutines.Dispatchers
@@ -49,19 +50,43 @@ sealed interface ServerSave {
     data class Refused(val reason: String) : ServerSave
 }
 
+/** Why signing in to a server failed where the user has a choice to make. */
+sealed interface SignInProblem {
+    val address: String
+    val invite: String?
+
+    class KeyChanged(
+        override val address: String,
+        override val invite: String?,
+        val expected: ByteArray,
+        val actual: ByteArray,
+    ) : SignInProblem
+
+    data class IdentityMissing(override val address: String, override val invite: String?) : SignInProblem
+}
+
+/** How starting over with a new identity goes. */
+sealed interface StartingOver {
+    data object Running : StartingOver
+    data class Done(val started: StartedOver) : StartingOver
+    data class Failed(val reason: String) : StartingOver
+}
+
 /** The name of the theme made of the user's own colours. */
 val CUSTOM = customThemeName()
 
-fun CoreState.connectedTo(address: String) = connection == Connection.Connected && server?.address == address
+/** Whether a session holds on to the server at `address`, so picking it only shows it. */
+fun CoreState.holdsSessionWith(address: String) = holdsSession && server?.address == address
 
 val CoreState.permissions get() = role?.let(::permissionsOf)
 
-/** The room `this` has us in while the link is up or the core is bringing it back. */
-fun CoreState.voiceRoom(): ULong? = when (connection) {
-    // A link that came back lists us among the room's people a moment before `current` names the room.
-    Connection.Connected, is Connection.Reconnecting -> current?.room ?: people.find { it.user == me }?.room
-    else -> null
-}
+/** What went wrong, in words for the user. */
+val CoreException.explained
+    get() = when (this) {
+        is CoreException.Failed -> reason
+        is CoreException.PinMismatch -> "This server’s key changed."
+        is CoreException.IdentityMissing -> "Your identity is missing."
+    }
 
 /** Whether `address`, a host with or without a port, is on the local network. */
 fun isLocalAddress(address: String): Boolean {
@@ -114,9 +139,6 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
     /** The share shown over the whole window, if any. */
     var fullscreenShare by mutableStateOf<ULong?>(null)
 
-    /** The surfaces each share is shown in, the newest last; the core decodes into the newest. */
-    private val shareSurfaces = mutableMapOf<ULong, MutableList<Surface>>()
-
     var profile by mutableStateOf(core.profile())
         private set
     var voice by mutableStateOf(core.voice())
@@ -136,6 +158,19 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
 
     var connectingTo by mutableStateOf<String?>(null)
         private set
+
+    /** Why the last sign-in failed, where the user has a choice to make. */
+    var signInProblem by mutableStateOf<SignInProblem?>(null)
+    var startingOver by mutableStateOf<StartingOver?>(null)
+        private set
+
+    /** The address the Add Server page starts with. */
+    var addingAddress by mutableStateOf("")
+        private set
+
+    /** Why what this install keeps couldn't be read, so the app started without it. */
+    val storeProblems = core.storeProblems()
+
     var users by mutableStateOf(emptyList<User>())
         private set
     var invite by mutableStateOf<String?>(null)
@@ -189,35 +224,11 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
                 try {
                     if (withMic == null) core.closeAudio() else core.openAudio(withMic)
                 } catch (failure: CoreException) {
-                    notices.trySend("The room has no sound: ${failure.message}")
+                    notices.trySend("The room has no sound: ${failure.explained}")
                 }
             }
         }
         sample?.let(::showSample)
-    }
-
-    /** Watches `user`'s share in place of any other: a phone watches one share at a time. */
-    fun watch(user: ULong) {
-        for (watched in state.value.current?.watching.orEmpty()) {
-            if (watched != user) core.command(Command.Unwatch(watched))
-        }
-        core.command(Command.Watch(user))
-    }
-
-    /** Shows `user`'s share in `surface` from now on. */
-    fun showShare(user: ULong, surface: Surface) {
-        shareSurfaces.getOrPut(user, ::mutableListOf) += surface
-        core.setShareView(user, ShareView.nativeWindow(surface).toULong())
-    }
-
-    /** Stops showing `user`'s share in `surface`, which is going away, and goes back to the one before. */
-    fun hideShare(user: ULong, surface: Surface) {
-        val surfaces = shareSurfaces[user] ?: return
-        val wasShown = surfaces.lastOrNull() === surface
-        surfaces.remove(surface)
-        if (!wasShown) return
-        val previous = surfaces.lastOrNull()?.takeIf { it.isValid }
-        core.setShareView(user, previous?.let { ShareView.nativeWindow(it).toULong() } ?: 0u)
     }
 
     fun open(screen: Screen) {
@@ -230,9 +241,47 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
         if (stack.size > 1) stack.removeAt(stack.lastIndex)
     }
 
-    /** Opens the rooms of the server at `address`, signing in unless we are connected there. */
+    /** Opens the rooms of the server at `address`, signing in unless a session holds on to it. */
     fun openServer(address: String) {
-        if (state.value.connectedTo(address)) open(Screen.Rooms) else connect(address)
+        if (state.value.holdsSessionWith(address)) open(Screen.Rooms) else connect(address)
+    }
+
+    /** Opens the Add Server page, with `address` typed in. */
+    fun addServer(address: String = "") {
+        addingAddress = address
+        open(Screen.AddServer)
+    }
+
+    /** Trusts the key the server at the problem's address has now, as the user chose to, and signs in again. */
+    fun trustNewKey(problem: SignInProblem.KeyChanged) {
+        signInProblem = null
+        scope.launch {
+            if (ask { core.trustServerKey(problem.address, problem.actual) } != null) {
+                connect(problem.address, problem.invite)
+            }
+        }
+    }
+
+    /** Signs in again where the last sign-in failed. */
+    fun tryAgain(problem: SignInProblem) {
+        signInProblem = null
+        connect(problem.address, problem.invite)
+    }
+
+    /** Makes a new identity, unless the keychain holds the old one again by now. */
+    fun startOver() {
+        if (startingOver == StartingOver.Running) return
+        startingOver = StartingOver.Running
+        scope.launch {
+            startingOver = withContext(Dispatchers.IO) {
+                try {
+                    StartingOver.Done(core.startOver())
+                } catch (failure: CoreException) {
+                    StartingOver.Failed(failure.explained)
+                }
+            }
+            loadServers()
+        }
     }
 
     /** Signs in at `address` and opens its rooms, or says why it couldn't. */
@@ -306,7 +355,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
         try {
             core.setVoice(voice, keep)
         } catch (failure: CoreException) {
-            notices.trySend(failure.message.orEmpty())
+            notices.trySend(failure.explained)
         }
     }
 
@@ -364,7 +413,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
         try {
             action()
         } catch (failure: CoreException) {
-            notices.trySend(failure.message.orEmpty())
+            notices.trySend(failure.explained)
             null
         }
     }
@@ -388,7 +437,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
     private fun show(state: CoreState) {
         if (state.current?.room != shown.value.current?.room) roomInFront = state.current != null
         if (state.people.none { it.user == sheetPerson }) sheetPerson = null
-        shown.value = sampleConnection?.let { state.copy(connection = it) } ?: state
+        shown.value = sampleConnection?.let { state.copy(connection = it, notice = connectionNotice(it)) } ?: state
     }
 
     private fun handle(event: Event) {
@@ -404,7 +453,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
             is Event.PasswordRefused -> passwordRefused = event.reason
             Event.ServerProfileSaved -> if (serverSaved == ServerSave.Saving) serverSaved = ServerSave.Saved
             is Event.ServerProfileRefused -> serverSaved = ServerSave.Refused(event.reason)
-            is Event.ProfileRefused -> notices.trySend("This server refused your profile: ${event.reason}")
+            is Event.ProfileRefused -> notices.trySend(event.reason)
             Event.ProfileSaved, is Event.AvatarReady -> {}
         }
     }
@@ -415,15 +464,32 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
         stack += pages
     }
 
-    /** Whether signing in at `address` worked. A failure shows as a notice. */
+    /** Whether signing in at `address` worked. A failure shows as a notice, or as a choice for the user. */
     private suspend fun signIn(address: String, invite: String?): Boolean {
         sampleConnection = null
         users = emptyList()
         this.invite = null
-        val signedIn = ask { core.connect(address, invite) } != null
+        val failure = withContext(Dispatchers.IO) {
+            try {
+                core.connect(address, invite)
+                null
+            } catch (failure: CoreException) {
+                failure
+            }
+        }
+        when (failure) {
+            null -> {}
+            is CoreException.PinMismatch ->
+                signInProblem = SignInProblem.KeyChanged(address, invite, failure.expected, failure.actual)
+            is CoreException.IdentityMissing -> {
+                startingOver = null
+                signInProblem = SignInProblem.IdentityMissing(address, invite)
+            }
+            is CoreException.Failed -> notices.trySend(failure.reason)
+        }
         show(core.state())
         loadServers()
-        return signedIn
+        return failure == null
     }
 
     private suspend fun loadServers() {
@@ -472,10 +538,10 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
             if (name in listOf("room", "blocked", "person", "personblocked", "share", "sharefull")) {
                 core.command(Command.Join(1u))
             }
-            if (name in listOf("share", "sharefull")) watch(4u)
+            if (name in listOf("share", "sharefull")) core.watchOnly(4u)
             if (name in listOf("blocked", "personblocked", "blockedpeople")) core.command(Command.Block(3u))
             when (name) {
-                "person" -> sheetPerson = 2u
+                "person" -> sheetPerson = 4u
                 "personblocked" -> sheetPerson = 3u
                 "sharefull" -> {
                     // Once the mock shows the share watched, which fullscreen waits for.

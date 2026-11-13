@@ -32,7 +32,7 @@ class ThroccApp : Application() {
         val opened = AppModel(if (mock) Core.mock(onboarded = sample != "onboarding") else Core(), mock, sample)
         model = opened
         MainScope().launch {
-            opened.state.map { it.voiceRoom() != null }.distinctUntilChanged().collect { startVoice() }
+            opened.state.map { it.liveRoom != null }.distinctUntilChanged().collect { startVoice() }
         }
         return opened
     }
@@ -40,7 +40,7 @@ class ThroccApp : Application() {
     /** The service of the room we are in starts. One that runs looks at the mic permission again. */
     fun startVoice() {
         val model = model ?: return
-        if (model.mock || model.state.value.voiceRoom() == null) return
+        if (model.mock || model.state.value.liveRoom == null) return
         try {
             startForegroundService(Intent(this, VoiceService::class.java))
         } catch (_: ForegroundServiceStartNotAllowedException) {

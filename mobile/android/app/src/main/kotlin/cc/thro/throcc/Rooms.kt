@@ -42,10 +42,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cc.thro.throcc.core.Command
 import cc.thro.throcc.core.CoreState
+import cc.thro.throcc.core.JoinAction
+import cc.thro.throcc.core.KeyTrust
 import cc.thro.throcc.core.Person
 import cc.thro.throcc.core.Room
 import cc.thro.throcc.core.isValidPassword
-import cc.thro.throcc.core.limits
+import cc.thro.throcc.core.passwordProblem
 import java.io.Serializable
 
 private sealed interface RoomDialog : Serializable {
@@ -69,13 +71,13 @@ fun Rooms(model: AppModel, state: CoreState) {
         "Privacy and Keys" to Screen.Keys,
     )
     fun join(room: Room) {
-        when {
-            state.current?.room == room.id -> model.roomInFront = true
-            room.locked && !managesRooms -> {
+        when (room.join) {
+            JoinAction.ALREADY_IN -> model.roomInFront = true
+            JoinAction.ASK_PASSWORD -> {
                 model.passwordRefused = null
                 dialog = RoomDialog.Password(room.id)
             }
-            else -> model.join(Command.Join(room.id))
+            JoinAction.JOIN -> model.join(Command.Join(room.id))
         }
     }
     Page(
@@ -117,15 +119,6 @@ fun Rooms(model: AppModel, state: CoreState) {
                                 dialog = RoomDialog.Delete(room.id)
                             }
                         }
-                    }
-                }
-            }
-            val lobby = state.people.filter { person -> state.rooms.none { it.id == person.room } }
-            if (lobby.isNotEmpty()) {
-                item("lobby") {
-                    GroupTitle("Lobby")
-                    Card(shape = MaterialTheme.shapes.extraLarge, colors = panelColors()) {
-                        Column(Modifier.padding(vertical = 8.dp)) { lobby.forEach { PersonRow(model, state, it) } }
                     }
                 }
             }
@@ -195,12 +188,12 @@ private fun RoomCard(model: AppModel, state: CoreState, room: Room, onJoin: () -
             }
             menu()
         }
-        Column(Modifier.padding(bottom = 8.dp)) { people.forEach { PersonRow(model, state, it) } }
+        Column(Modifier.padding(bottom = 8.dp)) { people.forEach { PersonRow(model, it) } }
     }
 }
 
 @Composable
-private fun PersonRow(model: AppModel, state: CoreState, person: Person) {
+private fun PersonRow(model: AppModel, person: Person) {
     val scheme = MaterialTheme.colorScheme
     val quiet = scheme.onSurfaceVariant
     val small = Modifier.size(20.dp)
@@ -222,10 +215,10 @@ private fun PersonRow(model: AppModel, state: CoreState, person: Person) {
             overflow = TextOverflow.Ellipsis,
         )
         if (!person.blocked) {
-            when (state.trust(person)) {
-                Trust.KeyChanged -> Icon(Icons.Default.Warning, "Key changed", small, scheme.error)
-                Trust.Unverified -> Icon(Icons.Outlined.GppMaybe, "Not verified", small, quiet)
-                Trust.Verified -> {}
+            when (person.trust) {
+                KeyTrust.KEY_CHANGED -> Icon(Icons.Default.Warning, "Key changed", small, scheme.error)
+                KeyTrust.UNVERIFIED -> Icon(Icons.Outlined.GppMaybe, "Not verified", small, quiet)
+                KeyTrust.VERIFIED -> {}
             }
         }
         if (person.sharing != null) Icon(Icons.AutoMirrored.Filled.ScreenShare, "Sharing", small, quiet)
@@ -235,8 +228,8 @@ private fun PersonRow(model: AppModel, state: CoreState, person: Person) {
 
 @Composable
 private fun PasswordField(password: String, hint: String, refused: String? = null, onChange: (String) -> Unit) {
-    val tooLong = password.isNotEmpty() && !isValidPassword(password)
-    val error = refused ?: "Passwords can be at most ${limits().passwordChars} characters.".takeIf { tooLong }
+    // An empty password is no problem here: it leaves the room open, or waits to be typed.
+    val error = refused ?: password.takeIf { it.isNotEmpty() }?.let(::passwordProblem)
     OutlinedTextField(
         password,
         onChange,

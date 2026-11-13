@@ -28,12 +28,19 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ScreenShare
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Card
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.PlainTooltip
 import androidx.compose.material3.Text
+import androidx.compose.material3.TooltipAnchorPosition
+import androidx.compose.material3.TooltipBox
+import androidx.compose.material3.TooltipDefaults
+import androidx.compose.material3.rememberTooltipState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -45,6 +52,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -62,23 +71,33 @@ object ShareView {
         System.loadLibrary("throcc_mobile")
     }
 
-    /** The `ANativeWindow` behind `surface`, with a reference for `Core.setShareView`. */
+    /** The `ANativeWindow` behind `surface`, with a reference for `Core.showShare`. */
     external fun nativeWindow(surface: Surface): Long
 }
 
-/** A share's shape, width over height, within what a phone can show: a sender may announce any size. */
-private val Share.aspect get() = (width.toFloat() / height.toFloat().coerceAtLeast(1f)).coerceIn(0.25f, 4f)
+private const val TOO_SLOW = "Slow connection"
+private const val TOO_SLOW_HINT = "Frames are dropping. Ask the sharer for a lower bitrate."
 
-/** `user`'s share, decoded straight into a surface. */
+/** `user`'s share, decoded straight into a surface. The core keeps the surfaces a share is shown in. */
 @Composable
 private fun ShareSurface(model: AppModel, user: ULong, modifier: Modifier = Modifier) {
     AndroidView(
         factory = { context ->
             SurfaceView(context).apply {
                 holder.addCallback(object : SurfaceHolder.Callback {
-                    override fun surfaceCreated(holder: SurfaceHolder) = model.showShare(user, holder.surface)
+                    /** The number the core gave this surface while it shows the share. */
+                    var shown: ULong? = null
+
+                    override fun surfaceCreated(holder: SurfaceHolder) {
+                        shown = model.core.showShare(user, ShareView.nativeWindow(holder.surface).toULong())
+                    }
+
                     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
-                    override fun surfaceDestroyed(holder: SurfaceHolder) = model.hideShare(user, holder.surface)
+
+                    override fun surfaceDestroyed(holder: SurfaceHolder) {
+                        shown?.let { model.core.hideShare(user, it) }
+                        shown = null
+                    }
                 })
             }
         },
@@ -86,10 +105,38 @@ private fun ShareSurface(model: AppModel, user: ULong, modifier: Modifier = Modi
     )
 }
 
+/** The warning that our connection can't keep up with a share. Long-press tells what it means. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TooSlow(modifier: Modifier = Modifier) {
+    TooltipBox(
+        TooltipDefaults.rememberTooltipPositionProvider(TooltipAnchorPosition.Below),
+        { PlainTooltip { Text(TOO_SLOW_HINT) } },
+        rememberTooltipState(),
+        modifier,
+    ) {
+        Row(
+            Modifier
+                .background(MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.8f), CircleShape)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            Arrangement.spacedBy(6.dp),
+            Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Default.Warning, null, Modifier.size(18.dp), LocalWarning.current)
+            Text(
+                TOO_SLOW,
+                Modifier.semantics { contentDescription = "$TOO_SLOW. $TOO_SLOW_HINT" },
+                style = MaterialTheme.typography.labelLarge,
+            )
+        }
+    }
+}
+
 /** A share in the room: watched in place, with a way to fullscreen it, or offered to watch. */
 @Composable
 fun ShareTile(model: AppModel, state: CoreState, person: Person, share: Share) {
     val watching = state.current?.watching?.contains(person.user) == true
+    val tooSlow = person.user in state.health.slowShares
     Card(
         Modifier.fillMaxWidth().aspectRatio(share.aspect.coerceAtLeast(0.75f)),
         shape = MaterialTheme.shapes.extraLarge,
@@ -103,6 +150,7 @@ fun ShareTile(model: AppModel, state: CoreState, person: Person, share: Share) {
                         ShareSurface(model, person.user, Modifier.aspectRatio(share.aspect))
                     }
                 }
+                if (tooSlow) TooSlow(Modifier.align(Alignment.TopStart).padding(12.dp))
                 Row(Modifier.align(Alignment.TopEnd).padding(8.dp), Arrangement.spacedBy(8.dp)) {
                     FilledTonalIconButton({ model.fullscreenShare = person.user }) {
                         Icon(Icons.Default.Fullscreen, "Fullscreen")
@@ -125,7 +173,7 @@ fun ShareTile(model: AppModel, state: CoreState, person: Person, share: Share) {
                         style = MaterialTheme.typography.titleMedium,
                     )
                     Text(share.label, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    FilledTonalButton({ model.watch(person.user) }) { Text("Watch") }
+                    FilledTonalButton({ model.core.watchOnly(person.user) }) { Text("Watch") }
                 }
             }
         }
@@ -170,6 +218,10 @@ fun ShareFullscreen(model: AppModel, state: CoreState) {
                 }
                 Text(person.name, color = Color.White, style = MaterialTheme.typography.titleMedium)
             }
+        }
+        if (user in state.health.slowShares) {
+            // Shown with or without the controls, as the desktop does.
+            TooSlow(Modifier.align(Alignment.TopEnd).safeDrawingPadding().padding(12.dp))
         }
         RoomStrip(model, state.people.filter { it.room == room }, Modifier.align(Alignment.BottomCenter))
     }

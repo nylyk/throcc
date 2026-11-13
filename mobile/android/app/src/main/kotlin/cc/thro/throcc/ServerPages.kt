@@ -58,6 +58,8 @@ import cc.thro.throcc.core.canRemove
 import cc.thro.throcc.core.canSetRole
 import cc.thro.throcc.core.fingerprintShort
 import cc.thro.throcc.core.fingerprintText
+import cc.thro.throcc.core.initial
+import cc.thro.throcc.core.nameProblem
 import kotlinx.coroutines.launch
 
 @Composable
@@ -71,7 +73,7 @@ fun ServerOverview(model: AppModel, state: CoreState) {
             } else {
                 val name = server.title
                 Row(Modifier, Arrangement.spacedBy(16.dp), Alignment.CenterVertically) {
-                    Avatar(model.picture(server.avatar), name, 80.dp)
+                    Avatar(model.picture(server.avatar), initial(name), 80.dp)
                     Text(name, style = MaterialTheme.typography.headlineSmallEmphasized)
                 }
             }
@@ -107,7 +109,7 @@ private fun EditServer(model: AppModel, server: Server) {
         }
         NameField(name) { name = it }
     }
-    MainButton("Save", (renamed || repainted) && nameError(name) == null, model.serverSaved == ServerSave.Saving) {
+    MainButton("Save", (renamed || repainted) && nameProblem(name) == null, model.serverSaved == ServerSave.Saving) {
         model.serverSaved = ServerSave.Saving
         val name = if (renamed) NameChange.Set(named) else NameChange.Keep
         val picture = if (repainted) PictureChange.Set(picture) else PictureChange.Keep
@@ -155,7 +157,10 @@ private fun Member(model: AppModel, state: CoreState, user: User, index: Int, on
     GroupRow(
         index,
         model.users.size,
-        leading = { Avatar(model.picture(state.people.find { it.user == user.id }?.avatar), user.name, 40.dp) },
+        leading = {
+            val person = state.people.find { it.user == user.id }
+            Avatar(model.picture(person?.avatar), person?.initial ?: initial(user.name), 40.dp)
+        },
         trailing = {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (roles.isEmpty()) {
@@ -293,7 +298,7 @@ fun Keys(model: AppModel, state: CoreState) {
                     others.size,
                     { model.sheetPerson = person.user },
                     leading = { PersonPicture(model, person, 40.dp) },
-                    trailing = { if (!person.blocked) TrustLabel(state.trust(person)) },
+                    trailing = { if (!person.blocked) TrustLabel(person.trust) },
                     supporting = person.identityKey?.let { key ->
                         { Text(fingerprintShort(key), fontFamily = FontFamily.Monospace) }
                     },
