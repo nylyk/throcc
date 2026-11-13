@@ -24,8 +24,9 @@ flags=(
 )
 android_api=31
 case "$target" in
-    aarch64-apple-darwin) flags+=(--target=arm64-darwin20-gcc --extra-cflags=-mmacosx-version-min=14.0) ;;
-    x86_64-apple-darwin) flags+=(--target=x86_64-darwin20-gcc --extra-cflags=-mmacosx-version-min=14.0) ;;
+    # clang aims at iOS when this is set, as it is where the iOS core builds.
+    aarch64-apple-darwin) unset IPHONEOS_DEPLOYMENT_TARGET; flags+=(--target=arm64-darwin20-gcc --extra-cflags=-mmacosx-version-min=14.0) ;;
+    x86_64-apple-darwin) unset IPHONEOS_DEPLOYMENT_TARGET; flags+=(--target=x86_64-darwin20-gcc --extra-cflags=-mmacosx-version-min=14.0) ;;
     aarch64-apple-ios) flags+=(--target=arm64-darwin-gcc --extra-cflags=-miphoneos-version-min=26.0) ;;
     aarch64-apple-ios-sim)
         # libvpx has no arm64 simulator target: plain C for the simulator, which only runs tests.

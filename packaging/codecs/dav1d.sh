@@ -38,6 +38,8 @@ android_api=31
 apple_sdk() { xcrun --sdk "$1" --show-sdk-path; }
 case "$target" in
     aarch64-apple-darwin | x86_64-apple-darwin)
+        # clang aims at iOS when this is set, as it is where the iOS core builds.
+        unset IPHONEOS_DEPLOYMENT_TARGET
         arch=${target%%-*}
         [ "$arch" = aarch64 ] && clang_arch=arm64 || clang_arch=x86_64
         setup=("$(cross darwin "$arch" ar clang -arch "$clang_arch" -isysroot "$(apple_sdk macosx)" -mmacosx-version-min=14.0)")
