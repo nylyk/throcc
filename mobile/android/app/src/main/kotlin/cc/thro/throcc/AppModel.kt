@@ -290,12 +290,20 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
         withPermissions(networkPermissions(address)) {
             scope.launch {
                 connectingTo = address
-                val signedIn = signIn(address, invite)
+                val failure = signIn(address, invite)
                 connectingTo = null
-                when {
-                    signedIn -> showPages(Screen.Rooms)
-                    Screen.Rooms in stack -> showPages()
+                // The dialog opens only once this sign-in is over, so its Try Again never finds it under way.
+                when (failure) {
+                    null -> showPages(Screen.Rooms)
+                    is CoreException.PinMismatch ->
+                        signInProblem = SignInProblem.KeyChanged(address, invite, failure.expected, failure.actual)
+                    is CoreException.IdentityMissing -> {
+                        startingOver = null
+                        signInProblem = SignInProblem.IdentityMissing(address, invite)
+                    }
+                    is CoreException.Failed -> notices.trySend(failure.reason)
                 }
+                if (failure != null && Screen.Rooms in stack) showPages()
             }
         }
     }
@@ -464,8 +472,8 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
         stack += pages
     }
 
-    /** Whether signing in at `address` worked. A failure shows as a notice, or as a choice for the user. */
-    private suspend fun signIn(address: String, invite: String?): Boolean {
+    /** Signs in at `address`, and returns why that failed, if it did. */
+    private suspend fun signIn(address: String, invite: String?): CoreException? {
         sampleConnection = null
         users = emptyList()
         this.invite = null
@@ -477,19 +485,9 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
                 failure
             }
         }
-        when (failure) {
-            null -> {}
-            is CoreException.PinMismatch ->
-                signInProblem = SignInProblem.KeyChanged(address, invite, failure.expected, failure.actual)
-            is CoreException.IdentityMissing -> {
-                startingOver = null
-                signInProblem = SignInProblem.IdentityMissing(address, invite)
-            }
-            is CoreException.Failed -> notices.trySend(failure.reason)
-        }
         show(core.state())
         loadServers()
-        return failure == null
+        return failure
     }
 
     private suspend fun loadServers() {
@@ -532,7 +530,12 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
             "keys" -> listOf(Screen.Rooms, Screen.Keys)
             else -> emptyList()
         }
-        if (name in listOf("onboarding", "servers", "addserver")) return
+        when (name) {
+            "pinmismatch" -> signInProblem =
+                SignInProblem.KeyChanged("owls.thro.cc", null, ByteArray(32) { 0x2c }, ByteArray(32) { 0xb8.toByte() })
+            "identitymissing" -> signInProblem = SignInProblem.IdentityMissing("owls.thro.cc", null)
+        }
+        if (name in listOf("onboarding", "servers", "addserver", "pinmismatch", "identitymissing")) return
         scope.launch {
             signIn("owls.thro.cc", null)
             if (name in listOf("room", "blocked", "person", "personblocked", "share", "sharefull")) {

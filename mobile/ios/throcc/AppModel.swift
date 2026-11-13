@@ -7,10 +7,12 @@ enum Sheet: Hashable, Identifiable {
     case editRoom(Room)
     case person(UInt64)
     case server(ServerPage)
-    /// The server at `address` showed another key than the one this install trusted for it.
-    case pinMismatch(address: String, expected: Data, actual: Data)
-    /// Signing in to the server at `address` found our identity gone from the keychain.
-    case identityMissing(address: String)
+    /// The server at `address` showed another key than the one this install trusted for it,
+    /// on a sign-in with the invite `code`, if any.
+    case pinMismatch(address: String, code: String?, expected: Data, actual: Data)
+    /// Signing in to the server at `address`, with the invite `code` if any, found our identity
+    /// gone from the keychain.
+    case identityMissing(address: String, code: String?)
 
     var id: Self { self }
 }
@@ -178,7 +180,8 @@ final class AppModel {
 
     /// Signs in to the server at `address`, joining it first with the invite `code`, and opens
     /// its rooms. It does nothing while another sign-in is under way. A changed server key or a
-    /// missing identity opens its dialog in place of the add-server sheet rather than throwing.
+    /// missing identity opens its dialog in place of the sheet that asked rather than throwing,
+    /// and signing in closes the add-server sheet or either dialog.
     func connect(to address: String, code: String? = nil) async throws {
         if address == connectedAddress, state.holdsSession {
             showsRooms = true
@@ -199,9 +202,9 @@ final class AppModel {
             showsRooms = false
             switch error as? CoreError {
             case .PinMismatch(let expected, let actual):
-                sheet = .pinMismatch(address: address, expected: expected, actual: actual)
+                sheet = .pinMismatch(address: address, code: code, expected: expected, actual: actual)
             case .IdentityMissing:
-                sheet = .identityMissing(address: address)
+                sheet = .identityMissing(address: address, code: code)
             case .Failed, nil:
                 throw error
             }
@@ -213,22 +216,19 @@ final class AppModel {
         invite = nil
         loadServers()
         showsRooms = true
-        if case .addServer = sheet {
+        switch sheet {
+        case .addServer, .pinMismatch, .identityMissing:
             sheet = nil
+        default:
+            break
         }
     }
 
     /// Trusts `actual` as the key of the server at `address` on the user's word, and signs in
-    /// to it again.
-    func trustServerKey(at address: String, actual: Data) {
-        do {
-            try core.trustServerKey(address: address, actual: actual)
-        } catch {
-            notice = error.explanation
-            return
-        }
-        sheet = nil
-        open(address)
+    /// to it again with the invite `code`, if any, as `connect(to:code:)` does.
+    func trustServerKey(at address: String, actual: Data, code: String?) async throws {
+        try core.trustServerKey(address: address, actual: actual)
+        try await connect(to: address, code: code)
     }
 
     /// Makes a new identity and forgets every server, unless the keychain holds the old

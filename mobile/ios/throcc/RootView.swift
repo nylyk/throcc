@@ -63,9 +63,9 @@ struct RootView: View {
         case .editRoom(let room): RoomEditor(room: room)
         case .person(let user): NavigationStack { PersonView(user: user).toolbar { CloseButton() } }
         case .server(let page): NavigationStack { ServerPageView(page: page) }
-        case .pinMismatch(let address, let expected, let actual):
-            PinMismatchView(address: address, expected: expected, actual: actual)
-        case .identityMissing(let address): IdentityMissingView(address: address)
+        case .pinMismatch(let address, let code, let expected, let actual):
+            PinMismatchView(address: address, code: code, expected: expected, actual: actual)
+        case .identityMissing(let address, let code): IdentityMissingView(address: address, code: code)
         }
     }
 }

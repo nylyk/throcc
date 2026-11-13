@@ -39,7 +39,8 @@ fun colorScheme(palette: Palette): ColorScheme {
         onPrimary = bg,
         primaryContainer = lerp(panel, accent, 0.3f),
         onPrimaryContainer = text,
-        inversePrimary = color(palette.accent),
+        // Shown on the inverse surface, which is the text colour.
+        inversePrimary = bg,
         secondary = accent,
         onSecondary = bg,
         secondaryContainer = color(mixed.selected),

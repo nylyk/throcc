@@ -1,6 +1,7 @@
 import ImageIO
 import PhotosUI
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct Avatar: View {
     let picture: UIImage?
@@ -98,21 +99,22 @@ func shownPicture(in file: Data) -> UIImage? {
           let height = claimed[kCGImagePropertyPixelHeight] as? Int,
           max(width, height) <= 512
     else { return nil }
-    return thumbnail(of: source, within: 256)
+    return thumbnail(of: source, within: 256).map(UIImage.init(cgImage:))
 }
 
 /// The first picture in `source`, upright and decoded at no more than `side` pixels a side.
-private func thumbnail(of source: CGImageSource, within side: Int) -> UIImage? {
+private func thumbnail(of source: CGImageSource, within side: Int) -> CGImage? {
     let options: [CFString: Any] = [
         kCGImageSourceCreateThumbnailFromImageAlways: true,
         kCGImageSourceCreateThumbnailWithTransform: true,
         kCGImageSourceThumbnailMaxPixelSize: side,
     ]
-    return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary).map(UIImage.init(cgImage:))
+    return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
 }
 
 /// The picture in `file` made into a profile picture. It is decoded here, which reads formats
-/// such as HEIC, and handed to the core as a PNG no larger than the core needs.
+/// such as HEIC, and handed to the core as an 8-bit sRGB PNG no larger than the core needs: the
+/// core reads no colour profile, and crops to a square anyway.
 func profilePicture(from file: Data?) throws -> Data {
     guard let file,
           let source = CGImageSourceCreateWithData(file as CFData, nil),
@@ -123,12 +125,43 @@ func profilePicture(from file: Data?) throws -> Data {
     else { throw UnreadablePicture() }
     let (short, long) = (min(width, height), max(width, height))
     let longSide = short <= maxChosenShortSide ? long : long * maxChosenShortSide / short
-    guard let png = thumbnail(of: source, within: longSide)?.pngData() else { throw UnreadablePicture() }
+    guard let decoded = thumbnail(of: source, within: longSide),
+          let png = standardPNG(of: decoded)
+    else { throw UnreadablePicture() }
     return try preparePicture(file: png)
+}
+
+/// The middle of `image`, at most `maxChosenElongation` times its short side along its long
+/// side, as an 8-bit sRGB PNG. Core Graphics rather than UIKit, as this runs off the main actor.
+private func standardPNG(of image: CGImage) -> Data? {
+    let longest = maxChosenElongation * min(image.width, image.height)
+    let (width, height) = (min(image.width, longest), min(image.height, longest))
+    guard let sRGB = CGColorSpace(name: CGColorSpace.sRGB),
+          let context = CGContext(
+              data: nil,
+              width: width,
+              height: height,
+              bitsPerComponent: 8,
+              bytesPerRow: 0,
+              space: sRGB,
+              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+          )
+    else { return nil }
+    let centred = CGRect(x: (width - image.width) / 2, y: (height - image.height) / 2, width: image.width, height: image.height)
+    context.draw(image, in: centred)
+    let png = NSMutableData()
+    guard let drawn = context.makeImage(),
+          let destination = CGImageDestinationCreateWithData(png as CFMutableData, UTType.png.identifier as CFString, 1, nil)
+    else { return nil }
+    CGImageDestinationAddImage(destination, drawn, nil)
+    return CGImageDestinationFinalize(destination) ? png as Data : nil
 }
 
 /// The short side a chosen picture is scaled down to before the core squares it.
 private let maxChosenShortSide = 512
+
+/// How many times its short side a chosen picture's long side keeps at most.
+private let maxChosenElongation = 4
 
 private struct UnreadablePicture: LocalizedError {
     var errorDescription: String? { "That picture couldn’t be read. Choose another one." }

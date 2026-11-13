@@ -140,12 +140,17 @@ struct AddServerView: View {
     }
 }
 
-/// The server at `address` showed another key than the one this install trusted for it.
+/// The server at `address` showed another key than the one this install trusted for it, on a
+/// sign-in with the invite `code`, if any.
 struct PinMismatchView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.theme) private var theme
     let address: String
+    let code: String?
     let expected: Data
     let actual: Data
+    @State private var trusting = false
+    @State private var problem: String?
 
     var body: some View {
         NavigationStack {
@@ -158,14 +163,39 @@ struct PinMismatchView: View {
                     Text("This happens when the server was reinstalled, and also when someone is pretending to be it. The safe way back is a fresh invite code: add the server again with it, and the code proves the new key.")
                         .foregroundStyle(.text)
                 }
+                if let problem {
+                    Text(problem).foregroundStyle(.bad)
+                }
                 Section {
                     Button("Use a Fresh Invite") { model.sheet = .addServer(address: address) }
-                    DestructiveButton("Trust the New Key") { model.trustServerKey(at: address, actual: actual) }
+                        .disabled(trusting)
+                    DestructiveButton(trusting ? "Connecting…" : "Trust the New Key") { trust() }
+                        .disabled(trusting)
                 }
             }
             .navigationTitle("This server’s key changed")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { CloseButton() }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(role: .close) { model.sheet = nil }
+                        .tint(theme.text)
+                        .disabled(trusting)
+                }
+            }
+            .interactiveDismissDisabled(trusting)
+        }
+    }
+
+    private func trust() {
+        Task {
+            trusting = true
+            defer { trusting = false }
+            do {
+                // The model closes this dialog once signed in.
+                try await model.trustServerKey(at: address, actual: actual, code: code)
+            } catch {
+                problem = error.explanation
+            }
         }
     }
 
@@ -183,13 +213,15 @@ struct PinMismatchView: View {
     }
 }
 
-/// Signing in to the server at `address` found our identity gone from the keychain. Offers to
-/// look again, or to start over with a new one.
+/// Signing in to the server at `address`, with the invite `code` if any, found our identity
+/// gone from the keychain. Offers to look again, or to start over with a new one.
 struct IdentityMissingView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.theme) private var theme
     let address: String
+    let code: String?
     @State private var startingOver = false
+    @State private var joining = false
     @State private var started: StartedOver?
     @State private var problem: String?
 
@@ -201,8 +233,12 @@ struct IdentityMissingView: View {
                     Section {
                         Text("Your keychain had it after all. Your servers are still on your list.").foregroundStyle(.text)
                     }
+                    if let problem {
+                        Text(problem).foregroundStyle(.bad)
+                    }
                     Section {
-                        Button("Join") { tryAgain() }
+                        Button(joining ? "Connecting…" : "Join") { tryAgain() }
+                            .disabled(joining)
                     }
                 case .newIdentity?:
                     Section {
@@ -218,10 +254,10 @@ struct IdentityMissingView: View {
                         Text(problem).foregroundStyle(.bad)
                     }
                     Section {
-                        Button("Try Again") { tryAgain() }
-                            .disabled(startingOver)
+                        Button(joining ? "Connecting…" : "Try Again") { tryAgain() }
+                            .disabled(busy)
                         DestructiveButton(startingOver ? "Starting Over…" : "Start Over") { startOver() }
-                            .disabled(startingOver)
+                            .disabled(busy)
                     }
                 }
             }
@@ -231,12 +267,14 @@ struct IdentityMissingView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(role: started == nil ? .cancel : .close) { model.sheet = nil }
                         .tint(theme.text)
-                        .disabled(startingOver)
+                        .disabled(busy)
                 }
             }
-            .interactiveDismissDisabled(startingOver)
+            .interactiveDismissDisabled(busy)
         }
     }
+
+    private var busy: Bool { startingOver || joining }
 
     private var title: String {
         switch started {
@@ -247,8 +285,20 @@ struct IdentityMissingView: View {
     }
 
     private func tryAgain() {
-        model.sheet = nil
-        model.open(address)
+        Task {
+            joining = true
+            defer { joining = false }
+            do {
+                // The model closes this dialog once signed in, and keeps it up where the
+                // identity is still missing.
+                try await model.connect(to: address, code: code)
+                if model.sheet == .identityMissing(address: address, code: code) {
+                    problem = "Your identity still isn’t in the keychain."
+                }
+            } catch {
+                problem = error.explanation
+            }
+        }
     }
 
     private func startOver() {
