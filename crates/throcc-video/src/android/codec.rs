@@ -126,8 +126,8 @@ impl MediaCodec {
         // The announced size: a codec refuses to configure past what it supports, and the
         // padding that pictures may have on top would push a 1080p share over 1920×1088.
         let (width, height) = max_size.announced();
-        // SAFETY: the format is live until deleted below, and the keys are the NDK's.
-        let configured = unsafe {
+        // SAFETY: the format is live until deleted inside, and the keys are the NDK's.
+        let configure = |low_latency: bool| unsafe {
             let format = ndk::AMediaFormat_new();
             ndk::AMediaFormat_setString(format, ndk::AMEDIAFORMAT_KEY_MIME, mime(codec).as_ptr());
             for (key, value) in [
@@ -140,13 +140,19 @@ impl MediaCodec {
             }
             // Realtime priority, and a picture out per unit in: no reordering, no batching.
             ndk::AMediaFormat_setInt32(format, ndk::AMEDIAFORMAT_KEY_PRIORITY, 0);
-            ndk::AMediaFormat_setInt32(format, ndk::AMEDIAFORMAT_KEY_LOW_LATENCY, 1);
+            if low_latency {
+                ndk::AMediaFormat_setInt32(format, ndk::AMEDIAFORMAT_KEY_LOW_LATENCY, 1);
+            }
             let status =
                 ndk::AMediaCodec_configure(raw, format, view.as_ptr(), std::ptr::null_mut(), 0);
             ndk::AMediaFormat_delete(format);
             status == ndk::media_status_t::AMEDIA_OK
-                && ndk::AMediaCodec_start(raw) == ndk::media_status_t::AMEDIA_OK
         };
+        // Some codecs refuse the low-latency key outright rather than ignore it.
+        let configured = configure(true) || configure(false);
+        // SAFETY: the codec is live and configured if `configured` holds.
+        let configured =
+            configured && unsafe { ndk::AMediaCodec_start(raw) } == ndk::media_status_t::AMEDIA_OK;
         let decoder = Self {
             shared,
             view,
