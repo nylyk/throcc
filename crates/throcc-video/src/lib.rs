@@ -12,6 +12,8 @@ mod pixel_buffer;
 mod ffmpeg;
 #[cfg(not(feature = "ffmpeg"))]
 mod none;
+#[cfg(software)]
+pub mod software;
 
 use bytes::Bytes;
 use throcc_proto::messages::Codec;
@@ -161,9 +163,11 @@ pub enum EncodeError {
     NoSurfaces,
     #[error("this encoder takes no frames in GPU memory")]
     NoGpuInput,
-    #[cfg(target_os = "macos")]
-    #[error("the captured picture is {0}×{1}, not the encoder's size")]
+    #[error("the picture is {0}×{1}, not the encoder's size")]
     OtherSize(usize, usize),
+    #[cfg(software)]
+    #[error("libvpx: {0}")]
+    Vpx(String),
     #[cfg(all(feature = "ffmpeg", target_os = "linux"))]
     #[error("importing a frame in GPU memory: {0}")]
     Import(VaError),
@@ -215,6 +219,12 @@ pub enum DecodeError {
     #[cfg(feature = "ffmpeg")]
     #[error("ffmpeg: {0}")]
     Ffmpeg(#[from] rsmpeg::error::RsmpegError),
+    #[cfg(software)]
+    #[error("dav1d failed with {0}")]
+    Dav1d(i32),
+    #[cfg(software)]
+    #[error("libvpx: {0}")]
+    Vpx(String),
 }
 
 #[cfg(test)]

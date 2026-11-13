@@ -9,15 +9,23 @@ publish.workspace = true
 workspace = true
 
 [features]
-ffmpeg = ["dep:rsmpeg", "dep:libc"]
+ffmpeg = ["dep:rsmpeg"]
+# dav1d and libvpx on platforms that don't need them, to test them there.
+software = ["dep:rav1d", "dep:vpx-sys"]
 
 [dependencies]
 throcc-proto.workspace = true
 bytes.workspace = true
-libc = { workspace = true, optional = true }
+libc.workspace = true
+rav1d = { workspace = true, optional = true }
 rsmpeg = { workspace = true, optional = true }
 thiserror.workspace = true
 tracing.workspace = true
+vpx-sys = { workspace = true, optional = true }
+
+[target.'cfg(any(target_vendor = "apple", target_os = "android"))'.dependencies]
+rav1d.workspace = true
+vpx-sys.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 screencapturekit.workspace = true
