@@ -1,41 +1,24 @@
 import SwiftUI
 
-/// The colours of a palette and the ones mixed from them. The muted, accent and status
-/// colours read at 4.5:1 on every surface where the palette's text colour does.
+/// The colours of a palette and the ones the core mixes from them.
 struct Theme: Equatable {
-    let bg, panel, raised, line, text, muted, accent, good, bad: Color
+    let bg, panel, raised, line, text, muted, accent, warning, good, bad: Color
     let isDark: Bool
 
     init(_ palette: Palette) {
-        let text = Color(rgb: palette.text)
-        let bg = Color(rgb: palette.bg)
-        let panel = Color(rgb: palette.panel)
-        let raised = panel.mix(with: text, by: 0.06)
-        let readable = { (rgb: UInt32) -> Color in
-            let color = Color(rgb: rgb)
-            let mixes = stride(from: 0, through: 1, by: 0.1).lazy.map { color.mix(with: text, by: $0) }
-            return mixes.first { mixed in [bg, panel, raised].allSatisfy { contrast(mixed, $0) >= 4.5 } } ?? text
-        }
-        self.text = text
-        self.bg = bg
-        self.panel = panel
-        self.raised = raised
-        line = panel.mix(with: text, by: 0.16)
-        muted = readable(palette.muted)
-        accent = readable(palette.accent)
-        good = readable(palette.good)
-        bad = readable(palette.bad)
+        let colors = themeColors(palette: palette)
+        bg = Color(rgb: colors.bg)
+        panel = Color(rgb: colors.panel)
+        raised = Color(rgb: colors.raised)
+        line = Color(rgb: colors.line)
+        text = Color(rgb: colors.text)
+        muted = Color(rgb: colors.muted)
+        accent = Color(rgb: colors.accent)
+        warning = Color(rgb: colors.warning)
+        good = Color(rgb: colors.good)
+        bad = Color(rgb: colors.bad)
         isDark = !isLightTheme(palette: palette)
     }
-}
-
-/// The WCAG contrast ratio of two colours.
-private func contrast(_ one: Color, _ other: Color) -> Float {
-    let luminances = [one, other].map { color in
-        let parts = color.resolve(in: EnvironmentValues())
-        return 0.2126 * parts.linearRed + 0.7152 * parts.linearGreen + 0.0722 * parts.linearBlue
-    }
-    return (max(luminances[0], luminances[1]) + 0.05) / (min(luminances[0], luminances[1]) + 0.05)
 }
 
 extension Color {
@@ -74,6 +57,7 @@ extension ShapeStyle where Self == ThemeColor {
     static var line: ThemeColor { ThemeColor { $0.line } }
     static var text: ThemeColor { ThemeColor { $0.text } }
     static var muted: ThemeColor { ThemeColor { $0.muted } }
+    static var warning: ThemeColor { ThemeColor { $0.warning } }
     static var good: ThemeColor { ThemeColor { $0.good } }
     static var bad: ThemeColor { ThemeColor { $0.bad } }
 }

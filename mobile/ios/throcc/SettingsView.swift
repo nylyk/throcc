@@ -7,7 +7,7 @@ struct SettingsView: View {
         @Bindable var model = model
         NavigationStack(path: $model.settingsPath) {
             ThemedList {
-                Group {
+                Section {
                     NavigationLink(value: SettingsPage.profile) {
                         IconLabel("Profile", symbol: "person.crop.circle")
                     }
@@ -25,6 +25,10 @@ struct SettingsView: View {
                     }
                     NavigationLink(value: SettingsPage.about) {
                         IconLabel("About", symbol: "info.circle")
+                    }
+                } footer: {
+                    if let problem = model.storeProblems.settings {
+                        StoreProblem(text: problem)
                     }
                 }
                 .foregroundStyle(.text)
@@ -61,7 +65,7 @@ private struct ProfilePage: View {
                     .textContentType(.nickname)
                     .autocorrectionDisabled()
             } footer: {
-                if let problem = check.problem {
+                if let problem = nameProblem(typed: name) {
                     Text(problem).foregroundStyle(.bad)
                 }
             }
@@ -199,7 +203,8 @@ private struct LevelMeter: View {
     }
 }
 
-/// A volume from 0 to 200 % with its percentage, which calls `done` once let go.
+/// A gain on the loudness curve every client uses, from 0 to 200 % with its percentage, which
+/// calls `done` once let go.
 private struct VolumeSlider: View {
     let title: LocalizedStringKey
     @Binding var value: Float
@@ -212,10 +217,11 @@ private struct VolumeSlider: View {
     }
 
     var body: some View {
-        let percent = "\(Int((value * 100).rounded()))%"
+        let loudness = gainToLoudness(gain: value)
+        let percent = "\(Int((loudness * 100).rounded()))%"
         LabeledContent(title) { Text(percent).foregroundStyle(.muted) }
             .foregroundStyle(.text)
-        Slider(value: Binding { min(value, 2) } set: { value = $0 }, in: 0...2) {
+        Slider(value: Binding { loudness } set: { value = loudnessToGain(loudness: $0) }, in: 0...2) {
             Text(title)
         } onEditingChanged: { editing in
             if !editing { done() }
@@ -341,7 +347,12 @@ private struct VerifiedPage: View {
                     }
                 }
             } header: {
-                Text("People that you have verified").foregroundStyle(.muted)
+                VStack(alignment: .leading, spacing: 4) {
+                    if let problem = model.storeProblems.verified {
+                        StoreProblem(text: problem)
+                    }
+                    Text("People that you have verified").foregroundStyle(.muted)
+                }
             } footer: {
                 if people.isEmpty {
                     Text("Nobody yet. Compare safety numbers with someone to verify them.").foregroundStyle(.muted)
@@ -367,7 +378,7 @@ private struct BlockedPage: View {
             Section {
                 ForEach(people, id: \.key) { person in
                     HStack(spacing: 12) {
-                        Avatar(picture: model.picture(in: person.picture), name: person.name, size: 28)
+                        Avatar(picture: model.picture(in: person.picture), initial: initial(name: person.name), size: 28)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(person.name).foregroundStyle(.text)
                             if let server = person.server {
@@ -388,7 +399,12 @@ private struct BlockedPage: View {
                     }
                 }
             } header: {
-                Text("People that you have blocked").foregroundStyle(.muted)
+                VStack(alignment: .leading, spacing: 4) {
+                    if let problem = model.storeProblems.blocked {
+                        StoreProblem(text: problem)
+                    }
+                    Text("People that you have blocked").foregroundStyle(.muted)
+                }
             } footer: {
                 if people.isEmpty {
                     Text("Nobody. Tap someone in a room to block them.").foregroundStyle(.muted)
@@ -397,6 +413,18 @@ private struct BlockedPage: View {
         }
         .navigationTitle("Blocked People")
         .onAppear { people = model.core.blocked() }
+    }
+}
+
+/// Why something this install keeps couldn't be read, so the app started without it.
+private struct StoreProblem: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.footnote)
+            .textCase(nil)
+            .foregroundStyle(.bad)
     }
 }
 

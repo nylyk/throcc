@@ -1,15 +1,6 @@
 import Foundation
 
 extension NameCheck {
-    var problem: String? {
-        switch self {
-        case .empty, .fine: nil
-        case .tooLong: "Names can be at most \(limits().nameChars) characters."
-        case .showsNothing: "Names need at least one visible character."
-        case .hidesText: "Names can’t contain control or invisible characters."
-        }
-    }
-
     /// The name as a server keeps it, when it takes it.
     var name: String? {
         if case .fine(let name) = self { name } else { nil }
@@ -37,7 +28,9 @@ extension KnownServer {
 extension Error {
     var explanation: String {
         switch self as? CoreError {
-        case .Failed(let message): message
+        case .Failed(let reason): reason
+        case .PinMismatch: "The server’s key changed."
+        case .IdentityMissing: "Your identity is missing from this device."
         case nil: localizedDescription
         }
     }

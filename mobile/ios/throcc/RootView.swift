@@ -57,12 +57,15 @@ struct RootView: View {
     @ViewBuilder
     private func content(of sheet: Sheet) -> some View {
         switch sheet {
-        case .addServer: AddServerView()
+        case .addServer(let address): AddServerView(address: address)
         case .settings: SettingsView()
         case .newRoom: RoomEditor(room: nil)
         case .editRoom(let room): RoomEditor(room: room)
         case .person(let user): NavigationStack { PersonView(user: user).toolbar { CloseButton() } }
         case .server(let page): NavigationStack { ServerPageView(page: page) }
+        case .pinMismatch(let address, let expected, let actual):
+            PinMismatchView(address: address, expected: expected, actual: actual)
+        case .identityMissing(let address): IdentityMissingView(address: address)
         }
     }
 }

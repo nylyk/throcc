@@ -7,6 +7,42 @@ enum Sample: String {
     case server, members, invites, keys
     case reconnect, elsewhere
     case share, sharefull
+    case pinmismatch, identitymissing
+}
+
+/// A lost connection the samples show in place of the state's, with the notice the core
+/// gives for it.
+struct SampleConnection {
+    let connection: Connection
+    let notice: ConnectionNotice
+
+    static var awaitingReconnect: SampleConnection {
+        SampleConnection(
+            connection: .awaitingReconnect,
+            notice: ConnectionNotice(
+                summary: "Disconnected after a while away. Reconnect from the room.",
+                hint: "The connection was down for a while. Reconnecting here signs you out on any other device.",
+                problem: nil,
+                action: .reconnect,
+                busy: false,
+                serious: false
+            )
+        )
+    }
+
+    static var signedInElsewhere: SampleConnection {
+        SampleConnection(
+            connection: .signedInElsewhere,
+            notice: ConnectionNotice(
+                summary: "Disconnected: signed in on another device",
+                hint: "Pick the server to sign in here again.",
+                problem: "Signed in on another device.",
+                action: .signInHere,
+                busy: false,
+                serious: true
+            )
+        )
+    }
 }
 
 extension AppModel {
@@ -15,7 +51,7 @@ extension AppModel {
         case .onboarding, .servers:
             break
         case .addserver:
-            sheet = .addServer
+            sheet = .addServer(address: "")
         case .rooms:
             await connectToSample()
         case .room:
@@ -63,15 +99,23 @@ extension AppModel {
             await connectToSample()
         case .share:
             await joinSampleRoom()
-            watch(4)
+            core.watchOnly(user: 4)
         case .sharefull:
             await joinSampleRoom()
-            watch(4)
+            core.watchOnly(user: 4)
             // Once the mock shows the share watched, which fullscreen goes with.
             while !(state.current?.watching.contains(4) ?? false) {
                 try? await Task.sleep(for: .milliseconds(20))
             }
             fullscreenShare = 4
+        case .pinmismatch:
+            sheet = .pinMismatch(
+                address: "owls.thro.cc",
+                expected: Data(repeating: 0x2c, count: 32),
+                actual: Data(repeating: 0xb8, count: 32)
+            )
+        case .identitymissing:
+            sheet = .identityMissing(address: "owls.thro.cc")
         }
     }
 

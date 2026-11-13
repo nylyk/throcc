@@ -3,9 +3,9 @@ import SwiftUI
 struct PersonView: View {
     @Environment(AppModel.self) private var model
     let user: UInt64
-    /// The identity key whose safety number is shown, the only one a tap may verify.
-    @State private var shownKey: Data?
-    @State private var number: String?
+    /// The safety-number comparison on screen, which keeps the number on the key being compared.
+    @State private var check: SafetyCheck?
+    @State private var groups: [String] = []
     @State private var keyChangedWhileOpen = false
     @State private var removal: Removal?
 
@@ -21,6 +21,7 @@ struct PersonView: View {
             }
         }
         .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: model.state, initial: true) { follow() }
     }
 
     private func form(for person: Person) -> some View {
@@ -45,7 +46,7 @@ struct PersonView: View {
                     .foregroundStyle(.muted)
             } else {
                 keyWarning(for: person)
-                trust(in: person)
+                safetyNumber(of: person)
                 Section {
                     SoundControl(user: user, sound: .voice, level: person.voice)
                 } header: {
@@ -64,7 +65,6 @@ struct PersonView: View {
                 moderation(of: person)
             }
         }
-        .onChange(of: person.identityKey, initial: true) { follow(person.identityKey) }
         .modifier(RemovalConfirmation(removal: $removal))
     }
 
@@ -78,40 +78,46 @@ struct PersonView: View {
                     .foregroundStyle(.text)
                 LabeledContent("Now") { Text(fingerprintShort(key: warning.now)).monospaced().foregroundStyle(.muted) }
                     .foregroundStyle(.text)
-                Button("Dismiss Warning") {
-                    model.core.command(command: .dismissKeyChange(user: user, shown: shownKey))
-                }
-                .disabled(keyChangedWhileOpen || shownKey != person.identityKey)
+                Button("Dismiss Warning") { check?.dismissWarning() }
+                    .disabled(check?.canDismissWarning() != true)
             } header: {
                 Label("\(person.name)’s key changed", systemImage: "exclamationmark.triangle").foregroundStyle(.bad)
             }
         }
     }
 
-    private func trust(in person: Person) -> some View {
+    private func safetyNumber(of person: Person) -> some View {
         Section {
-            TrustLabel(trust: model.state.trust(of: person))
-            if let number, let shownKey {
-                SafetyNumber(number: number)
-                if keyChangedWhileOpen {
-                    Text("\(person.name)’s key changed while this was open, so this is a new number. Compare it again.")
-                        .foregroundStyle(.text)
-                    Button("Compare Again") { keyChangedWhileOpen = false }
+            HStack(spacing: 8) {
+                TrustLabel(trust: person.trust)
+                if let verifiedAs = person.verifiedAs {
+                    Text("Verified as \(verifiedAs)")
+                        .font(.caption)
+                        .foregroundStyle(.muted)
                 }
-                Button(person.verified ? "Mark as Not Verified" : "Mark as Verified") {
-                    let verified = !person.verified
-                    model.core.command(command: .setVerified(user: user, key: shownKey, verified: verified))
-                }
-                .disabled(keyChangedWhileOpen || shownKey != person.identityKey)
-            } else {
-                Text("Their safety number appears once you share a room.").foregroundStyle(.muted)
             }
+            if keyChangedWhileOpen {
+                Text("\(person.name)’s key changed while this was open, so this is a new number. Compare it again.")
+                    .foregroundStyle(.text)
+                Button("Compare Again") {
+                    check?.compareAgain()
+                    showCheck()
+                }
+            }
+            if groups.isEmpty {
+                Text("Their safety number appears once you share a room.").foregroundStyle(.muted)
+            } else {
+                SafetyNumber(groups: groups)
+            }
+            Button(person.verified ? "Mark as Not Verified" : "Mark as Verified") {
+                check?.mark(verify: !person.verified)
+            }
+            .disabled(check?.canMark() != true)
         } header: {
             Text("Safety Number").foregroundStyle(.muted)
         } footer: {
-            if number != nil {
-                Text("To check that your calls with \(person.name) are end-to-end encrypted, compare these numbers with theirs in person or through another app.")
-                    .foregroundStyle(.muted)
+            if let explanation = check?.explanation(name: person.name) {
+                Text(explanation).foregroundStyle(.muted)
             }
         }
     }
@@ -132,21 +138,28 @@ struct PersonView: View {
         }
     }
 
-    /// Keeps the number on the key the person presents, and notes a change under the user's eyes.
-    private func follow(_ key: Data?) {
-        guard let key, key != shownKey else { return }
-        keyChangedWhileOpen = keyChangedWhileOpen || shownKey != nil
-        shownKey = key
-        number = model.core.safetyNumber(key: key)
+    /// Keeps the number on the key the person presents now.
+    private func follow() {
+        let check = self.check ?? model.core.safetyCheck(user: user)
+        if check.follow() || self.check == nil {
+            self.check = check
+            showCheck()
+        }
+    }
+
+    private func showCheck() {
+        guard let check else { return }
+        groups = check.groups()
+        keyChangedWhileOpen = check.keyChangedWhileOpen()
     }
 }
 
+/// The safety number's twelve groups of five digits.
 private struct SafetyNumber: View {
     @Environment(\.dynamicTypeSize) private var typeSize
-    let number: String
+    let groups: [String]
 
     var body: some View {
-        let groups = stride(from: 0, to: number.count, by: 5).map { number.dropFirst($0).prefix(5) }
         let columns = typeSize.isAccessibilitySize ? 2 : 4
         LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: columns), spacing: 8) {
             ForEach(groups.indices, id: \.self) { Text(groups[$0]).speechSpellsOutCharacters() }
@@ -160,30 +173,33 @@ private struct SafetyNumber: View {
     }
 }
 
-/// The volume of one of someone's sounds here, from 0 to 200%, with its mute switch.
+/// The volume of one of someone's sounds here, from 0 to 200% on the loudness curve every
+/// client uses, with its mute switch.
 private struct SoundControl: View {
     @Environment(AppModel.self) private var model
     let user: UInt64
     let sound: Sound
     let level: SoundLevel
-    @State private var volume: Float
+    @State private var loudness: Float
 
     init(user: UInt64, sound: Sound, level: SoundLevel) {
         self.user = user
         self.sound = sound
         self.level = level
-        _volume = State(initialValue: min(level.volume, 2))
+        _loudness = State(initialValue: gainToLoudness(gain: level.volume))
     }
 
     var body: some View {
-        let percent = "\(Int((volume * 100).rounded()))%"
+        let percent = "\(Int((loudness * 100).rounded()))%"
         LabeledContent("Volume") { Text(percent).foregroundStyle(.muted) }
             .foregroundStyle(.text)
-        Slider(value: $volume, in: 0...2) { Text("Volume") }
+        Slider(value: $loudness, in: 0...2) { Text("Volume") }
             .accessibilityValue(percent)
-            .onChange(of: volume) { set(SoundLevel(volume: volume, muted: level.muted)) }
-        Toggle("Mute", isOn: Binding { level.muted } set: { set(SoundLevel(volume: volume, muted: $0)) })
-            .foregroundStyle(.text)
+            .onChange(of: loudness) { set(SoundLevel(volume: loudnessToGain(loudness: loudness), muted: level.muted)) }
+        Toggle("Mute", isOn: Binding { level.muted } set: {
+            set(SoundLevel(volume: loudnessToGain(loudness: loudness), muted: $0))
+        })
+        .foregroundStyle(.text)
     }
 
     private func set(_ level: SoundLevel) {

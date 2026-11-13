@@ -19,31 +19,35 @@ struct ShareSurface: UIViewRepresentable {
     @Environment(AppModel.self) private var model
 
     final class Coordinator {
-        let model: AppModel
+        let core: Core
         let user: UInt64
+        /// The number the core gave the view, by which it stops showing the share there.
+        var shown: UInt64 = 0
 
-        init(model: AppModel, user: UInt64) {
-            self.model = model
+        init(core: Core, user: UInt64) {
+            self.core = core
             self.user = user
         }
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(model: model, user: user)
+        Coordinator(core: model.core, user: user)
     }
 
     func makeUIView(context: Context) -> SampleBufferView {
         let view = SampleBufferView()
         view.backgroundColor = .black
         view.displayLayer.videoGravity = .resizeAspect
-        model.showShare(user, in: view.displayLayer)
+        // The core takes over a reference to the layer.
+        let layer = UInt64(UInt(bitPattern: Unmanaged.passRetained(view.displayLayer).toOpaque()))
+        context.coordinator.shown = model.core.showShare(user: user, view: layer)
         return view
     }
 
     func updateUIView(_ view: SampleBufferView, context: Context) {}
 
     static func dismantleUIView(_ view: SampleBufferView, coordinator: Coordinator) {
-        coordinator.model.hideShare(coordinator.user, from: view.displayLayer)
+        coordinator.core.hideShare(user: coordinator.user, number: coordinator.shown)
     }
 }
 
@@ -67,6 +71,9 @@ struct ShareTile: View {
                 }
                 VStack {
                     HStack(spacing: 8) {
+                        if model.state.health.slowShares.contains(person.user) {
+                            SlowConnectionPill()
+                        }
                         Spacer()
                         Button("Fullscreen", systemImage: "arrow.up.left.and.arrow.down.right") {
                             model.fullscreenShare = person.user
@@ -87,14 +94,14 @@ struct ShareTile: View {
                     Image(systemName: "rectangle.on.rectangle").font(.title)
                     Text("\(person.name) is sharing").lineLimit(1)
                     Text(share.label).font(.footnote).foregroundStyle(.muted)
-                    Button("Watch") { model.watch(person.user) }
+                    Button("Watch") { model.core.watchOnly(user: person.user) }
                         .buttonStyle(.bordered)
                 }
                 .foregroundStyle(.text)
                 .padding(16)
             }
         }
-        .aspectRatio(max(share.aspect, 0.75), contentMode: .fit)
+        .aspectRatio(CGFloat(max(share.aspect, 0.75)), contentMode: .fit)
         .frame(maxWidth: .infinity)
         .background(.panel, in: .rect(cornerRadius: 16))
         .clipShape(.rect(cornerRadius: 16))
@@ -115,21 +122,26 @@ struct ShareFullscreen: View {
             Color.black.ignoresSafeArea()
             if let share = person?.sharing {
                 ShareSurface(user: user)
-                    .aspectRatio(share.aspect, contentMode: .fit)
+                    .aspectRatio(CGFloat(share.aspect), contentMode: .fit)
                     .ignoresSafeArea()
             }
             VStack {
-                if controls {
-                    HStack(spacing: 8) {
-                        Button("Close", systemImage: "chevron.down") { model.fullscreenShare = nil }
-                            .labelStyle(.iconOnly)
-                            .buttonStyle(.bordered)
-                            .buttonBorderShape(.circle)
-                        Text(person?.name ?? "").foregroundStyle(.white)
-                        Spacer()
+                HStack(spacing: 8) {
+                    if controls {
+                        Group {
+                            Button("Close", systemImage: "chevron.down") { model.fullscreenShare = nil }
+                                .labelStyle(.iconOnly)
+                                .buttonStyle(.bordered)
+                                .buttonBorderShape(.circle)
+                            Text(person?.name ?? "").foregroundStyle(.white)
+                        }
+                        .tint(.white)
+                        .transition(.opacity)
                     }
-                    .tint(.white)
-                    .transition(.opacity)
+                    Spacer()
+                    if state.health.slowShares.contains(user) {
+                        SlowConnectionPill()
+                    }
                 }
                 Spacer()
                 RoomStrip(people: state.people.filter { $0.room == state.current?.room })
@@ -166,43 +178,21 @@ private struct RoomStrip: View {
     }
 }
 
-extension Share {
-    /// Width over height, within what a phone can show: a sender may announce any size.
-    var aspect: CGFloat {
-        min(max(CGFloat(width) / CGFloat(max(height, 1)), 0.25), 4)
-    }
-}
-
-extension AppModel {
-    /// Watches `user`'s share in place of any other: a phone watches one share at a time.
-    func watch(_ user: UInt64) {
-        for watched in state.current?.watching ?? [] where watched != user {
-            core.command(command: .unwatch(user: watched))
+/// Says the connection can't keep up with a share that is being watched.
+private struct SlowConnectionPill: View {
+    var body: some View {
+        Label {
+            Text("Slow connection").foregroundStyle(.white)
+        } icon: {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.warning)
         }
-        core.command(command: .watch(user: user))
-    }
-
-    /// Shows `user`'s share in `layer` from now on.
-    func showShare(_ user: UInt64, in layer: AVSampleBufferDisplayLayer) {
-        shareLayers[user, default: []].append(layer)
-        core.setShareView(user: user, view: Self.handedOver(layer))
-    }
-
-    /// Stops showing `user`'s share in `layer`, which is going away, and goes back to the one
-    /// before.
-    func hideShare(_ user: UInt64, from layer: AVSampleBufferDisplayLayer) {
-        guard var layers = shareLayers[user], let index = layers.lastIndex(where: { $0 === layer }) else {
-            return
-        }
-        let wasShown = index == layers.count - 1
-        layers.remove(at: index)
-        shareLayers[user] = layers
-        guard wasShown else { return }
-        core.setShareView(user: user, view: layers.last.map(Self.handedOver) ?? 0)
-    }
-
-    /// `layer` with a reference the core takes over.
-    private static func handedOver(_ layer: AVSampleBufferDisplayLayer) -> UInt64 {
-        UInt64(UInt(bitPattern: Unmanaged.passRetained(layer).toOpaque()))
+        .labelStyle(.titleAndIcon)
+        .font(.footnote.weight(.medium))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(.black.opacity(0.6), in: .capsule)
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("Frames are dropping. Ask the sharer for a lower bitrate.")
+        .help("Frames are dropping. Ask the sharer for a lower bitrate.")
     }
 }

@@ -38,7 +38,7 @@ private struct ServerOverview: View {
                         ThemedField("Name", text: $name)
                     } else {
                         LabeledContent("Name") {
-                            Avatar(picture: model.picture(in: picture), name: server.title, size: 28)
+                            Avatar(picture: model.picture(in: picture), initial: initial(name: server.title), size: 28)
                             Text(server.title).foregroundStyle(.muted)
                         }
                         .foregroundStyle(.text)
@@ -46,7 +46,7 @@ private struct ServerOverview: View {
                     LabeledContent("Address") { Text(server.address).foregroundStyle(.muted) }
                         .foregroundStyle(.text)
                 } footer: {
-                    if let problem = check.problem {
+                    if let problem = nameProblem(typed: name) {
                         Text(problem).foregroundStyle(.bad)
                     }
                 }
@@ -65,7 +65,7 @@ private struct ServerOverview: View {
                             ProgressView()
                         } else {
                             Button("Save") { save(name: check.name, over: server) }
-                                .disabled(!changed || check.problem != nil)
+                                .disabled(!changed || nameProblem(typed: name) != nil)
                         }
                     } footer: {
                         SaveStatusText(status: model.serverSave)
@@ -112,7 +112,7 @@ private struct MembersPage: View {
                     HStack(spacing: 12) {
                         Avatar(
                             picture: state.person(user.id)?.avatar.flatMap { model.pictures[$0] },
-                            name: user.name,
+                            initial: initial(name: user.name),
                             size: 28
                         )
                         VStack(alignment: .leading, spacing: 2) {
@@ -232,7 +232,7 @@ private struct KeysPage: View {
                                 }
                             }
                             Spacer()
-                            TrustLabel(trust: state.trust(of: person)).font(.caption)
+                            TrustLabel(trust: person.trust).font(.caption)
                         }
                     }
                 }

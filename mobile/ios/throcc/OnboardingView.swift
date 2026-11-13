@@ -16,7 +16,7 @@ struct OnboardingView: View {
                         .textContentType(.nickname)
                         .autocorrectionDisabled()
                 } footer: {
-                    if let problem = check.problem ?? refusal {
+                    if let problem = nameProblem(typed: name) ?? refusal {
                         Text(problem).foregroundStyle(.bad)
                     } else {
                         Text("Choose the name people see you as.").foregroundStyle(.muted)
