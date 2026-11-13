@@ -65,10 +65,9 @@ struct ShareTile: View {
         ZStack {
             if watching {
                 Color.black
-                // The fullscreen view takes the share while it is open.
-                if model.fullscreenShare != person.user {
-                    ShareSurface(user: person.user)
-                }
+                // Kept under fullscreen, so the share goes back to it unchanged.
+                ShareSurface(user: person.user)
+                Loading(user: person.user)
                 VStack {
                     HStack(spacing: 8) {
                         if model.state.health.slowShares.contains(person.user) {
@@ -87,6 +86,10 @@ struct ShareTile: View {
                     .buttonBorderShape(.circle)
                     .tint(.white)
                     Spacer()
+                    HStack {
+                        Sharer(person: person)
+                        Spacer()
+                    }
                 }
                 .padding(8)
             } else {
@@ -124,6 +127,7 @@ struct ShareFullscreen: View {
                 ShareSurface(user: user)
                     .aspectRatio(CGFloat(share.aspect), contentMode: .fit)
                     .ignoresSafeArea()
+                Loading(user: user)
             }
             VStack {
                 HStack(spacing: 8) {
@@ -152,6 +156,38 @@ struct ShareFullscreen: View {
         .onTapGesture { withAnimation { controls.toggle() } }
         .statusBarHidden(!controls)
         .persistentSystemOverlays(.hidden)
+        .onAppear { Turning.allow(true) }
+        .onDisappear { Turning.allow(false) }
+    }
+}
+
+/// A spinner until `user`'s share has a picture to show.
+private struct Loading: View {
+    let user: UInt64
+    @Environment(AppModel.self) private var model
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        if !(model.state.current?.showing.contains(user) ?? false) {
+            ProgressView().controlSize(.large).tint(theme.muted)
+        }
+    }
+}
+
+/// Whose share this is, over the picture.
+private struct Sharer: View {
+    let person: Person
+
+    var body: some View {
+        HStack(spacing: 8) {
+            PersonPicture(person: person, size: 24)
+            Text(person.name).lineLimit(1).foregroundStyle(.white)
+        }
+        .font(.footnote.weight(.medium))
+        .padding(.leading, 4)
+        .padding(.trailing, 10)
+        .padding(.vertical, 4)
+        .background(.black.opacity(0.6), in: .capsule)
     }
 }
 

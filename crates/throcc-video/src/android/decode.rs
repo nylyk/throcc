@@ -26,7 +26,8 @@ pub struct Decoder {
     /// The output's change count when last looked at.
     seen: u64,
     engine: Engine,
-    /// Whether reference pictures were dropped since [`Decoder::take_flushed`] last ran.
+    /// Whether reference pictures were dropped, or the codec moved to a view that shows
+    /// nothing until its next picture, since [`Decoder::take_flushed`] last ran.
     flushed: bool,
     /// Each unit's sequence number and timestamp, until its picture comes out.
     in_flight: VecDeque<(u64, u32)>,
@@ -162,7 +163,9 @@ impl Decoder {
         };
         match (codec.as_mut(), self.output.view()) {
             (Some(running), Some(view)) => {
-                if !running.retarget(view) {
+                if running.retarget(view) {
+                    self.flushed = true;
+                } else {
                     *codec = None;
                 }
             }

@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct ThroccApp: App {
+    @UIApplicationDelegateAdaptor private var delegate: AppDelegate
     private let launch: Result<AppModel, Error>
     private let sample: Sample?
 
@@ -48,4 +49,36 @@ private func setAppDirs() throws {
     values.isExcludedFromBackup = true
     try data.setResourceValues(values)
     setAppDirs(data: data.path, cache: cache.path)
+}
+
+final class AppDelegate: NSObject, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        supportedInterfaceOrientationsFor window: UIWindow?
+    ) -> UIInterfaceOrientationMask {
+        Turning.allowed
+    }
+}
+
+/// Which ways the window may turn: a phone stays upright except while a share fills it.
+@MainActor
+enum Turning {
+    private static let phone = UIDevice.current.userInterfaceIdiom == .phone
+    static private(set) var allowed: UIInterfaceOrientationMask = phone ? .portrait : .all
+
+    /// Lets a phone's window turn with the phone, or turns it back upright.
+    static func allow(_ turning: Bool) {
+        guard phone else { return }
+        allowed = turning ? .allButUpsideDown : .portrait
+        for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+            var controller = scene.keyWindow?.rootViewController
+            while let shown = controller {
+                shown.setNeedsUpdateOfSupportedInterfaceOrientations()
+                controller = shown.presentedViewController
+            }
+            if !turning {
+                scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait))
+            }
+        }
+    }
 }

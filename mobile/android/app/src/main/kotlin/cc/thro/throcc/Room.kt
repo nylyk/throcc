@@ -34,7 +34,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -106,22 +108,27 @@ private fun PersonCard(model: AppModel, person: Person) {
                 Text(
                     person.name,
                     Modifier.weight(1f, fill = false),
-                    maxLines = 2,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     textAlign = TextAlign.Center,
                     style = MaterialTheme.typography.titleMedium,
                 )
                 MutedIcon(person)
             }
-            person.sharing?.let { Sharing(it.label) }
+            // Held empty for those not sharing, so every card has the same height.
+            val sharing = person.sharing
+            Sharing(
+                sharing?.label.orEmpty(),
+                if (sharing == null) Modifier.alpha(0f).clearAndSetSemantics {} else Modifier,
+            )
         }
     }
 }
 
 @Composable
-private fun Sharing(label: String) {
+private fun Sharing(label: String, modifier: Modifier = Modifier) {
     val quiet = MaterialTheme.colorScheme.onSurfaceVariant
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         Icon(Icons.AutoMirrored.Filled.ScreenShare, "Sharing", Modifier.size(16.dp), quiet)
         Text(
             label,

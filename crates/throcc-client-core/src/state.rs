@@ -418,6 +418,8 @@ pub struct CurrentRoom {
     pub sharing: Option<ShareConfig>,
     /// Whose shares we receive.
     pub watching: Vec<UserId>,
+    /// Whose watched shares have a picture to show.
+    pub showing: Vec<UserId>,
 }
 
 /// The server showed `user`, whose identity key `verified` was verified, with another key

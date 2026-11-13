@@ -97,12 +97,12 @@ private struct PersonCard: View {
                 MutedIcon(person: person).font(.footnote)
             }
             .foregroundStyle(person.blocked ? ThemeColor.muted : .text)
-            if let sharing = person.sharing {
-                Text("Sharing \(sharing.label)")
-                    .font(.caption)
-                    .foregroundStyle(.muted)
-                    .lineLimit(1)
-            }
+            // Held empty for those not sharing, so every card has the same height.
+            Text(person.sharing.map { "Sharing \($0.label)" } ?? " ")
+                .font(.caption)
+                .foregroundStyle(.muted)
+                .lineLimit(1)
+                .accessibilityHidden(person.sharing == nil)
         }
         .frame(maxWidth: .infinity, minHeight: 140)
         .padding(8)

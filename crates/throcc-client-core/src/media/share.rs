@@ -487,12 +487,14 @@ impl KeyframeAsks {
 /// Decodes a share's `units` on its own thread into its newest picture due by `playout`,
 /// shown in `output` on the phones, and returns what decodes them. `ask_idr` runs after a
 /// reset, and on failures at most once per [`KEYFRAME_RETRY`] until a picture decodes.
+/// `first_picture` runs once the first picture is out.
 pub fn receive(
     mut units: mpsc::Receiver<Received>,
     config: ShareConfig,
     playout: Option<Arc<Playout>>,
     output: Output,
     ask_idr: impl Fn() + Send + 'static,
+    first_picture: impl FnOnce() + Send + 'static,
 ) -> Result<(Picture, watch::Receiver<&'static str>), String> {
     let mut decoder =
         Decoder::new(config.codec, max_size(&config), output).map_err(|e| e.to_string())?;
@@ -501,6 +503,7 @@ pub fn receive(
     std::thread::Builder::new()
         .name("throcc-decode".into())
         .spawn(move || {
+            let mut first_picture = Some(first_picture);
             let mut held: VecDeque<Arc<Frame>> = VecDeque::new();
             let mut replaced: Option<Arc<Frame>> = None;
             let mut asks = KeyframeAsks::default();
@@ -580,6 +583,9 @@ pub fn receive(
                 }
                 decoder.present(&newest);
                 replaced = tx.send_replace(Some(newest));
+                if let Some(first_picture) = first_picture.take() {
+                    first_picture();
+                }
             }
         })
         .map_err(|e| e.to_string())?;

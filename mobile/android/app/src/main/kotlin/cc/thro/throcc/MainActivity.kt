@@ -1,5 +1,7 @@
 package cc.thro.throcc
 
+import android.app.Activity
+import android.content.pm.ActivityInfo
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -12,6 +14,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        uprightOnPhones()
         model = (application as ThroccApp).open(intent)
         setContent { App(model) }
     }
@@ -20,5 +23,14 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         model.core.command(Command.Reconnect)
         (application as ThroccApp).startVoice()
+    }
+}
+
+/** Keeps a phone's window upright; a tablet's turns freely. */
+fun Activity.uprightOnPhones() {
+    requestedOrientation = if (resources.configuration.smallestScreenWidthDp < 600) {
+        ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+    } else {
+        ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
     }
 }

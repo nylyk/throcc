@@ -169,6 +169,8 @@ pub struct CurrentRoom {
     pub sharing: bool,
     /// Whose shares we receive.
     pub watching: Vec<u64>,
+    /// Whose watched shares have a picture to show.
+    pub showing: Vec<u64>,
 }
 
 /// The server showed `user`, whose identity key `verified` was verified, with the key `now`.
@@ -222,6 +224,7 @@ impl From<&core::State> for CoreState {
                 room: current.room.0,
                 sharing: current.sharing.is_some(),
                 watching: current.watching.iter().map(|user| user.0).collect(),
+                showing: current.showing.iter().map(|user| user.0).collect(),
             }),
             mic: state.mic,
             deafened: state.deafened,

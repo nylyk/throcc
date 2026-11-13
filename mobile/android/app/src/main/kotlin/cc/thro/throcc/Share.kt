@@ -1,5 +1,7 @@
 package cc.thro.throcc
 
+import android.app.Activity
+import android.content.pm.ActivityInfo
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -30,6 +32,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
@@ -78,12 +81,16 @@ object ShareView {
 private const val TOO_SLOW = "Slow connection"
 private const val TOO_SLOW_HINT = "Frames are dropping. Ask the sharer for a lower bitrate."
 
-/** `user`'s share, decoded straight into a surface. The core keeps the surfaces a share is shown in. */
+/**
+ * `user`'s share, decoded straight into a surface. The core keeps the surfaces a share is shown in.
+ * `onTop` puts it above the other share surfaces in the window.
+ */
 @Composable
-private fun ShareSurface(model: AppModel, user: ULong, modifier: Modifier = Modifier) {
+private fun ShareSurface(model: AppModel, user: ULong, modifier: Modifier = Modifier, onTop: Boolean = false) {
     AndroidView(
         factory = { context ->
             SurfaceView(context).apply {
+                setZOrderMediaOverlay(onTop)
                 holder.addCallback(object : SurfaceHolder.Callback {
                     /** The number the core gave this surface while it shows the share. */
                     var shown: ULong? = null
@@ -132,6 +139,34 @@ private fun TooSlow(modifier: Modifier = Modifier) {
     }
 }
 
+/** A spinner until the share has a picture to show. */
+@Composable
+private fun Loading(state: CoreState, user: ULong) {
+    if (state.current?.showing?.contains(user) != true) {
+        CircularProgressIndicator(color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/** Whose share this is, over the picture. */
+@Composable
+private fun Sharer(model: AppModel, person: Person, modifier: Modifier = Modifier) {
+    Row(
+        modifier
+            .background(MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.8f), CircleShape)
+            .padding(start = 4.dp, top = 4.dp, end = 12.dp, bottom = 4.dp),
+        Arrangement.spacedBy(8.dp),
+        Alignment.CenterVertically,
+    ) {
+        PersonPicture(model, person, 24.dp)
+        Text(
+            person.name,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.labelLarge,
+        )
+    }
+}
+
 /** A share in the room: watched in place, with a way to fullscreen it, or offered to watch. */
 @Composable
 fun ShareTile(model: AppModel, state: CoreState, person: Person, share: Share) {
@@ -145,12 +180,12 @@ fun ShareTile(model: AppModel, state: CoreState, person: Person, share: Share) {
         Box(Modifier.fillMaxSize()) {
             if (watching) {
                 Box(Modifier.fillMaxSize().background(Color.Black), Alignment.Center) {
-                    // The fullscreen view takes the share while it is open.
-                    if (model.fullscreenShare != person.user) {
-                        ShareSurface(model, person.user, Modifier.aspectRatio(share.aspect))
-                    }
+                    // Kept under fullscreen, so the codec never goes without a surface.
+                    ShareSurface(model, person.user, Modifier.aspectRatio(share.aspect))
+                    Loading(state, person.user)
                 }
                 if (tooSlow) TooSlow(Modifier.align(Alignment.TopStart).padding(12.dp))
+                Sharer(model, person, Modifier.align(Alignment.BottomStart).padding(12.dp))
                 Row(Modifier.align(Alignment.TopEnd).padding(8.dp), Arrangement.spacedBy(8.dp)) {
                     FilledTonalIconButton({ model.fullscreenShare = person.user }) {
                         Icon(Icons.Default.Fullscreen, "Fullscreen")
@@ -197,6 +232,7 @@ fun ShareFullscreen(model: AppModel, state: CoreState) {
     if (share == null) return
     BackHandler { model.fullscreenShare = null }
     Immersive()
+    Turning()
     var controls by remember { mutableStateOf(true) }
     Box(
         Modifier
@@ -205,7 +241,8 @@ fun ShareFullscreen(model: AppModel, state: CoreState) {
             .clickable(remember { MutableInteractionSource() }, null) { controls = !controls },
     ) {
         Box(Modifier.fillMaxSize(), Alignment.Center) {
-            ShareSurface(model, user, Modifier.aspectRatio(share.aspect))
+            ShareSurface(model, user, Modifier.aspectRatio(share.aspect), onTop = true)
+            Loading(state, user)
         }
         AnimatedVisibility(controls, Modifier.align(Alignment.TopStart), enter = fadeIn(), exit = fadeOut()) {
             Row(
@@ -243,6 +280,16 @@ private fun RoomStrip(model: AppModel, people: List<Person>, modifier: Modifier)
             val ring = if (person.speaking) scheme.tertiary else Color.Transparent
             PersonPicture(model, person, 28.dp, Modifier.border(2.dp, ring, CircleShape).padding(3.dp))
         }
+    }
+}
+
+/** Lets the window turn with the device while shown, as the user's rotation setting allows. */
+@Composable
+private fun Turning() {
+    val activity = LocalView.current.context as? Activity ?: return
+    DisposableEffect(activity) {
+        activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_USER
+        onDispose { activity.uprightOnPhones() }
     }
 }
 

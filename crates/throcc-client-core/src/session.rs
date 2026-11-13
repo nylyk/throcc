@@ -907,6 +907,7 @@ impl Session {
                 room,
                 sharing: None,
                 watching: vec![],
+                showing: vec![],
             });
         });
         let state = self.shared.state();
@@ -960,6 +961,7 @@ impl Session {
                 room,
                 sharing: None,
                 watching: vec![],
+                showing: vec![],
             });
         });
     }
@@ -1716,7 +1718,26 @@ impl Session {
                 let units = self.call.engine.subscribe(video, Kind::Video, 64);
                 let ask_idr = self.call.engine.idr_requester(video);
                 let output = self.shared.output(user);
-                match crate::media::share::receive(units, config, playout, output, ask_idr) {
+                let shared = self.shared.clone();
+                let first_picture = move || {
+                    shared.update(|s| {
+                        if let Some(c) = s.current.as_mut()
+                            && c.watching.contains(&user)
+                            && !c.showing.contains(&user)
+                        {
+                            c.showing.push(user);
+                        }
+                    });
+                };
+                let receiving = crate::media::share::receive(
+                    units,
+                    config,
+                    playout,
+                    output,
+                    ask_idr,
+                    first_picture,
+                );
+                match receiving {
                     Ok((picture, decoder)) => {
                         self.shared.set_picture(user, Some(picture));
                         Some(decoder)
@@ -1765,6 +1786,11 @@ impl Session {
             }
         }
         self.shared.set_picture(user, None);
+        self.shared.update(|s| {
+            if let Some(c) = s.current.as_mut() {
+                c.showing.retain(|shown| *shown != user);
+            }
+        });
     }
 
     fn stop_watching_all(&mut self) {

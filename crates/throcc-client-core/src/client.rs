@@ -313,6 +313,7 @@ impl MockClient {
                     shown.speaking = false;
                     if let Some(current) = s.current.as_mut() {
                         current.watching.retain(|watched| watched != user);
+                        current.showing.retain(|shown| shown != user);
                     }
                 } else {
                     shown.name = sample.name.clone();
@@ -415,6 +416,7 @@ impl ClientApi for MockClient {
                     room,
                     sharing: None,
                     watching: vec![],
+                    showing: vec![],
                 });
             }),
             UiCommand::JoinWithPassword(room, _) => self.command(UiCommand::Join(Some(room))),
@@ -447,6 +449,7 @@ impl ClientApi for MockClient {
                     && !c.watching.contains(&user)
                 {
                     c.watching.push(user);
+                    c.showing.push(user);
                     if let Some(p) = s.people.get_mut(&user) {
                         p.audience += 1;
                     }
@@ -457,6 +460,7 @@ impl ClientApi for MockClient {
                     && c.watching.contains(&user)
                 {
                     c.watching.retain(|u| *u != user);
+                    c.showing.retain(|u| *u != user);
                     if let Some(p) = s.people.get_mut(&user) {
                         p.audience = p.audience.saturating_sub(1);
                     }
