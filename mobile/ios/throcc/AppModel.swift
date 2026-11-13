@@ -335,8 +335,12 @@ final class AppModel {
             column = .detail
         }
         state = new
-        // Fullscreen ends with the watching, also when the room or the server goes away.
-        if let user = fullscreenShare, !(new.current?.watching.contains(user) ?? false) {
+        // Fullscreen ends with the share or the watching, also when the room or the server
+        // goes away.
+        if let user = fullscreenShare,
+            !(new.current?.watching.contains(user) ?? false)
+                || new.people.first(where: { $0.user == user })?.sharing == nil
+        {
             fullscreenShare = nil
         }
         callAudio?.follow(inRoom: new.liveRoom != nil)
