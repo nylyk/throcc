@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 
 enum Sheet: Hashable, Identifiable {
@@ -73,6 +74,10 @@ final class AppModel {
     var settingsPath: [SettingsPage] = []
     /// The connection that the samples of a lost connection show in place of the state's.
     var sampleConnection: Connection?
+    /// The share shown over the whole screen, if any.
+    var fullscreenShare: UInt64?
+    /// The layers each share is shown in, the newest last; the core shows it in the newest.
+    @ObservationIgnored var shareLayers: [UInt64: [AVSampleBufferDisplayLayer]] = [:]
     @ObservationIgnored private let decoded = NSCache<NSData, UIImage>()
     /// The hashes of the pictures the core was asked for on this connection.
     @ObservationIgnored private var askedPictures: Set<Data> = []

@@ -1,6 +1,6 @@
 # throcc-mobile
 
-The UniFFI layer between `throcc-client-core` and the iOS and Android apps in `mobile/`. It builds as a static library for iOS and a shared library for Android. The core has no binding code: everything the apps call is declared here. Media never crosses it: a state is plain data, and video and audio stay in Rust, down to the audio devices.
+The UniFFI layer between `throcc-client-core` and the iOS and Android apps in `mobile/`. It builds as a static library for iOS and a shared library for Android. The core has no binding code: everything the apps call is declared here. Media never crosses it: a state is plain data, and video and audio stay in Rust, down to the audio devices and the views shares are shown in. An app hands a share's view over with `Core::set_share_view` as a pointer it gives up its reference to: an Android `Surface`'s `ANativeWindow`, from `ShareView.nativeWindow`, this crate's one JNI function, or an iOS `AVSampleBufferDisplayLayer`.
 
 | File | Holds |
 | --- | --- |

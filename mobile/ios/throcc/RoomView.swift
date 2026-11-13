@@ -3,13 +3,29 @@ import SwiftUI
 struct RoomView: View {
     @Environment(AppModel.self) private var model
 
+    private var fullscreen: Binding<Bool> {
+        Binding(get: { model.fullscreenShare != nil }, set: { if !$0 { model.fullscreenShare = nil } })
+    }
+
     var body: some View {
         let state = model.state
         let micOn = state.mic && !model.micDenied
         if let current = state.current, let room = state.rooms.first(where: { $0.id == current.room }) {
+            let people = state.people.filter { $0.room == room.id }
+            let sharing = people.filter { !$0.blocked && $0.sharing != nil }
             ScrollView {
+                if !sharing.isEmpty {
+                    VStack(spacing: 12) {
+                        ForEach(sharing, id: \.user) { person in
+                            if let share = person.sharing {
+                                ShareTile(person: person, share: share)
+                            }
+                        }
+                    }
+                    .padding([.horizontal, .top], 16)
+                }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
-                    ForEach(state.people.filter { $0.room == room.id }, id: \.user) { person in
+                    ForEach(people, id: \.user) { person in
                         Button { model.sheet = .person(person.user) } label: { PersonCard(person: person) }
                             .buttonStyle(.plain)
                             .accessibilityValue(person.speaking ? "Speaking" : "")
@@ -18,6 +34,11 @@ struct RoomView: View {
                 .padding(16)
             }
             .background(.bg)
+            .fullScreenCover(isPresented: fullscreen) {
+                if let user = model.fullscreenShare {
+                    ShareFullscreen(user: user).environment(model)
+                }
+            }
             .navigationTitle(room.name)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

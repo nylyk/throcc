@@ -6,6 +6,7 @@ enum Sample: String {
     case profile, voice, settings, appearance, customtheme, verified, blockedpeople
     case server, members, invites, keys
     case reconnect, elsewhere
+    case share, sharefull
 }
 
 extension AppModel {
@@ -60,6 +61,13 @@ extension AppModel {
         case .elsewhere:
             sampleConnection = .signedInElsewhere
             await connectToSample()
+        case .share:
+            await joinSampleRoom()
+            watch(4)
+        case .sharefull:
+            await joinSampleRoom()
+            watch(4)
+            fullscreenShare = 4
         }
     }
 

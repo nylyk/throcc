@@ -83,6 +83,9 @@ pub struct Share {
     /// The share's height, frame rate and codec, such as "1440p60 AV1".
     pub label: String,
     pub audio: bool,
+    /// The size of its pictures, in pixels, which a view keeps the shape of.
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -216,6 +219,8 @@ impl From<(&ids::UserId, &core::Person)> for Person {
             sharing: person.sharing.as_ref().map(|config| Share {
                 label: core::share_label(config),
                 audio: config.audio,
+                width: config.width.into(),
+                height: config.height.into(),
             }),
             audience: person.audience as u32,
             speaking: person.speaking,

@@ -2,6 +2,7 @@ package cc.thro.throcc
 
 import android.Manifest
 import android.os.Build
+import android.view.Surface
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -109,6 +110,12 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
 
     var sheetPerson by mutableStateOf<ULong?>(null)
 
+    /** The share shown over the whole window, if any. */
+    var fullscreenShare by mutableStateOf<ULong?>(null)
+
+    /** The surfaces each share is shown in, the newest last; the core decodes into the newest. */
+    private val shareSurfaces = mutableMapOf<ULong, MutableList<Surface>>()
+
     var profile by mutableStateOf(core.profile())
         private set
     var voice by mutableStateOf(core.voice())
@@ -186,6 +193,30 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
             }
         }
         sample?.let(::showSample)
+    }
+
+    /** Watches `user`'s share in place of any other: a phone watches one share at a time. */
+    fun watch(user: ULong) {
+        for (watched in state.value.current?.watching.orEmpty()) {
+            if (watched != user) core.command(Command.Unwatch(watched))
+        }
+        core.command(Command.Watch(user))
+    }
+
+    /** Shows `user`'s share in `surface` from now on. */
+    fun showShare(user: ULong, surface: Surface) {
+        shareSurfaces.getOrPut(user, ::mutableListOf) += surface
+        core.setShareView(user, ShareView.nativeWindow(surface).toULong())
+    }
+
+    /** Stops showing `user`'s share in `surface`, which is going away, and goes back to the one before. */
+    fun hideShare(user: ULong, surface: Surface) {
+        val surfaces = shareSurfaces[user] ?: return
+        val wasShown = surfaces.lastOrNull() === surface
+        surfaces.remove(surface)
+        if (!wasShown) return
+        val previous = surfaces.lastOrNull()?.takeIf { it.isValid }
+        core.setShareView(user, previous?.let { ShareView.nativeWindow(it).toULong() } ?: 0u)
     }
 
     fun open(screen: Screen) {
@@ -420,7 +451,8 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
     private fun showSample(name: String) {
         stack += when (name) {
             "addserver" -> listOf(Screen.AddServer)
-            "rooms", "room", "blocked", "person", "personblocked", "reconnect", "elsewhere" -> listOf(Screen.Rooms)
+            "rooms", "room", "blocked", "person", "personblocked", "reconnect", "elsewhere", "share", "sharefull" ->
+                listOf(Screen.Rooms)
             "settings" -> listOf(Screen.Settings)
             "profile" -> listOf(Screen.Settings, Screen.Profile)
             "voice" -> listOf(Screen.Settings, Screen.Voice)
@@ -436,11 +468,15 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
         if (name in listOf("onboarding", "servers", "addserver")) return
         scope.launch {
             signIn("owls.thro.cc", null)
-            if (name in listOf("room", "blocked", "person", "personblocked")) core.command(Command.Join(1u))
+            if (name in listOf("room", "blocked", "person", "personblocked", "share", "sharefull")) {
+                core.command(Command.Join(1u))
+            }
+            if (name in listOf("share", "sharefull")) watch(4u)
             if (name in listOf("blocked", "personblocked", "blockedpeople")) core.command(Command.Block(3u))
             when (name) {
                 "person" -> sheetPerson = 2u
                 "personblocked" -> sheetPerson = 3u
+                "sharefull" -> fullscreenShare = 4u
                 "invites" -> core.command(Command.CreateInvite)
                 "reconnect" -> sampleConnection = Connection.AwaitingReconnect
                 "elsewhere" -> sampleConnection = Connection.SignedInElsewhere

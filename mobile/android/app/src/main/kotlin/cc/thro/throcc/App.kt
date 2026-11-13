@@ -87,6 +87,7 @@ private fun Panes(model: AppModel, state: CoreState) {
         }
         if (wide) Box(Modifier.weight(1f).consumeWindowInsets(roomStart)) { RoomPane(model, state, null) }
     }
+    ShareFullscreen(model, state)
 }
 
 /** The page in front slides in over the one behind, which shifts a quarter of the way. */

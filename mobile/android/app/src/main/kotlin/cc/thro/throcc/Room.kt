@@ -75,6 +75,12 @@ fun RoomPane(model: AppModel, state: CoreState, onBack: (() -> Unit)?) {
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             if (onBack != null) item(span = { GridItemSpan(maxLineSpan) }) { ConnectionBanner(model, state) }
+            for (person in people) {
+                val share = person.sharing.takeUnless { person.blocked } ?: continue
+                item("share-${person.user}", span = { GridItemSpan(maxLineSpan) }) {
+                    ShareTile(model, state, person, share)
+                }
+            }
             items(people, { it.user.toLong() }) { PersonCard(model, it) }
         }
     }
