@@ -1002,6 +1002,12 @@ pub fn format_color(color: u32) -> String {
     theme::format_hex(color & 0xFF_FFFF)
 }
 
+/// The letter a picture stands in with for `name`.
+#[uniffi::export]
+pub fn initial(name: String) -> String {
+    core_state::initial(&name)
+}
+
 /// Whether a server takes `typed` as a room password.
 #[uniffi::export]
 pub fn is_valid_password(typed: String) -> bool {
