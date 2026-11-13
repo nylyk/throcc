@@ -287,10 +287,12 @@ private fun ShareOverlay(model: AppModel, state: CoreState, person: Person, shar
             Arrangement.spacedBy(8.dp),
             Alignment.CenterVertically,
         ) {
-            AnimatedVisibility(controls, Modifier.weight(1f, fill = false), enter = fadeIn(), exit = fadeOut()) {
-                Sharer(model, person, share.label)
+            // Holds the room left of a warning, shown or not, so the warning stays at the end.
+            Box(Modifier.weight(1f)) {
+                androidx.compose.animation.AnimatedVisibility(controls, enter = fadeIn(), exit = fadeOut()) {
+                    Sharer(model, person, share.label)
+                }
             }
-            Spacer(Modifier.weight(1f))
             shareWarning(state, person.user)?.let { WarningPill(it) }
         }
         AnimatedVisibility(controls, Modifier.align(Alignment.BottomCenter), enter = fadeIn(), exit = fadeOut()) {
