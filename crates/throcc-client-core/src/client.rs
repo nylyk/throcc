@@ -16,7 +16,7 @@ use crate::blocked::BlockedStore;
 use crate::call::Call;
 use crate::keystore::Keystore;
 use crate::media::video::frame::VideoFrame;
-use crate::media::video::{Frame, Picture};
+use crate::media::video::{Frame, Picture, View};
 use crate::media::voice::AudioEngine;
 use crate::profile::Profile;
 use crate::session::{AvatarSlot, Lists, Session, Shared};
@@ -134,6 +134,9 @@ pub trait ClientApi: Send + Sync {
     fn safety_number(&self, key: &PublicKey) -> String;
     /// The newest picture of `user`'s share while watched, or of ours while sharing.
     fn picture(&self, user: UserId) -> Option<Picture>;
+    /// Shows `user`'s share in `view` from now on, or nowhere, on the phones, whose decoders
+    /// show their pictures themselves. The view may come before the share is watched.
+    fn set_share_view(&self, _user: UserId, _view: Option<View>) {}
     /// Tells the core `user`'s picture is on screen. Our own share builds its preview only
     /// while this keeps being called.
     fn picture_drawn(&self, _user: UserId) {}
@@ -251,6 +254,10 @@ impl ClientApi for Client {
 
     fn picture(&self, user: UserId) -> Option<Picture> {
         self.shared.picture(user)
+    }
+
+    fn set_share_view(&self, user: UserId, view: Option<View>) {
+        self.shared.output(user).set(view);
     }
 
     fn picture_drawn(&self, user: UserId) {
@@ -592,6 +599,14 @@ impl ClientApi for MockClient {
 
     fn safety_number(&self, _key: &PublicKey) -> String {
         "482139057716024733195580241196087436295031487266089415270031".into()
+    }
+
+    fn set_share_view(&self, user: UserId, view: Option<View>) {
+        let output = self.shared.output(user);
+        output.set(view);
+        if let Some(frame) = self.picture.borrow().as_deref().and_then(Frame::planes) {
+            output.show(frame);
+        }
     }
 
     fn picture(&self, _user: UserId) -> Option<Picture> {

@@ -6,7 +6,7 @@ use throcc_proto::messages::Codec;
 
 use super::{Decoder, Encoder, PixelBuffer};
 use crate::frame::{VideoFrame, luma_psnr};
-use crate::{DecodeError, EncoderConfig, Frame, MaxSize};
+use crate::{DecodeError, EncoderConfig, Frame, MaxSize, Output};
 
 fn config(width: usize, height: usize) -> EncoderConfig {
     EncoderConfig {
@@ -27,7 +27,7 @@ fn round_trip(codec: Codec) {
     let mut encoder = software(codec, 1280, 720);
     assert_eq!(encoder.codec(), codec);
     assert!(encoder.takes_pixel_buffers());
-    let mut decoder = Decoder::new(codec, MaxSize::ANY).unwrap();
+    let mut decoder = Decoder::new(codec, MaxSize::ANY, Output::default()).unwrap();
     let (mut shown, mut keyframes) = (Vec::new(), Vec::new());
     let mut in_gpu_memory = true;
     for n in 0..60u16 {
@@ -97,7 +97,7 @@ fn the_first_encoder_tried_opens_or_says_why() {
 #[test]
 fn pictures_of_other_sizes_are_fitted_with_black_bars() {
     let mut encoder = software(Codec::H264, 1280, 720);
-    let mut decoder = Decoder::new(Codec::H264, MaxSize::ANY).unwrap();
+    let mut decoder = Decoder::new(Codec::H264, MaxSize::ANY, Output::default()).unwrap();
     let mut last = None;
     for (n, (width, height)) in [(2560, 1440), (1000, 1000), (641, 359), (1000, 1000)]
         .into_iter()
@@ -133,7 +133,7 @@ fn pictures_of_other_sizes_are_fitted_with_black_bars() {
 #[test]
 fn a_picture_larger_than_allowed_is_refused() {
     let mut encoder = software(Codec::H264, 640, 360);
-    let mut decoder = Decoder::new(Codec::H264, MaxSize::new(320, 360)).unwrap();
+    let mut decoder = Decoder::new(Codec::H264, MaxSize::new(320, 360), Output::default()).unwrap();
     let input = VideoFrame::test_pattern(640, 360, 0, 0);
     let unit = encoder.encode(&input).unwrap().remove(0);
     assert!(matches!(
@@ -145,7 +145,7 @@ fn a_picture_larger_than_allowed_is_refused() {
 #[test]
 fn a_decoder_waits_for_a_keyframe() {
     let mut encoder = software(Codec::Hevc, 640, 360);
-    let mut decoder = Decoder::new(Codec::Hevc, MaxSize::ANY).unwrap();
+    let mut decoder = Decoder::new(Codec::Hevc, MaxSize::ANY, Output::default()).unwrap();
     let mut units = Vec::new();
     for n in 0..3u16 {
         let input = VideoFrame::test_pattern(640, 360, n, u32::from(n) * 3000);
@@ -166,7 +166,7 @@ fn a_decoder_waits_for_a_keyframe() {
 fn software_decoders_hand_out_pixel_buffers() {
     let mut encoder = Encoder::open_with(Codec::Vp9, config(640, 360), false).unwrap();
     assert!(!encoder.takes_pixel_buffers());
-    let mut decoder = Decoder::new(Codec::Vp9, MaxSize::ANY).unwrap();
+    let mut decoder = Decoder::new(Codec::Vp9, MaxSize::ANY, Output::default()).unwrap();
     assert_eq!(decoder.engine(), "libvpx (software)");
     let mut shown = 0;
     for n in 0..5u16 {
@@ -184,7 +184,7 @@ fn software_decoders_hand_out_pixel_buffers() {
 #[test]
 fn av1_decodes_in_dav1d_into_pixel_buffers() {
     let file = include_bytes!("../../testdata/pattern.ivf");
-    let mut decoder = Decoder::new(Codec::Av1, MaxSize::ANY).unwrap();
+    let mut decoder = Decoder::new(Codec::Av1, MaxSize::ANY, Output::default()).unwrap();
     for (n, unit) in crate::software::dav1d::ivf_units(file)
         .into_iter()
         .enumerate()

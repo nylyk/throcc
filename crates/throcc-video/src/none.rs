@@ -5,9 +5,11 @@ use std::convert::Infallible;
 use throcc_proto::messages::{Codec, Recovery};
 
 use crate::frame::VideoFrame;
-use crate::{DecodeError, EncodeError, EncodedUnit, EncoderConfig, Frame, MaxSize};
+#[cfg(not(target_os = "android"))]
+use crate::{DecodeError, Frame, MaxSize, Output};
 #[cfg(target_os = "linux")]
 use crate::{DmaBuf, GpuEncoded};
+use crate::{EncodeError, EncodedUnit, EncoderConfig};
 
 pub struct Encoder(Infallible);
 
@@ -56,11 +58,17 @@ pub fn tries_gpu_input_first() -> bool {
     false
 }
 
+#[cfg(not(target_os = "android"))]
 pub struct Decoder(Infallible);
 
+#[cfg(not(target_os = "android"))]
 impl Decoder {
-    pub fn new(codec: Codec, _max_size: MaxSize) -> Result<Self, DecodeError> {
+    pub fn new(codec: Codec, _max_size: MaxSize, _output: Output) -> Result<Self, DecodeError> {
         Err(DecodeError::NoDecoder(codec))
+    }
+
+    pub fn present(&mut self, _frame: &Frame) {
+        match self.0 {}
     }
 
     pub fn recycle(&mut self, _frame: VideoFrame) {

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-pub use throcc_video::{Frame, frame};
+pub use throcc_video::{Frame, Output, View, frame};
 
 /// The newest picture of a share, shared with the renderer.
 pub type Picture = tokio::sync::watch::Receiver<Option<Arc<Frame>>>;

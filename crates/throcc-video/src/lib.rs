@@ -11,6 +11,10 @@ mod nal;
 #[cfg(software)]
 pub mod software;
 
+mod output;
+
+#[cfg(target_os = "android")]
+mod android;
 #[cfg(target_vendor = "apple")]
 mod apple;
 #[cfg(ffmpeg)]
@@ -21,6 +25,8 @@ mod none;
 use bytes::Bytes;
 use throcc_proto::messages::Codec;
 
+#[cfg(target_os = "android")]
+pub use android::{CodecFrame, Decoder};
 #[cfg(target_vendor = "apple")]
 pub use apple::{Decoder, Encoder, FULL_RANGE_NV12, PixelBuffer};
 #[cfg(target_os = "linux")]
@@ -33,20 +39,26 @@ pub use ffmpeg::encode::Encoder;
 pub use ffmpeg::encode::tries_gpu_input_first;
 #[cfg(all(ffmpeg, target_os = "linux"))]
 pub use ffmpeg::vaapi::VaError;
+#[cfg(not(any(target_vendor = "apple", target_os = "android", ffmpeg)))]
+pub use none::Decoder;
+#[cfg(not(any(target_vendor = "apple", ffmpeg)))]
+pub use none::Encoder;
 #[cfg(all(not(ffmpeg), target_os = "linux"))]
 pub use none::tries_gpu_input_first;
-#[cfg(not(any(target_vendor = "apple", ffmpeg)))]
-pub use none::{Decoder, Encoder};
+pub use output::{Output, View};
 
-/// Whether this build has a video backend at all. Without one, nothing encodes or decodes.
-pub const HAS_BACKEND: bool = cfg!(any(target_vendor = "apple", ffmpeg));
+/// Whether this build encodes video, so it can share. Phones send no shares yet.
+pub const ENCODES: bool = cfg!(any(target_vendor = "apple", ffmpeg)) && !cfg!(target_os = "ios");
 
-/// A picture as handed to the renderer: NV12 in memory, or on Apple platforms the pixel
-/// buffer in GPU memory it was captured or decoded into.
+/// A picture as handed to the renderer: NV12 in memory, on Apple platforms the pixel buffer
+/// in GPU memory it was captured or decoded into, or on Android an output buffer of the codec
+/// that shows it by rendering it into the app's view.
 pub enum Frame {
     Planes(frame::VideoFrame),
     #[cfg(target_vendor = "apple")]
     PixelBuffer(PixelBuffer),
+    #[cfg(target_os = "android")]
+    Codec(CodecFrame),
 }
 
 impl Frame {
@@ -55,6 +67,8 @@ impl Frame {
             Frame::Planes(frame) => frame.timestamp,
             #[cfg(target_vendor = "apple")]
             Frame::PixelBuffer(buffer) => buffer.timestamp,
+            #[cfg(target_os = "android")]
+            Frame::Codec(frame) => frame.timestamp,
         }
     }
 
@@ -64,6 +78,8 @@ impl Frame {
             Frame::Planes(frame) => (frame.width, frame.height),
             #[cfg(target_vendor = "apple")]
             Frame::PixelBuffer(buffer) => (buffer.width(), buffer.height()),
+            #[cfg(target_os = "android")]
+            Frame::Codec(frame) => (frame.width, frame.height),
         }
     }
 
@@ -73,6 +89,8 @@ impl Frame {
             Frame::Planes(frame) => Some(frame),
             #[cfg(target_vendor = "apple")]
             Frame::PixelBuffer(_) => None,
+            #[cfg(target_os = "android")]
+            Frame::Codec(_) => None,
         }
     }
 
@@ -82,15 +100,20 @@ impl Frame {
             Frame::Planes(frame) => Some(frame),
             #[cfg(target_vendor = "apple")]
             Frame::PixelBuffer(_) => None,
+            #[cfg(target_os = "android")]
+            Frame::Codec(_) => None,
         }
     }
 
-    /// The picture in memory, copied out of GPU memory if it is there.
+    /// The picture in memory, copied out of GPU memory if it is there. A picture still in
+    /// Android's codec can't be read back, and comes out black.
     pub fn copied_to_memory(&self) -> frame::VideoFrame {
         match self {
             Frame::Planes(frame) => frame.clone(),
             #[cfg(target_vendor = "apple")]
             Frame::PixelBuffer(buffer) => buffer.copied_to_memory(),
+            #[cfg(target_os = "android")]
+            Frame::Codec(frame) => frame::VideoFrame::blank(frame.width, frame.height),
         }
     }
 }
@@ -144,6 +167,11 @@ impl MaxSize {
 
     pub fn pixels(self) -> usize {
         self.width * self.height
+    }
+
+    /// The widest and the tallest a picture may be.
+    pub fn sides(self) -> (usize, usize) {
+        (self.width, self.height)
     }
 
     /// Whether a picture of `width`×`height` fits. Negative sides never do.
@@ -233,6 +261,9 @@ pub enum DecodeError {
     VideoToolbox(i32),
     #[error("waiting for a keyframe")]
     NoKeyframe,
+    #[cfg(target_os = "android")]
+    #[error("MediaCodec failed with {0}")]
+    MediaCodec(i32),
     #[cfg(software)]
     #[error("libvpx: {0}")]
     Vpx(String),

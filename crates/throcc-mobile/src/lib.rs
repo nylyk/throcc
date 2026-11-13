@@ -11,6 +11,7 @@ use throcc_client_core::avatars;
 use throcc_client_core::blocked::BlockedStore;
 use throcc_client_core::client::{self, Client, ClientApi, MockClient, UiCommand, UiEvent};
 use throcc_client_core::keystore::{self, Keystore};
+use throcc_client_core::media::video::View;
 use throcc_client_core::media::voice::AudioEngine;
 use throcc_client_core::profile::Profile as CoreProfile;
 use throcc_client_core::server_look::ServerLook;
@@ -35,6 +36,30 @@ pub use state::{
     Sound, SoundLevel,
 };
 pub use voice::{MicLevel, NoiseSuppression, Voice};
+
+/// `ShareView.nativeWindow` in the Android app: the `ANativeWindow` behind a `Surface`, with a
+/// reference the caller hands on to `Core::set_share_view`. 0 if it has none.
+///
+/// # Safety
+/// Only the JVM calls this, with its environment and a `Surface`.
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_cc_thro_throcc_ShareView_nativeWindow(
+    env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    surface: *mut std::ffi::c_void,
+) -> i64 {
+    #[link(name = "android")]
+    unsafe extern "C" {
+        fn ANativeWindow_fromSurface(
+            env: *mut std::ffi::c_void,
+            surface: *mut std::ffi::c_void,
+        ) -> *mut std::ffi::c_void;
+    }
+    // SAFETY: the JVM calls this with its environment and a live `Surface`, and the window
+    // comes back with a reference of its own.
+    unsafe { ANativeWindow_fromSurface(env, surface) as usize as i64 }
+}
 
 uniffi::setup_scaffolding!();
 
@@ -461,6 +486,19 @@ impl Core {
     pub fn command(&self, command: Command) {
         if let Some(command) = command.into_core() {
             self.tell_client(command);
+        }
+    }
+
+    /// Shows `user`'s share in a view of the app's from now on, or nowhere for 0. On Android
+    /// `view` is the `ANativeWindow*` that `ShareView.nativeWindow` returns for a surface, on
+    /// iOS an `AVSampleBufferDisplayLayer` passed retained. Either way the core takes over that
+    /// reference. The view may come before the share is watched; the share is shown once it
+    /// is.
+    pub fn set_share_view(&self, user: u64, view: u64) {
+        // SAFETY: the app hands over a live view and gives up its reference, as documented.
+        let view = unsafe { View::from_raw(view) };
+        if let Some(connected) = &*lock(&self.connected) {
+            connected.client.set_share_view(UserId(user), view);
         }
     }
 

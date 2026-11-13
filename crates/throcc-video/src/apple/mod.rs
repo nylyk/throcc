@@ -8,10 +8,14 @@ mod decode;
 mod encode;
 mod pixel_buffer;
 mod transfer;
+#[cfg(target_os = "ios")]
+mod view;
 
 pub use decode::Decoder;
 pub use encode::Encoder;
 pub use pixel_buffer::{FULL_RANGE_NV12, PixelBuffer};
+#[cfg(target_os = "ios")]
+pub use view::View;
 
 /// VideoToolbox's and CoreVideo's success.
 const NO_ERR: i32 = 0;

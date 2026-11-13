@@ -923,8 +923,8 @@ mod first_tried {
 mod round_trip {
     use super::super::decode::Decoder;
     use super::*;
-    use crate::MaxSize;
     use crate::frame::luma_psnr;
+    use crate::{MaxSize, Output};
 
     /// Encodes 30 frames with `encoder` and decodes them. Returns whether decoding ran
     /// on hardware, or `None` when this machine can't open the encoder.
@@ -937,7 +937,7 @@ mod round_trip {
             kbps: 4000,
         };
         let mut encoder = Encoder::open_with(candidate, config)?;
-        let mut decoder = Decoder::new(codec, MaxSize::ANY).unwrap();
+        let mut decoder = Decoder::new(codec, MaxSize::ANY, Output::default()).unwrap();
         let mut shown = Vec::new();
         for n in 0..30u16 {
             let input = VideoFrame::test_pattern(1280, 720, n, u32::from(n) * 3000);
@@ -1043,7 +1043,7 @@ mod round_trip {
 mod gpu_input {
     use super::super::decode::Decoder;
     use super::*;
-    use crate::MaxSize;
+    use crate::{MaxSize, Output};
 
     /// A VA-API encoder, or `None` on machines without one.
     fn vaapi_encoder(width: usize, height: usize) -> Option<Encoder> {
@@ -1145,7 +1145,7 @@ mod gpu_input {
             return;
         };
         let mut frame = shared_picture(&encoder, 1200, 900);
-        let mut decoder = Decoder::new(encoder.codec(), MaxSize::ANY).unwrap();
+        let mut decoder = Decoder::new(encoder.codec(), MaxSize::ANY, Output::default()).unwrap();
         let mut last = None;
         for n in 0..10 {
             frame.timestamp = n * 3000;

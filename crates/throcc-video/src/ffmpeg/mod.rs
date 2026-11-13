@@ -13,7 +13,7 @@ mod tests {
     use super::decode::Decoder;
     use super::encode::Encoder;
     use crate::frame::{VideoFrame, luma_psnr};
-    use crate::{EncoderConfig, MaxSize};
+    use crate::{EncoderConfig, MaxSize, Output};
 
     #[test]
     fn frames_survive_encode_and_decode() {
@@ -28,7 +28,7 @@ mod tests {
             return;
         };
         eprintln!("opened {}", encoder.name());
-        let mut decoder = Decoder::new(encoder.codec(), MaxSize::ANY).unwrap();
+        let mut decoder = Decoder::new(encoder.codec(), MaxSize::ANY, Output::default()).unwrap();
         let mut shown = Vec::new();
         let mut keyframes = Vec::new();
         for n in 0..60u16 {
@@ -86,7 +86,7 @@ mod tests {
             return;
         };
         eprintln!("opened {}", encoder.name());
-        let mut decoder = Decoder::new(encoder.codec(), MaxSize::ANY).unwrap();
+        let mut decoder = Decoder::new(encoder.codec(), MaxSize::ANY, Output::default()).unwrap();
         let mut last = None;
         for (n, (width, height)) in [
             (2560, 1440),

@@ -17,7 +17,9 @@ use super::video::{Picture, PreviewDemand};
 #[cfg(target_os = "linux")]
 use throcc_video::Refusal;
 use throcc_video::frame::{VideoFrame, share_size};
-use throcc_video::{DecodeError, Decoder, EncodedUnit, Encoder, EncoderConfig, Frame, MaxSize};
+use throcc_video::{
+    DecodeError, Decoder, EncodedUnit, Encoder, EncoderConfig, Frame, MaxSize, Output,
+};
 
 const IDLE: Duration = Duration::from_millis(2);
 /// Self-view gets every Nth frame.
@@ -483,16 +485,18 @@ impl KeyframeAsks {
     }
 }
 
-/// Decodes a share's `units` on its own thread into its newest picture due by `playout`, and
-/// returns what decodes them. `ask_idr` runs after a reset, and on failures at most once per
-/// [`KEYFRAME_RETRY`] until a picture decodes.
+/// Decodes a share's `units` on its own thread into its newest picture due by `playout`,
+/// shown in `output` on the phones, and returns what decodes them. `ask_idr` runs after a
+/// reset, and on failures at most once per [`KEYFRAME_RETRY`] until a picture decodes.
 pub fn receive(
     mut units: mpsc::Receiver<Received>,
     config: ShareConfig,
     playout: Option<Arc<Playout>>,
+    output: Output,
     ask_idr: impl Fn() + Send + 'static,
 ) -> Result<(Picture, watch::Receiver<&'static str>), String> {
-    let mut decoder = Decoder::new(config.codec, max_size(&config)).map_err(|e| e.to_string())?;
+    let mut decoder =
+        Decoder::new(config.codec, max_size(&config), output).map_err(|e| e.to_string())?;
     let (tx, picture) = watch::channel(None);
     let (engine_tx, engine) = watch::channel(decoder.engine());
     std::thread::Builder::new()
@@ -570,6 +574,7 @@ pub fn receive(
                 if let Some(frame) = unused.and_then(Frame::into_planes) {
                     decoder.recycle(frame);
                 }
+                decoder.present(&newest);
                 replaced = tx.send_replace(Some(newest));
             }
         })

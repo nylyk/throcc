@@ -22,7 +22,7 @@ use super::{NO_ERR, PixelBuffer, TIMESCALE, attributes};
 use crate::frame::VideoFrame;
 use crate::nal::{self, LENGTH_SIZE};
 use crate::software::{dav1d, vpx};
-use crate::{DecodeError, Frame, MaxSize};
+use crate::{DecodeError, Frame, MaxSize, Output};
 
 /// VideoToolbox's `kVTInvalidSessionErr`: the session is gone, as after iOS took the
 /// hardware from a backgrounded app, and has to be made again.
@@ -32,9 +32,14 @@ const INVALID_SESSION: i32 = -12903;
 /// back to Apple's own software decoders where the hardware lacks them, AV1 in dav1d and
 /// VP9 in libvpx. Shows the newest frame; presentation time is ignored.
 pub struct Decoder {
-    codec: Codec,
     inner: Inner,
     max_size: MaxSize,
+    /// The view iOS shows pictures in.
+    #[cfg_attr(
+        not(target_os = "ios"),
+        allow(dead_code, reason = "macOS draws them itself")
+    )]
+    output: Output,
     /// Whether reference pictures were dropped since [`Decoder::take_flushed`] last ran.
     flushed: bool,
 }
@@ -56,8 +61,9 @@ enum Software {
 }
 
 impl Decoder {
-    /// Opens a decoder that refuses pictures larger than `max_size`.
-    pub fn new(codec: Codec, max_size: MaxSize) -> Result<Self, DecodeError> {
+    /// Opens a decoder that refuses pictures larger than `max_size`. On iOS it shows its
+    /// pictures in the view `output` holds.
+    pub fn new(codec: Codec, max_size: MaxSize, output: Output) -> Result<Self, DecodeError> {
         let software = |decoder| Inner::Software {
             decoder,
             pool: None,
@@ -69,9 +75,9 @@ impl Decoder {
             Codec::Vp9 => software(Software::Vpx(vpx::Decoder::new(max_size)?)),
         };
         let decoder = Self {
-            codec,
             inner,
             max_size,
+            output,
             flushed: false,
         };
         info!("decoding {codec:?} in {}", decoder.engine());
@@ -133,8 +139,14 @@ impl Decoder {
         }
     }
 
-    pub fn codec(&self) -> Codec {
-        self.codec
+    /// Shows `frame`, the newest picture due, in iOS's view. macOS draws pictures itself.
+    pub fn present(&mut self, frame: &Frame) {
+        #[cfg(target_os = "ios")]
+        if let (Frame::PixelBuffer(picture), Some(view)) = (frame, self.output.view()) {
+            view.show(picture);
+        }
+        #[cfg(not(target_os = "ios"))]
+        let _ = frame;
     }
 }
 
@@ -156,7 +168,7 @@ fn upload(pool: &mut Option<Pool>, frame: VideoFrame, spare: &mut Option<VideoFr
 
 /// What the output callback of a decode left.
 #[derive(Default)]
-struct Output {
+struct Decoded {
     status: i32,
     picture: Option<CFRetained<CVImageBuffer>>,
 }
@@ -170,7 +182,7 @@ struct VideoToolbox {
     parameter_sets: Vec<Vec<u8>>,
     /// Where the output callback leaves each picture. Boxed, so its address holds while the
     /// session points at it.
-    output: Box<Mutex<Output>>,
+    decoded: Box<Mutex<Decoded>>,
     /// Whether the session was lost since the last [`VideoToolbox::take_lost`].
     lost: bool,
 }
@@ -197,7 +209,7 @@ impl VideoToolbox {
             codec,
             session: None,
             parameter_sets: Vec::new(),
-            output: Box::default(),
+            decoded: Box::default(),
             lost: false,
         }
     }
@@ -223,7 +235,7 @@ impl VideoToolbox {
             return Ok(None);
         }
         let sample = sample_buffer(&split.length_prefixed, &session.format, timestamp)?;
-        *lock(&self.output) = Output::default();
+        *lock(&self.decoded) = Decoded::default();
         let mut info = VTDecodeInfoFlags::empty();
         // SAFETY: the session and sample are live, and decoding synchronously calls the
         // output callback before it returns.
@@ -244,7 +256,7 @@ impl VideoToolbox {
         if status != NO_ERR {
             return Err(DecodeError::VideoToolbox(status));
         }
-        let output = std::mem::take(&mut *lock(&self.output));
+        let output = std::mem::take(&mut *lock(&self.decoded));
         if output.status != NO_ERR {
             return Err(DecodeError::VideoToolbox(output.status));
         }
@@ -291,7 +303,7 @@ impl VideoToolbox {
         let destination = attributes::pixel_buffer(None);
         let callback = VTDecompressionOutputCallbackRecord {
             decompressionOutputCallback: Some(decoded),
-            decompressionOutputRefCon: (&*self.output as *const Mutex<Output>).cast_mut().cast(),
+            decompressionOutputRefCon: (&*self.decoded as *const Mutex<Decoded>).cast_mut().cast(),
         };
         let mut raw: *mut VTDecompressionSession = std::ptr::null_mut();
         // SAFETY: the callback's refcon is the boxed output, which outlives the session:
@@ -325,7 +337,7 @@ impl VideoToolbox {
     }
 }
 
-fn lock(output: &Mutex<Output>) -> std::sync::MutexGuard<'_, Output> {
+fn lock(output: &Mutex<Decoded>) -> std::sync::MutexGuard<'_, Decoded> {
     output
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -342,7 +354,7 @@ unsafe extern "C-unwind" fn decoded(
     _duration: CMTime,
 ) {
     // SAFETY: the refcon is the session's boxed output, alive while the session is.
-    let output = unsafe { &*refcon.cast::<Mutex<Output>>() };
+    let output = unsafe { &*refcon.cast::<Mutex<Decoded>>() };
     let mut output = lock(output);
     output.status = status;
     // SAFETY: a non-null picture is live for the callback; the output takes a reference.

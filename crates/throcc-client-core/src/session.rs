@@ -29,7 +29,7 @@ use crate::lock;
 use crate::media::cues::Cue;
 use crate::media::engine::Kind;
 use crate::media::share_audio::Playout;
-use crate::media::video::{Picture, PreviewDemand};
+use crate::media::video::{Output, Picture, PreviewDemand};
 use crate::media::voice::{AudioEngine, CallAudio, CallCommand};
 use crate::playback::SavedPlayback;
 use crate::profile::Profile;
@@ -70,6 +70,9 @@ pub(crate) struct Shared {
     pub state: Mutex<Arc<State>>,
     pub events: broadcast::Sender<UiEvent>,
     pub pictures: Mutex<HashMap<UserId, Picture>>,
+    /// Where each share is shown on the phones, set by the app whether or not it is watched
+    /// yet.
+    pub outputs: Mutex<HashMap<UserId, Output>>,
     /// Our own user and the preview demand of our running share.
     pub preview: Mutex<Option<(UserId, Arc<PreviewDemand>)>>,
     pub avatars: Mutex<HashMap<Hash, AvatarSlot>>,
@@ -90,6 +93,7 @@ impl Shared {
             state: Mutex::new(Arc::new(state)),
             events,
             pictures: Mutex::default(),
+            outputs: Mutex::default(),
             preview: Mutex::default(),
             avatars: Mutex::default(),
         }
@@ -139,6 +143,11 @@ impl Shared {
         {
             demand.drawn();
         }
+    }
+
+    /// Where `user`'s share is shown, on the phones.
+    pub fn output(&self, user: UserId) -> Output {
+        lock(&self.outputs).entry(user).or_default().clone()
     }
 
     fn set_picture(&self, user: UserId, picture: Option<Picture>) {
@@ -1694,7 +1703,8 @@ impl Session {
             let decoder = {
                 let units = self.call.engine.subscribe(video, Kind::Video, 64);
                 let ask_idr = self.call.engine.idr_requester(video);
-                match crate::media::share::receive(units, config, playout, ask_idr) {
+                let output = self.shared.output(user);
+                match crate::media::share::receive(units, config, playout, output, ask_idr) {
                     Ok((picture, decoder)) => {
                         self.shared.set_picture(user, Some(picture));
                         Some(decoder)
@@ -1753,7 +1763,7 @@ impl Session {
     /// Starts capturing for a share, unless one runs or is starting. The capture may wait on
     /// the user picking what to share, so it reports back through [`ShareStarts`].
     fn start_share(&mut self, wanted: ShareConfig) {
-        if !throcc_video::HAS_BACKEND {
+        if !throcc_video::ENCODES {
             self.shared
                 .notice("This build can't share video; it has no video encoder.");
             return;
