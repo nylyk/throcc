@@ -171,8 +171,14 @@ struct ShareFullscreen: View {
         .onTapGesture { withAnimation { controls.toggle() } }
         .statusBarHidden(!controls)
         .persistentSystemOverlays(.hidden)
-        .onAppear { Turning.allow(true) }
-        .onDisappear { Turning.allow(false) }
+        .onAppear {
+            Turning.allow(true)
+            UIApplication.shared.isIdleTimerDisabled = true
+        }
+        .onDisappear {
+            Turning.allow(false)
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
     }
 }
 

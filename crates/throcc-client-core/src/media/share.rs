@@ -6,6 +6,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use throcc_proto::frame::Flags;
 use throcc_proto::messages::{Recovery, ShareConfig, ShareTracks};
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
@@ -507,16 +508,21 @@ pub fn receive(
             let mut held: VecDeque<Arc<Frame>> = VecDeque::new();
             let mut replaced: Option<Arc<Frame>> = None;
             let mut asks = KeyframeAsks::default();
+            // Set while the decoder lacks the references anything but a keyframe needs.
+            let mut awaiting_keyframe = false;
             let mut oversized: u64 = 0;
             loop {
                 // A sender sends nothing while its screen stands still, so the loop keeps
                 // turning without units to follow the app's view and show the picture again
                 // in a new one.
                 if decoder.follow_view() {
-                    if decoder.take_flushed() && asks.ask(Instant::now(), true, false) {
+                    let shown: Option<Arc<Frame>> = tx.borrow().clone();
+                    let flushed = decoder.take_flushed();
+                    awaiting_keyframe |= flushed;
+                    let blank = shown.as_ref().is_some_and(|frame| !frame.shows_again());
+                    if (flushed || blank) && asks.ask(Instant::now(), true, false) {
                         ask_idr();
                     }
-                    let shown: Option<Arc<Frame>> = tx.borrow().clone();
                     if let Some(shown) = shown {
                         decoder.present(&shown);
                     }
@@ -529,9 +535,17 @@ pub fn receive(
                     }
                     Err(mpsc::error::TryRecvError::Disconnected) => return,
                 };
+                let unit = unit.filter(|unit| {
+                    let skipped = awaiting_keyframe && !unit.flags.contains(Flags::KEYFRAME);
+                    if skipped && asks.ask(Instant::now(), false, true) {
+                        ask_idr();
+                    }
+                    !skipped
+                });
                 if let Some(unit) = &unit {
                     let decoded = decoder.decode(&unit.data, unit.timestamp);
                     let flushed = decoder.take_flushed();
+                    awaiting_keyframe = flushed && !unit.flags.contains(Flags::KEYFRAME);
                     let engine_changed = *engine_tx.borrow() != decoder.engine();
                     if engine_changed {
                         engine_tx.send_replace(decoder.engine());

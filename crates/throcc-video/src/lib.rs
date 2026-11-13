@@ -83,6 +83,15 @@ impl Frame {
         }
     }
 
+    /// Whether the picture can be shown again, in another view.
+    pub fn shows_again(&self) -> bool {
+        #[cfg(target_os = "android")]
+        if let Frame::Codec(_) = self {
+            return false;
+        }
+        true
+    }
+
     /// The planes, for a picture held in memory.
     pub fn planes(&self) -> Option<&frame::VideoFrame> {
         match self {

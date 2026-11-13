@@ -233,6 +233,7 @@ fun ShareFullscreen(model: AppModel, state: CoreState) {
     BackHandler { model.fullscreenShare = null }
     Immersive()
     Turning()
+    KeepScreenOn()
     var controls by remember { mutableStateOf(true) }
     Box(
         Modifier
@@ -299,6 +300,16 @@ private fun Turning() {
     DisposableEffect(activity) {
         activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_USER
         onDispose { activity.uprightOnPhones() }
+    }
+}
+
+/** Keeps the screen from turning off while shown. */
+@Composable
+private fun KeepScreenOn() {
+    val view = LocalView.current
+    DisposableEffect(view) {
+        view.keepScreenOn = true
+        onDispose { view.keepScreenOn = false }
     }
 }
 

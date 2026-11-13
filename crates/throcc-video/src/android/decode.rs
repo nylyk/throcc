@@ -26,9 +26,10 @@ pub struct Decoder {
     /// The output's change count when last looked at.
     seen: u64,
     engine: Engine,
-    /// Whether reference pictures were dropped, or the codec moved to a view that shows
-    /// nothing until its next picture, since [`Decoder::take_flushed`] last ran.
+    /// Whether reference pictures were dropped since [`Decoder::take_flushed`] last ran.
     flushed: bool,
+    /// Whether the running codec has put out a picture.
+    codec_worked: bool,
     /// Each unit's sequence number and timestamp, until its picture comes out.
     in_flight: VecDeque<(u64, u32)>,
     sequence: u64,
@@ -61,6 +62,7 @@ impl Decoder {
             output,
             engine: Engine::MediaCodec(None),
             flushed: false,
+            codec_worked: false,
             in_flight: VecDeque::new(),
             sequence: 0,
             failing_since: None,
@@ -126,7 +128,20 @@ impl Decoder {
         if in_codec {
             let decoded = self.decode_in_codec(unit, timestamp);
             match &decoded {
-                Ok(Some(_)) => self.failing_since = None,
+                Ok(Some(_)) => {
+                    self.failing_since = None;
+                    self.codec_worked = true;
+                }
+                Err(DecodeError::MediaCodec(code))
+                    if self.codec_worked && *code != codec::UNIT_TOO_LARGE =>
+                {
+                    // A codec that worked and then failed, as a hardware codec does on a
+                    // damaged unit, is dead; a new one takes over from the next keyframe.
+                    warn!("MediaCodec failed with {code}; starting a new one");
+                    self.drop_codec();
+                    self.open();
+                    return Ok(None);
+                }
                 Err(_) if self.failing_for_long(timestamp) => {
                     self.give_up_codec()?;
                     if matches!(self.engine, Engine::Software { .. }) {
@@ -163,9 +178,7 @@ impl Decoder {
         };
         match (codec.as_mut(), self.output.view()) {
             (Some(running), Some(view)) => {
-                if running.retarget(view) {
-                    self.flushed = true;
-                } else {
+                if !running.retarget(view) {
                     *codec = None;
                 }
             }
@@ -193,6 +206,7 @@ impl Decoder {
                 self.engine = Engine::MediaCodec(Some(codec));
                 self.open_failed_at = None;
                 self.failing_since = None;
+                self.codec_worked = false;
                 self.flushed = true;
                 true
             }
@@ -278,10 +292,15 @@ impl Decoder {
             return self.switch_to_software();
         }
         warn!("MediaCodec keeps failing; starting it again");
+        self.drop_codec();
+        Ok(())
+    }
+
+    /// Lets the codec go; the next unit opens a new one.
+    fn drop_codec(&mut self) {
         self.engine = Engine::MediaCodec(None);
         self.in_flight.clear();
         self.open_failed_at = None;
-        Ok(())
     }
 
     /// Hands AV1 or VP9 to dav1d or libvpx for good.
