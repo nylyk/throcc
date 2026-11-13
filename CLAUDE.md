@@ -35,6 +35,7 @@ On macOS, building with `--features ffmpeg` needs `FFMPEG_PKG_CONFIG_PATH=$PWD/d
 | `throcc-proto` | Messages, ids, the media header, framing, fingerprints. No async runtime, no media, no I/O |
 | `throcc-crypto` | PAKE, identity signatures, HPKE wrapping, media AEAD, safety numbers. No I/O. Feature `media` is off in the server |
 | `throcc-server` | Sessions, auth, rooms, SFU, key relay, SQLite storage |
+| `throcc-video` | Video encoders and decoders, a backend per platform, and the NV12 frames between them. No sessions, keys or wire |
 | `throcc-client-core` | Connection, keystore, key manager, voice and share pipelines. `Client` and `MockClient` behind `ClientApi` |
 | `throcc-client` | gpui UI and the video surface |
 | `throcc-cli` | Headless client for scripts and integration tests |
@@ -48,7 +49,7 @@ Each crate's `README.md` explains its modules and how they fit together. Update 
 
 - Only the main agent changes `throcc-proto`. From 0.1 on, any change to messages bumps `PROTOCOL` in `messages.rs`; new enum variants go last. 0.1 ships protocol 1.
 - Limits that server and client share live in `throcc_proto::limits` and nowhere else; anything sized by a room or a server derives from them.
-- The server never depends on codecs, capture, audio or media crypto. `check-server-deps.sh` enforces this.
+- The server never depends on codecs, capture, audio, media crypto or `throcc-video`. `check-server-deps.sh` enforces this.
 - The server never reads media past the 13-byte header and holds no media key.
 - **Security-critical:** the media header, the media AEAD and track-key derivation, HPKE sender-key wrapping and its info, the signed encryption key, and the safety-number construction. Fix real issues here with great care and without changing the protocol; a fix that needs a protocol change needs a human decision.
 - Never weaken a security property to make a test pass. Stop and ask instead.

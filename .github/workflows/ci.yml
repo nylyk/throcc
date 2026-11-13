@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [develop]
+    branches: [develop, 'feature/**']
   pull_request:
 
 concurrency:
@@ -111,9 +111,11 @@ jobs:
         with:
           path: deps/ffmpeg-lgpl
           key: ${{ steps.ffmpeg.outputs.cache-primary-key }}
-      - run: ./scripts/ci-run.sh cargo clippy -p throcc-client-core --features ffmpeg --all-targets -- -D warnings
+      - run: ./scripts/ci-run.sh cargo clippy -p throcc-video -p throcc-client-core --features throcc-client-core/ffmpeg --all-targets -- -D warnings
         shell: bash
-      - run: ./scripts/ci-run.sh cargo test -p throcc-client-core --features ffmpeg --lib -- media::video media::share
+      - run: ./scripts/ci-run.sh cargo test -p throcc-video --features ffmpeg --lib
+        shell: bash
+      - run: ./scripts/ci-run.sh cargo test -p throcc-client-core --features ffmpeg --lib -- media::share
         shell: bash
 
   mobile:

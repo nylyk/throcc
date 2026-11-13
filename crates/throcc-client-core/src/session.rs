@@ -278,7 +278,6 @@ pub(crate) struct Session {
     unkeyed_playback: HashMap<(UserId, Sound), SoundLevel>,
     server_look: ServerLook,
     avatar_fetches: Arc<Semaphore>,
-    #[cfg(feature = "ffmpeg")]
     sharing: Option<crate::media::share::ShareSender>,
     share_starts: ShareStarts,
     tracks: HashMap<MediaId, Watched>,
@@ -293,7 +292,6 @@ pub(crate) struct Session {
 
 /// The starts of our share. A capture starts beside the session loop, since picking what to
 /// share waits on the user; only the latest start is applied, and only while still wanted.
-#[cfg(feature = "ffmpeg")]
 struct ShareStarts {
     /// The number of the start still wanted.
     wanted: Option<u64>,
@@ -302,16 +300,13 @@ struct ShareStarts {
     started: mpsc::Receiver<StartedShare>,
 }
 
-#[cfg(feature = "ffmpeg")]
 type StartedShare = (u64, StartResult);
 
-#[cfg(feature = "ffmpeg")]
 type StartResult = Result<
     Result<crate::media::share::ShareSender, crate::media::share::ShareError>,
     tokio::task::JoinError,
 >;
 
-#[cfg(feature = "ffmpeg")]
 impl ShareStarts {
     fn new() -> Self {
         let (done, started) = mpsc::channel(4);
@@ -325,24 +320,6 @@ impl ShareStarts {
 
     async fn next(&mut self) -> Option<StartedShare> {
         self.started.recv().await
-    }
-}
-
-/// Without ffmpeg nothing is shared, so no start ever ends.
-#[cfg(not(feature = "ffmpeg"))]
-struct ShareStarts;
-
-#[cfg(not(feature = "ffmpeg"))]
-type StartedShare = std::convert::Infallible;
-
-#[cfg(not(feature = "ffmpeg"))]
-impl ShareStarts {
-    fn new() -> Self {
-        Self
-    }
-
-    async fn next(&mut self) -> Option<StartedShare> {
-        std::future::pending().await
     }
 }
 
@@ -434,7 +411,6 @@ impl Session {
             unkeyed_playback: HashMap::new(),
             server_look,
             avatar_fetches: Arc::new(Semaphore::new(AVATAR_FETCHES)),
-            #[cfg(feature = "ffmpeg")]
             sharing: None,
             share_starts: ShareStarts::new(),
             tracks: HashMap::new(),
@@ -1715,7 +1691,6 @@ impl Session {
                 playout
             });
             let video = share.video;
-            #[cfg(feature = "ffmpeg")]
             let decoder = {
                 let units = self.call.engine.subscribe(video, Kind::Video, 64);
                 let ask_idr = self.call.engine.idr_requester(video);
@@ -1729,13 +1704,6 @@ impl Session {
                         None
                     }
                 }
-            };
-            #[cfg(not(feature = "ffmpeg"))]
-            let decoder = {
-                drop(playout);
-                self.shared
-                    .notice("This build can't show video; it was built without ffmpeg.");
-                None
             };
             let carries = Carries::ShareVideo { config, decoder };
             self.tracks
@@ -1784,8 +1752,12 @@ impl Session {
 
     /// Starts capturing for a share, unless one runs or is starting. The capture may wait on
     /// the user picking what to share, so it reports back through [`ShareStarts`].
-    #[cfg(feature = "ffmpeg")]
     fn start_share(&mut self, wanted: ShareConfig) {
+        if !throcc_video::HAS_BACKEND {
+            self.shared
+                .notice("This build can't share video; it has no video encoder.");
+            return;
+        }
         if self.share_starts.wanted.is_some() {
             self.shared
                 .notice("Already choosing what to share. Finish in the picker that's open.");
@@ -1823,7 +1795,6 @@ impl Session {
     }
 
     /// Applies a share start that has finished, if it is still wanted.
-    #[cfg(feature = "ffmpeg")]
     async fn share_started(&mut self, (number, started): StartedShare) {
         if self.share_starts.wanted != Some(number) {
             drop_unwanted_share(started);
@@ -1846,34 +1817,19 @@ impl Session {
         }
     }
 
-    #[cfg(not(feature = "ffmpeg"))]
-    fn start_share(&mut self, _wanted: ShareConfig) {
-        self.shared
-            .notice("This build can't share video; it was built without ffmpeg.");
-    }
-
-    #[cfg(not(feature = "ffmpeg"))]
-    async fn share_started(&mut self, started: StartedShare) {
-        match started {}
-    }
-
     /// Stops our share, and any start of one.
     fn stop_share(&mut self) {
         self.media.share = None;
-        #[cfg(feature = "ffmpeg")]
-        {
-            self.share_starts.wanted = None;
-            if let Some(sender) = self.sharing.take() {
-                tokio::task::spawn_blocking(move || drop(sender));
-                self.shared.set_picture(self.call.me(), None);
-                *lock(&self.shared.preview) = None;
-            }
+        self.share_starts.wanted = None;
+        if let Some(sender) = self.sharing.take() {
+            tokio::task::spawn_blocking(move || drop(sender));
+            self.shared.set_picture(self.call.me(), None);
+            *lock(&self.shared.preview) = None;
         }
     }
 
     /// Stops and announces the end of a share whose capture stopped on its own.
     async fn stop_ended_share(&mut self) {
-        #[cfg(feature = "ffmpeg")]
         if self
             .sharing
             .as_ref()
@@ -1894,22 +1850,15 @@ impl Session {
 
     /// The running share's codec, size, frame rate and encoder.
     fn sharing_detail(&self) -> Option<String> {
-        #[cfg(feature = "ffmpeg")]
-        return self
-            .sharing
+        self.sharing
             .as_ref()
-            .map(|sender| share_detail(&sender.config, sender.engine));
-        #[cfg(not(feature = "ffmpeg"))]
-        None
+            .map(|sender| share_detail(&sender.config, sender.engine))
     }
 
     fn recover_share(&self, kind: Recovery) {
-        #[cfg(feature = "ffmpeg")]
         if let Some(sender) = &self.sharing {
             sender.recover(kind);
         }
-        #[cfg(not(feature = "ffmpeg"))]
-        let _ = kind;
     }
 
     /// Replaces our encryption key once it nears expiry, and gives the server the new one.
@@ -2252,7 +2201,6 @@ impl Session {
 
 /// Drops a share that started after it was no longer wanted, off the async workers, since
 /// stopping it joins its threads.
-#[cfg(feature = "ffmpeg")]
 fn drop_unwanted_share(started: StartResult) {
     if let Ok(Ok(sender)) = started {
         tokio::task::spawn_blocking(move || drop(sender));

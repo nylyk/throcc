@@ -9,11 +9,12 @@ publish.workspace = true
 workspace = true
 
 [features]
-ffmpeg = ["dep:rsmpeg"]
+ffmpeg = ["throcc-video/ffmpeg"]
 
 [dependencies]
 throcc-proto.workspace = true
 throcc-crypto = { workspace = true, features = ["media"] }
+throcc-video.workspace = true
 anyhow.workspace = true
 bytes.workspace = true
 rtrb.workspace = true
@@ -22,7 +23,6 @@ serde.workspace = true
 serde_json.workspace = true
 quinn.workspace = true
 ropus.workspace = true
-rsmpeg = { workspace = true, optional = true }
 sonora.workspace = true
 sonora-agc2.workspace = true
 sonora-common-audio.workspace = true

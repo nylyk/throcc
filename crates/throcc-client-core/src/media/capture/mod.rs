@@ -1,23 +1,12 @@
 #[cfg(any(windows, target_os = "linux", test))]
 mod audio_ring;
-#[cfg(any(
-    windows,
-    target_os = "macos",
-    target_os = "linux",
-    feature = "ffmpeg",
-    test
-))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
 mod clock;
-#[cfg(feature = "ffmpeg")]
-pub(crate) use clock::FrameLimiter;
+mod limiter;
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "linux")]
-pub use linux::{DmaBuf, DmaBufPlane};
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
-#[cfg(target_os = "macos")]
-pub use macos::PixelBuffer;
 #[cfg(windows)]
 mod windows;
 
@@ -25,10 +14,19 @@ use std::time::{Duration, Instant};
 
 use throcc_proto::frame::VIDEO_CLOCK_HZ;
 use throcc_proto::messages::ShareConfig;
+#[cfg(target_os = "macos")]
+pub use throcc_video::PixelBuffer;
+use throcc_video::frame::VideoFrame;
+#[cfg(any(windows, target_os = "linux"))]
+use throcc_video::frame::copy_nv12;
+#[cfg(target_os = "linux")]
+use throcc_video::frame::resize;
+#[cfg(target_os = "linux")]
+pub use throcc_video::{DmaBuf, DmaBufPlane};
 
 use super::audio::{FRAME, SAMPLE_RATE};
 use super::share_audio::STEREO_FRAME;
-use super::video::frame::VideoFrame;
+pub(crate) use limiter::FrameLimiter;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CaptureError {
@@ -43,40 +41,6 @@ pub enum CaptureError {
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 fn failed(e: impl std::fmt::Display) -> CaptureError {
     CaptureError::Failed(e.to_string())
-}
-
-/// Copies an NV12 picture of `width`×`height`, given as (plane, stride) pairs, into `into`.
-#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
-fn copy_nv12(
-    into: &mut VideoFrame,
-    (y, y_stride): (&[u8], usize),
-    (uv, uv_stride): (&[u8], usize),
-    (width, height): (usize, usize),
-) {
-    resize(into, width, height);
-    copy_rows(y, y_stride, width, &mut into.y);
-    copy_rows(uv, uv_stride, width, &mut into.uv);
-}
-
-/// Makes `frame` `width`×`height`, keeping its buffers when it already is.
-#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
-fn resize(frame: &mut VideoFrame, width: usize, height: usize) {
-    if frame.width != width || frame.height != height {
-        *frame = VideoFrame::blank(width, height);
-    }
-}
-
-/// Copies rows of `row_bytes` from `src`, `stride` apart, into the tightly packed `dst`.
-#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
-fn copy_rows(src: &[u8], stride: usize, row_bytes: usize, dst: &mut [u8]) {
-    if stride < row_bytes || row_bytes == 0 {
-        return;
-    }
-    for (src, dst) in src.chunks(stride).zip(dst.chunks_exact_mut(row_bytes)) {
-        if let Some(src) = src.get(..row_bytes) {
-            dst.copy_from_slice(src);
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

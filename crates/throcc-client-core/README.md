@@ -27,11 +27,11 @@ Trust follows identity keys, not servers. The key manager wraps our sender secre
 | `media/engine.rs`, `fragment.rs`, `reorder.rs` | Sending and receiving media datagrams: fragments, the replay window, the reorder window |
 | `media/voice.rs`, `audio.rs`, `devices.rs`, `jitter.rs` | The audio thread: mic processing and Opus, the mix, device rings, jitter buffers. It belongs to the app and runs without a server: settings, devices, the mic test, the level meter and cues need no session. A session plays and sends through a `CallAudio` handle; a newer handle takes the call audio over, commands from an older one are ignored, and dropping a handle ends its call's audio. Devices open at 48 kHz where they offer it; on macOS, where opening at another rate would change the device's rate for every app, at their current rate when 10 ms of it is a whole number of frames. Otherwise they open at their current rate under the same condition, or not at all. The audio thread resamples the rest. Devices are listed on a thread of their own, because on Windows cpal binds the listing thread to a single-threaded COM apartment. `devices.rs` has a backend per platform behind one `Devices`: cpal on desktop; on iOS one audio unit, the voice-processing one with the mic and plain remote I/O without; on Android AAudio streams with the voice-communication usage and input preset. A phone opens its devices with or without the mic, so someone who denies it still listens, and closes them outside a room. The capture chain leaves echo cancelling to the platform there |
 | `media/cues.rs` | Join, leave, mute, deafen, connection, screen share and watching cues, synthesized once and mixed in by the audio thread |
-| `media/share.rs`, `share_audio.rs` | Our running share: capture, encode, send. Its audio, and the audio-led sync of shares we watch |
+| `media/share.rs`, `share_audio.rs` | Our running share: capture, encode, send. Decoding the shares we watch on a thread each. Their audio, and the audio-led sync of shares we watch |
 | `media/capture/` | Screen and system-audio capture per OS: ScreenCaptureKit, Windows Graphics Capture with process loopback, the portal with PipeWire. The portal keeps nothing of what was picked, so every share asks again |
-| `media/video/` | Encode and decode through ffmpeg, hardware first, and the NV12 frames between them, with their conversions from 4-byte RGB pixels and to BGRA. On macOS, our own share's preview and VideoToolbox-decoded pictures reach the UI as the pixel buffers they are in, uncopied |
+| `media/video.rs` | The newest picture of each share as the UI gets it, and when the UI last drew our own preview. The codecs and frames are in `throcc-video`; on macOS, our own share's preview and VideoToolbox-decoded pictures reach the UI as the pixel buffers they are in, uncopied |
 
-Video needs the `ffmpeg` feature. Without it the client does voice only. Audio and capture callbacks never block, allocate, lock or panic; they reach tokio only through bounded rings that drop when full.
+Video needs a backend in `throcc-video`: its `ffmpeg` feature, which this crate's `ffmpeg` feature turns on. Without one the client does voice only. Audio and capture callbacks never block, allocate, lock or panic; they reach tokio only through bounded rings that drop when full.
 
 ## Manual hardware tests
 
@@ -50,4 +50,4 @@ cargo test -p throcc-client-core --features ffmpeg --lib -- --ignored <name>
 | macOS | `sending_1440p60_takes_under_one_core` | The same, with moving content on the display |
 | Windows | `primary_monitor_delivers_frames`, `share_audio_arrives_in_order_with_sound` | A display, a GPU, and speakers for the second |
 
-The VA-API tests (`gpu_input`) and the VideoToolbox ones run in the normal suite and print `skipped:` where the hardware is missing.
+The hardware video tests live in `throcc-video` and print `skipped:` where the hardware is missing.

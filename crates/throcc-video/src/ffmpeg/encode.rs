@@ -13,54 +13,21 @@ use tracing::{debug, info};
 #[cfg(target_os = "linux")]
 use super::decode::to_nv12;
 #[cfg(target_os = "linux")]
-use super::frame::share_size;
-use super::frame::{VideoFrame, fit_within};
-#[cfg(target_os = "linux")]
-use super::vaapi::{self, Rectangle, VaError, Vpp};
-#[cfg(target_os = "linux")]
-use crate::media::capture::DmaBuf;
+use super::vaapi::{self, Rectangle, Vpp};
 #[cfg(target_os = "macos")]
-use crate::media::capture::PixelBuffer;
+use crate::PixelBuffer;
+#[cfg(target_os = "linux")]
+use crate::frame::share_size;
+use crate::frame::{VideoFrame, fit_within};
+#[cfg(target_os = "linux")]
+use crate::{DmaBuf, GpuEncoded};
+use crate::{EncodeError, EncodedUnit, EncoderConfig};
 
 /// A GOP cap of this many seconds bounds how long a picture stays broken without a request.
 const GOP_SECONDS: i32 = 4;
 /// NVENC's intra refresh sweeps the picture once per GOP and never ends a GOP with an IDR,
 /// so a picture broken by a loss heals within this many seconds without any keyframe.
 const REFRESH_SECONDS: i32 = 1;
-
-#[derive(Debug, thiserror::Error)]
-pub enum EncodeError {
-    #[error("no usable video encoder on this machine")]
-    NoEncoder,
-    #[error("ffmpeg: {0}")]
-    Ffmpeg(#[from] RsmpegError),
-    #[error("can't scale the picture to the encoder's size")]
-    Scaler,
-    #[error("the hardware encoder has no frame pool")]
-    NoSurfaces,
-    #[error("this encoder takes no frames in GPU memory")]
-    NoGpuInput,
-    #[cfg(target_os = "macos")]
-    #[error("the captured picture is {0}×{1}, not the encoder's size")]
-    OtherSize(usize, usize),
-    #[cfg(target_os = "linux")]
-    #[error("importing a frame in GPU memory: {0}")]
-    Import(VaError),
-    #[cfg(target_os = "linux")]
-    #[error("GPU video processing: {0}")]
-    Gpu(VaError),
-    #[cfg(target_os = "linux")]
-    #[error("the preview came back in pixel format {0}, which throcc doesn't present")]
-    PreviewFormat(i32),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EncoderConfig {
-    pub width: usize,
-    pub height: usize,
-    pub fps: u32,
-    pub kbps: u32,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Input {
@@ -175,14 +142,6 @@ const LIBVPX: &[(&CStr, &CStr)] = &[
 ];
 const VIDEOTOOLBOX: &[(&CStr, &CStr)] = &[(c"realtime", c"1"), (c"allow_sw", c"0")];
 
-/// An encoded access unit.
-#[derive(Clone, Debug)]
-pub struct EncodedUnit {
-    pub data: Bytes,
-    pub keyframe: bool,
-    pub timestamp: u32,
-}
-
 /// A low-latency video encoder, hardware where there is one: no B-frames, no lookahead,
 /// a VBV of about two frames, and recovery by intra refresh where the encoder has it,
 /// else by IDR.
@@ -210,14 +169,6 @@ pub struct Encoder {
 struct GpuInput {
     vpp: Vpp,
     previews: Previews,
-}
-
-/// What encoding a frame in GPU memory gave.
-#[cfg(target_os = "linux")]
-pub struct GpuEncoded {
-    pub units: Vec<EncodedUnit>,
-    /// The preview asked for, or why there is none.
-    pub preview: Option<Result<VideoFrame, EncodeError>>,
 }
 
 /// Small NV12 copies of frames in GPU memory, drawn on the GPU and downloaded.
@@ -1083,9 +1034,10 @@ mod failed_open {
 
 #[cfg(test)]
 mod round_trip {
-    use super::super::decode::{Decoder, MaxSize};
-    use super::super::frame::{VideoFrame, luma_psnr};
+    use super::super::decode::Decoder;
     use super::*;
+    use crate::MaxSize;
+    use crate::frame::luma_psnr;
 
     /// Encodes 30 frames with `encoder` and decodes them. Returns whether decoding ran
     /// on hardware, or `None` when this machine can't open the encoder.
@@ -1210,8 +1162,9 @@ mod round_trip {
 
 #[cfg(all(test, target_os = "linux"))]
 mod gpu_input {
-    use super::super::decode::{Decoder, MaxSize};
+    use super::super::decode::Decoder;
     use super::*;
+    use crate::MaxSize;
 
     /// A VA-API encoder, or `None` on machines without one.
     fn vaapi_encoder(width: usize, height: usize) -> Option<Encoder> {
@@ -1363,10 +1316,10 @@ mod gpu_input {
 
 #[cfg(all(test, target_os = "macos"))]
 mod pixel_buffers {
-    use super::super::Frame;
-    use super::super::decode::{Decoder, MaxSize};
-    use super::super::frame::luma_psnr;
+    use super::super::decode::Decoder;
     use super::*;
+    use crate::frame::luma_psnr;
+    use crate::{Frame, MaxSize};
 
     fn opened(name: &CStr) -> Option<Encoder> {
         let candidate = candidate(name)?;
@@ -1390,7 +1343,7 @@ mod pixel_buffers {
         let mut in_gpu_memory = true;
         for n in 0..30u16 {
             let input = VideoFrame::test_pattern(1280, 720, n, u32::from(n) * 3000);
-            let picture = PixelBuffer::holding(&input);
+            let picture = PixelBuffer::holding(&input).unwrap();
             for unit in encoder.encode_pixel_buffer(&picture).unwrap() {
                 if let Some(output) = decoder.decode(&unit.data, unit.timestamp).unwrap() {
                     in_gpu_memory &= matches!(output, Frame::PixelBuffer(_));
@@ -1463,7 +1416,7 @@ mod pixel_buffers {
 
     #[test]
     fn a_picture_of_another_size_or_a_software_encoder_is_refused() {
-        let picture = PixelBuffer::holding(&VideoFrame::test_pattern(640, 360, 0, 0));
+        let picture = PixelBuffer::holding(&VideoFrame::test_pattern(640, 360, 0, 0)).unwrap();
         if let Some(mut videotoolbox) = opened(c"h264_videotoolbox") {
             assert!(matches!(
                 videotoolbox.encode_pixel_buffer(&picture),

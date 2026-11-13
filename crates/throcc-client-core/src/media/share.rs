@@ -13,12 +13,13 @@ use tracing::{info, warn};
 use super::capture::{Capture, CaptureConfig, CaptureError, FrameLimiter};
 use super::engine::{Kind, MediaEngine, Outgoing, Received};
 use super::share_audio::{Playout, STEREO_FRAME, ShareAudioEncoder, due_frames};
-use super::video::decode::{DecodeError, Decoder, MaxSize};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use super::video::encode::EncodeError;
-use super::video::encode::{EncodedUnit, Encoder, EncoderConfig};
-use super::video::frame::{VideoFrame, share_size};
-use super::video::{Frame, Picture, PreviewDemand};
+use super::video::{Picture, PreviewDemand};
+#[cfg(target_os = "macos")]
+use throcc_video::EncodeError;
+#[cfg(target_os = "linux")]
+use throcc_video::Refusal;
+use throcc_video::frame::{VideoFrame, share_size};
+use throcc_video::{DecodeError, Decoder, EncodedUnit, Encoder, EncoderConfig, Frame, MaxSize};
 
 const IDLE: Duration = Duration::from_millis(2);
 /// Self-view gets every Nth frame.
@@ -325,7 +326,7 @@ impl Sending {
                     None => {}
                 }
             }
-            Err(e) => match refusal(&e, modifier) {
+            Err(e) => match e.refusal(modifier) {
                 Some(refused) => {
                     warn!(?refused, "falling back to frames in shared memory: {e}");
                     self.capture.refuse_dmabuf(match refused {
@@ -392,27 +393,6 @@ impl Sending {
                 Outgoing::new(self.tracks.video, unit.data, unit.timestamp, unit.keyframe);
             self.engine.send(Kind::Video, outgoing);
         }
-    }
-}
-
-/// Frames in GPU memory a share stops taking after one of them failed.
-#[cfg(target_os = "linux")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Refusal {
-    /// Those with this modifier, which failed to import.
-    Modifier(u64),
-    /// All of them, since the encoder or the GPU can't process them.
-    All,
-}
-
-/// What to refuse after a frame in GPU memory with `modifier` failed with `error`. `None`
-/// for errors that may pass, which cost only that frame.
-#[cfg(target_os = "linux")]
-fn refusal(error: &EncodeError, modifier: u64) -> Option<Refusal> {
-    match error {
-        EncodeError::Import(_) => Some(Refusal::Modifier(modifier)),
-        EncodeError::NoGpuInput | EncodeError::Gpu(_) => Some(Refusal::All),
-        _ => None,
     }
 }
 
@@ -602,35 +582,6 @@ pub fn receive(
         })
         .map_err(|e| e.to_string())?;
     Ok((picture, engine))
-}
-
-#[cfg(all(test, target_os = "linux"))]
-mod refusal_tests {
-    use super::super::video::vaapi::VaError;
-    use super::*;
-
-    #[test]
-    fn a_layout_that_fails_to_import_is_refused_alone() {
-        let import = EncodeError::Import(VaError::Format(0));
-        assert_eq!(refusal(&import, 7), Some(Refusal::Modifier(7)));
-    }
-
-    #[test]
-    fn an_encoder_or_gpu_that_cant_take_them_refuses_all() {
-        let processing = EncodeError::Gpu(VaError::Call {
-            call: "vaEndPicture",
-            status: 1,
-        });
-        assert_eq!(refusal(&processing, 7), Some(Refusal::All));
-        assert_eq!(refusal(&EncodeError::NoGpuInput, 7), Some(Refusal::All));
-    }
-
-    #[test]
-    fn a_passing_error_costs_only_the_frame() {
-        assert_eq!(refusal(&EncodeError::NoSurfaces, 7), None);
-        let send = EncodeError::Ffmpeg(rsmpeg::error::RsmpegError::SendFrameAgainError);
-        assert_eq!(refusal(&send, 7), None);
-    }
 }
 
 #[cfg(test)]

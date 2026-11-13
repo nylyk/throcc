@@ -7,7 +7,7 @@ on:
     paths:
       - 'packaging/**'
       - 'crates/throcc-client/build.rs'
-      - 'crates/throcc-client-core/src/media/video/**'
+      - 'crates/throcc-video/**'
       - 'crates/throcc-client-core/src/media/capture/**'
       - 'scripts/ci-run.sh'
       - '.github/workflows/packaging.yml'
@@ -16,7 +16,7 @@ on:
     paths:
       - 'packaging/**'
       - 'crates/throcc-client/build.rs'
-      - 'crates/throcc-client-core/src/media/video/**'
+      - 'crates/throcc-video/**'
       - 'crates/throcc-client-core/src/media/capture/**'
       - 'scripts/ci-run.sh'
       - '.github/workflows/packaging.yml'
@@ -199,7 +199,7 @@ jobs:
           export PATH="$(dirname "$(command -v cl)"):$PWD/deps/ffmpeg-lgpl/bin:$PWD/deps/bin:$PATH"
           export FFMPEG_DLL_PATH="$(cygpath -w "$PWD/deps/ffmpeg-lgpl/bin")"
           export FFMPEG_BINDING_PATH="$(cygpath -w "$PWD/deps/ffmpeg-lgpl/binding.rs")"
-          ./scripts/ci-run.sh cargo test --release -p throcc-client-core --features ffmpeg --lib video:: -- --test-threads=1 --nocapture
+          ./scripts/ci-run.sh cargo test --release -p throcc-video --features ffmpeg --lib -- --test-threads=1 --nocapture
 
   flatpak:
     needs: notices

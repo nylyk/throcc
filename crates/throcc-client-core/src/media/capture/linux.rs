@@ -38,12 +38,13 @@ use pw::spa::utils::{
     Choice, ChoiceEnum, ChoiceFlags, Direction, Fraction, Id, Rectangle, SpaTypes,
 };
 use pw::stream::{Stream, StreamBox, StreamFlags};
+use throcc_video::frame::{VideoFrame, rgb_to_nv12};
+use throcc_video::{DmaBuf, DmaBufPlane, MAX_PLANES};
 use tracing::warn;
 
 use super::clock::ShareClock;
 use super::{Capture, CaptureConfig, CaptureError, copy_nv12, failed, resize};
 use crate::media::share_audio::STEREO_FRAME;
-use crate::media::video::frame::{VideoFrame, rgb_to_nv12};
 use desktop_audio::DesktopAudio;
 
 /// Frame buffers shared by the PipeWire thread and the share thread.
@@ -51,7 +52,6 @@ const POOL: usize = 4;
 /// PipeWire buffers the share thread may hold at once: the ring's, the one it reads, and
 /// one on its way back.
 const LENT: usize = POOL + 2;
-const MAX_PLANES: usize = 4;
 /// Formats offered in GPU memory, with their DRM fourccs.
 const DMABUF_FORMATS: [(VideoFormat, u32); 4] = [
     (VideoFormat::BGRx, fourcc(b"XR24")),
@@ -518,14 +518,8 @@ fn run(
     Ok(())
 }
 
-#[cfg(feature = "ffmpeg")]
 fn encoder_takes_dmabufs() -> bool {
-    crate::media::video::encode::tries_gpu_input_first()
-}
-
-#[cfg(not(feature = "ffmpeg"))]
-fn encoder_takes_dmabufs() -> bool {
-    false
+    throcc_video::tries_gpu_input_first()
 }
 
 fn renegotiate(
@@ -1019,31 +1013,6 @@ impl Slot {
             dmabuf: None,
         }
     }
-}
-
-/// A captured picture still in GPU memory, as DRM PRIME planes.
-#[derive(Debug)]
-pub struct DmaBuf {
-    pub width: u32,
-    pub height: u32,
-    pub fourcc: u32,
-    pub modifier: u64,
-    pub planes: [Option<DmaBufPlane>; MAX_PLANES],
-    /// Media timestamp, 90 kHz.
-    pub timestamp: u32,
-}
-
-impl DmaBuf {
-    pub fn planes(&self) -> impl Iterator<Item = &DmaBufPlane> {
-        self.planes.iter().flatten()
-    }
-}
-
-#[derive(Debug)]
-pub struct DmaBufPlane {
-    pub fd: OwnedFd,
-    pub offset: u32,
-    pub stride: u32,
 }
 
 /// A frame in GPU memory and the PipeWire buffer it lives in, lent to the share thread.

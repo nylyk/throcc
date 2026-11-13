@@ -14,101 +14,21 @@ use screencapturekit::content_sharing_picker::{
     SCContentSharingPicker, SCContentSharingPickerConfiguration, SCContentSharingPickerMode,
     SCPickerOutcome,
 };
-use screencapturekit::cv::{CVPixelBuffer, CVPixelBufferLockGuard};
+use screencapturekit::cv::CVPixelBuffer;
 use screencapturekit::prelude::*;
 use screencapturekit::stream::ErrorHandler;
+use throcc_video::frame::{VideoFrame, share_size};
 
 use super::clock::ShareClock;
-use super::{Capture, CaptureConfig, CaptureError, copy_nv12, failed};
+use super::{Capture, CaptureConfig, CaptureError, PixelBuffer, failed};
 use crate::media::audio::SAMPLE_RATE;
 use crate::media::share_audio::STEREO_FRAME;
-use crate::media::video::frame::{VideoFrame, share_size};
 
 /// Captured frames waiting for the share thread. A full ring drops the newest frame.
 const RING: usize = 4;
 /// Captured audio buffers waiting for the share thread, about 20 ms each.
 const AUDIO_RING: usize = 32;
 const NANOS: i128 = 1_000_000_000;
-
-/// A captured or decoded picture, full-range NV12 in GPU memory.
-#[derive(Clone)]
-pub struct PixelBuffer {
-    pub buffer: CVPixelBuffer,
-    pub timestamp: u32,
-}
-
-impl PixelBuffer {
-    pub fn width(&self) -> usize {
-        self.buffer.width()
-    }
-
-    pub fn height(&self) -> usize {
-        self.buffer.height()
-    }
-
-    /// The `CVPixelBufferRef`, valid while this lives.
-    pub fn as_ptr(&self) -> *mut std::ffi::c_void {
-        self.buffer.as_ptr()
-    }
-
-    /// The picture copied into memory.
-    pub fn copied_to_memory(&self) -> VideoFrame {
-        let mut out = VideoFrame::blank(self.width(), self.height());
-        if let Ok(guard) = self.buffer.lock_read_only()
-            && let (Some(y), Some(uv)) = (plane(&guard, 0), plane(&guard, 1))
-        {
-            copy_nv12(&mut out, y, uv, (guard.width(), guard.height()));
-        }
-        out.timestamp = self.timestamp;
-        out
-    }
-}
-
-/// Plane `index` of a locked pixel buffer, with its stride.
-fn plane<'a>(guard: &'a CVPixelBufferLockGuard<'_>, index: usize) -> Option<(&'a [u8], usize)> {
-    let base = guard.base_address_of_plane(index)?;
-    let stride = guard.bytes_per_row_of_plane(index);
-    let len = stride * guard.height_of_plane(index);
-    // SAFETY: the buffer stays locked while `guard` is borrowed, and plane `index` is
-    // `height_of_plane` rows of `stride` bytes.
-    Some((unsafe { std::slice::from_raw_parts(base, len) }, stride))
-}
-
-/// CoreVideo's `420f`: full-range NV12, as ScreenCaptureKit captures and renderers draw.
-#[cfg(any(test, feature = "ffmpeg"))]
-pub(crate) const FULL_RANGE_NV12: u32 = u32::from_be_bytes(*b"420f");
-
-#[cfg(test)]
-impl PixelBuffer {
-    /// A pixel buffer holding `frame`, as ScreenCaptureKit would deliver it.
-    pub(crate) fn holding(frame: &VideoFrame) -> Self {
-        let buffer = CVPixelBuffer::create(frame.width, frame.height, FULL_RANGE_NV12)
-            .unwrap_or_else(|status| unreachable!("CVPixelBufferCreate failed: {status}"));
-        {
-            let mut guard = buffer
-                .lock_read_write()
-                .unwrap_or_else(|status| unreachable!("locking failed: {status}"));
-            for (index, plane) in [&frame.y, &frame.uv].into_iter().enumerate() {
-                let stride = guard.bytes_per_row_of_plane(index);
-                let Some(base) = guard.base_address_of_plane_mut(index) else {
-                    unreachable!("plane {index} has no address");
-                };
-                for (row, source) in plane.chunks_exact(frame.width).enumerate() {
-                    // SAFETY: the buffer is locked for writing, and each plane has as many
-                    // rows of `stride` bytes as `frame` has of `width`.
-                    unsafe {
-                        let destination = base.add(row * stride);
-                        std::ptr::copy_nonoverlapping(source.as_ptr(), destination, frame.width);
-                    }
-                }
-            }
-        }
-        Self {
-            buffer,
-            timestamp: frame.timestamp,
-        }
-    }
-}
 
 pub struct MacCapture {
     stream: SCStream,
@@ -261,18 +181,7 @@ impl MacCapture {
 
 impl Capture for MacCapture {
     fn next_frame(&mut self, into: &mut VideoFrame) -> bool {
-        let Some(picture) = self.pop() else {
-            return false;
-        };
-        let Ok(guard) = picture.buffer.lock_read_only() else {
-            return false;
-        };
-        let (Some(y), Some(uv)) = (plane(&guard, 0), plane(&guard, 1)) else {
-            return false;
-        };
-        copy_nv12(into, y, uv, (guard.width(), guard.height()));
-        into.timestamp = picture.timestamp;
-        true
+        self.pop().is_some_and(|picture| picture.copy_into(into))
     }
 
     fn next_pixel_buffer(&mut self) -> Option<PixelBuffer> {
@@ -372,12 +281,6 @@ mod tests {
 
     use super::*;
     use crate::media::capture::{Capture, frames_within};
-
-    #[test]
-    fn a_pixel_buffer_copies_out_unchanged() {
-        let frame = VideoFrame::test_pattern(1280, 720, 7, 4500);
-        assert_eq!(PixelBuffer::holding(&frame).copied_to_memory(), frame);
-    }
 
     #[test]
     #[ignore = "needs a display and the screen recording permission"]

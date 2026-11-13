@@ -1,7 +1,7 @@
 use std::ffi::{c_int, c_uint, c_void};
 use std::os::fd::AsRawFd;
 
-use crate::media::capture::DmaBuf;
+use crate::DmaBuf;
 
 pub type Display = *mut c_void;
 pub type SurfaceId = c_uint;
@@ -230,7 +230,7 @@ pub(crate) fn export(
         .enumerate()
         .take(layer.num_planes as usize)
     {
-        *plane = Some(crate::media::capture::DmaBufPlane {
+        *plane = Some(crate::DmaBufPlane {
             fd: objects[layer.object_index[index] as usize].try_clone()?,
             offset: layer.offset[index],
             stride: layer.pitch[index],

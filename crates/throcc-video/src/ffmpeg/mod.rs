@@ -1,132 +1,19 @@
-#[cfg(feature = "ffmpeg")]
+//! Encode and decode through ffmpeg, hardware first: NVENC, Media Foundation, VA-API and
+//! VideoToolbox, then libvpx and dav1d in software.
+
 pub mod decode;
-#[cfg(feature = "ffmpeg")]
 pub mod encode;
-pub mod frame;
-#[cfg(all(feature = "ffmpeg", target_os = "linux"))]
-pub(crate) mod vaapi;
-
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
-
-/// The newest picture of a share, shared with the renderer.
-pub type Picture = tokio::sync::watch::Receiver<Option<Arc<Frame>>>;
-
-/// A picture of a share as handed to the renderer: NV12 in memory, or on macOS the pixel
-/// buffer in GPU memory it was captured or decoded into.
-pub enum Frame {
-    Planes(frame::VideoFrame),
-    #[cfg(target_os = "macos")]
-    PixelBuffer(crate::media::capture::PixelBuffer),
-}
-
-impl Frame {
-    pub fn timestamp(&self) -> u32 {
-        match self {
-            Frame::Planes(frame) => frame.timestamp,
-            #[cfg(target_os = "macos")]
-            Frame::PixelBuffer(buffer) => buffer.timestamp,
-        }
-    }
-
-    /// Width and height in pixels.
-    pub fn size(&self) -> (usize, usize) {
-        match self {
-            Frame::Planes(frame) => (frame.width, frame.height),
-            #[cfg(target_os = "macos")]
-            Frame::PixelBuffer(buffer) => (buffer.width(), buffer.height()),
-        }
-    }
-
-    /// The planes, for a picture held in memory.
-    pub fn planes(&self) -> Option<&frame::VideoFrame> {
-        match self {
-            Frame::Planes(frame) => Some(frame),
-            #[cfg(target_os = "macos")]
-            Frame::PixelBuffer(_) => None,
-        }
-    }
-
-    /// Takes the planes out, for a picture held in memory.
-    pub fn into_planes(self) -> Option<frame::VideoFrame> {
-        match self {
-            Frame::Planes(frame) => Some(frame),
-            #[cfg(target_os = "macos")]
-            Frame::PixelBuffer(_) => None,
-        }
-    }
-
-    /// The picture in memory, copied out of GPU memory if it is there.
-    pub fn copied_to_memory(&self) -> frame::VideoFrame {
-        match self {
-            Frame::Planes(frame) => frame.clone(),
-            #[cfg(target_os = "macos")]
-            Frame::PixelBuffer(buffer) => buffer.copied_to_memory(),
-        }
-    }
-}
-
-/// How long our share's preview counts as on screen after the UI last drew it.
-const PREVIEW_LINGER: Duration = Duration::from_secs(1);
-
-/// When the UI last drew our own share's preview, so the share builds preview pictures
-/// only while someone looks at them.
-pub struct PreviewDemand {
-    since: Instant,
-    /// Milliseconds from `since` to the last draw, plus one; zero before the first.
-    drawn: AtomicU64,
-}
-
-impl Default for PreviewDemand {
-    fn default() -> Self {
-        Self {
-            since: Instant::now(),
-            drawn: AtomicU64::new(0),
-        }
-    }
-}
-
-impl PreviewDemand {
-    pub fn drawn(&self) {
-        self.drawn.store(self.millis() + 1, Ordering::Relaxed);
-    }
-
-    pub fn wanted(&self) -> bool {
-        let drawn = self.drawn.load(Ordering::Relaxed);
-        drawn != 0 && (self.millis() + 1).saturating_sub(drawn) < PREVIEW_LINGER.as_millis() as u64
-    }
-
-    fn millis(&self) -> u64 {
-        self.since.elapsed().as_millis() as u64
-    }
-}
+#[cfg(target_os = "linux")]
+pub mod vaapi;
 
 #[cfg(test)]
-mod preview_tests {
-    use super::*;
-
-    #[test]
-    fn the_preview_is_wanted_only_shortly_after_a_draw() {
-        let demand = PreviewDemand::default();
-        assert!(!demand.wanted());
-        demand.drawn();
-        assert!(demand.wanted());
-        let stale = PreviewDemand {
-            since: Instant::now() - PREVIEW_LINGER * 2,
-            drawn: AtomicU64::new(1),
-        };
-        assert!(!stale.wanted());
-    }
-}
-
-#[cfg(all(test, feature = "ffmpeg"))]
 mod tests {
     use throcc_proto::messages::Recovery;
 
-    use super::decode::{Decoder, MaxSize};
-    use super::encode::{Encoder, EncoderConfig};
-    use super::frame::{VideoFrame, luma_psnr};
+    use super::decode::Decoder;
+    use super::encode::Encoder;
+    use crate::frame::{VideoFrame, luma_psnr};
+    use crate::{EncoderConfig, MaxSize};
 
     #[test]
     fn frames_survive_encode_and_decode() {
