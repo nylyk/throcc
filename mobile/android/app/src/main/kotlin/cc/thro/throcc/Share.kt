@@ -115,12 +115,11 @@ private fun ShareSurface(model: AppModel, user: ULong, modifier: Modifier = Modi
 /** The warning that our connection can't keep up with a share. Long-press tells what it means. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TooSlow(modifier: Modifier = Modifier) {
+private fun TooSlow() {
     TooltipBox(
         TooltipDefaults.rememberTooltipPositionProvider(TooltipAnchorPosition.Below),
         { PlainTooltip { Text(TOO_SLOW_HINT) } },
         rememberTooltipState(),
-        modifier,
     ) {
         Row(
             Modifier
@@ -184,7 +183,7 @@ fun ShareTile(model: AppModel, state: CoreState, person: Person, share: Share) {
                     ShareSurface(model, person.user, Modifier.aspectRatio(share.aspect))
                     Loading(state, person.user)
                 }
-                if (tooSlow) TooSlow(Modifier.align(Alignment.TopStart).padding(12.dp))
+                if (tooSlow) Box(Modifier.align(Alignment.TopStart).padding(12.dp)) { TooSlow() }
                 Sharer(model, person, Modifier.align(Alignment.BottomStart).padding(12.dp))
                 Row(Modifier.align(Alignment.TopEnd).padding(8.dp), Arrangement.spacedBy(8.dp)) {
                     FilledTonalIconButton({ model.fullscreenShare = person.user }) {
@@ -259,7 +258,7 @@ fun ShareFullscreen(model: AppModel, state: CoreState) {
         }
         if (user in state.health.slowShares) {
             // Shown with or without the controls, as the desktop does.
-            TooSlow(Modifier.align(Alignment.TopEnd).safeDrawingPadding().padding(12.dp))
+            Box(Modifier.align(Alignment.TopEnd).safeDrawingPadding().padding(12.dp)) { TooSlow() }
         }
         AnimatedVisibility(controls, Modifier.align(Alignment.BottomCenter), enter = fadeIn(), exit = fadeOut()) {
             Column(
