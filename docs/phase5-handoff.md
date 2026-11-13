@@ -51,16 +51,30 @@ A security review covered the safety-number move, and a Fable 5.2 review covered
 
 Not run anywhere: the apps' new pin-mismatch and identity-missing dialogs (samples `pinmismatch`, `identitymissing` on both), the rebuilt safety-number sheets, the volume sliders, the slow-connection pill and the picture preparation. Check them with item 1 below.
 
+## First runs on a Mac (2026-11-13)
+
+On an M4 Mac with a Pixel 8 (GrapheneOS) and the iOS simulator; no iPhone, as the iPhone 12 needs a cable for its first pairing with Xcode.
+
+- The codec builds need `meson`, `ninja` and `nasm` from Homebrew. libvpx for x86_64 Android takes the NDK's `llvm-readelf` (`5f4047b`).
+- The `share` and `sharefull` samples render right on both. The black bar with a light block across the top of the test picture is its frame number.
+- On the Pixel against a real server, watching a macOS desktop's HEVC share and another's: watch, stop, watch again, fullscreen in and out, turning, the lock screen with voice running. All work after these changes (`cc566f9`, `55cba56`):
+  - Fullscreen kept no picture on Android: the tile's surface went before the fullscreen one came, so the codec closed and waited for a keyframe. The tile's surface stays under fullscreen now, and a codec moved to a new surface asks for a keyframe.
+  - The core reports `CurrentRoom.showing`, the watched shares with a picture; the apps show a spinner until then.
+  - Share tiles name the sharer; person cards are one height; phones stay upright outside fullscreen, which turns with the phone; the fullscreen overlay carries the call controls and the room, both hidden with it; on iOS a tap on the picture reaches the overlay; Android's room title is small and without a count.
+- A debug APK went to a second tester and worked.
+
 ## What is left
 
 In order:
 
-1. **Run the iOS and Android apps.** `just ios-sim --mock --screen share`, `--screen sharefull`, then `just android-emulator` and `just android --ez mock true --es screen share` and `sharefull`. The mock shows a still test picture. Then against a real server with a desktop sharing: watch, stop, switch shares, fullscreen, rotate, background the app and come back, lock the phone. Fix what breaks. Take the screenshots the README wants.
-2. **AV1 in VideoToolbox** on A17 Pro, M3 and newer. Today AV1 always decodes in dav1d on Apple. VideoToolbox needs a format description with an `av1C` atom built from the sequence header OBU (`dav1d_parse_sequence_header` gives the fields); then `VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)` picks it, dav1d otherwise. Test on an M3+ Mac; CI has no AV1 hardware.
-3. **The desktop on macOS by hand**: share a screen (ScreenCaptureKit pixel buffers into the hardware encoder), watch a Linux or Windows share in AV1 and HEVC, pop out, fullscreen. `sending_1440p60_takes_under_one_core` (ignored test in `throcc-client-core`) with moving content. Check the HEVC low-latency mode on a height that isn't a multiple of 16.
-4. **A signed build**: `gh workflow run packaging.yml --ref feature/mobile-5`, then open the dmg on a clean Mac (no Homebrew ffmpeg) and install the APK.
-5. **Android on a device**: MediaCodec AV1 at 2560 wide on a phone without AV1 hardware (the software fallback), and VP9.
+1. **The rest of the app runs.** Not run yet: switching between two live shares, iOS against a real server (only the simulator with the mock so far), backgrounding the app and coming back, and the README screenshots. Also not run anywhere: the pin-mismatch and identity-missing dialogs (samples `pinmismatch`, `identitymissing` on both), the rebuilt safety-number sheets, the volume sliders, the slow-connection pill and the picture preparation.
+2. **AV1 in VideoToolbox** on A17 Pro, M3 and newer. Today AV1 always decodes in dav1d on Apple. VideoToolbox needs a format description with an `av1C` atom built from the sequence header OBU (`dav1d_parse_sequence_header` gives the fields); then `VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)` picks it, dav1d otherwise. The M4 Mac used above can test it; CI has no AV1 hardware.
+3. **The desktop on macOS by hand.** Sharing in HEVC to a phone works. Left: watch a Linux or Windows share in AV1 and HEVC, pop out, fullscreen. `sending_1440p60_takes_under_one_core` (ignored test in `throcc-client-core`) with moving content. Check the HEVC low-latency mode on a height that isn't a multiple of 16.
+4. **A signed build**: `gh workflow run packaging.yml --ref feature/mobile-5`, then open the dmg on a clean Mac (no Homebrew ffmpeg) and install the signed APK.
+5. **Android software fallback**: MediaCodec AV1 at 2560 wide on a device without AV1 hardware (the Pixel 8 has it; perhaps the tablet), and VP9.
 6. **Before merging**: `ci.yml` also runs on pushes to `feature/**` (added for this work); keep it or drop it. Delete this file.
+
+Also seen: `crates/throcc-cli/tests/share.rs` calls `share::receive` with too few arguments since before these changes. It builds only with `--features ffmpeg`, so CI misses it.
 
 ## Where things are
 
