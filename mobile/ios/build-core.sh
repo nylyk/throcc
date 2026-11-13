@@ -26,9 +26,10 @@ for slice in "$@"; do
     xcframework+=(-library "$library" -headers "$headers")
 done
 
-# dav1d and libvpx link statically, built once per slice.
+# dav1d and libvpx link statically, built once per slice and for this Mac, where
+# uniffi-bindgen builds the core too.
 missing=()
-for triple in "${triples[@]}"; do
+for triple in "${triples[@]}" "$(rustc -vV | sed -n 's/^host: //p')"; do
     [ -f "deps/codecs/$triple/lib/libvpx.a" ] || missing+=("$triple")
 done
 [ ${#missing[@]} -eq 0 ] || packaging/codecs/build.sh deps/codecs "${missing[@]}"

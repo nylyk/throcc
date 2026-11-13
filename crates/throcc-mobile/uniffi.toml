@@ -3,4 +3,4 @@ package_name = "cc.thro.throcc.core"
 android = true
 
 [bindings.swift]
-link_frameworks = ["AudioToolbox", "AVFAudio", "Security"]
+link_frameworks = ["AudioToolbox", "AVFAudio", "AVFoundation", "CoreMedia", "CoreVideo", "Security", "VideoToolbox"]

@@ -31,6 +31,7 @@ import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -476,7 +477,11 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
             when (name) {
                 "person" -> sheetPerson = 2u
                 "personblocked" -> sheetPerson = 3u
-                "sharefull" -> fullscreenShare = 4u
+                "sharefull" -> {
+                    // Once the mock shows the share watched, which fullscreen waits for.
+                    while (state.value.current?.watching?.contains(4u) != true) delay(20)
+                    fullscreenShare = 4u
+                }
                 "invites" -> core.command(Command.CreateInvite)
                 "reconnect" -> sampleConnection = Connection.AwaitingReconnect
                 "elsewhere" -> sampleConnection = Connection.SignedInElsewhere

@@ -93,7 +93,12 @@ abstract class BuildCore @Inject constructor(private val exec: ExecOperations) :
     /** Builds dav1d and libvpx for any ABI that lacks them, and returns how cargo links them. */
     private fun codecs(): Map<String, String> {
         val root = repository.get().dir("deps/codecs").asFile
-        val missing = abis.get().map { rustTargets.getValue(it) }.filter { !root.resolve("$it/lib/libvpx.a").exists() }
+        // uniffi-bindgen builds the core for the host too, which links them on a Mac.
+        val printedHost = ByteArrayOutputStream()
+        run(emptyMap(), "rustc", "-vV", output = printedHost)
+        val host = printedHost.toString().lines().first { it.startsWith("host: ") }.removePrefix("host: ")
+        val targets = abis.get().map { rustTargets.getValue(it) } + listOf(host).filter { "apple" in it }
+        val missing = targets.filter { !root.resolve("$it/lib/libvpx.a").exists() }
         if (missing.isNotEmpty()) run(emptyMap(), "packaging/codecs/build.sh", root.path, *missing.toTypedArray())
         val printed = ByteArrayOutputStream()
         run(emptyMap(), "packaging/codecs/env.sh", root.path, output = printed)

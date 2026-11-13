@@ -14,6 +14,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
@@ -65,8 +66,8 @@ object ShareView {
     external fun nativeWindow(surface: Surface): Long
 }
 
-/** A share's shape, width over height. */
-private val Share.aspect get() = width.toFloat() / height.toFloat().coerceAtLeast(1f)
+/** A share's shape, width over height, within what a phone can show: a sender may announce any size. */
+private val Share.aspect get() = (width.toFloat() / height.toFloat().coerceAtLeast(1f)).coerceIn(0.25f, 4f)
 
 /** `user`'s share, decoded straight into a surface. */
 @Composable
@@ -90,7 +91,7 @@ private fun ShareSurface(model: AppModel, user: ULong, modifier: Modifier = Modi
 fun ShareTile(model: AppModel, state: CoreState, person: Person, share: Share) {
     val watching = state.current?.watching?.contains(person.user) == true
     Card(
-        Modifier.fillMaxWidth().aspectRatio(share.aspect.coerceIn(0.5f, 2.4f)),
+        Modifier.fillMaxWidth().aspectRatio(share.aspect.coerceAtLeast(0.75f)),
         shape = MaterialTheme.shapes.extraLarge,
         colors = panelColors(),
     ) {
@@ -178,10 +179,12 @@ fun ShareFullscreen(model: AppModel, state: CoreState) {
 @Composable
 private fun RoomStrip(model: AppModel, people: List<Person>, modifier: Modifier) {
     val scheme = MaterialTheme.colorScheme
-    Row(
+    // Wraps, so a full room of 30 stays on screen.
+    FlowRow(
         modifier.safeDrawingPadding().padding(8.dp)
             .background(scheme.surfaceContainer.copy(alpha = 0.8f), MaterialTheme.shapes.extraLarge)
             .padding(horizontal = 8.dp, vertical = 4.dp),
+        Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally),
         Arrangement.spacedBy(4.dp),
     ) {
         for (person in people) {

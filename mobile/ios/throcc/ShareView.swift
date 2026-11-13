@@ -94,7 +94,7 @@ struct ShareTile: View {
                 .padding(16)
             }
         }
-        .aspectRatio(share.aspect, contentMode: .fit)
+        .aspectRatio(max(share.aspect, 0.75), contentMode: .fit)
         .frame(maxWidth: .infinity)
         .background(.panel, in: .rect(cornerRadius: 16))
         .clipShape(.rect(cornerRadius: 16))
@@ -140,9 +140,6 @@ struct ShareFullscreen: View {
         .onTapGesture { withAnimation { controls.toggle() } }
         .statusBarHidden(!controls)
         .persistentSystemOverlays(.hidden)
-        .onChange(of: person?.sharing == nil || !(state.current?.watching.contains(user) ?? false)) { _, ended in
-            if ended { model.fullscreenShare = nil }
-        }
     }
 }
 
@@ -151,7 +148,8 @@ private struct RoomStrip: View {
     let people: [Person]
 
     var body: some View {
-        HStack(spacing: 4) {
+        // Wraps, so a full room of 30 stays on screen.
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 32, maximum: 32), spacing: 4)], spacing: 4) {
             ForEach(people, id: \.user) { person in
                 PersonPicture(person: person, size: 28)
                     .padding(2)
@@ -164,14 +162,14 @@ private struct RoomStrip: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(.panel.opacity(0.8), in: .capsule)
+        .background(.panel.opacity(0.8), in: .rect(cornerRadius: 20))
     }
 }
 
 extension Share {
-    /// Width over height.
+    /// Width over height, within what a phone can show: a sender may announce any size.
     var aspect: CGFloat {
-        CGFloat(width) / CGFloat(max(height, 1))
+        min(max(CGFloat(width) / CGFloat(max(height, 1)), 0.25), 4)
     }
 }
 

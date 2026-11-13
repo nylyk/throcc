@@ -15,10 +15,15 @@ default:
 desktop *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    host=$(rustc -vV | sed -n 's/^host: //p')
-    [ -f "deps/codecs/$host/lib/libvpx.a" ] || packaging/codecs/build.sh deps/codecs "$host"
-    set -a; eval "$(packaging/codecs/env.sh deps/codecs)"; set +a
-    cargo run --release -p throcc-client -- {{ args }}
+    if [ "$(uname)" = Darwin ]; then
+        host=$(rustc -vV | sed -n 's/^host: //p')
+        [ -f "deps/codecs/$host/lib/libvpx.a" ] || packaging/codecs/build.sh deps/codecs "$host"
+        set -a; eval "$(packaging/codecs/env.sh deps/codecs)"; set +a
+        cargo run --release -p throcc-client -- {{ args }}
+    else
+        [ -f deps/ffmpeg-lgpl/lib/pkgconfig/libavcodec.pc ] || packaging/ffmpeg/build.sh deps/ffmpeg-lgpl
+        FFMPEG_PKG_CONFIG_PATH="$PWD/deps/ffmpeg-lgpl/lib/pkgconfig" cargo run --release -p throcc-client --features ffmpeg -- {{ args }}
+    fi
 
 # Runs the server in release, keeping its key and database in `server_data`, with any server options such as `--listen [::]:8477`.
 server *args:

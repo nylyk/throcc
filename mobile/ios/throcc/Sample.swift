@@ -67,6 +67,10 @@ extension AppModel {
         case .sharefull:
             await joinSampleRoom()
             watch(4)
+            // Once the mock shows the share watched, which fullscreen goes with.
+            while !(state.current?.watching.contains(4) ?? false) {
+                try? await Task.sleep(for: .milliseconds(20))
+            }
             fullscreenShare = 4
         }
     }

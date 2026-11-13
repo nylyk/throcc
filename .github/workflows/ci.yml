@@ -143,11 +143,14 @@ jobs:
           - platform: ios
             os: macos-26
             targets: aarch64-apple-ios aarch64-apple-ios-sim
+            # uniffi-bindgen builds the core for the Mac too.
+            codec_targets: aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-darwin
             cargo: cargo
             target_flags: --target aarch64-apple-ios --target aarch64-apple-ios-sim
           - platform: android
             os: ubuntu-latest
             targets: aarch64-linux-android x86_64-linux-android
+            codec_targets: aarch64-linux-android x86_64-linux-android
             cargo: cargo ndk -t arm64-v8a -t x86_64 -P 31
     runs-on: ${{ matrix.os }}
     env:
@@ -160,15 +163,18 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/develop' }}
+      # The NDK the app's Gradle build pins, which the codecs are built with too.
       - if: matrix.platform == 'android'
         run: |
           cargo install cargo-ndk --version 4.1.2 --locked
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >>"$GITHUB_ENV"
+          ndk=$(sed -n 's/^ *ndkVersion = "\(.*\)"$/\1/p' mobile/android/app/build.gradle.kts)
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$ndk" >/dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ndk" >>"$GITHUB_ENV"
       - id: codecs
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: deps/codecs
-          key: codecs-${{ matrix.platform }}-${{ hashFiles('packaging/codecs/*') }}
+          key: codecs-${{ matrix.platform }}-${{ hashFiles('packaging/codecs/*', 'mobile/android/app/build.gradle.kts') }}
       - if: steps.codecs.outputs.cache-hit != 'true'
         run: |
           if [ "$RUNNER_OS" = macOS ]; then
@@ -176,7 +182,7 @@ jobs:
           else
             sudo apt-get update && sudo apt-get install -y meson ninja-build nasm
           fi
-          packaging/codecs/build.sh deps/codecs ${{ matrix.targets }}
+          packaging/codecs/build.sh deps/codecs ${{ matrix.codec_targets }}
       - if: steps.codecs.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -200,8 +206,6 @@ jobs:
           # uniffi-bindgen runs on the host and links what the core links there.
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev
-          ndk=$(sed -n 's/^ *ndkVersion = "\(.*\)"$/\1/p' mobile/android/app/build.gradle.kts)
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$ndk" >/dev/null
           export JAVA_HOME=$JAVA_HOME_21_X64
           ./scripts/ci-run.sh mobile/android/gradlew -p mobile/android compileDebugKotlin \
             -Pandroid.injected.build.abi=x86_64

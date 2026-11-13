@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+host=$(rustc -vV | sed -n 's/^host: //p')
+[ -f "deps/codecs/$host/lib/libvpx.a" ] || packaging/codecs/build.sh deps/codecs "$host"
+set -a
+eval "$(packaging/codecs/env.sh deps/codecs)"
+set +a
 cargo build -q --release -p throcc-client
 mkdir -p docs/screens
 [ $# -gt 0 ] || set -- focus share person

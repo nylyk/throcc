@@ -7,6 +7,7 @@
 # target built in <root> gets its own library path, so one cargo run can build several.
 set -euo pipefail
 root=$(cd "$1" && pwd)
+case "$root" in *[[:space:]]*) echo "env.sh: $root has a space, which the env can't carry" >&2; exit 1 ;; esac
 echo "SYSTEM_DEPS_DAV1D_NO_PKG_CONFIG=1"
 echo "SYSTEM_DEPS_DAV1D_SEARCH_NATIVE=$root"
 echo "SYSTEM_DEPS_DAV1D_LIB=dav1d"
@@ -15,6 +16,7 @@ echo "VPX_LIB_DIR=$root"
 echo "VPX_VERSION=$(sed -n 's/^version=//p' "$(dirname "$0")/libvpx.sh")"
 echo "VPX_STATIC=1"
 for lib in "$root"/*/lib; do
+    [ -d "$lib" ] || continue
     target=$(basename "$(dirname "$lib")")
     name=$(tr 'a-z-' 'A-Z_' <<<"$target")
     echo "CARGO_TARGET_${name}_RUSTFLAGS=-Lnative=$lib"

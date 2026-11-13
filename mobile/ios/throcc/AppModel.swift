@@ -295,6 +295,10 @@ final class AppModel {
             column = .detail
         }
         state = new
+        // Fullscreen ends with the watching, also when the room or the server goes away.
+        if let user = fullscreenShare, !(new.current?.watching.contains(user) ?? false) {
+            fullscreenShare = nil
+        }
         callAudio?.follow(inRoom: new.hasLiveRoom)
         if let sampleConnection {
             state.connection = sampleConnection
