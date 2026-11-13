@@ -1,7 +1,9 @@
-use throcc_proto::Fingerprint;
+use std::net::SocketAddr;
+
 use throcc_proto::ids::{Hash, RoomId, UserId};
 use throcc_proto::invite::InviteCode;
-use throcc_proto::messages::{Request, Response, valid_name};
+use throcc_proto::messages::{AuthError, Request, Response, valid_name};
+use throcc_proto::{DEFAULT_PORT, Fingerprint};
 use tracing::warn;
 
 use crate::connection::{self, ConnectError, Connected};
@@ -39,6 +41,49 @@ impl SignInError {
     /// Whether the identity the known servers know us by is gone from the keychain.
     pub fn identity_missing(&self) -> bool {
         matches!(self, Self::Store(e) if e.is::<IdentityMissing>())
+    }
+
+    /// What went wrong signing in to `address`, in a sentence for the user.
+    pub fn explain(&self, address: &str) -> String {
+        match self {
+            Self::NotEnrolled(address) => {
+                format!("You haven’t joined {address} yet. Ask someone there for an invite code.")
+            }
+            Self::Login(LoginError::Refused(AuthError::BadInvite) | LoginError::Pake(_)) => {
+                "That code didn’t work. It may be mistyped, used up or expired, or something between you and the server isn’t the server. Ask for a fresh one.".into()
+            }
+            Self::Login(LoginError::Refused(AuthError::RateLimited)) => {
+                "Too many wrong codes from your network. Wait ten minutes, then try again.".into()
+            }
+            Self::Login(LoginError::Refused(AuthError::ServerFull)) => {
+                "The server is full right now. Try again in a while.".into()
+            }
+            Self::Login(LoginError::Refused(AuthError::UnknownKey)) => {
+                "This server doesn’t know you anymore. Join again with a fresh invite code.".into()
+            }
+            Self::Connect(ConnectError::Resolve(address)) => {
+                format!("Couldn’t find {address}. Check the address.")
+            }
+            Self::Connect(ConnectError::Connection(_)) => unreachable_hint(address),
+            other => other.to_string(),
+        }
+    }
+}
+
+/// Why the server at `address` didn't answer, and what to check.
+pub fn unreachable_hint(address: &str) -> String {
+    let port = port_of(address);
+    format!("Couldn’t reach the server. Check the address, and that UDP port {port} is open.")
+}
+
+/// The port a connection to `address` uses: the one it names, else the default.
+fn port_of(address: &str) -> u16 {
+    if let Ok(socket) = address.parse::<SocketAddr>() {
+        return socket.port();
+    }
+    match address.rsplit_once(':') {
+        Some((host, port)) if !host.contains(':') => port.parse().unwrap_or(DEFAULT_PORT),
+        _ => DEFAULT_PORT,
     }
 }
 
@@ -136,4 +181,20 @@ pub(crate) async fn publish_encryption_key(
     let signed = keystore.signed_encryption_key(server, me);
     let response = requester.request(Request::SetEncryptionKey(signed)).await?;
     control::expect_ok(response).map_err(SignInError::EncryptionKey)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn port_is_the_addresses_own_or_the_default() {
+        assert_eq!(port_of("voice.example.net"), DEFAULT_PORT);
+        assert_eq!(port_of("voice.example.net:9000"), 9000);
+        assert_eq!(port_of("192.0.2.40:9001"), 9001);
+        assert_eq!(port_of("[2001:db8::1]:9002"), 9002);
+        assert_eq!(port_of("2001:db8::1"), DEFAULT_PORT);
+        assert_eq!(port_of("192.0.2.40"), DEFAULT_PORT);
+        assert!(unreachable_hint("host:9000").contains("UDP port 9000"));
+    }
 }

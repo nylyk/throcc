@@ -5,12 +5,13 @@ use gpui::{
 use gpui_component::Disableable;
 use gpui_component::input::Input;
 use throcc_client_core::client::UiCommand;
+use throcc_client_core::state::KeyTrust;
 use throcc_proto::ids::Role;
 use throcc_proto::{Fingerprint, permissions};
 
 use super::common::{
-    Trust, Typeset, avatar, caption, card, chip, field_error, ghost_icon, mono, primary, secondary,
-    section, server_seed, trust, verified_as,
+    Typeset, avatar, caption, card, chip, field_error, ghost_icon, mono, primary, secondary,
+    section, server_seed,
 };
 use super::page::{field, frame, nav, picture_editor, save_line, segmented};
 use crate::app::{Dialog, PictureFor, Screen, ServerPage, ThroccApp, typed_name};
@@ -92,7 +93,6 @@ fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .as_ref()
         .map(|s| (s.address.clone(), s.fingerprint));
     let me = state.me;
-    let verified = app.verified.list();
     div()
         .flex()
         .flex_col()
@@ -119,7 +119,7 @@ fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .children(state.people.iter().filter(|(u, _)| Some(**u) != me).map(
                     |(user, person)| {
                         let user = *user;
-                        let verified_as = verified_as(&verified, person);
+                        let verified_as = person.verified_as();
                         div()
                             .id(("contact", user.0 as usize))
                             .flex()
@@ -148,14 +148,14 @@ fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                                         caption(format!("Verified as {name}")).truncate()
                                     })),
                             )
-                            .child(match trust(&state, user) {
-                                Trust::KeyChanged => {
+                            .child(match state.trust(user) {
+                                KeyTrust::KeyChanged => {
                                     chip("Key changed", theme::danger_bg(), theme::danger_text())
                                 }
-                                Trust::Verified => {
+                                KeyTrust::Verified => {
                                     chip("Verified", theme::ok_bg(), theme::ok_text())
                                 }
-                                Trust::Unverified => {
+                                KeyTrust::Unverified => {
                                     chip("Not verified", theme::raised(), theme::text_3())
                                 }
                             })

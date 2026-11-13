@@ -274,7 +274,8 @@ pub(crate) struct Session {
     /// Whether the mic was on when we deafened, so undeafening restores it.
     mic_before_deafen: bool,
     profile: Profile,
-    /// Our profile as saved while we joined, newer than `profile` once it changes.
+    /// Our profile as the app keeps it, newer than `profile` once it changes, which gives it
+    /// to the server.
     kept_profile: watch::Receiver<Profile>,
     /// Our profile as the server has it.
     server_profile: UserProfile,
@@ -434,7 +435,7 @@ impl Session {
         session
     }
 
-    /// Takes the profile saved during the join, if one came since we last looked.
+    /// Takes the profile the app kept, if one came since we last looked.
     fn take_kept_profile(&mut self) {
         let kept = self.kept_profile.borrow_and_update();
         if kept.has_changed() {
@@ -502,7 +503,9 @@ impl Session {
     /// tells it nothing, since the session pushes again once reconnected.
     fn profile_refused(&self, response: anyhow::Result<Response>) {
         if self.call.connection.close_reason().is_none() {
-            self.shared.emit(UiEvent::ProfileRefused(refusal(response)));
+            let reason = refusal(response);
+            let notice = format!("This server refused your profile: {reason}");
+            self.shared.emit(UiEvent::ProfileRefused(notice));
         }
     }
 
@@ -608,6 +611,7 @@ impl Session {
                         warn!("saving playback: {e:#}");
                     }
                 }
+                Ok(()) = self.kept_profile.changed() => self.push_profile().await,
                 _ = renewal.tick() => self.renew_encryption_key().await,
                 Some(_) = self.call.recovery.recv() => self.recover_share(Recovery::Idr),
                 Some(started) = self.share_starts.next() => self.share_started(started).await,
@@ -1096,10 +1100,13 @@ impl Session {
     /// Shows who is verified and whose verified key changed.
     fn refresh_trust(&self) {
         let state = self.shared.state();
-        let trust: BTreeMap<UserId, (bool, Option<PublicKey>)> = state
+        let trust: BTreeMap<UserId, (bool, Option<PublicKey>, Option<String>)> = state
             .people
             .keys()
-            .map(|user| (*user, self.trust.of(*user)))
+            .map(|user| {
+                let (verified, key) = self.trust.of(*user);
+                (*user, (verified, key, self.trust.verified_name(*user)))
+            })
             .collect();
         let me = self.call.me();
         let warnings: Vec<KeyWarning> = state
@@ -1110,8 +1117,9 @@ impl Session {
             .collect();
         self.shared.update(|s| {
             for (user, person) in &mut s.people {
-                if let Some(&(verified, key)) = trust.get(user) {
-                    (person.verified, person.identity_key) = (verified, key);
+                if let Some((verified, key, name)) = trust.get(user) {
+                    (person.verified, person.identity_key) = (*verified, *key);
+                    person.verified_name = name.clone();
                 }
             }
             s.key_warnings = warnings;
@@ -1967,6 +1975,7 @@ impl Session {
                     None => self.blocks(&p),
                 };
                 let (verified, identity_key) = self.trust.of(p.user);
+                let verified_name = self.trust.verified_name(p.user);
                 let playback = self.playback_of(p.user);
                 let sharing = self.sharing_of(p.user);
                 let audience = self.audience_of(p.user);
@@ -1974,6 +1983,7 @@ impl Session {
                     let speaking = s.people.get(&p.user).is_some_and(|old| old.speaking);
                     let updated = Person {
                         verified,
+                        verified_name,
                         identity_key,
                         speaking,
                         sharing,
@@ -2027,7 +2037,12 @@ impl Session {
                     self.put_out_of_room();
                     self.shared.notice("The room you were in was deleted.");
                 }
-                self.shared.update(|s| s.rooms.retain(|r| r.id != room));
+                // The server moves everyone out before it says, so nobody should be left
+                // in it; nobody is ever shown in a room that isn't there.
+                self.shared.update(|s| {
+                    s.rooms.retain(|r| r.id != room);
+                    s.people.retain(|_, p| p.room != Some(room));
+                });
             }
             ServerEvent::PeersChanged { room, .. } => {
                 if Some(room) == self.room {
@@ -2295,6 +2310,7 @@ fn person(p: &Presence, playback: Playback, blocked: bool) -> Person {
         speaking: false,
         playback,
         verified: false,
+        verified_name: None,
         identity_key: None,
         role: p.role,
         blocked,

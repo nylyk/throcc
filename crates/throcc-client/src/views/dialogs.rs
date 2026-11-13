@@ -13,6 +13,7 @@ use gpui_component::slider::Slider;
 use gpui_component::switch::Switch;
 use throcc_client_core::client::UiCommand;
 use throcc_client_core::keystore::StartedOver;
+use throcc_client_core::safety::SafetyCheck;
 use throcc_client_core::state::{FRAME_RATES, Resolution};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{RoomId, UserId};
@@ -20,7 +21,7 @@ use throcc_proto::messages::Codec;
 
 use super::common::{
     Typeset, avatar, caption, card, chip, danger, description, error_box, field_error, mono,
-    primary, rate, secondary, title, verified_as,
+    primary, rate, secondary, title,
 };
 use super::page::{field, field_label};
 use crate::app::{Dialog, Screen, SettingsPage, StartOver, ThroccApp, typed_name, typed_password};
@@ -35,11 +36,7 @@ pub fn render(app: &mut ThroccApp, dialog: Dialog, cx: &mut Context<ThroccApp>) 
     let body = match dialog {
         Dialog::Share => share(app, cx),
         Dialog::Connection => connection(app, cx),
-        Dialog::Profile {
-            user,
-            shown,
-            key_changed,
-        } => profile(app, user, shown, key_changed, cx),
+        Dialog::Profile(check) => profile(app, check, cx),
         Dialog::Remove {
             user,
             name,
@@ -483,25 +480,18 @@ fn connection(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .into_any_element()
 }
 
-fn profile(
-    app: &mut ThroccApp,
-    user: UserId,
-    shown: Option<(Fingerprint, String)>,
-    key_changed: bool,
-    cx: &mut Context<ThroccApp>,
-) -> AnyElement {
+fn profile(app: &mut ThroccApp, check: SafetyCheck, cx: &mut Context<ThroccApp>) -> AnyElement {
+    let user = check.user();
     let avatar = app.state.person(user).and_then(|p| p.avatar);
     let picture = app.picture(avatar, cx);
-    let person = app.state.person(user);
+    let state = app.state.clone();
+    let person = state.person(user);
     let name = person.map_or(format!("User {}", user.0), |p| p.name.clone());
     let verified = person.is_some_and(|p| p.verified);
-    let presented = person.and_then(|p| p.identity_key).map(Fingerprint);
-    let shown_key = shown.as_ref().map(|(key, _)| *key);
     let verified_as = person
-        .and_then(|p| verified_as(&app.verified.list(), p))
+        .and_then(|p| p.verified_as())
         .map(|name| caption(format!("Verified as {name}")));
-    let change = app
-        .state
+    let change = state
         .key_warnings
         .iter()
         .find(|w| w.user == user)
@@ -544,7 +534,7 @@ fn profile(
                 .child(key("Now", now.short())),
         );
     }
-    if key_changed {
+    if check.key_changed_while_open() {
         content = content.child(
             warning_box()
                 .w_full()
@@ -557,23 +547,17 @@ fn profile(
                 )),
         );
     }
-    let groups: Vec<String> = shown
-        .as_ref()
-        .map(|(_, number)| safety_groups(number))
-        .unwrap_or_default();
+    let groups = check.groups();
+    let mark_command = check.mark(&state);
     let mark = if verified {
         secondary("mark-verified", "Mark as Not Verified")
     } else {
         primary("mark-verified", "Mark as Verified")
     }
-    .disabled(key_changed || shown_key.is_none() || shown_key != presented)
+    .disabled(mark_command.is_none())
     .on_click(cx.listener(move |app, _, _, cx| {
-        if let Some(key) = shown_key {
-            app.command(UiCommand::SetVerified {
-                user,
-                key,
-                verified: !verified,
-            });
+        if let Some(command) = mark_command.clone() {
+            app.command(command);
         }
         cx.notify();
     }));
@@ -605,36 +589,26 @@ fn profile(
                 .into_any_element()
         })
         .child(mark);
-    let new_key_shown = change.is_some_and(|(_, now)| Some(now) == shown_key);
     let mut buttons = actions("Done", cx).w_full();
     if change.is_some() {
+        let dismiss = check.dismiss_warning(&state);
         buttons = buttons.child(
             secondary("dismiss-key-change", "Dismiss Warning")
-                .disabled(key_changed || shown_key != presented)
+                .disabled(dismiss.is_none())
                 .on_click(cx.listener(move |app, _, _, cx| {
-                    app.command(UiCommand::DismissKeyChange {
-                        user,
-                        shown: shown_key,
-                    });
+                    if let Some(command) = dismiss.clone() {
+                        app.command(command);
+                    }
                     cx.notify();
                 })),
         );
     }
-    let explanation = if new_key_shown {
-        format!(
-            "This number belongs to {name}’s new key. Compare it with theirs in person or through another app before you trust it."
-        )
-    } else {
-        format!(
-            "To check that your calls with {name} are end-to-end encrypted, compare these numbers with theirs in person or through another app."
-        )
-    };
     content
         .child(number)
         .children(
-            shown
-                .is_some()
-                .then(|| description(explanation).text_center()),
+            check
+                .explanation(&state, &name)
+                .map(|explanation| description(explanation).text_center()),
         )
         .child(buttons)
         .into_any_element()
@@ -677,15 +651,6 @@ fn profile_header(name: &str, seed: u64, picture: Option<Arc<RenderImage>>) -> D
         .gap_2()
         .child(avatar(name, seed, picture, px(96.), false))
         .child(div().typeset(theme::LARGE_TITLE).child(name.to_owned()))
-}
-
-fn safety_groups(number: &str) -> Vec<String> {
-    number
-        .as_bytes()
-        .chunks(5)
-        .filter_map(|c| std::str::from_utf8(c).ok())
-        .map(str::to_owned)
-        .collect()
 }
 
 fn remove(user: UserId, name: &str, cascade: bool, cx: &mut Context<ThroccApp>) -> AnyElement {

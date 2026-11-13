@@ -8065,6 +8065,7 @@ dependencies = [
  "cpal",
  "directories",
  "futures-core",
+ "image",
  "jni",
  "keyring",
  "keyring-core",

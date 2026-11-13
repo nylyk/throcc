@@ -12,13 +12,13 @@ use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, Sizable, Size};
 use throcc_client_core::client::UiCommand;
-use throcc_client_core::state::{Person, State, share_label};
+use throcc_client_core::state::{KeyTrust, Person, State, share_label};
 use throcc_proto::ids::{RoomId, UserId};
 
 use super::common::{
-    CONTROLS_LINGER, TRAFFIC_LIGHTS, Trust, Typeset, audience, avatar, blocked_avatar, bottom_bar,
+    CONTROLS_LINGER, TRAFFIC_LIGHTS, Typeset, audience, avatar, blocked_avatar, bottom_bar,
     caption, danger_menu_item, description, ghost_icon, icon, primary, rate, section, sharing_icon,
-    toggle_icon, top_bar, trust,
+    toggle_icon, top_bar,
 };
 use super::mascot;
 use super::overlay::ShareOverlay;
@@ -199,7 +199,7 @@ fn sidebar(
             .flex_col()
             .child(with_room_menu(row, id, selected, manages, cx))
             .children(people.into_iter().map(|(user, person)| {
-                let trust = trust(&state, user);
+                let trust = state.trust(user);
                 occupant(user, person, pictures.get(&user).cloned(), trust, cx)
             }))
     });
@@ -426,7 +426,7 @@ fn occupant(
     user: UserId,
     person: &Person,
     picture: Option<std::sync::Arc<gpui::RenderImage>>,
-    trust: Trust,
+    trust: KeyTrust,
     cx: &Context<ThroccApp>,
 ) -> Stateful<Div> {
     div()
@@ -480,11 +480,11 @@ fn occupant(
 
 /// The sign beside the name of someone not verified, or whose verified key changed: a danger
 /// sign for a changed key, a quiet one otherwise.
-fn trust_marker(user: UserId, trust: Trust) -> Option<Stateful<Div>> {
+fn trust_marker(user: UserId, trust: KeyTrust) -> Option<Stateful<Div>> {
     let (name, size, color, label) = match trust {
-        Trust::KeyChanged => ("triangle-alert", 16., theme::danger_text(), "Key changed"),
-        Trust::Unverified => ("shield-question-mark", 14., theme::text_3(), "Not verified"),
-        Trust::Verified => return None,
+        KeyTrust::KeyChanged => ("triangle-alert", 16., theme::danger_text(), "Key changed"),
+        KeyTrust::Unverified => ("shield-question-mark", 14., theme::text_3(), "Not verified"),
+        KeyTrust::Verified => return None,
     };
     let marker = div()
         .id(("trust", user.0 as usize))

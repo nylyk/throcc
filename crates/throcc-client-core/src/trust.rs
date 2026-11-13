@@ -71,6 +71,11 @@ impl Trust {
         }
     }
 
+    /// The name the key `user` presented this session was verified under, if it is verified.
+    pub fn verified_name(&self, user: UserId) -> Option<String> {
+        self.verified.lock().name_of(self.presented.get(&user)?)
+    }
+
     /// The warning that the key shown as `user` replaced one the user verified.
     pub fn warning(&self, user: UserId) -> Option<KeyWarning> {
         let verified = self.verified.lock();

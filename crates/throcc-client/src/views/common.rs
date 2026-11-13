@@ -11,9 +11,7 @@ use gpui_component::menu::PopupMenuItem;
 use gpui_component::notification::Notification;
 use gpui_component::slider::{SliderEvent, SliderState};
 use gpui_component::{Icon, Sizable, Size};
-use throcc_client_core::state::{MAX_VOLUME, Person, State, VerifiedIdentity};
-use throcc_proto::Fingerprint;
-use throcc_proto::ids::UserId;
+pub use throcc_client_core::state::{gain_to_loudness, initial, loudness_to_gain};
 
 use crate::theme;
 use crate::updates::Release;
@@ -29,71 +27,8 @@ pub trait Typeset: Styled + Sized {
 
 impl<E: Styled> Typeset for E {}
 
-/// Whether the identity key the server shows for `user` replaced one the user verified.
-pub fn key_changed(state: &State, user: UserId) -> bool {
-    state.key_warnings.iter().any(|w| w.user == user)
-}
-
-/// The name `person` was verified under, where the server now shows another: the server
-/// picks the name, so it alone doesn't say who is verified.
-pub fn verified_as(verified: &[VerifiedIdentity], person: &Person) -> Option<String> {
-    if person.blocked {
-        return None;
-    }
-    let key = Fingerprint(person.identity_key.filter(|_| person.verified)?);
-    let stored = &verified.iter().find(|v| v.key == key)?.name;
-    (*stored != person.name).then(|| stored.clone())
-}
-
-/// What we know of the identity key the server shows for someone.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Trust {
-    /// It replaced a key the user verified.
-    KeyChanged,
-    Unverified,
-    /// Verified, or our own.
-    Verified,
-}
-
-pub fn trust(state: &State, user: UserId) -> Trust {
-    if key_changed(state, user) {
-        Trust::KeyChanged
-    } else if state.me == Some(user) || state.person(user).is_some_and(|p| p.verified) {
-        Trust::Verified
-    } else {
-        Trust::Unverified
-    }
-}
-
 pub fn icon(name: &'static str) -> Icon {
     Icon::empty().path(format!("icons/{name}.svg"))
-}
-
-const QUIETEST_DB: f32 = -36.0;
-
-/// The gain for a volume slider at `loudness`, from 0 (silent) to 2 where 1 plays the sound
-/// as it arrives. Each half rises evenly in decibels: from -36 dB to unity, then to +12 dB.
-pub fn loudness_to_gain(loudness: f32) -> f32 {
-    let loudness = loudness.clamp(0.0, 2.0);
-    if loudness == 0.0 {
-        0.0
-    } else if loudness <= 1.0 {
-        10f32.powf(QUIETEST_DB * (1.0 - loudness) / 20.0)
-    } else {
-        MAX_VOLUME.powf(loudness - 1.0)
-    }
-}
-
-/// Where a volume slider sits for `gain`, the inverse of [`loudness_to_gain`].
-pub fn gain_to_loudness(gain: f32) -> f32 {
-    let gain = gain.clamp(0.0, MAX_VOLUME);
-    if gain == 0.0 {
-        0.0
-    } else if gain <= 1.0 {
-        (1.0 - 20.0 * gain.log10() / QUIETEST_DB).max(0.0)
-    } else {
-        1.0 + gain.ln() / MAX_VOLUME.ln()
-    }
 }
 
 /// A 0 to 200 % volume slider, set to `gain`.
@@ -131,12 +66,6 @@ pub fn rate(kbps: u32) -> String {
     } else {
         format!("{kbps} kbps")
     }
-}
-
-pub fn initials(name: &str) -> String {
-    name.chars()
-        .find(|c| c.is_alphanumeric())
-        .map_or("?".into(), |c| c.to_uppercase().to_string())
 }
 
 /// An avatar colour seed for the server at `address`, the same wherever it is drawn.
@@ -208,7 +137,7 @@ pub fn avatar(
                         .rounded_full()
                         .object_fit(ObjectFit::Cover)
                         .into_any_element(),
-                    None => initials(name).into_any_element(),
+                    None => initial(name).into_any_element(),
                 }),
         )
 }
@@ -516,6 +445,8 @@ pub fn notify_after<T: 'static>(delay: std::time::Duration, cx: &mut Context<T>)
 
 #[cfg(test)]
 mod tests {
+    use throcc_client_core::state::MAX_VOLUME;
+
     use super::*;
 
     #[test]

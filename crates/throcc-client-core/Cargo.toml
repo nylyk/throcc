@@ -30,6 +30,7 @@ sonora-simd.workspace = true
 rustls.workspace = true
 rustls-webpki.workspace = true
 thiserror.workspace = true
+image = { workspace = true, features = ["gif", "bmp", "webp"] }
 tokio.workspace = true
 tracing.workspace = true
 zeroize.workspace = true

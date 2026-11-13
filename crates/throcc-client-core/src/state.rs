@@ -5,6 +5,7 @@ use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
 use throcc_proto::limits::{MAX_ROOMS, MAX_SIGNED_IN};
 use throcc_proto::messages::{Codec, PublicKey, Recovery, Room, ShareConfig, valid_name};
+use throcc_proto::permissions;
 
 pub(crate) const MIC_KBPS: u32 = 64;
 pub(crate) const SHARE_AUDIO_KBPS: u32 = crate::media::share_audio::KBPS;
@@ -45,6 +46,48 @@ impl State {
 
     pub fn room_mut(&mut self, room: RoomId) -> Option<&mut RoomView> {
         self.rooms.iter_mut().find(|r| r.id == room)
+    }
+
+    /// Whether the identity key the server shows for `user` replaced one the user verified.
+    pub fn key_changed(&self, user: UserId) -> bool {
+        self.key_warnings.iter().any(|w| w.user == user)
+    }
+
+    /// What we know of the identity key the server shows for `user`.
+    pub fn trust(&self, user: UserId) -> KeyTrust {
+        if self.key_changed(user) {
+            KeyTrust::KeyChanged
+        } else if self.me == Some(user) || self.person(user).is_some_and(|p| p.verified) {
+            KeyTrust::Verified
+        } else {
+            KeyTrust::Unverified
+        }
+    }
+
+    /// The room we are in while the connection is up or coming back. A link that came back
+    /// lists us among the room's people a moment before `current` names the room.
+    pub fn live_room(&self) -> Option<RoomId> {
+        if !matches!(
+            self.connection,
+            ConnectionStatus::Connected | ConnectionStatus::Reconnecting { .. }
+        ) {
+            return None;
+        }
+        let ours = || self.person(self.me?)?.room;
+        self.current.as_ref().map(|c| c.room).or_else(ours)
+    }
+
+    /// What picking `room` does: nothing where we are in it already, and asking for its
+    /// password first where it is locked and we can't manage rooms.
+    pub fn join_action(&self, room: RoomId) -> JoinAction {
+        let manages_rooms = self.role.is_some_and(permissions::can_manage_rooms);
+        if self.current.as_ref().is_some_and(|c| c.room == room) {
+            JoinAction::AlreadyIn
+        } else if self.room(room).is_some_and(|r| r.locked) && !manages_rooms {
+            JoinAction::AskPassword
+        } else {
+            JoinAction::Join
+        }
     }
 
     /// The pictures of the server and everyone shown.
@@ -104,6 +147,105 @@ pub enum ConnectionStatus {
     Failed(String),
 }
 
+impl ConnectionStatus {
+    /// Whether a session holds on to the server: connected, or bringing the link back
+    /// with or without asking first. Signing in again would only throw that away.
+    pub fn holds_session(&self) -> bool {
+        matches!(
+            self,
+            Self::Connected | Self::Reconnecting { .. } | Self::AwaitingReconnect
+        )
+    }
+
+    /// What to tell the user about the connection, or nothing while it is up or ended on
+    /// purpose.
+    pub fn notice(&self) -> Option<ConnectionNotice> {
+        let notice = match self {
+            Self::Connected | Self::Disconnected => return None,
+            Self::Reconnecting { attempt, reason } => ConnectionNotice {
+                summary: format!(
+                    "Reconnecting (attempt {attempt}): {reason}. You’ll be put back in your room."
+                ),
+                hint: format!("Reconnecting, attempt {attempt}. You’ll be put back in your room."),
+                problem: Some(format!("Lost the connection: {reason}.")),
+                action: None,
+                busy: true,
+                serious: false,
+            },
+            Self::AwaitingReconnect => ConnectionNotice {
+                summary: "Disconnected after a while away. Reconnect from the room.".into(),
+                hint: "The connection was down for a while. Reconnecting here signs you out on any other device.".into(),
+                problem: None,
+                action: Some(NoticeAction::Reconnect),
+                busy: false,
+                serious: false,
+            },
+            Self::SignedInElsewhere => ConnectionNotice {
+                summary: "Disconnected: signed in on another device".into(),
+                hint: "Pick the server to sign in here again.".into(),
+                problem: Some("Signed in on another device.".into()),
+                action: Some(NoticeAction::SignInHere),
+                busy: false,
+                serious: true,
+            },
+            Self::Failed(reason) => ConnectionNotice {
+                summary: format!("Disconnected: {reason}"),
+                hint: "Pick the server to try again.".into(),
+                problem: Some(reason.clone()),
+                action: Some(NoticeAction::TryAgain),
+                busy: false,
+                serious: true,
+            },
+        };
+        Some(notice)
+    }
+}
+
+/// What became of a connection that isn't up, in words for the user.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectionNotice {
+    /// All of it in one line, for a strip across a page.
+    pub summary: String,
+    /// What happens next, or what the user can do.
+    pub hint: String,
+    /// What went wrong, where something did.
+    pub problem: Option<String>,
+    pub action: Option<NoticeAction>,
+    /// Whether the core is at work on it.
+    pub busy: bool,
+    /// Whether the connection ended, rather than coming back.
+    pub serious: bool,
+}
+
+/// What the user can do about a connection that isn't up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoticeAction {
+    /// `UiCommand::Reconnect`.
+    Reconnect,
+    /// Sign in to the server again, which pushes the other device off.
+    SignInHere,
+    /// Sign in to the server again.
+    TryAgain,
+}
+
+/// What picking a room does, from [`State::join_action`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoinAction {
+    AlreadyIn,
+    AskPassword,
+    Join,
+}
+
+/// What we know of the identity key the server shows for someone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyTrust {
+    /// It replaced a key the user verified.
+    KeyChanged,
+    Unverified,
+    /// Verified, or our own.
+    Verified,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoomView {
     pub id: RoomId,
@@ -128,6 +270,13 @@ pub fn shown_name(name: &str) -> Option<String> {
     valid_name(name).map(str::to_owned)
 }
 
+/// The letter a picture stands in with for `name`: its first letter or digit.
+pub fn initial(name: &str) -> String {
+    name.chars()
+        .find(|c| c.is_alphanumeric())
+        .map_or("?".into(), |c| c.to_uppercase().to_string())
+}
+
 pub(crate) fn person_name(user: UserId, name: &str) -> String {
     shown_name(name).unwrap_or_else(|| format!("User {}", user.0))
 }
@@ -150,6 +299,8 @@ pub struct Person {
     pub playback: Playback,
     /// Whether the user verified the identity key they presented this session.
     pub verified: bool,
+    /// The name that key was verified under, while it is verified.
+    pub verified_name: Option<String>,
     /// The identity key they presented this session, in a room with us. None until then,
     /// even for someone verified before: nothing else ties their account here to that key.
     pub identity_key: Option<PublicKey>,
@@ -157,6 +308,15 @@ pub struct Person {
     /// Whether the user blocked them. A blocked person keeps their place in the room, under
     /// [`BLOCKED_NAME`] and without their picture, sounds or shares.
     pub blocked: bool,
+}
+
+impl Person {
+    /// The name they were verified under, where the server now shows another: the server
+    /// picks the name, so it alone doesn't say who is verified.
+    pub fn verified_as(&self) -> Option<&str> {
+        let name = self.verified_name.as_deref().filter(|_| self.verified)?;
+        (!self.blocked && name != self.name).then_some(name)
+    }
 }
 
 /// The name a blocked person is shown under.
@@ -198,6 +358,35 @@ impl Playback {
 
 /// The highest gain a volume can boost a sound by, +12 dB.
 pub const MAX_VOLUME: f32 = 4.0;
+
+/// The quietest a volume slider goes before silence.
+const QUIETEST_DB: f32 = -36.0;
+
+/// The gain for a volume slider at `loudness`, from 0 (silent) to 2 where 1 plays the sound
+/// as it arrives. Each half rises evenly in decibels: from -36 dB to unity, then to
+/// [`MAX_VOLUME`].
+pub fn loudness_to_gain(loudness: f32) -> f32 {
+    let loudness = loudness.clamp(0.0, 2.0);
+    if loudness == 0.0 {
+        0.0
+    } else if loudness <= 1.0 {
+        10f32.powf(QUIETEST_DB * (1.0 - loudness) / 20.0)
+    } else {
+        MAX_VOLUME.powf(loudness - 1.0)
+    }
+}
+
+/// Where a volume slider sits for `gain`, the inverse of [`loudness_to_gain`].
+pub fn gain_to_loudness(gain: f32) -> f32 {
+    let gain = gain.clamp(0.0, MAX_VOLUME);
+    if gain == 0.0 {
+        0.0
+    } else if gain <= 1.0 {
+        (1.0 - 20.0 * gain.log10() / QUIETEST_DB).max(0.0)
+    } else {
+        1.0 + gain.ln() / MAX_VOLUME.ln()
+    }
+}
 
 /// How loud one of someone's sounds plays on this machine. It is never sent.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -453,6 +642,7 @@ mod tests {
             speaking: false,
             playback: Playback::default(),
             verified: false,
+            verified_name: None,
             identity_key: None,
             role: Role::User,
             blocked: false,

@@ -117,6 +117,11 @@ impl VerifiedKeys {
         self.records.verified.contains_key(&Hex(*key))
     }
 
+    /// The name `key` was verified under, if it is verified.
+    pub fn name_of(&self, key: &PublicKey) -> Option<String> {
+        Some(self.records.verified.get(&Hex(*key))?.name.clone())
+    }
+
     /// The verified key last seen as `user` on `server`.
     pub fn verified_at(&self, server: &Fingerprint, user: UserId) -> Option<PublicKey> {
         let seen = seen_as(server, user);

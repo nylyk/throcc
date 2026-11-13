@@ -74,6 +74,20 @@ pub fn custom(appearance: &Appearance) -> [u32; 8] {
     saved_custom(appearance).unwrap_or_else(|| picked(appearance).1)
 }
 
+/// Picks the theme called `name`, a preset or [`CUSTOM`], keeping the Custom theme's colours
+/// as they stand: picking a preset never loses them, and Custom starts from them.
+pub fn pick(appearance: &mut Appearance, name: &str) {
+    let colors = to_hex(custom(appearance));
+    appearance.theme = Some(name.to_owned());
+    appearance.palette = Some(colors);
+}
+
+/// Picks the Custom theme with `colors` as its colours.
+pub fn pick_custom(appearance: &mut Appearance, colors: [u32; 8]) {
+    appearance.theme = Some(CUSTOM.to_owned());
+    appearance.palette = Some(to_hex(colors.map(|c| c & 0xFF_FFFF)));
+}
+
 fn saved_custom(appearance: &Appearance) -> Option<[u32; 8]> {
     from_hex(appearance.palette.as_ref()?)
 }
@@ -122,6 +136,107 @@ pub fn oklab(color: u32) -> [f32; 3] {
         1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
         0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
     ]
+}
+
+/// `color` from Oklab, as 0xRRGGBB, clamped into sRGB.
+pub fn from_oklab([l, a, b]: [f32; 3]) -> u32 {
+    let l_ = (l + 0.396_337_78 * a + 0.215_803_76 * b).powi(3);
+    let m_ = (l - 0.105_561_346 * a - 0.063_854_17 * b).powi(3);
+    let s_ = (l - 0.089_484_18 * a - 1.291_485_5 * b).powi(3);
+    let r = 4.076_741_7 * l_ - 3.307_711_6 * m_ + 0.230_969_94 * s_;
+    let g = -1.268_438 * l_ + 2.609_757_4 * m_ - 0.341_319_38 * s_;
+    let b = -0.004_196_086_3 * l_ - 0.703_418_6 * m_ + 1.707_614_7 * s_;
+    (linear_to_srgb(r) << 16) | (linear_to_srgb(g) << 8) | linear_to_srgb(b)
+}
+
+/// `share` of `top` over `base`, mixed in Oklab like CSS `color-mix(in oklab, …)`.
+pub fn mix(top: u32, share: f32, base: u32) -> u32 {
+    let (t, b) = (oklab(top), oklab(base));
+    from_oklab(std::array::from_fn(|i| t[i] * share + b[i] * (1.0 - share)))
+}
+
+/// The WCAG contrast ratio of two colours, from 1 to 21.
+pub fn contrast(one: u32, other: u32) -> f32 {
+    let (a, b) = (luminance(one), luminance(other));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// The contrast text needs to read on a surface, as WCAG AA asks of body text.
+pub const READABLE: f32 = 4.5;
+
+/// `color` mixed toward `text` in steps of a tenth until it reads on every one of
+/// `surfaces`, or `text` itself if no step does.
+pub fn readable(color: u32, text: u32, surfaces: &[u32]) -> u32 {
+    (0..=10)
+        .map(|step| mix(text, step as f32 / 10.0, color))
+        .find(|mixed| surfaces.iter().all(|s| contrast(*mixed, *s) >= READABLE))
+        .unwrap_or(text)
+}
+
+/// The colours every client mixes from a theme's eight, the same on each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Colors {
+    pub bg: u32,
+    pub panel: u32,
+    /// A row or control lifted off the panel.
+    pub raised: u32,
+    /// A control's fill, a step above `raised`.
+    pub control: u32,
+    /// Lines and borders.
+    pub line: u32,
+    /// What is picked.
+    pub selected: u32,
+    /// Behind a warning about something gone wrong.
+    pub danger: u32,
+    pub text: u32,
+    /// These read as text on every surface above, at [`READABLE`] contrast.
+    pub muted: u32,
+    pub accent: u32,
+    pub warning: u32,
+    pub good: u32,
+    pub bad: u32,
+}
+
+impl Colors {
+    /// The colours of a theme given as its eight, in [`PRESETS`] order.
+    pub fn of([bg, panel, text, muted, accent, warning, good, bad]: [u32; 8]) -> Self {
+        let raised = mix(text, 0.06, panel);
+        let control = mix(text, 0.10, panel);
+        let selected = mix(accent, 0.18, panel);
+        let surfaces = [bg, panel, raised, control, selected];
+        let readable = |color| readable(color, text, &surfaces);
+        Self {
+            bg,
+            panel,
+            raised,
+            control,
+            line: mix(text, 0.16, panel),
+            selected,
+            danger: mix(bad, 0.18, panel),
+            text,
+            muted: readable(muted),
+            accent: readable(accent),
+            warning: readable(warning),
+            good: readable(good),
+            bad: readable(bad),
+        }
+    }
+}
+
+/// Relative luminance, as WCAG defines it.
+fn luminance(color: u32) -> f32 {
+    let [r, g, b] = [color >> 16, color >> 8, color].map(|c| srgb_to_linear(c & 0xFF));
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+fn linear_to_srgb(c: f32) -> u32 {
+    let c = c.clamp(0.0, 1.0);
+    let c = if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
+    (c * 255.0).round() as u32
 }
 
 fn srgb_to_linear(channel: u32) -> f32 {
@@ -176,6 +291,33 @@ mod tests {
         assert_eq!(parse_hex("#12345"), None);
         assert_eq!(parse_hex("#GGGGGG"), None);
         assert_eq!(parse_hex("#+FFFFF"), None);
+    }
+
+    #[test]
+    fn mixing_keeps_the_ends_and_meets_in_the_middle() {
+        assert_eq!(mix(0xFF0000, 1.0, 0x0000FF), 0xFF0000);
+        assert_eq!(mix(0xFF0000, 0.0, 0x0000FF), 0x0000FF);
+        assert_eq!(mix(0x808080, 0.5, 0x808080), 0x808080);
+        assert!((contrast(0x000000, 0xFFFFFF) - 21.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn every_text_colour_reads_on_every_surface() {
+        let dim = [
+            0x0C0D11, 0x14161D, 0xECEDF3, 0x2A2C35, 0x30333D, 0x2A2C35, 0x203020, 0x302020,
+        ];
+        for (name, colors) in PRESETS.into_iter().chain([("dim", dim)]) {
+            let c = Colors::of(colors);
+            for color in [c.muted, c.accent, c.warning, c.good, c.bad] {
+                for surface in [c.bg, c.panel, c.raised, c.control, c.selected] {
+                    assert!(
+                        contrast(color, surface) >= READABLE,
+                        "{name}: {color:06X} on {surface:06X}"
+                    );
+                }
+            }
+        }
+        assert_ne!(Colors::of(dim).muted, dim[3]);
     }
 
     #[test]

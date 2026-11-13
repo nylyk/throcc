@@ -15,6 +15,58 @@ pub struct CoreState {
     pub deafened: bool,
     pub key_warnings: Vec<KeyWarning>,
     pub health: Health,
+    /// What to tell the user about a connection that isn't up.
+    pub notice: Option<ConnectionNotice>,
+    /// The room we are in while the connection is up or coming back, which the call's audio
+    /// follows.
+    pub live_room: Option<u64>,
+    /// Whether a session holds on to the server, so picking it again only shows it.
+    pub holds_session: bool,
+}
+
+/// What became of a connection that isn't up, in words for the user.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ConnectionNotice {
+    /// All of it in one line.
+    pub summary: String,
+    /// What happens next, or what the user can do.
+    pub hint: String,
+    /// What went wrong, where something did.
+    pub problem: Option<String>,
+    pub action: Option<NoticeAction>,
+    /// Whether the core is at work on it.
+    pub busy: bool,
+    /// Whether the connection ended, rather than coming back.
+    pub serious: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum NoticeAction {
+    /// `Command::Reconnect`.
+    Reconnect,
+    /// Connect to the server again, which signs the other device out.
+    SignInHere,
+    /// Connect to the server again.
+    TryAgain,
+}
+
+/// What picking a room does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum JoinAction {
+    AlreadyIn,
+    /// Ask for its password, then `Command::JoinWithPassword`.
+    AskPassword,
+    Join,
+}
+
+/// What we know of the identity key the server shows for someone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum KeyTrust {
+    /// It replaced a key the user verified.
+    KeyChanged,
+    Unverified,
+    /// Verified, or our own.
+    Verified,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -54,6 +106,8 @@ pub struct Room {
     pub id: u64,
     pub name: String,
     pub locked: bool,
+    /// What picking it does.
+    pub join: JoinAction,
 }
 
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
@@ -71,6 +125,11 @@ pub struct Person {
     pub voice: SoundLevel,
     pub share_audio: SoundLevel,
     pub verified: bool,
+    /// The name they were verified under, where the server now shows another.
+    pub verified_as: Option<String>,
+    pub trust: KeyTrust,
+    /// The letter their picture stands in with.
+    pub initial: String,
     /// The identity key they presented this session, in a room with us.
     pub identity_key: Option<Vec<u8>>,
     pub role: Role,
@@ -78,14 +137,17 @@ pub struct Person {
     pub blocked: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct Share {
     /// The share's height, frame rate and codec, such as "1440p60 AV1".
     pub label: String,
     pub audio: bool,
-    /// The size of its pictures, in pixels, which a view keeps the shape of.
+    /// The size of its pictures, in pixels.
     pub width: u32,
     pub height: u32,
+    /// Its width over its height, within what a phone can show: a sender may announce any
+    /// size.
+    pub aspect: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -124,6 +186,8 @@ pub struct Health {
     pub upload_kbps: u32,
     pub upload_loss: f32,
     pub download_loss: f32,
+    /// Sharers our connection can't keep up with.
+    pub slow_shares: Vec<u64>,
 }
 
 impl From<&core::State> for CoreState {
@@ -138,8 +202,22 @@ impl From<&core::State> for CoreState {
             connection: (&state.connection).into(),
             me: state.me.map(|me| me.0),
             role: state.role.map(Role::from),
-            rooms: state.rooms.iter().map(Room::from).collect(),
-            people: state.people.iter().map(Person::from).collect(),
+            rooms: state
+                .rooms
+                .iter()
+                .map(|room| Room {
+                    join: state.join_action(room.id).into(),
+                    ..Room::from(room)
+                })
+                .collect(),
+            people: state
+                .people
+                .iter()
+                .map(|(user, person)| Person {
+                    trust: state.trust(*user).into(),
+                    ..Person::from((user, person))
+                })
+                .collect(),
             current: state.current.as_ref().map(|current| CurrentRoom {
                 room: current.room.0,
                 sharing: current.sharing.is_some(),
@@ -154,7 +232,11 @@ impl From<&core::State> for CoreState {
                 upload_kbps: state.health.upload_kbps,
                 upload_loss: state.health.upload_loss,
                 download_loss: state.health.download_loss,
+                slow_shares: state.health.slow_shares.iter().map(|u| u.0).collect(),
             },
+            notice: state.connection.notice().map(ConnectionNotice::from),
+            live_room: state.live_room().map(|room| room.0),
+            holds_session: state.connection.holds_session(),
         }
     }
 }
@@ -203,6 +285,7 @@ impl From<&core::RoomView> for Room {
             id: room.id.0,
             name: room.name.clone(),
             locked: room.locked,
+            join: JoinAction::Join,
         }
     }
 }
@@ -221,12 +304,21 @@ impl From<(&ids::UserId, &core::Person)> for Person {
                 audio: config.audio,
                 width: config.width.into(),
                 height: config.height.into(),
+                aspect: (f32::from(config.width) / f32::from(config.height.max(1)))
+                    .clamp(0.25, 4.0),
             }),
             audience: person.audience as u32,
             speaking: person.speaking,
             voice: person.playback.voice.into(),
             share_audio: person.playback.share.into(),
             verified: person.verified,
+            verified_as: person.verified_as().map(str::to_owned),
+            trust: if person.verified {
+                KeyTrust::Verified
+            } else {
+                KeyTrust::Unverified
+            },
+            initial: core::initial(&person.name),
             identity_key: person.identity_key.map(|key| key.to_vec()),
             role: person.role.into(),
             blocked: person.blocked,
@@ -267,6 +359,43 @@ impl From<&core::KeyWarning> for KeyWarning {
             user: warning.user.0,
             verified: warning.verified.0.to_vec(),
             now: warning.now.0.to_vec(),
+        }
+    }
+}
+
+impl From<core::ConnectionNotice> for ConnectionNotice {
+    fn from(notice: core::ConnectionNotice) -> Self {
+        Self {
+            summary: notice.summary,
+            hint: notice.hint,
+            problem: notice.problem,
+            action: notice.action.map(|action| match action {
+                core::NoticeAction::Reconnect => NoticeAction::Reconnect,
+                core::NoticeAction::SignInHere => NoticeAction::SignInHere,
+                core::NoticeAction::TryAgain => NoticeAction::TryAgain,
+            }),
+            busy: notice.busy,
+            serious: notice.serious,
+        }
+    }
+}
+
+impl From<core::JoinAction> for JoinAction {
+    fn from(action: core::JoinAction) -> Self {
+        match action {
+            core::JoinAction::AlreadyIn => Self::AlreadyIn,
+            core::JoinAction::AskPassword => Self::AskPassword,
+            core::JoinAction::Join => Self::Join,
+        }
+    }
+}
+
+impl From<core::KeyTrust> for KeyTrust {
+    fn from(trust: core::KeyTrust) -> Self {
+        match trust {
+            core::KeyTrust::KeyChanged => Self::KeyChanged,
+            core::KeyTrust::Unverified => Self::Unverified,
+            core::KeyTrust::Verified => Self::Verified,
         }
     }
 }

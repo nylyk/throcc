@@ -113,7 +113,7 @@ pub enum UiEvent {
     AvatarReady(Hash),
     /// The server has our profile as kept on this computer.
     ProfileSaved,
-    /// The server refused our profile, for this reason.
+    /// The server refused our profile: a sentence for the user saying why.
     ProfileRefused(String),
     /// The server took the server's new name or picture.
     ServerProfileSaved,
@@ -160,7 +160,7 @@ pub struct Client {
 
 impl Client {
     /// Signs in, or enrolls with `invite`, and blocks until the server has answered. The
-    /// server gets the newest `profile` unless it has it already.
+    /// server gets the newest `profile` unless it has it already, and each one sent after.
     pub fn connect(
         address: &str,
         mut keystore: Keystore,
@@ -334,9 +334,12 @@ impl MockClient {
     pub fn new(verified: VerifiedStore, blocked: BlockedStore) -> Self {
         let frame = VideoFrame::test_pattern(1280, 720, 1, 0);
         add_sample_verified(&verified);
-        let state = sample_state();
+        let mut state = sample_state();
+        let sample_people = state.people.clone();
+        // As on a server, nobody outside a room is shown.
+        state.people.retain(|_, p| p.room.is_some());
         let client = Self {
-            sample_people: state.people.clone(),
+            sample_people,
             shared: Shared::new(state),
             verified,
             blocked,
@@ -382,11 +385,23 @@ impl ClientApi for MockClient {
         match command {
             UiCommand::Join(room) => self.update(|s| {
                 let (mic, deafened) = (s.mic, s.deafened);
-                if let Some(person) = s.people.get_mut(&me) {
-                    person.room = room;
-                    person.mic = mic;
-                    person.deafened = deafened;
-                    person.sharing = None;
+                let sample = self.sample_people.get(&me).cloned();
+                match room {
+                    Some(room) => {
+                        if let Some(person) = s.people.get(&me).cloned().or(sample) {
+                            let person = Person {
+                                room: Some(room),
+                                mic,
+                                deafened,
+                                sharing: None,
+                                ..person
+                            };
+                            s.people.insert(me, person);
+                        }
+                    }
+                    None => {
+                        s.people.remove(&me);
+                    }
                 }
                 s.current = room.map(|room| CurrentRoom {
                     room,
@@ -490,16 +505,13 @@ impl ClientApi for MockClient {
                 }
             }),
             UiCommand::KickFromRoom { user, room } => self.update(|s| {
-                if let Some(p) = s.people.get_mut(&user).filter(|p| p.room == Some(room)) {
-                    p.room = None;
-                    p.sharing = None;
+                if s.person(user).is_some_and(|p| p.room == Some(room)) {
+                    s.people.remove(&user);
                 }
             }),
             UiCommand::DeleteRoom(room) => self.update(|s| {
                 s.rooms.retain(|r| r.id != room);
-                for p in s.people.values_mut().filter(|p| p.room == Some(room)) {
-                    p.room = None;
-                }
+                s.people.retain(|_, p| p.room != Some(room));
                 if s.current.as_ref().is_some_and(|c| c.room == room) {
                     s.current = None;
                 }
@@ -523,6 +535,7 @@ impl ClientApi for MockClient {
                     return;
                 }
                 p.verified = verified;
+                p.verified_name = verified.then(|| p.name.clone());
                 let name = p.name.clone();
                 let mut keys = self.verified.lock();
                 if verified {
@@ -555,6 +568,7 @@ impl ClientApi for MockClient {
                     s.key_warnings.retain(|w| verified.contains(&w.verified.0));
                     for p in s.people.values_mut() {
                         p.verified = p.identity_key.is_some_and(|k| verified.contains(&k));
+                        p.verified_name = p.verified.then(|| p.verified_name.clone()).flatten();
                     }
                 });
             }
@@ -636,6 +650,7 @@ fn person(name: &str, room: Option<u64>) -> Person {
         speaking: false,
         playback: Playback::default(),
         verified: false,
+        verified_name: None,
         identity_key: None,
         role: Role::User,
         blocked: false,
