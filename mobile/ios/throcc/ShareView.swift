@@ -67,6 +67,7 @@ struct ShareTile: View {
     let maxHeight: CGFloat
     @Environment(AppModel.self) private var model
     @State private var surface = SurfaceHandle()
+    @State private var controls = true
 
     var body: some View {
         ZStack {
@@ -74,43 +75,9 @@ struct ShareTile: View {
             // Kept under fullscreen, so the share goes back to it unchanged.
             ShareSurface(user: person.user, handle: surface)
             Loading(user: person.user)
-            VStack {
-                HStack(spacing: 8) {
-                    Sharer(person: person, details: share.label)
-                    Spacer()
-                    if let warning = ShareWarning(health: model.state.health, user: person.user) {
-                        WarningPill(warning: warning)
-                    }
-                }
-                Spacer()
-                HStack {
-                    Spacer()
-                    HStack(spacing: 16) {
-                        Button("Stop Watching", systemImage: "eye.slash") {
-                            model.core.command(command: .unwatch(user: person.user))
-                        }
-                        if AVPictureInPictureController.isPictureInPictureSupported() {
-                            Button("Picture in Picture", systemImage: "pip.enter") {
-                                if let view = surface.view {
-                                    let size = CGSize(width: Int(share.width), height: Int(share.height))
-                                    model.pictureInPicture.start(user: person.user, size: size, from: view)
-                                }
-                            }
-                        }
-                        Button("Fullscreen", systemImage: "arrow.up.left.and.arrow.down.right") {
-                            model.fullscreenShare = person.user
-                        }
-                    }
-                    .labelStyle(.iconOnly)
-                    .buttonStyle(.borderless)
-                    .tint(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(.black.opacity(0.6), in: .capsule)
-                }
-            }
-            .padding(8)
+            ShareOverlay(person: person, share: share, fullscreen: false, surface: surface, controls: $controls)
         }
+        .togglesControls($controls)
         .aspectRatio(CGFloat(max(share.aspect, 0.5)), contentMode: .fit)
         .clipShape(.rect(cornerRadius: 16))
         .frame(maxWidth: .infinity, maxHeight: maxHeight)
@@ -123,57 +90,22 @@ struct ShareFullscreen: View {
     let user: UInt64
     @Environment(AppModel.self) private var model
     @State private var controls = true
+    @State private var surface = SurfaceHandle()
 
     var body: some View {
         let state = model.state
         let person = state.people.first { $0.user == user }
         ZStack {
             Color.black.ignoresSafeArea()
-            if let share = person?.sharing {
-                ShareSurface(user: user)
+            if let person, let share = person.sharing {
+                ShareSurface(user: user, handle: surface)
                     .aspectRatio(CGFloat(share.aspect), contentMode: .fit)
                     .ignoresSafeArea()
                 Loading(user: user)
+                ShareOverlay(person: person, share: share, fullscreen: true, surface: surface, controls: $controls)
             }
-            VStack {
-                HStack(spacing: 8) {
-                    if controls {
-                        Group {
-                            Button("Close", systemImage: "chevron.down") { model.fullscreenShare = nil }
-                                .labelStyle(.iconOnly)
-                                .buttonStyle(.bordered)
-                                .buttonBorderShape(.circle)
-                            Text(person?.name ?? "").foregroundStyle(.white)
-                        }
-                        .tint(.white)
-                        .transition(.opacity)
-                    }
-                    Spacer()
-                    if let warning = ShareWarning(health: state.health, user: user) {
-                        WarningPill(warning: warning)
-                    }
-                }
-                Spacer()
-                if controls {
-                    VStack(spacing: 12) {
-                        RoomStrip(people: state.people.filter { $0.room == state.current?.room })
-                        HStack(spacing: 16) {
-                            MicButton()
-                            SoundButton()
-                            LeaveButton()
-                        }
-                        .labelStyle(.iconOnly)
-                        .buttonStyle(.bordered)
-                        .buttonBorderShape(.circle)
-                        .controlSize(.large)
-                    }
-                    .transition(.opacity)
-                }
-            }
-            .padding(12)
         }
-        .contentShape(.rect)
-        .onTapGesture { withAnimation { controls.toggle() } }
+        .togglesControls($controls)
         .statusBarHidden(!controls)
         .persistentSystemOverlays(.hidden)
         .onAppear {
@@ -184,6 +116,145 @@ struct ShareFullscreen: View {
             Turning.allow(false)
             UIApplication.shared.isIdleTimerDisabled = false
         }
+    }
+}
+
+/// How long the overlay's controls stay after they show.
+private let controlsLinger: Duration = .seconds(3)
+
+/// The labels and controls over a watched share, the same in the tile as fullscreen: who shares
+/// what top left, a warning top right and the share's buttons bottom right, with the room and the
+/// call's buttons added fullscreen. `controls` shows all but a warning, which always shows.
+private struct ShareOverlay: View {
+    let person: Person
+    let share: Share
+    let fullscreen: Bool
+    /// The view the share shows in, which Picture in Picture opens from.
+    let surface: SurfaceHandle
+    @Binding var controls: Bool
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let state = model.state
+        VStack {
+            HStack(spacing: 8) {
+                if controls {
+                    Sharer(person: person, details: share.label).transition(.opacity)
+                }
+                Spacer()
+                if let warning = ShareWarning(health: state.health, user: person.user) {
+                    WarningPill(warning: warning)
+                }
+            }
+            Spacer()
+            if controls {
+                VStack(spacing: 12) {
+                    if fullscreen {
+                        RoomStrip(people: state.people.filter { $0.room == state.current?.room })
+                    }
+                    if fullscreen {
+                        CentredBesideTrailing {
+                            HStack(spacing: 16) {
+                                MicButton()
+                                SoundButton()
+                                LeaveButton()
+                            }
+                            .labelStyle(.iconOnly)
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.circle)
+                            .controlSize(.large)
+                            ShareButtons(person: person, share: share, fullscreen: true, surface: surface)
+                        }
+                    } else {
+                        HStack {
+                            Spacer()
+                            ShareButtons(person: person, share: share, fullscreen: false, surface: surface)
+                        }
+                    }
+                }
+                .transition(.opacity)
+            }
+        }
+        .padding(fullscreen ? 12 : 8)
+    }
+}
+
+extension View {
+    /// Shows or hides `controls` on a tap, and hides them a moment after they show.
+    func togglesControls(_ controls: Binding<Bool>) -> some View {
+        contentShape(.rect)
+            .onTapGesture { withAnimation { controls.wrappedValue.toggle() } }
+            .task(id: controls.wrappedValue) {
+                guard controls.wrappedValue, (try? await Task.sleep(for: controlsLinger)) != nil else {
+                    return
+                }
+                withAnimation { controls.wrappedValue = false }
+            }
+    }
+}
+
+/// Two subviews on one line: the first centred, the second at the trailing edge. Where the
+/// second would cover the first, the first centres in the room left of the second instead.
+private struct CentredBesideTrailing: Layout {
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        let width = proposal.width ?? sizes.reduce(0) { $0 + $1.width }
+        return CGSize(width: width, height: sizes.map(\.height).max() ?? 0)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard subviews.count == 2 else {
+            return
+        }
+        let centred = subviews[0].sizeThatFits(.unspecified)
+        let trailing = subviews[1].sizeThatFits(.unspecified)
+        let trailingX = bounds.maxX - trailing.width
+        let fitsCentred = bounds.midX + centred.width / 2 <= trailingX
+        let centredX = fitsCentred
+            ? bounds.midX - centred.width / 2
+            : bounds.minX + (trailingX - bounds.minX - centred.width) / 2
+        subviews[0].place(at: CGPoint(x: max(centredX, bounds.minX), y: bounds.midY), anchor: .leading, proposal: .unspecified)
+        subviews[1].place(at: CGPoint(x: trailingX, y: bounds.midY), anchor: .leading, proposal: .unspecified)
+    }
+}
+
+/// Stop watching, Picture in Picture, and fullscreen or back from it, in one pill.
+private struct ShareButtons: View {
+    let person: Person
+    let share: Share
+    let fullscreen: Bool
+    let surface: SurfaceHandle
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        HStack(spacing: 16) {
+            Button("Stop Watching", systemImage: "eye.slash") {
+                model.core.command(command: .unwatch(user: person.user))
+            }
+            if AVPictureInPictureController.isPictureInPictureSupported() {
+                Button("Picture in Picture", systemImage: "pip.enter") {
+                    if let view = surface.view {
+                        let size = CGSize(width: Int(share.width), height: Int(share.height))
+                        model.pictureInPicture.start(user: person.user, size: size, from: view)
+                    }
+                }
+            }
+            if fullscreen {
+                Button("Exit Fullscreen", systemImage: "arrow.down.right.and.arrow.up.left") {
+                    model.fullscreenShare = nil
+                }
+            } else {
+                Button("Fullscreen", systemImage: "arrow.up.left.and.arrow.down.right") {
+                    model.fullscreenShare = person.user
+                }
+            }
+        }
+        .labelStyle(.iconOnly)
+        .buttonStyle(.borderless)
+        .tint(.white)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(.black.opacity(0.6), in: .capsule)
     }
 }
 

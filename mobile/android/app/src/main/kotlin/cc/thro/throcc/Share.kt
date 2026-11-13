@@ -30,15 +30,14 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -58,6 +57,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalWindowInfo
@@ -73,6 +73,7 @@ import cc.thro.throcc.core.Command
 import cc.thro.throcc.core.CoreState
 import cc.thro.throcc.core.Person
 import cc.thro.throcc.core.Share
+import kotlinx.coroutines.delay
 
 /** The native side of a share's surface: the core decodes into the window behind it. */
 object ShareView {
@@ -205,7 +206,6 @@ private fun enterPictureInPicture(activity: Activity, model: AppModel, user: ULo
 /** The share being watched in the room, at most [MAX_TILE_HEIGHT] of the window's height, with a way to fullscreen it. */
 @Composable
 fun ShareTile(model: AppModel, state: CoreState, person: Person, share: Share) {
-    val warning = shareWarning(state, person.user)
     val window = LocalWindowInfo.current.containerSize
     val maxHeight = with(LocalDensity.current) { window.height.toDp() } * MAX_TILE_HEIGHT
     Box(Modifier.fillMaxWidth(), Alignment.Center) {
@@ -220,34 +220,7 @@ fun ShareTile(model: AppModel, state: CoreState, person: Person, share: Share) {
                     ShareSurface(model, person.user, Modifier.aspectRatio(share.aspect))
                     Loading(state, person.user)
                 }
-                Row(
-                    Modifier.fillMaxWidth().align(Alignment.TopStart).padding(12.dp),
-                    Arrangement.spacedBy(8.dp),
-                    Alignment.CenterVertically,
-                ) {
-                    Sharer(model, person, share.label, Modifier.weight(1f, fill = false))
-                    Spacer(Modifier.weight(1f))
-                    warning?.let { WarningPill(it) }
-                }
-                val activity = LocalView.current.context as? Activity
-                Row(
-                    Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(12.dp)
-                        .background(MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.8f), CircleShape),
-                ) {
-                    IconButton({ model.core.command(Command.Unwatch(person.user)) }) {
-                        Icon(Icons.Default.VisibilityOff, "Stop Watching")
-                    }
-                    if (activity != null) {
-                        IconButton({ enterPictureInPicture(activity, model, person.user, share) }) {
-                            Icon(Icons.Default.PictureInPictureAlt, "Picture in Picture")
-                        }
-                    }
-                    IconButton({ model.fullscreenShare = person.user }) {
-                        Icon(Icons.Default.Fullscreen, "Fullscreen")
-                    }
-                }
+                ShareOverlay(model, state, person, share, fullscreen = false)
             }
         }
     }
@@ -263,7 +236,6 @@ private const val MAX_TILE_HEIGHT = 0.6f
 @Composable
 fun ShareFullscreen(model: AppModel, state: CoreState) {
     val user = model.fullscreenShare ?: return
-    val room = state.current?.room
     val person = state.people.find { it.user == user }
     val share = person?.sharing
     val watching = state.current?.watching?.contains(user) == true
@@ -281,42 +253,104 @@ fun ShareFullscreen(model: AppModel, state: CoreState) {
     Immersive()
     Turning()
     KeepScreenOn()
-    var controls by remember { mutableStateOf(true) }
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(Color.Black)
-            .clickable(remember { MutableInteractionSource() }, null) { controls = !controls },
-    ) {
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
         Box(Modifier.fillMaxSize(), Alignment.Center) {
             ShareSurface(model, user, Modifier.aspectRatio(share.aspect), onTop = true)
             Loading(state, user)
         }
-        AnimatedVisibility(controls, Modifier.align(Alignment.TopStart), enter = fadeIn(), exit = fadeOut()) {
-            Row(
-                Modifier.safeDrawingPadding().padding(8.dp),
-                Arrangement.spacedBy(8.dp),
-                Alignment.CenterVertically,
-            ) {
-                FilledTonalIconButton({ model.fullscreenShare = null }) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
-                }
-                Text(person.name, color = Color.White, style = MaterialTheme.typography.titleMedium)
-            }
+        ShareOverlay(model, state, person, share, fullscreen = true)
+    }
+}
+
+/** How long the overlay's controls stay after they show. */
+private const val CONTROLS_LINGER_MS = 3_000L
+
+/**
+ * The labels and controls over a watched share, the same in the tile as fullscreen: who shares
+ * what top left, a warning top right and the share's buttons bottom right, with the room and the
+ * call's controls added fullscreen. A tap shows or hides the controls, which also hide after a
+ * moment; a warning stays.
+ */
+@Composable
+private fun ShareOverlay(model: AppModel, state: CoreState, person: Person, share: Share, fullscreen: Boolean) {
+    var controls by remember { mutableStateOf(true) }
+    LaunchedEffect(controls) {
+        if (controls) {
+            delay(CONTROLS_LINGER_MS)
+            controls = false
         }
-        shareWarning(state, user)?.let { warning ->
-            // Shown with or without the controls, as the desktop does.
-            Box(Modifier.align(Alignment.TopEnd).safeDrawingPadding().padding(12.dp)) { WarningPill(warning) }
+    }
+    val insets = if (fullscreen) Modifier.safeDrawingPadding() else Modifier
+    Box(Modifier.fillMaxSize().clickable(remember { MutableInteractionSource() }, null) { controls = !controls }) {
+        Row(
+            Modifier.fillMaxWidth().align(Alignment.TopStart).then(insets).padding(12.dp),
+            Arrangement.spacedBy(8.dp),
+            Alignment.CenterVertically,
+        ) {
+            AnimatedVisibility(controls, Modifier.weight(1f, fill = false), enter = fadeIn(), exit = fadeOut()) {
+                Sharer(model, person, share.label)
+            }
+            Spacer(Modifier.weight(1f))
+            shareWarning(state, person.user)?.let { WarningPill(it) }
         }
         AnimatedVisibility(controls, Modifier.align(Alignment.BottomCenter), enter = fadeIn(), exit = fadeOut()) {
             Column(
-                Modifier.safeDrawingPadding().padding(8.dp),
+                Modifier.fillMaxWidth().then(insets).padding(12.dp),
                 Arrangement.spacedBy(12.dp),
                 Alignment.CenterHorizontally,
             ) {
-                RoomStrip(model, state.people.filter { it.room == room })
-                RoomControls(model, state)
+                if (fullscreen) {
+                    RoomStrip(model, state.people.filter { it.room == state.current?.room })
+                    CentredBesideEnd(Modifier.fillMaxWidth()) {
+                        RoomControls(model, state)
+                        ShareButtons(model, person, share, fullscreen = true, Modifier)
+                    }
+                } else {
+                    ShareButtons(model, person, share, fullscreen = false, Modifier.align(Alignment.End))
+                }
             }
+        }
+    }
+}
+
+/**
+ * Two children on one line: the first centred, the second at the end. Where the second would
+ * cover the first, the first centres in the room left of the second instead.
+ */
+@Composable
+private fun CentredBesideEnd(modifier: Modifier, content: @Composable () -> Unit) {
+    Layout(content, modifier) { measurables, constraints ->
+        val loose = constraints.copy(minWidth = 0, minHeight = 0)
+        val (centred, end) = measurables.map { it.measure(loose) }
+        val width = constraints.maxWidth
+        val height = maxOf(centred.height, end.height)
+        val endX = width - end.width
+        val fitsCentred = (width + centred.width) / 2 <= endX
+        val centredX = if (fitsCentred) (width - centred.width) / 2 else (endX - centred.width) / 2
+        layout(width, height) {
+            centred.place(centredX.coerceAtLeast(0), (height - centred.height) / 2)
+            end.place(endX, (height - end.height) / 2)
+        }
+    }
+}
+
+/** Stop watching, picture in picture, and fullscreen or back from it, in one pill. */
+@Composable
+private fun ShareButtons(model: AppModel, person: Person, share: Share, fullscreen: Boolean, modifier: Modifier) {
+    val activity = LocalView.current.context as? Activity
+    Row(modifier.background(MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.8f), CircleShape)) {
+        IconButton({ model.core.command(Command.Unwatch(person.user)) }) {
+            Icon(Icons.Default.VisibilityOff, "Stop Watching")
+        }
+        if (activity != null) {
+            IconButton({ enterPictureInPicture(activity, model, person.user, share) }) {
+                Icon(Icons.Default.PictureInPictureAlt, "Picture in Picture")
+            }
+        }
+        if (fullscreen) {
+            IconButton({ model.fullscreenShare = null }) { Icon(Icons.Default.FullscreenExit, "Exit Fullscreen") }
+        } else {
+            IconButton({ model.fullscreenShare = person.user }) { Icon(Icons.Default.Fullscreen, "Fullscreen") }
         }
     }
 }
