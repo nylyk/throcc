@@ -319,6 +319,10 @@ fn spawn_ready(
 }
 
 impl Capture for PipeWireCapture {
+    fn repeat_timestamp(&mut self) -> Option<u32> {
+        self.clock.video(monotonic_nanos())
+    }
+
     fn next_dmabuf(&mut self) -> Option<&DmaBuf> {
         self.give_back();
         while let Some(held) = self.pop_dmabuf() {
@@ -336,6 +340,10 @@ impl Capture for PipeWireCapture {
             return Some(&held.frame);
         }
         None
+    }
+
+    fn current_dmabuf(&self) -> Option<&DmaBuf> {
+        self.current.as_ref().map(|held| &held.frame)
     }
 
     fn refuse_dmabuf(&mut self, modifier: Option<u64>) {

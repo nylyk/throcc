@@ -139,6 +139,18 @@ fn queue_output<T: Send + 'static>(
     Ok(consumer)
 }
 
+/// Now on the host clock, which samples' presentation times are on, in nanoseconds.
+fn host_now_nanos() -> i64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime only writes the timespec it is given. CLOCK_UPTIME_RAW is the
+    // clock mach_absolute_time counts, which the host clock is.
+    unsafe { libc::clock_gettime(libc::CLOCK_UPTIME_RAW, &mut now) };
+    now.tv_sec * NANOS as i64 + now.tv_nsec
+}
+
 /// A sample's presentation time on the host clock, in nanoseconds.
 fn host_nanos(sample: &CMSampleBuffer) -> i64 {
     let time = sample.presentation_timestamp();
@@ -182,6 +194,10 @@ impl MacCapture {
 }
 
 impl Capture for MacCapture {
+    fn repeat_timestamp(&mut self) -> Option<u32> {
+        self.clock.video(host_now_nanos())
+    }
+
     fn next_frame(&mut self, into: &mut VideoFrame) -> bool {
         self.pop().is_some_and(|picture| picture.copy_into(into))
     }

@@ -72,6 +72,11 @@ pub trait Capture: Send {
     fn next_dmabuf(&mut self) -> Option<&DmaBuf> {
         None
     }
+    /// The frame [`Capture::next_dmabuf`] returned last, while it is still held.
+    #[cfg(target_os = "linux")]
+    fn current_dmabuf(&self) -> Option<&DmaBuf> {
+        None
+    }
     /// Asks for no more frames in GPU memory with `modifier`, or none at all without one.
     /// Those already captured are skipped.
     #[cfg(target_os = "linux")]
@@ -80,6 +85,11 @@ pub trait Capture: Send {
     /// into. Never blocks.
     #[cfg(target_os = "macos")]
     fn next_pixel_buffer(&mut self) -> Option<PixelBuffer> {
+        None
+    }
+    /// A timestamp for sending the last picture again now: on this capture's clock, and
+    /// after every picture before it. `None` where the capture can't tell the time.
+    fn repeat_timestamp(&mut self) -> Option<u32> {
         None
     }
     /// Frames and audio buffers the capture callbacks dropped because a ring was full.

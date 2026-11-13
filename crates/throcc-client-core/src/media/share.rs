@@ -15,6 +15,8 @@ use super::capture::{Capture, CaptureConfig, CaptureError, FrameLimiter};
 use super::engine::{Kind, MediaEngine, Outgoing, Received};
 use super::share_audio::{Playout, STEREO_FRAME, ShareAudioEncoder, due_frames};
 use super::video::{Picture, PreviewDemand};
+#[cfg(target_os = "macos")]
+use throcc_video::PixelBuffer;
 #[cfg(target_os = "linux")]
 use throcc_video::Refusal;
 use throcc_video::frame::{VideoFrame, share_size};
@@ -23,6 +25,9 @@ use throcc_video::{
 };
 
 const IDLE: Duration = Duration::from_millis(2);
+/// A share whose screen stands still sends its last picture again this often, so viewers
+/// keep getting pictures and a keyframe asked for comes out with the next one.
+const STILL_REPEAT: Duration = Duration::from_millis(500);
 /// How long a share's decode thread sleeps between looks while it holds no picture.
 const WAITING: Duration = Duration::from_millis(10);
 /// Units waiting to be decoded past which decoding has fallen behind, half a second at
@@ -204,7 +209,9 @@ impl ShareSender {
             engine,
             tracks,
             frame,
-            unsent: first == Some(First::Copied),
+            unsent: first.is_some(),
+            last: Last::Nothing,
+            last_sent: Instant::now(),
             self_view: self_tx,
             admission: Admission {
                 limiter: FrameLimiter::new(capture_config.fps),
@@ -260,14 +267,31 @@ struct Sending {
     engine: Arc<MediaEngine>,
     tracks: ShareTracks,
     frame: VideoFrame,
-    /// Whether `frame` holds a captured picture that has not been sent yet.
+    /// Whether the first captured picture, in `frame` or still held by the capture in GPU
+    /// memory, has not been sent yet.
     unsent: bool,
+    /// Where the last picture sent is, to send it again while the screen stands still.
+    last: Last,
+    /// When a picture was last given to the encoder.
+    last_sent: Instant,
     self_view: watch::Sender<Option<Arc<Frame>>>,
     admission: Admission,
     tally: Tally,
     /// Whether captured pixel buffers go to the encoder uncopied.
     #[cfg(target_os = "macos")]
     pixel_buffers: bool,
+}
+
+/// Where the last picture sent is kept.
+enum Last {
+    Nothing,
+    /// In [`Sending::frame`].
+    Memory,
+    /// In the encoder, which took it in GPU memory.
+    #[cfg(target_os = "linux")]
+    Gpu,
+    #[cfg(target_os = "macos")]
+    PixelBuffer(PixelBuffer),
 }
 
 impl Sending {
@@ -294,7 +318,11 @@ impl Sending {
             let fresh =
                 std::mem::take(&mut self.unsent) || self.capture.next_frame(&mut self.frame);
             if !fresh {
-                std::thread::sleep(IDLE);
+                if self.last_sent.elapsed() >= STILL_REPEAT {
+                    self.send_again();
+                } else {
+                    std::thread::sleep(IDLE);
+                }
                 continue;
             }
             let Some(self_view) = self.admission.admit(self.frame.timestamp) else {
@@ -313,16 +341,24 @@ impl Sending {
     /// no more like it, so frames arrive in shared memory instead. True if there was one.
     #[cfg(target_os = "linux")]
     fn send_dmabuf(&mut self) -> bool {
-        let Some(frame) = self.capture.next_dmabuf() else {
+        let frame = if self.unsent {
+            self.capture.current_dmabuf()
+        } else {
+            self.capture.next_dmabuf()
+        };
+        let Some(frame) = frame else {
             return false;
         };
+        self.unsent = false;
         let modifier = frame.modifier;
         let Some(self_view) = self.admission.admit(frame.timestamp) else {
             return true;
         };
         let preview = self_view.then_some(SELF_VIEW_WIDTH);
+        self.last_sent = Instant::now();
         match self.encoder.encode_dmabuf(frame, preview) {
             Ok(encoded) => {
+                self.last = Last::Gpu;
                 self.send_units(encoded.units);
                 match encoded.preview {
                     Some(Ok(preview)) => {
@@ -333,16 +369,22 @@ impl Sending {
                     None => {}
                 }
             }
-            Err(e) => match e.refusal(modifier) {
-                Some(refused) => {
-                    warn!(?refused, "falling back to frames in shared memory: {e}");
-                    self.capture.refuse_dmabuf(match refused {
-                        Refusal::Modifier(modifier) => Some(modifier),
-                        Refusal::All => None,
-                    });
+            Err(e) => {
+                // The encoder's last picture is older than the one that failed.
+                if matches!(self.last, Last::Gpu) {
+                    self.last = Last::Nothing;
                 }
-                None => warn!("encoding failed: {e}"),
-            },
+                match e.refusal(modifier) {
+                    Some(refused) => {
+                        warn!(?refused, "falling back to frames in shared memory: {e}");
+                        self.capture.refuse_dmabuf(match refused {
+                            Refusal::Modifier(modifier) => Some(modifier),
+                            Refusal::All => None,
+                        });
+                    }
+                    None => warn!("encoding failed: {e}"),
+                }
+            }
         }
         true
     }
@@ -355,13 +397,18 @@ impl Sending {
             return false;
         };
         let Some(self_view) = self.admission.admit(picture.timestamp) else {
+            // Skipped for the frame rate, but the newest picture, to send if the screen stops.
+            self.last = Last::PixelBuffer(picture);
             return true;
         };
         if self_view {
             let shown = Frame::PixelBuffer(picture.clone());
             self.self_view.send_replace(Some(Arc::new(shown)));
         }
-        match self.encoder.encode_pixel_buffer(&picture) {
+        let encoded = self.encoder.encode_pixel_buffer(&picture);
+        self.last = Last::PixelBuffer(picture);
+        self.last_sent = Instant::now();
+        match encoded {
             Ok(units) => self.send_units(units),
             Err(e) => warn!("encoding failed: {e}"),
         }
@@ -382,9 +429,43 @@ impl Sending {
     }
 
     fn send_video(&mut self) {
+        self.last = Last::Memory;
+        self.last_sent = Instant::now();
         match self.encoder.encode(&self.frame) {
             Ok(units) => self.send_units(units),
             Err(e) => warn!("encoding failed: {e}"),
+        }
+    }
+
+    /// Encodes the last picture sent again, stamped now.
+    fn send_again(&mut self) {
+        self.last_sent = Instant::now();
+        if matches!(self.last, Last::Nothing) {
+            return;
+        }
+        let Some(timestamp) = self.capture.repeat_timestamp() else {
+            return;
+        };
+        let encoded = match &self.last {
+            Last::Nothing => return,
+            Last::Memory => {
+                self.frame.timestamp = timestamp;
+                self.encoder.encode(&self.frame)
+            }
+            #[cfg(target_os = "linux")]
+            Last::Gpu => self.encoder.encode_gpu_again(timestamp),
+            #[cfg(target_os = "macos")]
+            Last::PixelBuffer(picture) => {
+                let again = PixelBuffer {
+                    buffer: picture.buffer.clone(),
+                    timestamp,
+                };
+                self.encoder.encode_pixel_buffer(&again)
+            }
+        };
+        match encoded {
+            Ok(units) => self.send_units(units),
+            Err(e) => warn!("encoding the still picture again failed: {e}"),
         }
     }
 

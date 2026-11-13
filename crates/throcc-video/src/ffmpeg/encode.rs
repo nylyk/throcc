@@ -150,6 +150,9 @@ pub struct Encoder {
     /// The VA-API device of a VA-API encoder.
     #[cfg(target_os = "linux")]
     device: Option<AVHWDeviceContext>,
+    /// The surface [`Encoder::encode_dmabuf`] last encoded, for [`Encoder::encode_gpu_again`].
+    #[cfg(target_os = "linux")]
+    last_surface: Option<AVFrame>,
     #[cfg(target_os = "linux")]
     gpu: Option<GpuInput>,
 }
@@ -233,6 +236,8 @@ impl Encoder {
                     fitter: None,
                     #[cfg(target_os = "linux")]
                     device,
+                    #[cfg(target_os = "linux")]
+                    last_surface: None,
                     #[cfg(target_os = "linux")]
                     gpu: None,
                 })
@@ -353,8 +358,19 @@ impl Encoder {
         let preview =
             preview_width.map(|width| previews.draw(vpp, &imported, frame.timestamp, width));
         drop(imported);
+        self.last_surface = Some(surface.clone());
         let units = self.submit(surface, frame.timestamp)?;
         Ok(GpuEncoded { units, preview })
+    }
+
+    /// Encodes the picture [`Encoder::encode_dmabuf`] took last again, stamped `timestamp`.
+    /// Nothing before the first.
+    #[cfg(target_os = "linux")]
+    pub fn encode_gpu_again(&mut self, timestamp: u32) -> Result<Vec<EncodedUnit>, EncodeError> {
+        match self.last_surface.clone() {
+            Some(surface) => self.submit(surface, timestamp),
+            None => Ok(Vec::new()),
+        }
     }
 
     #[cfg(target_os = "linux")]

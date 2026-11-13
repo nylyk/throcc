@@ -76,7 +76,7 @@ In order:
 
 Also open, from the tablet: senders could encode AV1 in several tiles (NVENC and VA-API take a tile layout), so dav1d spreads over more cores on devices without AV1 hardware. And a sender could pick a codec every viewer decodes in hardware, which needs a protocol change and is undecided.
 
-Also open: a receiver that lost its references (a decoder replaced, a backlog dropped, a new view on Android) skips units until a keyframe and asks for one, but a sender whose screen stands still sends nothing, so the viewer keeps an old picture, or none in a new decoder. This is the black or wrongly sized tile seen after leaving fullscreen on a still share. Sending a keyframe of the still screen again was tried (`695b748`, `d2af1e5`) and reverted in `970124a` because it did not work; a fix needs another approach, such as the Android decoder keeping its last picture where it can draw it again.
+A still screen sends nothing, so a new decoder or a phone's new view had no picture to show: the black or wrongly sized tile after leaving fullscreen. The sender now encodes its last picture again after 500 ms without a new one, stamped on the capture's clock (`Capture::repeat_timestamp`), so viewers get at least two pictures a second and an IDR asked for comes with the next. Works from macOS to the tablet. Not yet run from Linux, whose capture sends nothing at all while still; Windows has no `repeat_timestamp` yet and doesn't repeat.
 
 Also seen: `crates/throcc-cli/tests/share.rs` calls `share::receive` with too few arguments since before these changes. It builds only with `--features ffmpeg`, so CI misses it.
 

@@ -50,6 +50,11 @@ impl Encoder {
     ) -> Result<GpuEncoded, EncodeError> {
         match self.0 {}
     }
+
+    #[cfg(target_os = "linux")]
+    pub fn encode_gpu_again(&mut self, _timestamp: u32) -> Result<Vec<EncodedUnit>, EncodeError> {
+        match self.0 {}
+    }
 }
 
 /// No encoder here takes frames in GPU memory.
