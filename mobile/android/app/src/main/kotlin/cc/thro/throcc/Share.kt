@@ -1,7 +1,9 @@
 package cc.thro.throcc
 
 import android.app.Activity
+import android.app.PictureInPictureParams
 import android.content.pm.ActivityInfo
+import android.util.Rational
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -18,6 +20,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -28,14 +31,16 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.PictureInPictureAlt
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.PlainTooltip
 import androidx.compose.material3.Text
@@ -162,7 +167,7 @@ private fun Loading(state: CoreState, user: ULong) {
 
 /** Whose share this is, over the picture. */
 @Composable
-private fun Sharer(model: AppModel, person: Person, modifier: Modifier = Modifier) {
+private fun Sharer(model: AppModel, person: Person, details: String, modifier: Modifier = Modifier) {
     Row(
         modifier
             .background(MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.8f), CircleShape)
@@ -173,11 +178,28 @@ private fun Sharer(model: AppModel, person: Person, modifier: Modifier = Modifie
         PersonPicture(model, person, 24.dp)
         Text(
             person.name,
+            Modifier.weight(1f, fill = false),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             style = MaterialTheme.typography.labelLarge,
         )
+        Text(
+            details,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            style = MaterialTheme.typography.labelMedium,
+        )
     }
+}
+
+/** Shows `user`'s share fullscreen in a small window over other apps. */
+private fun enterPictureInPicture(activity: Activity, model: AppModel, user: ULong, share: Share) {
+    // Android takes no window wider than 2.39:1 or narrower than its inverse.
+    val aspect = share.aspect.coerceIn(0.42f, 2.39f)
+    model.fullscreenBeforePictureInPicture = model.fullscreenShare
+    model.fullscreenShare = user
+    val params = PictureInPictureParams.Builder().setAspectRatio(Rational((aspect * 1000).toInt(), 1000)).build()
+    activity.enterPictureInPictureMode(params)
 }
 
 /** The share being watched in the room, at most [MAX_TILE_HEIGHT] of the window's height, with a way to fullscreen it. */
@@ -198,14 +220,32 @@ fun ShareTile(model: AppModel, state: CoreState, person: Person, share: Share) {
                     ShareSurface(model, person.user, Modifier.aspectRatio(share.aspect))
                     Loading(state, person.user)
                 }
-                warning?.let { Box(Modifier.align(Alignment.TopStart).padding(12.dp)) { WarningPill(it) } }
-                Sharer(model, person, Modifier.align(Alignment.BottomStart).padding(12.dp))
-                Row(Modifier.align(Alignment.TopEnd).padding(8.dp), Arrangement.spacedBy(8.dp)) {
-                    FilledTonalIconButton({ model.fullscreenShare = person.user }) {
-                        Icon(Icons.Default.Fullscreen, "Fullscreen")
+                Row(
+                    Modifier.fillMaxWidth().align(Alignment.TopStart).padding(12.dp),
+                    Arrangement.spacedBy(8.dp),
+                    Alignment.CenterVertically,
+                ) {
+                    Sharer(model, person, share.label, Modifier.weight(1f, fill = false))
+                    Spacer(Modifier.weight(1f))
+                    warning?.let { WarningPill(it) }
+                }
+                val activity = LocalView.current.context as? Activity
+                Row(
+                    Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(12.dp)
+                        .background(MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.8f), CircleShape),
+                ) {
+                    IconButton({ model.core.command(Command.Unwatch(person.user)) }) {
+                        Icon(Icons.Default.VisibilityOff, "Stop Watching")
                     }
-                    FilledTonalIconButton({ model.core.command(Command.Unwatch(person.user)) }) {
-                        Icon(Icons.Default.Close, "Stop Watching")
+                    if (activity != null) {
+                        IconButton({ enterPictureInPicture(activity, model, person.user, share) }) {
+                            Icon(Icons.Default.PictureInPictureAlt, "Picture in Picture")
+                        }
+                    }
+                    IconButton({ model.fullscreenShare = person.user }) {
+                        Icon(Icons.Default.Fullscreen, "Fullscreen")
                     }
                 }
             }
@@ -231,6 +271,12 @@ fun ShareFullscreen(model: AppModel, state: CoreState) {
         if (share == null || !watching) model.fullscreenShare = null
     }
     if (share == null) return
+    if (model.pictureInPicture) {
+        Box(Modifier.fillMaxSize().background(Color.Black), Alignment.Center) {
+            ShareSurface(model, user, Modifier.aspectRatio(share.aspect), onTop = true)
+        }
+        return
+    }
     BackHandler { model.fullscreenShare = null }
     Immersive()
     Turning()

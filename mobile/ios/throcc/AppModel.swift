@@ -83,6 +83,7 @@ final class AppModel {
     var sampleConnection: Connection?
     /// The share shown over the whole screen, if any.
     var fullscreenShare: UInt64?
+    @ObservationIgnored private(set) lazy var pictureInPicture = SharePictureInPicture(core: core)
     @ObservationIgnored private let decoded = NSCache<NSData, UIImage>()
     /// The hashes of the pictures the core was asked for on this connection.
     @ObservationIgnored private var askedPictures: Set<Data> = []
@@ -342,6 +343,12 @@ final class AppModel {
                 || new.people.first(where: { $0.user == user })?.sharing == nil
         {
             fullscreenShare = nil
+        }
+        if let user = pictureInPicture.showing?.user,
+            !(new.current?.watching.contains(user) ?? false)
+                || new.people.first(where: { $0.user == user })?.sharing == nil
+        {
+            pictureInPicture.stop()
         }
         callAudio?.follow(inRoom: new.liveRoom != nil)
         if let sampleConnection {

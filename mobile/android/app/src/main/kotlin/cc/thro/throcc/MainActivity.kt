@@ -2,6 +2,7 @@ package cc.thro.throcc
 
 import android.app.Activity
 import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -17,6 +18,12 @@ class MainActivity : ComponentActivity() {
         uprightOnPhones()
         model = (application as ThroccApp).open(intent)
         setContent { App(model) }
+    }
+
+    override fun onPictureInPictureModeChanged(inPictureInPicture: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(inPictureInPicture, newConfig)
+        model.pictureInPicture = inPictureInPicture
+        if (!inPictureInPicture) model.fullscreenShare = model.fullscreenBeforePictureInPicture
     }
 
     override fun onStart() {

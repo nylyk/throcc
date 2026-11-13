@@ -1,4 +1,5 @@
 import AVFoundation
+import AVKit
 import SwiftUI
 import UIKit
 
@@ -13,9 +14,15 @@ final class SampleBufferView: UIView {
     }
 }
 
-/// `user`'s share, fitted into the view in its shape.
+/// Where a share surface's view is, once made.
+final class SurfaceHandle {
+    weak var view: UIView?
+}
+
+/// `user`'s share, fitted into the view in its shape. `handle` learns the view.
 struct ShareSurface: UIViewRepresentable {
     let user: UInt64
+    var handle: SurfaceHandle?
     @Environment(AppModel.self) private var model
 
     final class Coordinator {
@@ -42,6 +49,7 @@ struct ShareSurface: UIViewRepresentable {
         // The core takes over a reference to the layer.
         let layer = UInt64(UInt(bitPattern: Unmanaged.passRetained(view.displayLayer).toOpaque()))
         context.coordinator.shown = model.core.showShare(user: user, view: layer)
+        handle?.view = view
         return view
     }
 
@@ -58,34 +66,47 @@ struct ShareTile: View {
     let share: Share
     let maxHeight: CGFloat
     @Environment(AppModel.self) private var model
+    @State private var surface = SurfaceHandle()
 
     var body: some View {
         ZStack {
             Color.black
             // Kept under fullscreen, so the share goes back to it unchanged.
-            ShareSurface(user: person.user)
+            ShareSurface(user: person.user, handle: surface)
             Loading(user: person.user)
             VStack {
                 HStack(spacing: 8) {
+                    Sharer(person: person, details: share.label)
+                    Spacer()
                     if let warning = ShareWarning(health: model.state.health, user: person.user) {
                         WarningPill(warning: warning)
                     }
-                    Spacer()
-                    Button("Fullscreen", systemImage: "arrow.up.left.and.arrow.down.right") {
-                        model.fullscreenShare = person.user
-                    }
-                    Button("Stop Watching", systemImage: "xmark") {
-                        model.core.command(command: .unwatch(user: person.user))
-                    }
                 }
-                .labelStyle(.iconOnly)
-                .buttonStyle(.bordered)
-                .buttonBorderShape(.circle)
-                .tint(.white)
                 Spacer()
                 HStack {
-                    Sharer(person: person)
                     Spacer()
+                    HStack(spacing: 16) {
+                        Button("Stop Watching", systemImage: "eye.slash") {
+                            model.core.command(command: .unwatch(user: person.user))
+                        }
+                        if AVPictureInPictureController.isPictureInPictureSupported() {
+                            Button("Picture in Picture", systemImage: "pip.enter") {
+                                if let view = surface.view {
+                                    let size = CGSize(width: Int(share.width), height: Int(share.height))
+                                    model.pictureInPicture.start(user: person.user, size: size, from: view)
+                                }
+                            }
+                        }
+                        Button("Fullscreen", systemImage: "arrow.up.left.and.arrow.down.right") {
+                            model.fullscreenShare = person.user
+                        }
+                    }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.borderless)
+                    .tint(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(.black.opacity(0.6), in: .capsule)
                 }
             }
             .padding(8)
@@ -182,11 +203,13 @@ private struct Loading: View {
 /// Whose share this is, over the picture.
 private struct Sharer: View {
     let person: Person
+    let details: String
 
     var body: some View {
         HStack(spacing: 8) {
             PersonPicture(person: person, size: 24)
             Text(person.name).lineLimit(1).foregroundStyle(.white)
+            Text(details).lineLimit(1).foregroundStyle(.white.opacity(0.7))
         }
         .font(.footnote.weight(.medium))
         .padding(.leading, 4)

@@ -139,6 +139,12 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
     /** The share shown over the whole window, if any. */
     var fullscreenShare by mutableStateOf<ULong?>(null)
 
+    /** Whether the window is a picture in picture of [fullscreenShare]. */
+    var pictureInPicture by mutableStateOf(false)
+
+    /** The share that was fullscreen before picture in picture, shown again after it. */
+    var fullscreenBeforePictureInPicture: ULong? = null
+
     var profile by mutableStateOf(core.profile())
         private set
     var voice by mutableStateOf(core.voice())
