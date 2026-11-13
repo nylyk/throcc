@@ -26,6 +26,17 @@ android {
     buildFeatures {
         compose = true
     }
+
+    val keystore = providers.environmentVariable("ANDROID_KEYSTORE_FILE")
+    if (keystore.isPresent) {
+        val password = providers.environmentVariable("ANDROID_KEYSTORE_PASSWORD").get()
+        buildTypes.getByName("release").signingConfig = signingConfigs.create("release") {
+            storeFile = file(keystore.get())
+            storePassword = password
+            keyAlias = "throcc"
+            keyPassword = password
+        }
+    }
 }
 
 dependencies {

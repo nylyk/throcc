@@ -167,7 +167,7 @@ From phase 3 on, the iOS and Android work in each phase can run in parallel.
 
 ## Releases
 
-A mobile release follows the desktop steps with its own tag. `ios-vX.Y.Z` uploads to App Store Connect for review. `android-vX.Y.Z` attaches the signed APK and `SHA256SUMS` to a GitHub release; F-Droid picks up the tag itself. The Android update check looks for `android-v` releases and is off by default, since F-Droid users get updates there. iOS has no update check.
+A mobile release follows the desktop steps with its own tag. `ios-vX.Y.Z` uploads to App Store Connect for review. `android-vX.Y.Z` attaches the signed APK and `SHA256SUMS` to a draft GitHub release that never becomes the latest; F-Droid picks up the tag itself. An Android release first bumps `versionCode` and `versionName` in `app/build.gradle.kts`. The packaging workflow signs with the PKCS12 keystore in the `ANDROID_KEYSTORE` secret, base64-encoded, whose key `throcc` shares the `ANDROID_KEYSTORE_PASSWORD` secret. The Android update check looks for `android-v` releases and is off by default, since F-Droid users get updates there. iOS has no update check.
 
 ## Risks
 
