@@ -30,7 +30,7 @@ dav1d-sys.workspace = true
 vpx-sys.workspace = true
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
-objc2-core-foundation = { workspace = true, features = ["std", "CFArray", "CFBase", "CFDictionary", "CFNumber", "CFString"] }
+objc2-core-foundation = { workspace = true, features = ["std", "CFArray", "CFBase", "CFData", "CFDictionary", "CFNumber", "CFString"] }
 objc2-core-media.workspace = true
 objc2-core-video.workspace = true
 objc2-video-toolbox.workspace = true

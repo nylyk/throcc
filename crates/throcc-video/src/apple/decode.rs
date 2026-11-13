@@ -17,6 +17,7 @@ use objc2_video_toolbox::{
 use throcc_proto::messages::Codec;
 use tracing::{info, warn};
 
+use super::av1;
 use super::transfer::Pool;
 use super::{NO_ERR, PixelBuffer, TIMESCALE, attributes};
 use crate::frame::VideoFrame;
@@ -28,10 +29,14 @@ use crate::{DecodeError, Frame, MaxSize, Output};
 /// is gone or broken, as after iOS took the hardware from a backgrounded app, and has to be
 /// made again.
 const LOST_SESSION: [i32; 2] = [-12903, -12911];
+/// VideoToolbox's `kVTCouldNotFindVideoDecoderErr` and
+/// `kVTVideoDecoderUnsupportedDataFormatErr`: no decoder here takes the stream.
+const UNSUPPORTED: [i32; 2] = [-12906, -12910];
 
 /// Decodes one remote share into pixel buffers: H.264 and HEVC in VideoToolbox, which falls
-/// back to Apple's own software decoders where the hardware lacks them, AV1 in dav1d and
-/// VP9 in libvpx. Shows the newest frame; presentation time is ignored.
+/// back to Apple's own software decoders where the hardware lacks them, AV1 in VideoToolbox
+/// where the hardware has it and in dav1d otherwise, and VP9 in libvpx. Shows the newest
+/// frame; presentation time is ignored.
 pub struct Decoder {
     inner: Inner,
     max_size: MaxSize,
@@ -70,6 +75,9 @@ impl Decoder {
         };
         let inner = match codec {
             Codec::H264 | Codec::Hevc => Inner::VideoToolbox(VideoToolbox::new(codec)),
+            Codec::Av1 if av1::decodes_in_hardware() => {
+                Inner::VideoToolbox(VideoToolbox::new(codec))
+            }
             Codec::Av1 => software(Software::Dav1d(dav1d::Decoder::new(max_size)?)),
             Codec::Vp9 => software(Software::Vpx(vpx::Decoder::new(max_size)?)),
         };
@@ -120,6 +128,16 @@ impl Decoder {
                 if decoder.take_lost() {
                     self.flushed = true;
                 }
+                let refused = decoder.codec == Codec::Av1
+                    && !decoder.opened
+                    && match decoded {
+                        Err(DecodeError::VideoToolbox(status)) => UNSUPPORTED.contains(&status),
+                        Err(DecodeError::Dav1d(_)) => true,
+                        _ => false,
+                    };
+                if refused {
+                    return self.decode_in_dav1d(unit, timestamp);
+                }
                 Ok(decoded?.map(Frame::PixelBuffer))
             }
             Inner::Software {
@@ -137,6 +155,22 @@ impl Decoder {
                 Ok(Some(upload(pool, frame, spare)))
             }
         }
+    }
+
+    /// Hands AV1 that VideoToolbox can't decode, or whose sequence header it can't describe,
+    /// to dav1d for good.
+    fn decode_in_dav1d(
+        &mut self,
+        unit: &[u8],
+        timestamp: u32,
+    ) -> Result<Option<Frame>, DecodeError> {
+        warn!("VideoToolbox can't decode this AV1 share; decoding it in dav1d");
+        self.inner = Inner::Software {
+            decoder: Software::Dav1d(dav1d::Decoder::new(self.max_size)?),
+            pool: None,
+            spare: None,
+        };
+        self.decode(unit, timestamp)
     }
 
     /// Waits for pictures still being decoded and returns the newest, for when units have
@@ -197,11 +231,13 @@ struct Decoded {
     picture: Option<CFRetained<CVImageBuffer>>,
 }
 
-/// H.264 or HEVC in VideoToolbox. The session is made from the first parameter sets and
-/// made again whenever ones it can't take arrive.
+/// H.264, HEVC or AV1 in VideoToolbox. The session is made from the first parameter sets,
+/// for AV1 the sequence header, and made again whenever ones it can't take arrive.
 struct VideoToolbox {
     codec: Codec,
     session: Option<Session>,
+    /// Whether a session ever opened.
+    opened: bool,
     /// The parameter sets the session's format description was made from.
     parameter_sets: Vec<Vec<u8>>,
     /// Where the output callback leaves each picture. Boxed, so its address holds while the
@@ -232,6 +268,7 @@ impl VideoToolbox {
         Self {
             codec,
             session: None,
+            opened: false,
             parameter_sets: Vec::new(),
             decoded: Box::default(),
             lost: false,
@@ -248,17 +285,26 @@ impl VideoToolbox {
         timestamp: u32,
         max_size: MaxSize,
     ) -> Result<Option<PixelBuffer>, DecodeError> {
-        let split = nal::split(self.codec, unit);
-        if !split.parameter_sets.is_empty() && split.parameter_sets != self.parameter_sets {
-            self.start(&split.parameter_sets, max_size)?;
+        let (parameter_sets, data) = match self.codec {
+            Codec::Av1 => {
+                let split = av1::split(unit);
+                (split.sequence_header.into_iter().collect(), split.sample)
+            }
+            codec => {
+                let split = nal::split(codec, unit);
+                (split.parameter_sets, split.length_prefixed)
+            }
+        };
+        if !parameter_sets.is_empty() && parameter_sets != self.parameter_sets {
+            self.start(&parameter_sets, max_size)?;
         }
         let Some(session) = &self.session else {
             return Err(DecodeError::NoKeyframe);
         };
-        if split.length_prefixed.is_empty() {
+        if data.is_empty() {
             return Ok(None);
         }
-        let sample = sample_buffer(&split.length_prefixed, &session.format, timestamp)?;
+        let sample = sample_buffer(&data, &session.format, timestamp)?;
         *lock(&self.decoded) = Decoded::default();
         let mut info = VTDecodeInfoFlags::empty();
         // SAFETY: the session and sample are live, and decoding synchronously calls the
@@ -302,7 +348,7 @@ impl VideoToolbox {
     /// running one takes it.
     fn start(&mut self, parameter_sets: &[&[u8]], max_size: MaxSize) -> Result<(), DecodeError> {
         let format = format_description(self.codec, parameter_sets)?;
-        // SAFETY: a description made from H.264 or HEVC parameter sets is a video one.
+        // SAFETY: every description made here is a video one.
         let size = unsafe { CMVideoFormatDescriptionGetDimensions(&format) };
         if !max_size.fits(size.width.into(), size.height.into()) {
             return Err(DecodeError::TooLarge(size.width, size.height));
@@ -319,6 +365,7 @@ impl VideoToolbox {
             self.session = None;
             self.parameter_sets.clear();
             self.session = Some(self.open(format)?);
+            self.opened = true;
         }
         // Only once a session takes them, so a failed one is tried again with the next
         // keyframe's.
@@ -388,11 +435,17 @@ unsafe extern "C-unwind" fn decoded(
     output.picture = NonNull::new(picture).map(|picture| unsafe { CFRetained::retain(picture) });
 }
 
-/// A format description made from H.264 or HEVC parameter sets.
+/// A format description made from H.264 or HEVC parameter sets, or an AV1 sequence header.
 fn format_description(
     codec: Codec,
     parameter_sets: &[&[u8]],
 ) -> Result<CFRetained<CMFormatDescription>, DecodeError> {
+    if codec == Codec::Av1 {
+        let [sequence_header] = parameter_sets else {
+            return Err(DecodeError::NoKeyframe);
+        };
+        return av1::format_description(sequence_header);
+    }
     let pointers: Vec<NonNull<u8>> = parameter_sets
         .iter()
         .map(|set| NonNull::from(*set).cast::<u8>())
@@ -437,7 +490,8 @@ fn format_description(
     Ok(unsafe { CFRetained::from_raw(raw) })
 }
 
-/// A sample buffer holding a copy of `data`, length-prefixed NAL units of one access unit.
+/// A sample buffer holding a copy of `data`, one access unit: length-prefixed NAL units, or
+/// AV1 OBUs.
 fn sample_buffer(
     data: &[u8],
     format: &CMFormatDescription,

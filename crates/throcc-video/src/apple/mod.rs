@@ -1,9 +1,10 @@
-//! VideoToolbox on macOS and iOS: H.264 and HEVC decoded into pixel buffers renderers draw
-//! uncopied, and encoded in hardware from captured pixel buffers. AV1 decodes in dav1d and
-//! VP9 in libvpx, into pixel buffers too; macOS encodes VP9 in libvpx where it has no
-//! hardware encoder.
+//! VideoToolbox on macOS and iOS: H.264, HEVC and, where the hardware has it, AV1 decoded
+//! into pixel buffers renderers draw uncopied, and H.264 and HEVC encoded in hardware from
+//! captured pixel buffers. Other AV1 decodes in dav1d and VP9 in libvpx, into pixel buffers
+//! too; macOS encodes VP9 in libvpx where it has no hardware encoder.
 
 mod attributes;
+mod av1;
 mod decode;
 mod encode;
 mod pixel_buffer;

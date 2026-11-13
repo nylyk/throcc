@@ -182,9 +182,15 @@ fn software_decoders_hand_out_pixel_buffers() {
 }
 
 #[test]
-fn av1_decodes_in_dav1d_into_pixel_buffers() {
+fn av1_decodes_into_pixel_buffers_in_hardware_where_there_is_one() {
     let file = include_bytes!("../../testdata/pattern.ivf");
     let mut decoder = Decoder::new(Codec::Av1, MaxSize::ANY, Output::default()).unwrap();
+    let expected = if super::av1::decodes_in_hardware() {
+        "VideoToolbox"
+    } else {
+        "dav1d (software)"
+    };
+    assert_eq!(decoder.engine(), expected);
     for (n, unit) in crate::software::dav1d::ivf_units(file)
         .into_iter()
         .enumerate()
@@ -194,4 +200,5 @@ fn av1_decodes_in_dav1d_into_pixel_buffers() {
         assert!(matches!(output, Frame::PixelBuffer(_)));
         assert_eq!(output.copied_to_memory().read_test_number(), n as u16);
     }
+    assert_eq!(decoder.engine(), expected);
 }
