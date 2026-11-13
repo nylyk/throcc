@@ -143,6 +143,17 @@ impl Encoder {
 
     pub fn encode(&mut self, picture: &VideoFrame) -> Result<Vec<EncodedUnit>, EncodeError> {
         let force = std::mem::take(&mut self.idr_next);
+        let encoded = self.encode_frame(picture, force);
+        // An IDR asked for still comes with the next frame if this one failed.
+        self.idr_next |= force && encoded.is_err();
+        encoded
+    }
+
+    fn encode_frame(
+        &mut self,
+        picture: &VideoFrame,
+        force: bool,
+    ) -> Result<Vec<EncodedUnit>, EncodeError> {
         match &mut self.backend {
             Backend::VideoToolbox(vt) => {
                 let fitter = fitter(&mut self.fitter, (self.width, self.height))?;
@@ -181,12 +192,15 @@ impl Encoder {
             Backend::Vpx(_) => return Err(EncodeError::NoGpuInput),
         };
         let force = std::mem::take(&mut self.idr_next);
-        if (picture.width(), picture.height()) == (self.width, self.height) {
-            return vt.encode(picture, force);
-        }
-        let fitter = fitter(&mut self.fitter, (self.width, self.height))?;
-        let fitted = fitter.fit(picture).ok_or(EncodeError::Scaler)?;
-        vt.encode(&fitted, force)
+        let encoded = if (picture.width(), picture.height()) == (self.width, self.height) {
+            vt.encode(picture, force)
+        } else {
+            fitter(&mut self.fitter, (self.width, self.height))
+                .and_then(|fitter| fitter.fit(picture).ok_or(EncodeError::Scaler))
+                .and_then(|fitted| vt.encode(&fitted, force))
+        };
+        self.idr_next |= force && encoded.is_err();
+        encoded
     }
 }
 
@@ -352,6 +366,8 @@ impl VideoToolbox {
         force: bool,
     ) -> Result<Vec<EncodedUnit>, EncodeError> {
         let timestamp = picture.timestamp;
+        // What a frame that failed left behind belongs to no frame now.
+        lock(&self.outputs).clear();
         // SAFETY: a time made from plain values.
         let presentation = unsafe { CMTime::new(i64::from(timestamp), TIMESCALE) };
         let properties = force.then(|| self.force_keyframe.as_opaque());

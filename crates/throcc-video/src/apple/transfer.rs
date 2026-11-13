@@ -54,7 +54,7 @@ impl Pool {
 
     /// A buffer from the pool holding `frame`, which must be of the pool's size.
     pub fn upload(&self, frame: &VideoFrame) -> Option<PixelBuffer> {
-        let buffer = self.take(frame.timestamp)?;
+        let mut buffer = self.take(frame.timestamp)?;
         buffer.write(frame).then_some(buffer)
     }
 }

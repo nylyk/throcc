@@ -257,6 +257,7 @@ impl Decoder {
     ) -> Result<Option<VideoFrame>, DecodeError> {
         let len =
             c_uint::try_from(unit.len()).map_err(|_| DecodeError::Vpx("unit too large".into()))?;
+        self.check_size(unit, len)?;
         // SAFETY: `unit` is live for the call.
         let status = unsafe {
             vpx::vpx_codec_decode(&mut *self.ctx, unit.as_ptr(), len, ptr::null_mut(), 0)
@@ -297,6 +298,29 @@ impl Decoder {
             )
         };
         Ok(Some(frame))
+    }
+}
+
+impl Decoder {
+    /// Refuses a keyframe larger than allowed before libvpx allocates for it. libvpx is built
+    /// to refuse anything past [`crate::MAX_SIDE`] itself, which covers the size changes
+    /// predicted frames can make.
+    fn check_size(&self, unit: &[u8], len: c_uint) -> Result<(), DecodeError> {
+        let mut info = vpx::vpx_codec_stream_info_t {
+            sz: std::mem::size_of::<vpx::vpx_codec_stream_info_t>() as c_uint,
+            w: 0,
+            h: 0,
+            is_kf: 0,
+        };
+        // SAFETY: `unit` and `info` are live for the call, and `info.sz` says its size.
+        let status = unsafe {
+            vpx::vpx_codec_peek_stream_info(vpx::vpx_codec_vp9_dx(), unit.as_ptr(), len, &mut info)
+        };
+        let (width, height) = (i64::from(info.w), i64::from(info.h));
+        if status == vpx::vpx_codec_err_t::VPX_CODEC_OK && !self.max_size.fits(width, height) {
+            return Err(DecodeError::TooLarge(width as i32, height as i32));
+        }
+        Ok(())
     }
 }
 

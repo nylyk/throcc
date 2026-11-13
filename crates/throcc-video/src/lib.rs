@@ -145,23 +145,44 @@ pub struct GpuEncoded {
 /// The widest and tallest any decoded picture may be.
 pub const MAX_SIDE: usize = 4096;
 
-/// The largest picture a decoder hands on, each side at most [`MAX_SIDE`].
+/// Room above each side a share announces for decoders that pad pictures to their alignment.
+pub const DECODER_PADDING: usize = 64;
+
+/// The largest picture a decoder hands on, each side at most [`MAX_SIDE`], and the size the
+/// share announced, which a codec is set up for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MaxSize {
     width: usize,
     height: usize,
+    announced: (usize, usize),
 }
 
 impl MaxSize {
     pub const ANY: Self = Self {
         width: MAX_SIDE,
         height: MAX_SIDE,
+        announced: (MAX_SIDE, MAX_SIDE),
     };
 
     pub fn new(width: usize, height: usize) -> Self {
+        let (width, height) = (width.min(MAX_SIDE), height.min(MAX_SIDE));
         Self {
-            width: width.min(MAX_SIDE),
-            height: height.min(MAX_SIDE),
+            width,
+            height,
+            announced: (width, height),
+        }
+    }
+
+    /// The bound for a share announced at `width`×`height`: that, plus
+    /// [`DECODER_PADDING`] for decoders that pad pictures.
+    pub fn for_share(width: usize, height: usize) -> Self {
+        let padded = Self::new(
+            width.saturating_add(DECODER_PADDING),
+            height.saturating_add(DECODER_PADDING),
+        );
+        Self {
+            announced: (width.clamp(16, MAX_SIDE), height.clamp(16, MAX_SIDE)),
+            ..padded
         }
     }
 
@@ -172,6 +193,11 @@ impl MaxSize {
     /// The widest and the tallest a picture may be.
     pub fn sides(self) -> (usize, usize) {
         (self.width, self.height)
+    }
+
+    /// The size the share announced.
+    pub fn announced(self) -> (usize, usize) {
+        self.announced
     }
 
     /// Whether a picture of `width`×`height` fits. Negative sides never do.

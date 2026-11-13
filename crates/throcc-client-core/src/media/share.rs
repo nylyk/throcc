@@ -22,6 +22,8 @@ use throcc_video::{
 };
 
 const IDLE: Duration = Duration::from_millis(2);
+/// How long a share's decode thread sleeps between looks while it holds no picture.
+const WAITING: Duration = Duration::from_millis(10);
 /// Self-view gets every Nth frame.
 const SELF_VIEW_EVERY: u32 = 2;
 /// The widest a self-view picture held in memory is shrunk to. A macOS pixel buffer is shown
@@ -433,13 +435,10 @@ pub enum ShareError {
 const MAX_HELD: usize = 32;
 /// Bytes of decoded frames held back for the share audio, at most.
 const MAX_HELD_BYTES: usize = 256 << 20;
-/// Room above each announced side for decoders that pad pictures to their alignment.
-const DECODER_PADDING: usize = 64;
 
 /// The largest decoded picture a share announced as `config` may have.
 fn max_size(config: &ShareConfig) -> MaxSize {
-    let side = |announced: u16| usize::from(announced) + DECODER_PADDING;
-    MaxSize::new(side(config.width), side(config.height))
+    MaxSize::for_share(config.width.into(), config.height.into())
 }
 
 /// The bytes of an NV12 picture of `frame`'s size, wherever it is held.
@@ -507,20 +506,25 @@ pub fn receive(
             let mut asks = KeyframeAsks::default();
             let mut oversized: u64 = 0;
             loop {
-                let unit = if held.is_empty() {
-                    let Some(unit) = units.blocking_recv() else {
-                        return;
-                    };
-                    Some(unit)
-                } else {
-                    match units.try_recv() {
-                        Ok(unit) => Some(unit),
-                        Err(mpsc::error::TryRecvError::Empty) => {
-                            std::thread::sleep(IDLE);
-                            None
-                        }
-                        Err(mpsc::error::TryRecvError::Disconnected) => return,
+                // A sender sends nothing while its screen stands still, so the loop keeps
+                // turning without units to follow the app's view and show the picture again
+                // in a new one.
+                if decoder.follow_view() {
+                    if decoder.take_flushed() && asks.ask(Instant::now(), true, false) {
+                        ask_idr();
                     }
+                    let shown: Option<Arc<Frame>> = tx.borrow().clone();
+                    if let Some(shown) = shown {
+                        decoder.present(&shown);
+                    }
+                }
+                let unit = match units.try_recv() {
+                    Ok(unit) => Some(unit),
+                    Err(mpsc::error::TryRecvError::Empty) => {
+                        std::thread::sleep(if held.is_empty() { WAITING } else { IDLE });
+                        None
+                    }
+                    Err(mpsc::error::TryRecvError::Disconnected) => return,
                 };
                 if let Some(unit) = &unit {
                     let decoded = decoder.decode(&unit.data, unit.timestamp);
@@ -636,16 +640,15 @@ mod receive_tests {
 
     #[test]
     fn decoded_pictures_are_bounded_by_the_announced_size() {
+        let sides = |width, height| max_size(&config(width, height)).sides();
+        assert_eq!(sides(1280, 720), (1280 + 64, 720 + 64));
         assert_eq!(
-            max_size(&config(1280, 720)),
-            MaxSize::new(1280 + 64, 720 + 64)
+            sides(u16::MAX, 16),
+            MaxSize::new(usize::MAX, 16 + 64).sides()
         );
-        assert_eq!(
-            max_size(&config(u16::MAX, 16)),
-            MaxSize::new(usize::MAX, 16 + 64)
-        );
-        assert_eq!(max_size(&config(u16::MAX, u16::MAX)), MaxSize::ANY);
-        assert_eq!(max_size(&config(0, 0)), MaxSize::new(64, 64));
+        assert_eq!(sides(u16::MAX, u16::MAX), MaxSize::ANY.sides());
+        assert_eq!(sides(0, 0), (64, 64));
+        assert_eq!(max_size(&config(1920, 1080)).announced(), (1920, 1080));
     }
 
     #[test]

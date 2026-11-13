@@ -11,8 +11,15 @@ use crate::MaxSize;
 
 /// How long a decode waits for an input buffer, in microseconds.
 const INPUT_WAIT_US: i64 = 10_000;
+/// How long a decode waits for the picture of the unit it queued, in microseconds. A sender
+/// sends nothing while its screen stands still, so a picture left in the codec would wait
+/// for the next change.
+const OUTPUT_WAIT_US: i64 = 30_000;
+/// The error a unit too large for the codec's input buffer is refused with.
+pub const UNIT_TOO_LARGE: i32 = -1;
 /// Decoded pictures handed out and not yet shown or dropped, at most. Past it the oldest is
-/// dropped, so pictures held back for the share audio can't starve the codec of buffers.
+/// shown early, so pictures held back for the share audio can't starve the codec of
+/// buffers; video runs ahead of the audio by that much rather than freezing.
 const OUTSTANDING: usize = 3;
 
 fn mime(codec: Codec) -> &'static CStr {
@@ -110,7 +117,9 @@ impl MediaCodec {
         let shared = Arc::new(Shared {
             codec: Mutex::new(raw),
         });
-        let (width, height) = max_size.sides();
+        // The announced size: a codec refuses to configure past what it supports, and the
+        // padding that pictures may have on top would push a 1080p share over 1920×1088.
+        let (width, height) = max_size.announced();
         // SAFETY: the format is live until deleted below, and the keys are the NDK's.
         let configured = unsafe {
             let format = ndk::AMediaFormat_new();
@@ -170,8 +179,10 @@ impl MediaCodec {
             if index >= 0 {
                 let mut size = 0usize;
                 let buffer = ndk::AMediaCodec_getInputBuffer(codec, index as usize, &mut size);
-                let len = unit.len().min(size);
-                if !buffer.is_null() {
+                // A unit that doesn't fit goes back empty: cut short, it would decode wrong.
+                let fits = !buffer.is_null() && unit.len() <= size;
+                let len = if fits { unit.len() } else { 0 };
+                if fits {
                     std::ptr::copy_nonoverlapping(unit.as_ptr(), buffer, len);
                 }
                 let status =
@@ -179,21 +190,27 @@ impl MediaCodec {
                 if status != ndk::media_status_t::AMEDIA_OK {
                     return Err(status.0);
                 }
+                if !fits {
+                    return Err(UNIT_TOO_LARGE);
+                }
                 true
             } else {
                 false
             }
         };
         let mut out = Vec::new();
+        let mut wait = if queued { OUTPUT_WAIT_US } else { 0 };
         loop {
             // SAFETY: zeroed is how the call expects the struct, which it fills in.
             let mut info: ndk::AMediaCodecBufferInfo = unsafe { std::mem::zeroed() };
             // SAFETY: the codec is live.
-            let index = unsafe { ndk::AMediaCodec_dequeueOutputBuffer(codec, &mut info, 0) };
+            let index = unsafe { ndk::AMediaCodec_dequeueOutputBuffer(codec, &mut info, wait) };
             match index {
                 index if index >= 0 => {
                     let sequence = info.presentationTimeUs as u64;
                     out.push((sequence, self.hand_out(index as usize, max_size)));
+                    // The picture asked for is out; take what else is ready without waiting.
+                    wait = 0;
                 }
                 index if index == ndk::AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED as isize => {
                     self.size = output_size(codec);
@@ -220,7 +237,7 @@ impl MediaCodec {
         self.outstanding.retain(|slot| slot.strong_count() > 0);
         while self.outstanding.len() >= OUTSTANDING {
             if let Some(oldest) = self.outstanding.pop_front().and_then(|slot| slot.upgrade()) {
-                self.shared.release(&oldest, false);
+                self.shared.release(&oldest, true);
             }
         }
         self.outstanding.push_back(Arc::downgrade(&slot));

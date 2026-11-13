@@ -19,6 +19,8 @@ flags=(
     --enable-static --disable-shared --enable-pic
     --disable-examples --disable-tools --disable-docs --disable-unit-tests
     --disable-vp8 --enable-vp9 --enable-realtime-only --enable-multithread
+    # Refuse pictures past throcc-video's MAX_SIDE before allocating for them.
+    --size-limit=4096x4096
 )
 android_api=31
 case "$target" in

@@ -24,9 +24,10 @@ use crate::nal::{self, LENGTH_SIZE};
 use crate::software::{dav1d, vpx};
 use crate::{DecodeError, Frame, MaxSize, Output};
 
-/// VideoToolbox's `kVTInvalidSessionErr`: the session is gone, as after iOS took the
-/// hardware from a backgrounded app, and has to be made again.
-const INVALID_SESSION: i32 = -12903;
+/// VideoToolbox's `kVTInvalidSessionErr` and `kVTVideoDecoderMalfunctionErr`: the session
+/// is gone or broken, as after iOS took the hardware from a backgrounded app, and has to be
+/// made again.
+const LOST_SESSION: [i32; 2] = [-12903, -12911];
 
 /// Decodes one remote share into pixel buffers: H.264 and HEVC in VideoToolbox, which falls
 /// back to Apple's own software decoders where the hardware lacks them, AV1 in dav1d and
@@ -35,11 +36,9 @@ pub struct Decoder {
     inner: Inner,
     max_size: MaxSize,
     /// The view iOS shows pictures in.
-    #[cfg_attr(
-        not(target_os = "ios"),
-        allow(dead_code, reason = "macOS draws them itself")
-    )]
     output: Output,
+    /// The output's change count when last looked at.
+    seen: u64,
     /// Whether reference pictures were dropped since [`Decoder::take_flushed`] last ran.
     flushed: bool,
 }
@@ -77,6 +76,7 @@ impl Decoder {
         let decoder = Self {
             inner,
             max_size,
+            seen: output.changes(),
             output,
             flushed: false,
         };
@@ -137,6 +137,13 @@ impl Decoder {
                 Ok(Some(upload(pool, frame, spare)))
             }
         }
+    }
+
+    /// Whether the app changed the view since the last call, so the newest picture can be
+    /// shown again in the new one. macOS has no views.
+    pub fn follow_view(&mut self) -> bool {
+        let changes = self.output.changes();
+        std::mem::replace(&mut self.seen, changes) != changes
     }
 
     /// Shows `frame`, the newest picture due, in iOS's view. macOS draws pictures itself.
@@ -247,7 +254,7 @@ impl VideoToolbox {
                 &mut info,
             )
         };
-        if status == INVALID_SESSION {
+        if LOST_SESSION.contains(&status) {
             warn!("the VideoToolbox session was lost; waiting for a keyframe");
             self.session = None;
             self.parameter_sets.clear();
@@ -287,15 +294,18 @@ impl VideoToolbox {
             // SAFETY: both are live.
             unsafe { running.session.can_accept_format_description(&format) }
         });
-        self.parameter_sets = parameter_sets.iter().map(|set| set.to_vec()).collect();
         if let Some(running) = &mut self.session
             && keeps
         {
             running.format = format;
-            return Ok(());
+        } else {
+            self.session = None;
+            self.parameter_sets.clear();
+            self.session = Some(self.open(format)?);
         }
-        self.session = None;
-        self.session = Some(self.open(format)?);
+        // Only once a session takes them, so a failed one is tried again with the next
+        // keyframe's.
+        self.parameter_sets = parameter_sets.iter().map(|set| set.to_vec()).collect();
         Ok(())
     }
 

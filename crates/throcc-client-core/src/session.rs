@@ -1741,6 +1741,7 @@ impl Session {
     }
 
     fn stop_watching(&mut self, user: UserId) {
+        lock(&self.shared.outputs).remove(&user);
         if let Some(watched) = self.watched_shares.remove(&user) {
             self.call.engine.unsubscribe(watched.video);
             self.tracks.remove(&watched.video);

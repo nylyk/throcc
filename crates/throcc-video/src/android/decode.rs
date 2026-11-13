@@ -8,8 +8,9 @@ use crate::frame::VideoFrame;
 use crate::software::{dav1d, vpx};
 use crate::{DecodeError, Frame, MaxSize, Output};
 
-/// How long, in 90 kHz media time, MediaCodec may keep failing on AV1 or VP9 before dav1d
-/// or libvpx take over.
+/// How long, in 90 kHz media time, MediaCodec may keep failing before it is given up: AV1
+/// and VP9 go to dav1d or libvpx, H.264 and HEVC get a new codec. Also how often a codec
+/// that wouldn't open is tried again.
 const HARDWARE_GRACE: u32 = 3 * 90_000;
 /// Units whose timestamps are remembered until their picture comes out.
 const IN_FLIGHT: usize = 64;
@@ -32,6 +33,8 @@ pub struct Decoder {
     sequence: u64,
     /// The timestamp of the first unit in the current run of MediaCodec failures.
     failing_since: Option<u32>,
+    /// The timestamp of the unit a codec last failed to open for.
+    open_failed_at: Option<u32>,
 }
 
 enum Engine {
@@ -60,6 +63,7 @@ impl Decoder {
             in_flight: VecDeque::new(),
             sequence: 0,
             failing_since: None,
+            open_failed_at: None,
         };
         info!("decoding {codec:?} in MediaCodec");
         Ok(decoder)
@@ -90,7 +94,8 @@ impl Decoder {
         }
     }
 
-    /// Shows `frame`, the newest picture due, in the view.
+    /// Shows `frame`, the newest picture due, in the view. A picture still in the codec
+    /// shows once; one in memory can be shown again, in a new view.
     pub fn present(&mut self, frame: &Frame) {
         match frame {
             Frame::Codec(frame) => frame.show(),
@@ -109,6 +114,9 @@ impl Decoder {
 
     pub fn decode(&mut self, unit: &[u8], timestamp: u32) -> Result<Option<Frame>, DecodeError> {
         self.follow_view();
+        if matches!(self.engine, Engine::MediaCodec(None)) {
+            self.reopen(timestamp);
+        }
         let in_codec = match &self.engine {
             Engine::MediaCodec(None) => return Ok(None),
             Engine::MediaCodec(Some(_)) => true,
@@ -116,12 +124,15 @@ impl Decoder {
         };
         if in_codec {
             let decoded = self.decode_in_codec(unit, timestamp);
-            if decoded.is_err() && self.hardware_failed_for_long(timestamp) {
-                self.switch_to_software()?;
-                return self.decode(unit, timestamp);
-            }
-            if let Ok(Some(_)) = decoded {
-                self.failing_since = None;
+            match &decoded {
+                Ok(Some(_)) => self.failing_since = None,
+                Err(_) if self.failing_for_long(timestamp) => {
+                    self.give_up_codec()?;
+                    if matches!(self.engine, Engine::Software { .. }) {
+                        return self.decode(unit, timestamp);
+                    }
+                }
+                _ => {}
             }
             return decoded;
         }
@@ -138,40 +149,65 @@ impl Decoder {
         }
     }
 
-    /// Starts, moves or stops the codec when the app changed the view.
-    fn follow_view(&mut self) {
+    /// Starts, moves or stops the codec when the app changed the view. True if it did, so
+    /// the newest picture can be shown again in the new one.
+    pub fn follow_view(&mut self) -> bool {
         let changes = self.output.changes();
         if changes == self.seen {
-            return;
+            return false;
         }
         self.seen = changes;
         let Engine::MediaCodec(codec) = &mut self.engine else {
-            return;
+            return true;
         };
-        let view = self.output.view();
-        match (codec.as_mut(), view) {
+        match (codec.as_mut(), self.output.view()) {
             (Some(running), Some(view)) => {
-                if !running.retarget(view.clone()) {
+                if !running.retarget(view) {
                     *codec = None;
-                    *codec = MediaCodec::open(self.codec, self.max_size, view);
-                    self.flushed = true;
                 }
             }
             (_, None) => {
                 *codec = None;
                 self.in_flight.clear();
             }
-            (None, Some(view)) => {
-                *codec = MediaCodec::open(self.codec, self.max_size, view);
-                // A new codec decodes from the next keyframe on.
+            (None, Some(_)) => {}
+        }
+        if matches!(self.engine, Engine::MediaCodec(None)) {
+            self.open_failed_at = None;
+            self.open();
+        }
+        true
+    }
+
+    /// Opens a codec for the view, if there is one, decoding from the next keyframe. AV1 or
+    /// VP9 that MediaCodec won't take go to software. False if nothing could open.
+    fn open(&mut self) -> bool {
+        let Some(view) = self.output.view() else {
+            return true;
+        };
+        match MediaCodec::open(self.codec, self.max_size, view) {
+            Some(codec) => {
+                self.engine = Engine::MediaCodec(Some(codec));
+                self.open_failed_at = None;
+                self.failing_since = None;
                 self.flushed = true;
-                if codec.is_none() {
-                    warn!("MediaCodec can't decode this {:?} share", self.codec);
-                    if self.switch_to_software().is_err() {
-                        self.flushed = false;
-                    }
-                }
+                true
             }
+            None => {
+                warn!("MediaCodec can't decode this {:?} share", self.codec);
+                self.switch_to_software().is_ok()
+            }
+        }
+    }
+
+    /// Tries again, at most once per [`HARDWARE_GRACE`], to open a codec that wouldn't open
+    /// or was given up.
+    fn reopen(&mut self, timestamp: u32) {
+        let due = self
+            .open_failed_at
+            .is_none_or(|at| timestamp.wrapping_sub(at) >= HARDWARE_GRACE);
+        if due && !self.open() {
+            self.open_failed_at = Some(timestamp);
         }
     }
 
@@ -215,23 +251,34 @@ impl Decoder {
     /// The timestamp of the unit queued as `sequence`, forgetting it and every older one.
     fn timestamp_of(&mut self, sequence: u64) -> Option<u32> {
         while let Some(&(queued, timestamp)) = self.in_flight.front() {
+            if queued > sequence {
+                return None;
+            }
             self.in_flight.pop_front();
             if queued == sequence {
                 return Some(timestamp);
-            }
-            if queued > sequence {
-                break;
             }
         }
         None
     }
 
-    fn hardware_failed_for_long(&mut self, timestamp: u32) -> bool {
-        if !matches!(self.codec, Codec::Av1 | Codec::Vp9) {
-            return false;
-        }
+    fn failing_for_long(&mut self, timestamp: u32) -> bool {
         let since = *self.failing_since.get_or_insert(timestamp);
         timestamp.wrapping_sub(since) >= HARDWARE_GRACE
+    }
+
+    /// Gives up a codec that keeps failing: AV1 and VP9 go to software, H.264 and HEVC get
+    /// a new codec with the next unit.
+    fn give_up_codec(&mut self) -> Result<(), DecodeError> {
+        self.failing_since = None;
+        if matches!(self.codec, Codec::Av1 | Codec::Vp9) {
+            return self.switch_to_software();
+        }
+        warn!("MediaCodec keeps failing; starting it again");
+        self.engine = Engine::MediaCodec(None);
+        self.in_flight.clear();
+        self.open_failed_at = None;
+        Ok(())
     }
 
     /// Hands AV1 or VP9 to dav1d or libvpx for good.

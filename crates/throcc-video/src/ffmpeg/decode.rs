@@ -144,6 +144,11 @@ impl Decoder {
     /// Desktops draw pictures themselves.
     pub fn present(&mut self, _frame: &Frame) {}
 
+    /// Desktops have no views to follow.
+    pub fn follow_view(&mut self) -> bool {
+        false
+    }
+
     /// Hands back a spent picture, so the next one reuses its memory.
     pub fn recycle(&mut self, frame: VideoFrame) {
         self.spare = Some(frame);

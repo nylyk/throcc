@@ -33,7 +33,8 @@ pub struct PixelBuffer {
 // SAFETY: CoreVideo pixel buffers are reference counted thread-safely, and are only read
 // here, under a lock of their base address.
 unsafe impl Send for PixelBuffer {}
-// SAFETY: as above; nothing reachable through `&PixelBuffer` writes to the buffer.
+// SAFETY: as above; nothing reachable through `&PixelBuffer` writes to the buffer, and
+// `write` takes it only before it is shared.
 unsafe impl Sync for PixelBuffer {}
 
 impl PixelBuffer {
@@ -116,8 +117,9 @@ impl PixelBuffer {
         true
     }
 
-    /// Writes `frame` into the buffer, which must be NV12 of the frame's size.
-    pub fn write(&self, frame: &VideoFrame) -> bool {
+    /// Writes `frame` into the buffer, which must be NV12 of the frame's size. Only for a
+    /// buffer nothing else holds yet: a fresh one or one just taken from a pool.
+    pub(crate) fn write(&mut self, frame: &VideoFrame) -> bool {
         if (self.width(), self.height()) != (frame.width, frame.height) {
             return false;
         }
@@ -147,7 +149,7 @@ impl PixelBuffer {
 
     /// A pixel buffer holding `frame`, as ScreenCaptureKit would deliver it.
     pub fn holding(frame: &VideoFrame) -> Option<Self> {
-        let buffer = Self::new(frame.width, frame.height, frame.timestamp)?;
+        let mut buffer = Self::new(frame.width, frame.height, frame.timestamp)?;
         buffer.write(frame).then_some(buffer)
     }
 }

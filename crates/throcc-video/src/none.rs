@@ -71,6 +71,10 @@ impl Decoder {
         match self.0 {}
     }
 
+    pub fn follow_view(&mut self) -> bool {
+        match self.0 {}
+    }
+
     pub fn recycle(&mut self, _frame: VideoFrame) {
         match self.0 {}
     }
