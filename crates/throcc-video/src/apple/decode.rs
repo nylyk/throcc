@@ -139,6 +139,23 @@ impl Decoder {
         }
     }
 
+    /// Waits for pictures still being decoded and returns the newest, for when units have
+    /// stopped coming.
+    pub fn drain(&mut self) -> Result<Option<Frame>, DecodeError> {
+        let Inner::Software {
+            decoder: Software::Dav1d(decoder),
+            pool,
+            spare,
+        } = &mut self.inner
+        else {
+            return Ok(None);
+        };
+        let Some(frame) = decoder.drain(spare.take())? else {
+            return Ok(None);
+        };
+        Ok(Some(upload(pool, frame, spare)))
+    }
+
     /// Whether the app changed the view since the last call, so the newest picture can be
     /// shown again in the new one. macOS has no views.
     pub fn follow_view(&mut self) -> bool {

@@ -139,7 +139,7 @@ impl Decoder {
                     // damaged unit, is dead; a new one takes over from the next keyframe.
                     warn!("MediaCodec failed with {code}; starting a new one");
                     self.drop_codec();
-                    self.open();
+                    self.flushed = true;
                     return Ok(None);
                 }
                 Err(_) if self.failing_for_long(timestamp) => {
@@ -163,6 +163,19 @@ impl Decoder {
                 Ok(decoded.map(Frame::Planes))
             }
         }
+    }
+
+    /// Waits for pictures still being decoded and returns the newest, for when units have
+    /// stopped coming.
+    pub fn drain(&mut self) -> Result<Option<Frame>, DecodeError> {
+        let Engine::Software {
+            decoder: Software::Dav1d(decoder),
+            spare,
+        } = &mut self.engine
+        else {
+            return Ok(None);
+        };
+        Ok(decoder.drain(spare.take())?.map(Frame::Planes))
     }
 
     /// Starts, moves or stops the codec when the app changed the view. True if it did, so

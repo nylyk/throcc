@@ -74,6 +74,8 @@ In order:
 5. **Android software fallback**: MediaCodec AV1 at 2560 wide on a device without AV1 hardware (the Pixel 8 has it; perhaps the tablet), and VP9.
 6. **Before merging**: `ci.yml` also runs on pushes to `feature/**` (added for this work); keep it or drop it. Delete this file.
 
+Also open: a receiver that lost its references (a decoder replaced, a backlog dropped) skips units until a keyframe and asks for one, but the sender only encodes it with its next captured frame, and it sends nothing while its screen stands still. Until that screen changes the viewer keeps an old picture, or none in a new decoder. Fix on the sender: when an IDR is asked for, encode the last frame again; the pixel-buffer and dmabuf capture paths would have to keep it.
+
 Also seen: `crates/throcc-cli/tests/share.rs` calls `share::receive` with too few arguments since before these changes. It builds only with `--features ffmpeg`, so CI misses it.
 
 ## Where things are

@@ -79,6 +79,10 @@ impl Decoder {
         match self.0 {}
     }
 
+    pub fn drain(&mut self) -> Result<Option<Frame>, DecodeError> {
+        match self.0 {}
+    }
+
     pub fn take_flushed(&mut self) -> bool {
         match self.0 {}
     }

@@ -25,6 +25,10 @@ use throcc_video::{
 const IDLE: Duration = Duration::from_millis(2);
 /// How long a share's decode thread sleeps between looks while it holds no picture.
 const WAITING: Duration = Duration::from_millis(10);
+/// Units waiting to be decoded past which decoding has fallen behind, half a second at
+/// 60 fps. They are dropped, and decoding goes on from the newest keyframe among them or
+/// the next one.
+const BACKLOG: usize = 30;
 /// Self-view gets every Nth frame.
 const SELF_VIEW_EVERY: u32 = 2;
 /// The widest a self-view picture held in memory is shrunk to. A macOS pixel buffer is shown
@@ -510,6 +514,8 @@ pub fn receive(
             let mut asks = KeyframeAsks::default();
             // Set while the decoder lacks the references anything but a keyframe needs.
             let mut awaiting_keyframe = false;
+            // Units taken from the channel to be decoded before any still in it.
+            let mut queued: VecDeque<Received> = VecDeque::new();
             let mut oversized: u64 = 0;
             loop {
                 // A sender sends nothing while its screen stands still, so the loop keeps
@@ -527,9 +533,52 @@ pub fn receive(
                         decoder.present(&shown);
                     }
                 }
-                let unit = match units.try_recv() {
+                if units.len() >= BACKLOG {
+                    let mut backlog: Vec<Received> = queued
+                        .drain(..)
+                        .chain(std::iter::from_fn(|| units.try_recv().ok()))
+                        .collect();
+                    let newest_keyframe = backlog
+                        .iter()
+                        .rposition(|unit| unit.flags.contains(Flags::KEYFRAME));
+                    let dropped = newest_keyframe.unwrap_or(backlog.len());
+                    match newest_keyframe {
+                        Some(at) => queued.extend(backlog.drain(at..)),
+                        None => {
+                            awaiting_keyframe = true;
+                            if asks.ask(Instant::now(), false, true) {
+                                ask_idr();
+                            }
+                        }
+                    }
+                    if dropped > 0 {
+                        warn!(
+                            dropped,
+                            "decoding fell behind; dropped the units waiting for it"
+                        );
+                    }
+                }
+                let unit = match queued.pop_front().map_or_else(|| units.try_recv(), Ok) {
                     Ok(unit) => Some(unit),
                     Err(mpsc::error::TryRecvError::Empty) => {
+                        // Units have stopped coming, so pictures still being decoded come
+                        // out now.
+                        loop {
+                            match decoder.drain() {
+                                Ok(Some(frame)) => {
+                                    if !awaiting_keyframe {
+                                        asks.answered();
+                                    }
+                                    make_room(&mut held, frame_bytes(&frame));
+                                    held.push_back(Arc::new(frame));
+                                }
+                                Ok(None) => break,
+                                Err(e) => {
+                                    warn!("decoding failed: {e}");
+                                    break;
+                                }
+                            }
+                        }
                         std::thread::sleep(if held.is_empty() { WAITING } else { IDLE });
                         None
                     }
@@ -545,7 +594,10 @@ pub fn receive(
                 if let Some(unit) = &unit {
                     let decoded = decoder.decode(&unit.data, unit.timestamp);
                     let flushed = decoder.take_flushed();
-                    awaiting_keyframe = flushed && !unit.flags.contains(Flags::KEYFRAME);
+                    // Only a keyframe that came out as a picture shows the references whole.
+                    let keyframe_shown =
+                        unit.flags.contains(Flags::KEYFRAME) && matches!(decoded, Ok(Some(_)));
+                    awaiting_keyframe = flushed && !keyframe_shown;
                     let engine_changed = *engine_tx.borrow() != decoder.engine();
                     if engine_changed {
                         engine_tx.send_replace(decoder.engine());

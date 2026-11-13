@@ -1,5 +1,6 @@
 //! AV1 through dav1d.
 
+use std::collections::VecDeque;
 use std::mem::MaybeUninit;
 
 use dav1d_sys as dav1d;
@@ -12,10 +13,12 @@ use crate::{DecodeError, MaxSize};
 /// dav1d's `-EAGAIN`: it wants pictures taken before it takes more data, or has none yet.
 const AGAIN: i32 = -(libc::EAGAIN);
 
-/// An AV1 decoder that hands out each picture as soon as it is decoded.
+/// An AV1 decoder with frame threads, handing out its pictures in order.
 pub struct Decoder {
     ctx: *mut Dav1dContext,
     max_size: MaxSize,
+    /// Pictures taken out of dav1d and not yet handed out, oldest first.
+    ready: VecDeque<VideoFrame>,
 }
 
 // SAFETY: the context is used through `&mut self` only, one thread at a time; dav1d's own
@@ -30,8 +33,6 @@ impl Decoder {
             dav1d::dav1d_default_settings(settings.as_mut_ptr());
             settings.assume_init()
         };
-        // One frame of delay: each picture comes out as soon as it is decoded.
-        settings.max_frame_delay = 1;
         settings.n_threads =
             std::thread::available_parallelism().map_or(1, |n| n.get().min(8)) as i32;
         settings.frame_size_limit = u32::try_from(max_size.pixels()).unwrap_or(u32::MAX);
@@ -41,10 +42,15 @@ impl Decoder {
         if result != 0 || ctx.is_null() {
             return Err(DecodeError::Dav1d(result));
         }
-        Ok(Self { ctx, max_size })
+        Ok(Self {
+            ctx,
+            max_size,
+            ready: VecDeque::new(),
+        })
     }
 
-    /// Decodes one temporal unit into its newest picture, if any.
+    /// Decodes one temporal unit and hands out the oldest picture ready, if any. Frame
+    /// threads keep a few pictures in flight; [`Decoder::drain`] brings them out.
     pub fn decode(
         &mut self,
         unit: &[u8],
@@ -61,63 +67,82 @@ impl Decoder {
         // SAFETY: `buffer` has room for `unit`.
         unsafe { std::ptr::copy_nonoverlapping(unit.as_ptr(), buffer, unit.len()) };
         data.m.timestamp = i64::from(timestamp);
-        let mut newest = None;
-        let result = loop {
-            // SAFETY: the context is open and `data` was created above.
-            let sent = unsafe { dav1d::dav1d_send_data(self.ctx, &mut data) };
-            match sent {
-                0 if data.sz == 0 => break Ok(()),
-                0 | AGAIN => {
-                    if let Some(frame) = self.take_pictures(timestamp, &mut spare)? {
-                        newest = Some(frame);
-                    } else if sent == AGAIN {
-                        break Err(DecodeError::Dav1d(AGAIN));
-                    }
-                }
-                error => break Err(DecodeError::Dav1d(error)),
-            }
-        };
+        let sent = self.send(&mut data, &mut spare);
         if data.sz > 0 {
             // SAFETY: what dav1d didn't take is still ours to release.
             unsafe { dav1d::dav1d_data_unref(&mut data) };
         }
-        result?;
-        if let Some(frame) = self.take_pictures(timestamp, &mut spare)? {
-            newest = Some(frame);
+        sent?;
+        // Only after this call does the next one wait for pictures in flight, which
+        // `drain` relies on.
+        if let Some(frame) = self.take_picture(&mut spare)? {
+            self.ready.push_back(frame);
         }
-        Ok(newest)
+        Ok(self.ready.pop_front())
     }
 
-    /// Takes every picture dav1d has ready, keeping the newest.
-    fn take_pictures(
+    /// Hands `data` to dav1d. While dav1d still holds data from before, pictures come out
+    /// first, waited for if none is ready.
+    fn send(
         &mut self,
-        timestamp: u32,
+        data: &mut Dav1dData,
         spare: &mut Option<VideoFrame>,
-    ) -> Result<Option<VideoFrame>, DecodeError> {
-        let mut newest = None;
+    ) -> Result<(), DecodeError> {
+        let mut waited = false;
         loop {
-            // SAFETY: an all-zero Dav1dPicture is dav1d's empty picture.
-            let mut picture: Dav1dPicture = unsafe { std::mem::zeroed() };
-            // SAFETY: the context is open and `picture` is a live, empty picture.
-            let got = unsafe { dav1d::dav1d_get_picture(self.ctx, &mut picture) };
-            match got {
-                0 => {}
-                AGAIN => return Ok(newest),
+            // SAFETY: the context is open and `data` is live.
+            match unsafe { dav1d::dav1d_send_data(self.ctx, data) } {
+                0 => return Ok(()),
+                AGAIN => match self.take_picture(spare)? {
+                    Some(frame) => self.ready.push_back(frame),
+                    None if waited => return Err(DecodeError::Dav1d(AGAIN)),
+                    None => waited = true,
+                },
                 error => return Err(DecodeError::Dav1d(error)),
             }
-            let copied = self.copy_out(&picture, timestamp, spare.take().or(newest.take()));
-            // SAFETY: the picture came from dav1d_get_picture and is released once.
-            unsafe { dav1d::dav1d_picture_unref(&mut picture) };
-            newest = Some(copied?);
         }
+    }
+
+    /// Hands out the next picture, waiting for one still in flight. `None` once there are
+    /// none.
+    pub fn drain(
+        &mut self,
+        mut spare: Option<VideoFrame>,
+    ) -> Result<Option<VideoFrame>, DecodeError> {
+        match self.ready.pop_front() {
+            Some(frame) => Ok(Some(frame)),
+            None => self.take_picture(&mut spare),
+        }
+    }
+
+    /// Takes one picture: a ready one on the first call after data went in, and on later
+    /// calls the next one in flight, waiting for it. Uses the planes of `spare` if it gets
+    /// one.
+    fn take_picture(
+        &mut self,
+        spare: &mut Option<VideoFrame>,
+    ) -> Result<Option<VideoFrame>, DecodeError> {
+        // SAFETY: an all-zero Dav1dPicture is dav1d's empty picture.
+        let mut picture: Dav1dPicture = unsafe { std::mem::zeroed() };
+        // SAFETY: the context is open and `picture` is a live, empty picture.
+        let got = unsafe { dav1d::dav1d_get_picture(self.ctx, &mut picture) };
+        match got {
+            0 => {}
+            AGAIN => return Ok(None),
+            error => return Err(DecodeError::Dav1d(error)),
+        }
+        let copied = self.copy_out(&picture, spare.take());
+        // SAFETY: the picture came from dav1d_get_picture and is released once.
+        unsafe { dav1d::dav1d_picture_unref(&mut picture) };
+        copied.map(Some)
     }
 
     fn copy_out(
         &self,
         picture: &Dav1dPicture,
-        timestamp: u32,
         spare: Option<VideoFrame>,
     ) -> Result<VideoFrame, DecodeError> {
+        let timestamp = picture.m.timestamp as u32;
         let (width, height) = (picture.p.w, picture.p.h);
         if !self.max_size.fits(width.into(), height.into()) {
             return Err(DecodeError::TooLarge(width, height));
@@ -175,12 +200,13 @@ mod tests {
     const PATTERN: &[u8] = include_bytes!("../../testdata/pattern.ivf");
 
     #[test]
-    fn av1_decodes_each_picture_as_it_arrives() {
+    fn av1_pictures_come_out_in_order_with_their_timestamps() {
         let mut decoder = Decoder::new(MaxSize::ANY).unwrap();
         let mut shown = Vec::new();
         for (n, unit) in ivf_units(PATTERN).into_iter().enumerate() {
             let timestamp = n as u32 * 3000;
-            let output = decoder.decode(unit, timestamp, None).unwrap().unwrap();
+            let decoded = decoder.decode(unit, timestamp, None).unwrap();
+            let output = decoder.drain(None).unwrap().or(decoded).unwrap();
             assert_eq!(
                 (output.width, output.height, output.timestamp),
                 (320, 180, timestamp)
@@ -193,6 +219,20 @@ mod tests {
         assert_eq!(numbers, (0..12).collect::<Vec<_>>());
         let worst = shown.iter().map(|(_, p)| *p).fold(f64::INFINITY, f64::min);
         assert!(worst > 25.0, "picture quality {worst:.1} dB");
+    }
+
+    #[test]
+    fn every_picture_comes_out_of_units_sent_back_to_back() {
+        let mut decoder = Decoder::new(MaxSize::ANY).unwrap();
+        let mut timestamps = Vec::new();
+        for (n, unit) in ivf_units(PATTERN).into_iter().enumerate() {
+            let decoded = decoder.decode(unit, n as u32 * 3000, None).unwrap();
+            timestamps.extend(decoded.map(|frame| frame.timestamp));
+        }
+        while let Some(frame) = decoder.drain(None).unwrap() {
+            timestamps.push(frame.timestamp);
+        }
+        assert_eq!(timestamps, (0..12).map(|n| n * 3000).collect::<Vec<u32>>());
     }
 
     #[test]

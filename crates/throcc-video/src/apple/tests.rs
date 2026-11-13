@@ -189,7 +189,8 @@ fn av1_decodes_in_dav1d_into_pixel_buffers() {
         .into_iter()
         .enumerate()
     {
-        let output = decoder.decode(unit, n as u32 * 3000).unwrap().unwrap();
+        let decoded = decoder.decode(unit, n as u32 * 3000).unwrap();
+        let output = decoder.drain().unwrap().or(decoded).unwrap();
         assert!(matches!(output, Frame::PixelBuffer(_)));
         assert_eq!(output.copied_to_memory().read_test_number(), n as u16);
     }

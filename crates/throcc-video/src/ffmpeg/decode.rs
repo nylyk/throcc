@@ -116,6 +116,10 @@ impl Decoder {
         let found = AVCodec::find_decoder_by_name(software_decoder(codec))
             .ok_or(DecodeError::NoDecoder(codec))?;
         let mut ctx = context(&found, max_size.pixels());
+        // Zero is a thread per core; FFmpeg's default is one. The low-delay flag keeps
+        // pictures from being held across units, so this threads within each picture.
+        // SAFETY: `ctx` is a live codec context that has not been opened yet.
+        unsafe { (*ctx.as_mut_ptr()).thread_count = 0 };
         ctx.open(None)?;
         let engine = if found.name().to_bytes() == b"libdav1d" {
             "dav1d (software)"
@@ -152,6 +156,12 @@ impl Decoder {
     /// Hands back a spent picture, so the next one reuses its memory.
     pub fn recycle(&mut self, frame: VideoFrame) {
         self.spare = Some(frame);
+    }
+
+    /// Pictures in flight come out only with the next unit: FFmpeg drains only at the end
+    /// of a stream.
+    pub fn drain(&mut self) -> Result<Option<Frame>, DecodeError> {
+        Ok(None)
     }
 
     /// Whether the decoder dropped its reference pictures since the last call, so only a
