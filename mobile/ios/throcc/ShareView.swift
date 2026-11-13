@@ -71,8 +71,8 @@ struct ShareTile: View {
                 Loading(user: person.user)
                 VStack {
                     HStack(spacing: 8) {
-                        if model.state.health.slowShares.contains(person.user) {
-                            SlowConnectionPill()
+                        if let warning = ShareWarning(health: model.state.health, user: person.user) {
+                            WarningPill(warning: warning)
                         }
                         Spacer()
                         Button("Fullscreen", systemImage: "arrow.up.left.and.arrow.down.right") {
@@ -144,8 +144,8 @@ struct ShareFullscreen: View {
                         .transition(.opacity)
                     }
                     Spacer()
-                    if state.health.slowShares.contains(user) {
-                        SlowConnectionPill()
+                    if let warning = ShareWarning(health: state.health, user: user) {
+                        WarningPill(warning: warning)
                     }
                 }
                 Spacer()
@@ -235,11 +235,43 @@ private struct RoomStrip: View {
     }
 }
 
-/// Says the connection can't keep up with a share that is being watched.
-private struct SlowConnectionPill: View {
+/// What the pill over a watched share warns of.
+private enum ShareWarning {
+    case slowConnection, cantKeepUp
+
+    /// The warning over `user`'s share, if any, the connection's first.
+    init?(health: Health, user: UInt64) {
+        if health.slowShares.contains(user) {
+            self = .slowConnection
+        } else if health.laggingShares.contains(user) {
+            self = .cantKeepUp
+        } else {
+            return nil
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .slowConnection: "Slow connection"
+        case .cantKeepUp: "Can’t keep up"
+        }
+    }
+
+    var hint: String {
+        switch self {
+        case .slowConnection: "Frames are dropping. Ask the sharer for a lower bitrate."
+        case .cantKeepUp: "This device decodes the share too slowly. Ask the sharer for a lower resolution or frame rate."
+        }
+    }
+}
+
+/// A warning over a share that is being watched.
+private struct WarningPill: View {
+    let warning: ShareWarning
+
     var body: some View {
         Label {
-            Text("Slow connection").foregroundStyle(.white)
+            Text(warning.label).foregroundStyle(.white)
         } icon: {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.warning)
         }
@@ -249,7 +281,8 @@ private struct SlowConnectionPill: View {
         .padding(.vertical, 4)
         .background(.black.opacity(0.6), in: .capsule)
         .accessibilityElement(children: .combine)
-        .accessibilityHint("Frames are dropping. Ask the sharer for a lower bitrate.")
-        .help("Frames are dropping. Ask the sharer for a lower bitrate.")
+        .accessibilityHint(warning.hint)
+        .help(warning.hint)
     }
 }
+

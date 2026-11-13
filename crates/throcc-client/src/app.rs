@@ -2104,6 +2104,16 @@ impl ThroccApp {
                     make_slow(app);
                 });
             }
+            "lagging" => {
+                joined(self);
+                after_a_moment(cx, move |app, _| {
+                    show_overlay(app);
+                    Arc::make_mut(&mut app.state)
+                        .health
+                        .lagging_shares
+                        .insert(UserId(4));
+                });
+            }
             "share" => {
                 joined(self);
                 self.dialog = Some(Dialog::Share);

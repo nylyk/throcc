@@ -17,7 +17,7 @@ use crate::views::common::{
     CONTROLS_LINGER, TRAFFIC_LIGHTS, Typeset, app_titlebar, caption, ghost_icon,
     hide_controls_after, moves_window,
 };
-use crate::views::overlay::{self, ShareOverlay};
+use crate::views::overlay::{self, ShareOverlay, ShareWarning};
 
 /// Where the traffic lights sit: centred on the overlay's title, as far from the left edge
 /// as from the top.
@@ -216,7 +216,10 @@ impl Render for PopOut {
                     buttons,
                     audience: person.map_or(0, |p| p.audience),
                     controls,
-                    too_slow: config.is_some() && state.health.slow_shares.contains(&user),
+                    warning: config
+                        .is_some()
+                        .then(|| ShareWarning::of(&state.health, user))
+                        .flatten(),
                     fullscreen,
                 }
                 .render(),

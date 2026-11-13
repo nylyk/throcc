@@ -765,6 +765,7 @@ fn sample_state() -> State {
             download_loss: 0.3,
             dropped_for_you: 0,
             slow_shares: Default::default(),
+            lagging_shares: Default::default(),
             receiving: vec![
                 TrackHealth {
                     label: "pixelmoth, screen".into(),

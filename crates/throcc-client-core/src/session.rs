@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::ControlFlow;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -44,6 +44,9 @@ use crate::verified::VerifiedStore;
 
 const LEVELS_EVERY: Duration = Duration::from_millis(100);
 const HEALTH_EVERY: Duration = Duration::from_secs(2);
+/// Health refreshes a share counts as one this device can't keep up with after its decoder
+/// last dropped a backlog.
+const LAGGING_REFRESHES: u32 = 3;
 /// The shortest time between two cues for others joining or leaving an audience.
 const AUDIENCE_CUE_GAP: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(15);
@@ -190,6 +193,10 @@ struct Watched {
     last_lost: u64,
     /// How many server reports in a row said it dropped units of this track for us.
     reports_with_drops: u32,
+    /// The decoder's count of backlogs dropped, as last looked at.
+    fell_behind_seen: u64,
+    /// Health refreshes left that count the share as one this device can't keep up with.
+    lagging_for: u32,
 }
 
 impl Watched {
@@ -206,6 +213,26 @@ impl Watched {
     fn too_slow(&self) -> bool {
         self.reports_with_drops >= 2
     }
+
+    /// Whether this device decodes the share too slowly: its decoder dropped a backlog in
+    /// the last [`LAGGING_REFRESHES`] health refreshes. Called once per refresh.
+    fn lagging(&mut self) -> bool {
+        let Carries::ShareVideo {
+            fell_behind: Some(fell_behind),
+            ..
+        } = &self.carries
+        else {
+            return false;
+        };
+        let count = fell_behind.load(Ordering::Relaxed);
+        if count != self.fell_behind_seen {
+            self.fell_behind_seen = count;
+            self.lagging_for = LAGGING_REFRESHES;
+        } else {
+            self.lagging_for = self.lagging_for.saturating_sub(1);
+        }
+        self.lagging_for > 0
+    }
 }
 
 /// What a watched track carries.
@@ -215,6 +242,7 @@ enum Carries {
     ShareVideo {
         config: ShareConfig,
         decoder: Option<watch::Receiver<&'static str>>,
+        fell_behind: Option<Arc<AtomicU64>>,
     },
 }
 
@@ -239,7 +267,9 @@ impl Carries {
         match self {
             Carries::Mic => VOICE_DETAIL.into(),
             Carries::ShareAudio => SHARE_AUDIO_DETAIL.into(),
-            Carries::ShareVideo { config, decoder } => share_detail(
+            Carries::ShareVideo {
+                config, decoder, ..
+            } => share_detail(
                 config,
                 decoder.as_ref().map_or("not decoded", |d| *d.borrow()),
             ),
@@ -791,10 +821,12 @@ impl Session {
             };
             match Call::restart(link, &self.keystore, &self.call) {
                 Ok(call) => {
+                    // Watched tracks unsubscribe from the engine they were subscribed to;
+                    // one left subscribed keeps its decoder alive.
+                    self.reset_room();
                     self.call = call;
                     self.last_alive = SystemTime::now();
                     self.trust.forget_presented();
-                    self.reset_room();
                     self.audio = self.audio.as_ref().map(CallAudio::renew);
                     self.cue(Cue::Reconnected);
                     let welcome = self.call.welcome.clone();
@@ -1738,9 +1770,9 @@ impl Session {
                     first_picture,
                 );
                 match receiving {
-                    Ok((picture, decoder)) => {
-                        self.shared.set_picture(user, Some(picture));
-                        Some(decoder)
+                    Ok(receiving) => {
+                        self.shared.set_picture(user, Some(receiving.picture));
+                        Some((receiving.engine, receiving.fell_behind))
                     }
                     Err(e) => {
                         self.shared.notice(format!("Can't show this share: {e}"));
@@ -1748,7 +1780,12 @@ impl Session {
                     }
                 }
             };
-            let carries = Carries::ShareVideo { config, decoder };
+            let (decoder, fell_behind) = decoder.unzip();
+            let carries = Carries::ShareVideo {
+                config,
+                decoder,
+                fell_behind,
+            };
             self.tracks
                 .insert(video, self.watched(video, user, carries));
             let watched = WatchedShare {
@@ -1770,6 +1807,8 @@ impl Session {
             last_received: arrived.datagrams,
             last_lost: arrived.lost,
             reports_with_drops: 0,
+            fell_behind_seen: 0,
+            lagging_for: 0,
         }
     }
 
@@ -2175,6 +2214,7 @@ impl Session {
         let state = self.shared.state();
         let mut rows = Vec::new();
         let mut slow_shares = BTreeSet::new();
+        let mut lagging_shares = BTreeSet::new();
         let (mut received_total, mut lost_total) = (0, 0);
         for (media_id, track) in self.tracks.iter_mut() {
             let arrived = self.call.engine.arrived(*media_id);
@@ -2185,6 +2225,9 @@ impl Session {
             lost_total += new_lost;
             if track.too_slow() {
                 slow_shares.insert(track.user);
+            }
+            if track.lagging() {
+                lagging_shares.insert(track.user);
             }
             let name = state
                 .person(track.user)
@@ -2209,6 +2252,7 @@ impl Session {
             download_loss,
             dropped_for_you: dropped,
             slow_shares,
+            lagging_shares,
             sending: self.sent_tracks(new_local_drops),
             receiving: rows,
         };
@@ -2496,6 +2540,8 @@ mod tests {
             last_received: 0,
             last_lost: 0,
             reports_with_drops: 0,
+            fell_behind_seen: 0,
+            lagging_for: 0,
         };
         reports
             .iter()
@@ -2506,6 +2552,39 @@ mod tests {
                 track.too_slow()
             })
             .collect()
+    }
+
+    #[test]
+    fn a_share_lags_for_three_refreshes_after_its_decoder_drops_a_backlog() {
+        let fell_behind = Arc::new(AtomicU64::new(0));
+        let mut track = Watched {
+            user: UserId(4),
+            carries: Carries::ShareVideo {
+                config: ShareConfig {
+                    codec: throcc_proto::messages::Codec::Av1,
+                    width: 1920,
+                    height: 1080,
+                    fps: 60,
+                    kbps: 8000,
+                    audio: false,
+                    recovery: Recovery::Idr,
+                },
+                decoder: None,
+                fell_behind: Some(fell_behind.clone()),
+            },
+            last_bytes: 0,
+            last_received: 0,
+            last_lost: 0,
+            reports_with_drops: 0,
+            fell_behind_seen: 0,
+            lagging_for: 0,
+        };
+        let mut refreshes = Vec::new();
+        for drops in [0, 1, 0, 0, 0, 2, 0] {
+            fell_behind.fetch_add(drops, Ordering::Relaxed);
+            refreshes.push(track.lagging());
+        }
+        assert_eq!(refreshes, [false, true, true, true, false, true, true]);
     }
 
     #[test]

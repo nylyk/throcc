@@ -8,11 +8,11 @@ use gpui_component::button::Button;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Sizable, Size};
 
+use throcc_client_core::state::Health;
+use throcc_proto::ids::UserId;
+
 use super::common::{Typeset, audience, avatar, caption, icon};
 use crate::theme;
-
-const TOO_SLOW: &str = "Slow connection";
-const TOO_SLOW_HINT: &str = "Frames are dropping. Ask the sharer for a lower bitrate.";
 
 /// How much larger than its base sizes the overlay draws over a fullscreen share.
 const FULLSCREEN_SCALE: f32 = 1.2;
@@ -29,6 +29,44 @@ const BADGE_TEXT: theme::TextStyle = theme::CALLOUT;
 const DETAILS_MIN_WIDTH: Pixels = px(260.);
 const WARNING_TEXT_MIN_WIDTH: Pixels = px(390.);
 
+/// What the pill over a watched share warns of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShareWarning {
+    /// Our connection can't keep up with the share.
+    SlowConnection,
+    /// This device decodes the share too slowly.
+    CantKeepUp,
+}
+
+impl ShareWarning {
+    /// The warning over `user`'s share, if any, the connection's first.
+    pub fn of(health: &Health, user: UserId) -> Option<Self> {
+        if health.slow_shares.contains(&user) {
+            Some(Self::SlowConnection)
+        } else if health.lagging_shares.contains(&user) {
+            Some(Self::CantKeepUp)
+        } else {
+            None
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::SlowConnection => "Slow connection",
+            Self::CantKeepUp => "Can’t keep up",
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            Self::SlowConnection => "Frames are dropping. Ask the sharer for a lower bitrate.",
+            Self::CantKeepUp => {
+                "This device decodes the share too slowly. Ask the sharer for a lower resolution or frame rate."
+            }
+        }
+    }
+}
+
 /// The labels and controls laid over a watched share, the same wherever it is drawn.
 pub struct ShareOverlay {
     pub name: SharedString,
@@ -42,9 +80,9 @@ pub struct ShareOverlay {
     pub buttons: Vec<Button>,
     /// How many people watch the share.
     pub audience: usize,
-    /// Whether the name, audience and buttons show. The slow-connection warning shows regardless.
+    /// Whether the name, audience and buttons show. The warning shows regardless.
     pub controls: bool,
-    pub too_slow: bool,
+    pub warning: Option<ShareWarning>,
     pub fullscreen: bool,
 }
 
@@ -53,7 +91,7 @@ impl ShareOverlay {
     pub fn render(self) -> Vec<Div> {
         let inset = self.scaled(INSET);
         let mut labels = Vec::new();
-        if self.controls || self.too_slow {
+        if self.controls || self.warning.is_some() {
             labels.push(
                 div()
                     .absolute()
@@ -64,7 +102,7 @@ impl ShareOverlay {
                     .items_center()
                     .gap(self.scaled(px(8.)))
                     .children(self.controls.then(|| self.title()))
-                    .children(self.too_slow.then(|| self.warning())),
+                    .children(self.warning.map(|warning| self.warning_pill(warning))),
             );
         }
         if self.controls {
@@ -160,16 +198,16 @@ impl ShareOverlay {
             .children(details)
     }
 
-    fn warning(&self) -> Stateful<Div> {
+    fn warning_pill(&self, warning: ShareWarning) -> Stateful<Div> {
         let label = (self.width >= self.scaled(WARNING_TEXT_MIN_WIDTH)).then(|| {
             div()
                 .typeset(self.text(BADGE_TEXT))
                 .font_weight(FontWeight::MEDIUM)
                 .whitespace_nowrap()
-                .child(TOO_SLOW)
+                .child(warning.label())
         });
         self.pill()
-            .id("too-slow")
+            .id("share-warning")
             .ml_auto()
             .flex_none()
             .gap(self.scaled(px(6.)))
@@ -181,6 +219,6 @@ impl ShareOverlay {
                     .text_color(theme::warn_text()),
             )
             .children(label)
-            .tooltip(|window, cx| Tooltip::new(TOO_SLOW_HINT).build(window, cx))
+            .tooltip(move |window, cx| Tooltip::new(warning.hint()).build(window, cx))
     }
 }

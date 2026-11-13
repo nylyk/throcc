@@ -78,8 +78,21 @@ object ShareView {
     external fun nativeWindow(surface: Surface): Long
 }
 
-private const val TOO_SLOW = "Slow connection"
-private const val TOO_SLOW_HINT = "Frames are dropping. Ask the sharer for a lower bitrate."
+/** What the pill over a watched share warns of: its label, and what it means. */
+private enum class ShareWarning(val label: String, val hint: String) {
+    SlowConnection("Slow connection", "Frames are dropping. Ask the sharer for a lower bitrate."),
+    CantKeepUp(
+        "Can’t keep up",
+        "This device decodes the share too slowly. Ask the sharer for a lower resolution or frame rate.",
+    ),
+}
+
+/** The warning over `user`'s share, if any, the connection's first. */
+private fun shareWarning(state: CoreState, user: ULong) = when (user) {
+    in state.health.slowShares -> ShareWarning.SlowConnection
+    in state.health.laggingShares -> ShareWarning.CantKeepUp
+    else -> null
+}
 
 /**
  * `user`'s share, decoded straight into a surface. The core keeps the surfaces a share is shown in.
@@ -112,13 +125,13 @@ private fun ShareSurface(model: AppModel, user: ULong, modifier: Modifier = Modi
     )
 }
 
-/** The warning that our connection can't keep up with a share. Long-press tells what it means. */
+/** A warning over a share. Long-press tells what it means. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TooSlow() {
+private fun WarningPill(warning: ShareWarning) {
     TooltipBox(
         TooltipDefaults.rememberTooltipPositionProvider(TooltipAnchorPosition.Below),
-        { PlainTooltip { Text(TOO_SLOW_HINT) } },
+        { PlainTooltip { Text(warning.hint) } },
         rememberTooltipState(),
     ) {
         Row(
@@ -130,8 +143,8 @@ private fun TooSlow() {
         ) {
             Icon(Icons.Default.Warning, null, Modifier.size(18.dp), LocalWarning.current)
             Text(
-                TOO_SLOW,
-                Modifier.semantics { contentDescription = "$TOO_SLOW. $TOO_SLOW_HINT" },
+                warning.label,
+                Modifier.semantics { contentDescription = "${warning.label}. ${warning.hint}" },
                 style = MaterialTheme.typography.labelLarge,
             )
         }
@@ -170,7 +183,7 @@ private fun Sharer(model: AppModel, person: Person, modifier: Modifier = Modifie
 @Composable
 fun ShareTile(model: AppModel, state: CoreState, person: Person, share: Share) {
     val watching = state.current?.watching?.contains(person.user) == true
-    val tooSlow = person.user in state.health.slowShares
+    val warning = shareWarning(state, person.user)
     Card(
         Modifier.fillMaxWidth().aspectRatio(share.aspect.coerceAtLeast(0.75f)),
         shape = MaterialTheme.shapes.extraLarge,
@@ -183,7 +196,7 @@ fun ShareTile(model: AppModel, state: CoreState, person: Person, share: Share) {
                     ShareSurface(model, person.user, Modifier.aspectRatio(share.aspect))
                     Loading(state, person.user)
                 }
-                if (tooSlow) Box(Modifier.align(Alignment.TopStart).padding(12.dp)) { TooSlow() }
+                warning?.let { Box(Modifier.align(Alignment.TopStart).padding(12.dp)) { WarningPill(it) } }
                 Sharer(model, person, Modifier.align(Alignment.BottomStart).padding(12.dp))
                 Row(Modifier.align(Alignment.TopEnd).padding(8.dp), Arrangement.spacedBy(8.dp)) {
                     FilledTonalIconButton({ model.fullscreenShare = person.user }) {
@@ -256,9 +269,9 @@ fun ShareFullscreen(model: AppModel, state: CoreState) {
                 Text(person.name, color = Color.White, style = MaterialTheme.typography.titleMedium)
             }
         }
-        if (user in state.health.slowShares) {
+        shareWarning(state, user)?.let { warning ->
             // Shown with or without the controls, as the desktop does.
-            Box(Modifier.align(Alignment.TopEnd).safeDrawingPadding().padding(12.dp)) { TooSlow() }
+            Box(Modifier.align(Alignment.TopEnd).safeDrawingPadding().padding(12.dp)) { WarningPill(warning) }
         }
         AnimatedVisibility(controls, Modifier.align(Alignment.BottomCenter), enter = fadeIn(), exit = fadeOut()) {
             Column(

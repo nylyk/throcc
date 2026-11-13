@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -489,10 +489,19 @@ impl KeyframeAsks {
     }
 }
 
+/// What a share's decode thread reports.
+pub struct Receiving {
+    pub picture: Picture,
+    /// What decodes the share, as people see it named.
+    pub engine: watch::Receiver<&'static str>,
+    /// How many times decoding fell so far behind that units waiting for it were dropped.
+    pub fell_behind: Arc<AtomicU64>,
+}
+
 /// Decodes a share's `units` on its own thread into its newest picture due by `playout`,
-/// shown in `output` on the phones, and returns what decodes them. `ask_idr` runs after a
-/// reset, and on failures at most once per [`KEYFRAME_RETRY`] until a picture decodes.
-/// `first_picture` runs once the first picture is out.
+/// shown in `output` on the phones. `ask_idr` runs after a reset, and on failures at most
+/// once per [`KEYFRAME_RETRY`] until a picture decodes. `first_picture` runs once the first
+/// picture is out.
 pub fn receive(
     mut units: mpsc::Receiver<Received>,
     config: ShareConfig,
@@ -500,11 +509,13 @@ pub fn receive(
     output: Output,
     ask_idr: impl Fn() + Send + 'static,
     first_picture: impl FnOnce() + Send + 'static,
-) -> Result<(Picture, watch::Receiver<&'static str>), String> {
+) -> Result<Receiving, String> {
     let mut decoder =
         Decoder::new(config.codec, max_size(&config), output).map_err(|e| e.to_string())?;
     let (tx, picture) = watch::channel(None);
     let (engine_tx, engine) = watch::channel(decoder.engine());
+    let fell_behind = Arc::new(AtomicU64::new(0));
+    let falls = fell_behind.clone();
     std::thread::Builder::new()
         .name("throcc-decode".into())
         .spawn(move || {
@@ -552,6 +563,7 @@ pub fn receive(
                         }
                     }
                     if dropped > 0 {
+                        falls.fetch_add(1, Ordering::Relaxed);
                         warn!(
                             dropped,
                             "decoding fell behind; dropped the units waiting for it"
@@ -561,6 +573,9 @@ pub fn receive(
                 let unit = match queued.pop_front().map_or_else(|| units.try_recv(), Ok) {
                     Ok(unit) => Some(unit),
                     Err(mpsc::error::TryRecvError::Empty) => {
+                        if tx.is_closed() {
+                            return;
+                        }
                         // Units have stopped coming, so pictures still being decoded come
                         // out now.
                         loop {
@@ -655,7 +670,11 @@ pub fn receive(
             }
         })
         .map_err(|e| e.to_string())?;
-    Ok((picture, engine))
+    Ok(Receiving {
+        picture,
+        engine,
+        fell_behind,
+    })
 }
 
 #[cfg(test)]

@@ -21,7 +21,7 @@ use super::common::{
     toggle_icon, top_bar,
 };
 use super::mascot;
-use super::overlay::ShareOverlay;
+use super::overlay::{ShareOverlay, ShareWarning};
 use super::page::{resize_handle, sidebar_column};
 use super::part::Part;
 use crate::app::{Dialog, Screen, ServerPage, ThroccApp, ToggleDeafen, ToggleMic};
@@ -140,7 +140,7 @@ fn fullscreen_overlay(
         buttons,
         audience: person.map_or(0, |p| p.audience),
         controls: std::time::Instant::now() < app.controls_until,
-        too_slow: state.health.slow_shares.contains(&user),
+        warning: ShareWarning::of(&state.health, user),
         fullscreen: true,
     };
     div()
@@ -1044,7 +1044,7 @@ fn tile_overlay(
         buttons,
         audience: t.person.audience,
         controls: app.shows_overlay(user),
-        too_slow: app.state.health.slow_shares.contains(&user),
+        warning: ShareWarning::of(&app.state.health, user),
         fullscreen: false,
     };
     div()

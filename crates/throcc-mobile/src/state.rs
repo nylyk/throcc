@@ -190,6 +190,8 @@ pub struct Health {
     pub download_loss: f32,
     /// Sharers our connection can't keep up with.
     pub slow_shares: Vec<u64>,
+    /// Sharers whose pictures this device decodes too slowly to keep up with.
+    pub lagging_shares: Vec<u64>,
 }
 
 impl From<&core::State> for CoreState {
@@ -236,6 +238,7 @@ impl From<&core::State> for CoreState {
                 upload_loss: state.health.upload_loss,
                 download_loss: state.health.download_loss,
                 slow_shares: state.health.slow_shares.iter().map(|u| u.0).collect(),
+                lagging_shares: state.health.lagging_shares.iter().map(|u| u.0).collect(),
             },
             notice: state.connection.notice().map(ConnectionNotice::from),
             live_room: state.live_room().map(|room| room.0),

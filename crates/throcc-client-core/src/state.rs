@@ -466,6 +466,8 @@ pub struct Health {
     /// Sharers whose frames the server dropped for us in its last two reports: our connection
     /// can't keep up with their share.
     pub slow_shares: BTreeSet<UserId>,
+    /// Sharers whose pictures this device decodes too slowly to keep up with.
+    pub lagging_shares: BTreeSet<UserId>,
     pub receiving: Vec<TrackHealth>,
     pub sending: Vec<SentTrack>,
 }
