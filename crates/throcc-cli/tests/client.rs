@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use throcc_client_core::account;
+use throcc_client_core::blocked::BlockedStore;
 use throcc_client_core::call::{Call, CallEvent};
 use throcc_client_core::client::{Client, ClientApi, UiCommand, UiEvent};
 use throcc_client_core::keystore::Keystore;
@@ -303,6 +304,40 @@ fn a_profile_saved_again_too_soon_reaches_others_once_the_server_allows_it() {
     }
     wait_for(&bob, "alice's second name", |s| {
         s.person(alice_id).is_some_and(|p| p.name == "Alice")
+    });
+}
+
+#[test]
+fn a_profile_the_app_keeps_mid_session_reaches_the_server() {
+    let (address, admin_invite, _server) = server();
+    let dir = tempfile::tempdir().unwrap();
+    let keystore = Keystore::open_in(dir.path()).unwrap();
+    let verified = VerifiedStore::load(dir.path()).unwrap();
+    let blocked = BlockedStore::load(dir.path()).unwrap();
+    let (kept, profile) = tokio::sync::watch::channel(named("Ilse"));
+    let alice = Client::connect(
+        &address,
+        keystore,
+        Some(&admin_invite),
+        profile,
+        None,
+        verified,
+        blocked,
+    )
+    .unwrap();
+    wait_connected(&alice, "connected");
+    let room = create_room(&alice);
+    let (bob, _b) = client(&address, &invite(&alice));
+    alice.command(UiCommand::Join(Some(room)));
+    bob.command(UiCommand::Join(Some(room)));
+    let alice_id = alice.state().me.unwrap();
+    wait_for(&bob, "alice", |s| {
+        s.person(alice_id).is_some_and(|p| p.name == "Ilse")
+    });
+
+    kept.send_replace(named("Mara"));
+    wait_for(&bob, "alice's kept name", |s| {
+        s.person(alice_id).is_some_and(|p| p.name == "Mara")
     });
 }
 

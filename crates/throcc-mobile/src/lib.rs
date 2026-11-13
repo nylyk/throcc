@@ -392,7 +392,7 @@ impl Core {
             name,
             picture: profile.picture.map(Arc::from),
         };
-        self.change_settings(|settings| settings.profile = Some(profile.clone()))?;
+        self.change_settings(|settings| settings.profile = Some(profile.clone()));
         self.pass_on(profile);
         Ok(())
     }
@@ -418,14 +418,16 @@ impl Core {
     pub fn set_theme(&self, name: String) -> Result<(), CoreError> {
         let (name, _) =
             theme::preset(&name).with_context(|| format!("there is no theme called {name}"))?;
-        self.change_settings(|settings| theme::pick(&mut settings.appearance, name))
+        self.change_settings(|settings| theme::pick(&mut settings.appearance, name));
+        Ok(())
     }
 
     /// Picks the Custom theme with `palette` as its colours.
     pub fn set_custom_theme(&self, palette: Palette) -> Result<(), CoreError> {
         self.change_settings(|settings| {
             theme::pick_custom(&mut settings.appearance, palette.colors());
-        })
+        });
+        Ok(())
     }
 
     /// The servers this install has joined.
@@ -483,14 +485,19 @@ impl Core {
     /// Signs in to the server at `address`, joining it first with `invite`, and waits for
     /// its answer. It takes the place of any connection there was.
     pub fn connect(&self, address: String, invite: Option<String>) -> Result<(), CoreError> {
-        let Some(profile) = lock(&self.settings).profile.clone() else {
-            return Err(anyhow!("set your name first").into());
-        };
         let invite = invite.map(|code| parse_invite(&code)).transpose()?;
         let _switching = lock(&self.switching);
         self.end_connection();
-        let (kept_profile, profile_changes) = watch::channel(profile);
-        *lock(&self.profile_watch) = Some(kept_profile);
+        let profile_changes = {
+            // Held while the profile is read, so one saved meanwhile reaches the watch.
+            let mut watch_slot = lock(&self.profile_watch);
+            let Some(profile) = lock(&self.settings).profile.clone() else {
+                return Err(anyhow!("set your name first").into());
+            };
+            let (kept_profile, profile_changes) = watch::channel(profile);
+            *watch_slot = Some(kept_profile);
+            profile_changes
+        };
         let (verified, blocked) = (self.verified.clone(), self.blocked.clone());
         let mut audio = None;
         let client: Arc<dyn ClientApi> = if self.mock {
@@ -515,8 +522,10 @@ impl Core {
         let events = client.events();
         let state = CoreState::from(&*client.state());
         let connection = self.connection.load(Ordering::SeqCst);
-        for (user, views) in lock(&self.share_views).iter() {
-            let newest = views.last().map(|(_, view)| view.clone());
+        // Held until the client is in place, so a view shown or hidden meanwhile reaches it.
+        let views = lock(&self.share_views);
+        for (user, shown) in views.iter() {
+            let newest = shown.last().map(|(_, view)| view.clone());
             client.set_share_view(UserId(*user), newest);
         }
         *lock(&self.connected) = Some(Connected {
@@ -524,6 +533,7 @@ impl Core {
             client,
             audio,
         });
+        drop(views);
         let _ = self.told.send((connection, Told::State(Box::new(state))));
         self.forward(events, connection);
         if let Some(audio) = self.audio() {
@@ -569,7 +579,7 @@ impl Core {
     /// once let go.
     pub fn set_voice(&self, voice: Voice, keep: bool) -> Result<(), CoreError> {
         if keep {
-            self.change_settings(|settings| voice.apply_to(&mut settings.audio.voice))?;
+            self.change_settings(|settings| voice.apply_to(&mut settings.audio.voice));
         } else {
             voice.apply_to(&mut lock(&self.settings).audio.voice);
         }
@@ -797,17 +807,18 @@ impl Core {
     }
 
     /// Changes the settings and keeps them, in memory only for the mock.
-    fn change_settings(&self, change: impl FnOnce(&mut Settings)) -> Result<(), CoreError> {
+    /// Changes the settings and keeps them, in memory only for the mock. A change that
+    /// can't be kept still holds until the app ends, and `store_problems` says why.
+    fn change_settings(&self, change: impl FnOnce(&mut Settings)) {
         let mut settings = lock(&self.settings);
-        let mut changed = settings.clone();
-        change(&mut changed);
-        if !self.mock {
-            changed
-                .save(&keystore::config_dir()?)
-                .context("saving the settings")?;
+        change(&mut settings);
+        if self.mock {
+            return;
         }
-        *settings = changed;
-        Ok(())
+        let saved = keystore::config_dir().and_then(|dir| settings.save(&dir));
+        lock(&self.problems).settings = saved
+            .err()
+            .map(|e| format!("Couldn't keep your settings: {e}"));
     }
 
     fn audio(&self) -> Option<Arc<AudioEngine>> {

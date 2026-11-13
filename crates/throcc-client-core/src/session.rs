@@ -70,8 +70,8 @@ pub(crate) struct Shared {
     pub state: Mutex<Arc<State>>,
     pub events: broadcast::Sender<UiEvent>,
     pub pictures: Mutex<HashMap<UserId, Picture>>,
-    /// Where each share is shown on the phones, set by the app whether or not it is watched
-    /// yet.
+    /// Where each share is shown on the phones, set and cleared by the app whether or not it
+    /// is watched, so a share restarted or watched again shows in the same view.
     pub outputs: Mutex<HashMap<UserId, Output>>,
     /// Our own user and the preview demand of our running share.
     pub preview: Mutex<Option<(UserId, Arc<PreviewDemand>)>>,
@@ -611,7 +611,11 @@ impl Session {
                         warn!("saving playback: {e:#}");
                     }
                 }
-                Ok(()) = self.kept_profile.changed() => self.push_profile().await,
+                Ok(()) = self.kept_profile.changed() => {
+                    // `changed` marked the new profile seen, so it is taken here.
+                    self.profile = self.kept_profile.borrow_and_update().clone();
+                    self.push_profile().await;
+                }
                 _ = renewal.tick() => self.renew_encryption_key().await,
                 Some(_) = self.call.recovery.recv() => self.recover_share(Recovery::Idr),
                 Some(started) = self.share_starts.next() => self.share_started(started).await,
@@ -1748,8 +1752,9 @@ impl Session {
         }
     }
 
+    /// Stops receiving `user`'s share. Where it is shown stays: the app sets and clears that,
+    /// and a share watched again, or restarted at another size, shows there again.
     fn stop_watching(&mut self, user: UserId) {
-        lock(&self.shared.outputs).remove(&user);
         if let Some(watched) = self.watched_shares.remove(&user) {
             self.call.engine.unsubscribe(watched.video);
             self.tracks.remove(&watched.video);

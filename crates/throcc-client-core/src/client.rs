@@ -285,6 +285,8 @@ pub struct MockClient {
     blocked: BlockedStore,
     /// The sample people as they are when not blocked.
     sample_people: BTreeMap<UserId, Person>,
+    /// Our name and picture as last set, which we keep out of a room too.
+    own_profile: std::sync::Mutex<Option<(String, Option<Hash>)>>,
     /// The picture every share shows.
     picture: watch::Sender<Option<Arc<Frame>>>,
 }
@@ -340,6 +342,7 @@ impl MockClient {
         state.people.retain(|_, p| p.room.is_some());
         let client = Self {
             sample_people,
+            own_profile: std::sync::Mutex::new(None),
             shared: Shared::new(state),
             verified,
             blocked,
@@ -389,7 +392,12 @@ impl ClientApi for MockClient {
                 match room {
                     Some(room) => {
                         if let Some(person) = s.people.get(&me).cloned().or(sample) {
+                            let (name, avatar) = crate::lock(&self.own_profile)
+                                .clone()
+                                .unwrap_or((person.name.clone(), person.avatar));
                             let person = Person {
+                                name,
+                                avatar,
                                 room: Some(room),
                                 mic,
                                 deafened,
@@ -463,6 +471,7 @@ impl ClientApi for MockClient {
                 let hash = profile
                     .picture
                     .map(|bytes| self.keep_avatar(bytes.to_vec()));
+                *crate::lock(&self.own_profile) = Some((profile.name.clone(), hash));
                 self.update(|s| {
                     if let Some(p) = s.people.get_mut(&me) {
                         p.name = profile.name;

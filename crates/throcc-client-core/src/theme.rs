@@ -165,12 +165,27 @@ pub fn contrast(one: u32, other: u32) -> f32 {
 pub const READABLE: f32 = 4.5;
 
 /// `color` mixed toward `text` in steps of a tenth until it reads on every one of
-/// `surfaces`, or `text` itself if no step does.
+/// `surfaces`. Where no step does, as with a text colour that hardly reads itself, the step
+/// that reads best.
 pub fn readable(color: u32, text: u32, surfaces: &[u32]) -> u32 {
-    (0..=10)
-        .map(|step| mix(text, step as f32 / 10.0, color))
-        .find(|mixed| surfaces.iter().all(|s| contrast(*mixed, *s) >= READABLE))
-        .unwrap_or(text)
+    let worst = |c: u32| {
+        surfaces
+            .iter()
+            .map(|s| contrast(c, *s))
+            .fold(f32::INFINITY, f32::min)
+    };
+    let mut best = (color, worst(color));
+    for step in 0..=10 {
+        let mixed = mix(text, step as f32 / 10.0, color);
+        let reads = worst(mixed);
+        if reads >= READABLE {
+            return mixed;
+        }
+        if reads > best.1 {
+            best = (mixed, reads);
+        }
+    }
+    best.0
 }
 
 /// The colours every client mixes from a theme's eight, the same on each.
@@ -189,7 +204,8 @@ pub struct Colors {
     /// Behind a warning about something gone wrong.
     pub danger: u32,
     pub text: u32,
-    /// These read as text on every surface above, at [`READABLE`] contrast.
+    /// These read as text at [`READABLE`] contrast on the background, the panel and the
+    /// raised, control and selected fills, where the palette's text colour does.
     pub muted: u32,
     pub accent: u32,
     pub warning: u32,
@@ -318,6 +334,16 @@ mod tests {
             }
         }
         assert_ne!(Colors::of(dim).muted, dim[3]);
+    }
+
+    #[test]
+    fn a_palette_that_cant_read_keeps_what_reads_best() {
+        let murky = [
+            0x202020, 0x202020, 0x303030, 0x808080, 0xFF0000, 0xFFB86B, 0x5BE3A4, 0xFF6B85,
+        ];
+        let c = Colors::of(murky);
+        assert!(contrast(c.accent, c.bg) >= contrast(0x303030, c.bg));
+        assert_ne!(c.accent, c.bad);
     }
 
     #[test]
