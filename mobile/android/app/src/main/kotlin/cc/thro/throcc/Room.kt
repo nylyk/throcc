@@ -71,8 +71,8 @@ fun RoomPane(model: AppModel, state: CoreState, onBack: (() -> Unit)?) {
     ) { padding ->
         LazyVerticalGrid(
             GridCells.Adaptive(152.dp),
-            Modifier.padding(padding).padding(horizontal = 16.dp),
-            contentPadding = PaddingValues(bottom = 96.dp),
+            Modifier.padding(padding.exceptBottom()).padding(horizontal = 16.dp),
+            contentPadding = PaddingValues(bottom = padding.calculateBottomPadding() + 96.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {

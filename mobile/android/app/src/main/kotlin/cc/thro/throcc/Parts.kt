@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
@@ -85,6 +87,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.window.core.layout.WindowSizeClass
@@ -156,11 +159,22 @@ fun Page(
     )
 }
 
+/** These paddings above and beside only, for scrolling content that takes the bottom one inside. */
+@Composable
+fun PaddingValues.exceptBottom(): PaddingValues {
+    val direction = LocalLayoutDirection.current
+    return PaddingValues(calculateStartPadding(direction), calculateTopPadding(), calculateEndPadding(direction), 0.dp)
+}
+
 /** A scrolling column of fields. */
 @Composable
 fun Form(padding: PaddingValues, content: @Composable ColumnScope.() -> Unit) {
     Column(
-        Modifier.padding(padding).verticalScroll(rememberScrollState()).pageWidth().padding(vertical = 16.dp),
+        Modifier.padding(padding.exceptBottom())
+            .verticalScroll(rememberScrollState())
+            .padding(bottom = padding.calculateBottomPadding())
+            .pageWidth()
+            .padding(vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
         content = content,
     )
