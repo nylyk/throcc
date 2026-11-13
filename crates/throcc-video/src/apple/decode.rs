@@ -23,7 +23,7 @@ use super::{NO_ERR, PixelBuffer, TIMESCALE, attributes};
 use crate::frame::VideoFrame;
 use crate::nal::{self, LENGTH_SIZE};
 use crate::software::{dav1d, vpx};
-use crate::{DecodeError, Frame, MaxSize, Output};
+use crate::{DecodeError, Frame, MaxSize, Output, switches};
 
 /// VideoToolbox's `kVTInvalidSessionErr` and `kVTVideoDecoderMalfunctionErr`: the session
 /// is gone or broken, as after iOS took the hardware from a backgrounded app, and has to be
@@ -75,7 +75,7 @@ impl Decoder {
         };
         let inner = match codec {
             Codec::H264 | Codec::Hevc => Inner::VideoToolbox(VideoToolbox::new(codec)),
-            Codec::Av1 if av1::decodes_in_hardware() => {
+            Codec::Av1 if !switches::software_decoding() && av1::decodes_in_hardware() => {
                 Inner::VideoToolbox(VideoToolbox::new(codec))
             }
             Codec::Av1 => software(Software::Dav1d(dav1d::Decoder::new(max_size)?)),

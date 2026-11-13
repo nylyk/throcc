@@ -24,6 +24,8 @@ just                                   # lists the recipes that build and run th
 mobile/android/gradlew -p mobile/android assembleDebug   # Android: builds the core with cargo-ndk, then the APK
 xcrun simctl launch booted cc.thro.throcc --mock --screen <name>   # iOS sample screens; names in `Sample.swift`
 adb shell am start -S -n cc.thro.throcc/.MainActivity --ez mock true --es screen <name>   # Android sample screens; names in `AppModel.kt`
+THROCC_SOFTWARE_DECODE=1 THROCC_CODEC=vp9 just desktop   # testing: software decoders, and one codec to share in (av1, hevc, h264, vp9)
+just android --ez software_decode true                   # the same software switch on Android; `--software-decode` as an iOS launch argument
 ```
 
 macOS, iOS and Android link dav1d and libvpx statically: `packaging/codecs/build.sh deps/codecs <rust-target>...` builds them, then `set -a; eval "$(packaging/codecs/env.sh deps/codecs)"; set +a` before cargo. macOS needs no ffmpeg; Linux and Windows video needs `--features ffmpeg`.

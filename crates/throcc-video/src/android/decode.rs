@@ -6,7 +6,7 @@ use tracing::{info, warn};
 use super::codec::{self, MediaCodec};
 use crate::frame::VideoFrame;
 use crate::software::{dav1d, vpx};
-use crate::{DecodeError, Frame, MaxSize, Output};
+use crate::{DecodeError, Frame, MaxSize, Output, switches};
 
 /// How long, in 90 kHz media time, MediaCodec may keep failing before it is given up: AV1
 /// and VP9 go to dav1d or libvpx, H.264 and HEVC get a new codec. Also how often a codec
@@ -211,6 +211,9 @@ impl Decoder {
     /// Opens a codec for the view, if there is one, decoding from the next keyframe. AV1 or
     /// VP9 that MediaCodec won't take go to software. False if nothing could open.
     fn open(&mut self) -> bool {
+        if switches::software_decoding() && matches!(self.codec, Codec::Av1 | Codec::Vp9) {
+            return self.switch_to_software().is_ok();
+        }
         let Some(view) = self.output.view() else {
             return true;
         };

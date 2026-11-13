@@ -19,7 +19,7 @@ use crate::frame::share_size;
 use crate::frame::{VideoFrame, fit_within};
 #[cfg(target_os = "linux")]
 use crate::{DmaBuf, GpuEncoded};
-use crate::{EncodeError, EncodedUnit, EncoderConfig};
+use crate::{EncodeError, EncodedUnit, EncoderConfig, switches};
 
 /// A GOP cap of this many seconds bounds how long a picture stays broken without a request.
 const GOP_SECONDS: i32 = 4;
@@ -207,7 +207,7 @@ impl Encoder {
     pub fn open(config: EncoderConfig) -> Result<Self, EncodeError> {
         LADDER
             .iter()
-            .filter(|candidate| has_driver(candidate))
+            .filter(|candidate| switches::encodes(candidate.codec) && has_driver(candidate))
             .find_map(|candidate| Self::open_with(candidate, config))
             .ok_or(EncodeError::NoEncoder)
     }
@@ -565,7 +565,9 @@ pub fn tries_gpu_input_first() -> bool {
 
 #[cfg(target_os = "linux")]
 fn first_tried(available: impl Fn(&Candidate) -> bool) -> Option<&'static Candidate> {
-    LADDER.iter().find(|candidate| available(candidate))
+    LADDER
+        .iter()
+        .find(|candidate| switches::encodes(candidate.codec) && available(candidate))
 }
 
 /// Whether the driver an encoder loads is installed. Only NVENC is checked, by its CUDA

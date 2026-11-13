@@ -36,7 +36,7 @@ use crate::frame::VideoFrame;
 use crate::nal;
 #[cfg(target_os = "macos")]
 use crate::software::vpx;
-use crate::{EncodeError, EncodedUnit, EncoderConfig};
+use crate::{EncodeError, EncodedUnit, EncoderConfig, switches};
 
 /// A GOP cap of this many seconds bounds how long a picture stays broken without a request.
 const GOP_SECONDS: u32 = 4;
@@ -67,6 +67,7 @@ impl Encoder {
     pub fn open(config: EncoderConfig) -> Result<Self, EncodeError> {
         LADDER
             .iter()
+            .filter(|codec| switches::encodes(**codec))
             .find_map(|codec| match Self::open_with(*codec, config, true) {
                 Ok(encoder) => Some(encoder),
                 Err(e) => {

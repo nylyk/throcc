@@ -12,6 +12,7 @@ mod nal;
 pub mod software;
 
 mod output;
+pub mod switches;
 
 #[cfg(target_os = "android")]
 mod android;

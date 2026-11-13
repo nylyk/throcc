@@ -8,6 +8,9 @@ struct ThroccApp: App {
 
     init() {
         let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("--software-decode") {
+            setenv("THROCC_SOFTWARE_DECODE", "1", 1)
+        }
         let mock = arguments.contains("--mock")
         let value = { (flag: String) in arguments.drop { $0 != flag }.dropFirst().first }
         let sample = value("--screen").flatMap(Sample.init(rawValue:))

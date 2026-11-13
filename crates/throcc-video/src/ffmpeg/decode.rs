@@ -8,7 +8,7 @@ use throcc_proto::messages::Codec;
 use tracing::{info, warn};
 
 use crate::frame::VideoFrame;
-use crate::{DecodeError, Frame, MaxSize, Output};
+use crate::{DecodeError, Frame, MaxSize, Output, switches};
 
 /// FFmpeg's own decoder for `codec`, the one that hands work to a hardware device.
 fn native_decoder(codec: Codec) -> &'static CStr {
@@ -67,7 +67,10 @@ impl Decoder {
     /// Opens a decoder that refuses pictures larger than `max_size`. Desktops draw pictures
     /// themselves, so `output` stays unused.
     pub fn new(codec: Codec, max_size: MaxSize, _output: Output) -> Result<Self, DecodeError> {
-        let decoder = match Self::on_hardware(codec, max_size) {
+        let hardware = (!switches::software_decoding())
+            .then(|| Self::on_hardware(codec, max_size))
+            .flatten();
+        let decoder = match hardware {
             Some(decoder) => decoder,
             None => Self::in_software(codec, max_size)?,
         };
