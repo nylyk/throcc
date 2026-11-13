@@ -304,7 +304,7 @@ private fun ShareOverlay(model: AppModel, state: CoreState, person: Person, shar
                 if (fullscreen) {
                     RoomStrip(model, state.people.filter { it.room == state.current?.room })
                     CentredBesideEnd(Modifier.fillMaxWidth()) {
-                        RoomControls(model, state)
+                        RoomControls(model, state, small = true)
                         ShareButtons(model, person, share, fullscreen = true, Modifier)
                     }
                 } else {

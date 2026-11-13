@@ -145,16 +145,19 @@ private fun WatchButton(model: AppModel, person: Person, share: Share, watched: 
     }
 }
 
-/** The mic, sound and leave controls, floating over the room. */
+/** The mic, sound and leave controls, floating over the room; `small` beside a fullscreen share's buttons. */
 @Composable
-fun RoomControls(model: AppModel, state: CoreState) {
+fun RoomControls(model: AppModel, state: CoreState, small: Boolean = false) {
     val scheme = MaterialTheme.colorScheme
-    val size = Modifier.padding(horizontal = 4.dp).size(IconButtonDefaults.mediumContainerSize())
-    val shapes = IconButtonDefaults.toggleableShapes(
-        IconButtonDefaults.mediumRoundShape,
-        IconButtonDefaults.mediumPressedShape,
-        IconButtonDefaults.mediumSelectedRoundShape,
-    )
+    val size = if (small) {
+        Modifier.padding(horizontal = 2.dp).size(IconButtonDefaults.smallContainerSize())
+    } else {
+        Modifier.padding(horizontal = 4.dp).size(IconButtonDefaults.mediumContainerSize())
+    }
+    val round = if (small) IconButtonDefaults.smallRoundShape else IconButtonDefaults.mediumRoundShape
+    val pressed = if (small) IconButtonDefaults.smallPressedShape else IconButtonDefaults.mediumPressedShape
+    val selected = if (small) IconButtonDefaults.smallSelectedRoundShape else IconButtonDefaults.mediumSelectedRoundShape
+    val shapes = IconButtonDefaults.toggleableShapes(round, pressed, selected)
     val mic = state.mic && !model.micDenied
     val setMic = { on: Boolean ->
         if (model.micDenied) {
@@ -172,7 +175,7 @@ fun RoomControls(model: AppModel, state: CoreState) {
         }
         FilledIconButton(
             { model.core.command(Command.Join(null)) },
-            IconButtonDefaults.shapes(IconButtonDefaults.mediumRoundShape, IconButtonDefaults.mediumPressedShape),
+            IconButtonDefaults.shapes(round, pressed),
             size,
             colors = IconButtonDefaults.filledIconButtonColors(scheme.error, scheme.onError),
         ) { Icon(Icons.Default.CallEnd, "Leave Room") }
