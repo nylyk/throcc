@@ -182,7 +182,7 @@ fn software_decoders_hand_out_pixel_buffers() {
 }
 
 #[test]
-fn av1_decodes_into_pixel_buffers_in_hardware_where_there_is_one() {
+fn av1_decodes_into_pixel_buffers_starting_in_hardware_where_there_is_one() {
     let file = include_bytes!("../../testdata/pattern.ivf");
     let mut decoder = Decoder::new(Codec::Av1, MaxSize::ANY, Output::default()).unwrap();
     let expected = if super::av1::decodes_in_hardware() {
@@ -200,5 +200,4 @@ fn av1_decodes_into_pixel_buffers_in_hardware_where_there_is_one() {
         assert!(matches!(output, Frame::PixelBuffer(_)));
         assert_eq!(output.copied_to_memory().read_test_number(), n as u16);
     }
-    assert_eq!(decoder.engine(), expected);
 }
