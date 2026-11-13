@@ -3,6 +3,14 @@ package cc.thro.throcc
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContentTransitionScope
+import androidx.compose.animation.AnimatedContentTransitionScope.SlideDirection
+import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.core.Easing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
@@ -20,9 +28,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation3.runtime.NavEntry
+import androidx.navigation3.scene.Scene
 import androidx.navigation3.ui.NavDisplay
 import androidx.window.core.layout.WindowSizeClass
 import cc.thro.throcc.core.CoreState
@@ -66,6 +76,10 @@ private fun Panes(model: AppModel, state: CoreState) {
                 backStack = if (roomInFront) model.stack + Screen.Room else model.stack,
                 modifier = if (wide) Modifier.width(360.dp).consumeWindowInsets(pagesEnd) else Modifier.weight(1f),
                 onBack = { if (roomInFront) model.roomInFront = false else model.back() },
+                transitionSpec = { slide(SlideDirection.Start, FastOutSlowInEasing) },
+                popTransitionSpec = { slide(SlideDirection.End, FastOutSlowInEasing) },
+                // A back gesture seeks the transition by its progress, so it eases on its own.
+                predictivePopTransitionSpec = { slide(SlideDirection.End, LinearEasing) },
                 // NavDisplay keeps an entry until the stack changes, so an entry that captured the
                 // state would show a stale one.
                 entryProvider = { screen -> NavEntry(screen) { Shown(model, screen) } },
@@ -73,6 +87,17 @@ private fun Panes(model: AppModel, state: CoreState) {
         }
         if (wide) Box(Modifier.weight(1f).consumeWindowInsets(roomStart)) { RoomPane(model, state, null) }
     }
+}
+
+/** The page in front slides in over the one behind, which shifts a quarter of the way. */
+private fun AnimatedContentTransitionScope<Scene<Screen>>.slide(
+    towards: SlideDirection,
+    easing: Easing,
+): ContentTransform {
+    val spec = tween<IntOffset>(300, easing = easing)
+    val forward = towards == SlideDirection.Start
+    return slideIntoContainer(towards, spec) { if (forward) it else it / 4 } togetherWith
+        slideOutOfContainer(towards, spec) { if (forward) it / 4 else it }
 }
 
 @Composable
