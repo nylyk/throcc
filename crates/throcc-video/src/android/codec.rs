@@ -107,11 +107,17 @@ pub enum Output {
 
 impl MediaCodec {
     /// A started decoder for `codec` rendering into `view`, refusing pictures larger than
-    /// `max_size`. `None` if the device has none or it doesn't take that size.
+    /// `max_size`. `None` if the device has none or it doesn't take that size, and for AV1
+    /// and VP9 if Android's own software decoder is all it has, as dav1d and libvpx outrun it.
     pub fn open(codec: Codec, max_size: MaxSize, view: View) -> Option<Self> {
         // SAFETY: the MIME type is a C string literal.
         let raw = unsafe { ndk::AMediaCodec_createDecoderByType(mime(codec).as_ptr()) };
         if raw.is_null() {
+            return None;
+        }
+        if matches!(codec, Codec::Av1 | Codec::Vp9) && is_platform_software(raw) {
+            // SAFETY: the codec was created above and is used no further.
+            unsafe { ndk::AMediaCodec_delete(raw) };
             return None;
         }
         let shared = Arc::new(Shared {
@@ -260,6 +266,23 @@ impl Drop for MediaCodec {
             ndk::AMediaCodec_delete(*codec);
         }
         *codec = std::ptr::null_mut();
+    }
+}
+
+/// Whether `codec` is one of Android's own software codecs rather than the device's.
+fn is_platform_software(codec: *mut ndk::AMediaCodec) -> bool {
+    let mut name: *mut c_char = std::ptr::null_mut();
+    // SAFETY: the codec is live; the name it returns is released below.
+    unsafe {
+        if ndk::AMediaCodec_getName(codec, &mut name) != ndk::media_status_t::AMEDIA_OK
+            || name.is_null()
+        {
+            return false;
+        }
+        let bytes = CStr::from_ptr(name).to_bytes();
+        let software = bytes.starts_with(b"c2.android.") || bytes.starts_with(b"OMX.google.");
+        ndk::AMediaCodec_releaseName(codec, name);
+        software
     }
 }
 
