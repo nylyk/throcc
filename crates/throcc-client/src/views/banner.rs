@@ -17,12 +17,22 @@ pub fn render(app: &ThroccApp) -> Option<Div> {
             theme::warn_bg(),
             theme::warn_text(),
         ),
+        ConnectionStatus::AwaitingReconnect => (
+            "Disconnected after a while away. Reconnect from the room.".to_owned(),
+            theme::warn_bg(),
+            theme::warn_text(),
+        ),
+        ConnectionStatus::SignedInElsewhere => (
+            "Disconnected: signed in on another device".to_owned(),
+            theme::danger_bg(),
+            theme::danger_text(),
+        ),
         ConnectionStatus::Failed(reason) => (
             format!("Disconnected: {reason}"),
             theme::danger_bg(),
             theme::danger_text(),
         ),
-        _ => return None,
+        ConnectionStatus::Disconnected | ConnectionStatus::Connected => return None,
     };
     Some(
         div()

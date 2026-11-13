@@ -1,8 +1,3 @@
-//! Keeps a Wayland session from going idle while a window plays a share, through the
-//! compositor's idle-inhibit protocol. The compositor honours an inhibitor while its surface is
-//! visible, and idle daemons such as hypridle and swayidle follow the compositor, whatever the
-//! desktop portal can do: Hyprland's portal, for one, has no Inhibit backend of its own.
-
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::{Mutex, OnceLock};
@@ -23,7 +18,7 @@ pub struct IdleInhibitor {
 }
 
 impl IdleInhibitor {
-    /// `None` outside Wayland, or on a compositor without the protocol.
+    /// The inhibitor is `None` outside Wayland, or on a compositor without the protocol.
     pub fn new(window: &gpui::Window) -> Option<Self> {
         let display = window.display_handle().ok()?.as_raw();
         let surface = HasWindowHandle::window_handle(window).ok()?.as_raw();
@@ -41,7 +36,7 @@ impl IdleInhibitor {
             unsafe { ObjectId::from_ptr(WlSurface::interface(), surface.surface.as_ptr().cast()) };
         let surface = WlSurface::from_id(&manager.connection, id.ok()?).ok()?;
         let mut queue = manager.queue.lock().unwrap_or_else(|e| e.into_inner());
-        // Drains the registry's events, which nothing else reads.
+        // The registry's events pile up on this queue, and nothing else drains them.
         queue.dispatch_pending(&mut Ignore).ok()?;
         let inhibitor = manager
             .manager

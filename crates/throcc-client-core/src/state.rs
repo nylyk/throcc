@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
 use throcc_proto::limits::{MAX_ROOMS, MAX_SIGNED_IN};
-use throcc_proto::messages::{Codec, PublicKey, Room, ShareConfig, valid_name};
+use throcc_proto::messages::{Codec, PublicKey, Recovery, Room, ShareConfig, valid_name};
 
 pub(crate) const MIC_KBPS: u32 = 64;
 pub(crate) const SHARE_AUDIO_KBPS: u32 = crate::media::share_audio::KBPS;
@@ -96,6 +96,11 @@ pub enum ConnectionStatus {
         attempt: u32,
         reason: String,
     },
+    /// The link was down too long to sign in again unasked, which could push another
+    /// device of ours off the server. `UiCommand::Reconnect` signs in again.
+    AwaitingReconnect,
+    /// Another device signed in as us, which ended this session.
+    SignedInElsewhere,
     Failed(String),
 }
 
@@ -149,7 +154,13 @@ pub struct Person {
     /// even for someone verified before: nothing else ties their account here to that key.
     pub identity_key: Option<PublicKey>,
     pub role: Role,
+    /// Whether the user blocked them. A blocked person keeps their place in the room, under
+    /// [`BLOCKED_NAME`] and without their picture, sounds or shares.
+    pub blocked: bool,
 }
+
+/// The name a blocked person is shown under.
+pub const BLOCKED_NAME: &str = "Blocked person";
 
 /// Which of someone's sounds a [`SoundLevel`] is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -229,6 +240,16 @@ pub struct KeyWarning {
     pub user: UserId,
     pub verified: Fingerprint,
     pub now: Fingerprint,
+}
+
+/// Someone blocked on this install, as they looked when blocked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockedPerson {
+    pub key: Fingerprint,
+    pub name: String,
+    pub avatar: Option<Hash>,
+    /// The server they were blocked on.
+    pub server: Option<Fingerprint>,
 }
 
 /// An identity key verified on this install.
@@ -371,6 +392,7 @@ impl ShareChoice {
     }
 
     /// The share to ask for. Its size is a 16:9 box the sender fits the screen's shape in.
+    /// The encoder decides its codec and recovery.
     pub fn config(self, codec: Codec, audio: bool) -> ShareConfig {
         let height = self.resolution.height();
         ShareConfig {
@@ -380,6 +402,7 @@ impl ShareChoice {
             width: height / 9 * 16,
             height,
             fps: self.fps,
+            recovery: Recovery::Idr,
         }
     }
 }
@@ -432,6 +455,7 @@ mod tests {
             verified: false,
             identity_key: None,
             role: Role::User,
+            blocked: false,
         }
     }
 

@@ -1,0 +1,28 @@
+These are the Android libraries in this app, with their licenses.
+
+================================================================================
+Android Jetpack and Jetpack Compose
+
+The androidx libraries, Compose and its Material icons are licensed under the
+Apache License 2.0, whose text appears with the Rust crates below.
+https://developer.android.com/jetpack/androidx
+
+================================================================================
+Kotlin and kotlinx
+
+The Kotlin standard library, kotlinx.coroutines and JetBrains annotations are
+licensed under the Apache License 2.0, whose text appears with the Rust crates
+below. https://github.com/JetBrains/kotlin
+
+================================================================================
+JNA
+
+JNA is dual-licensed under the Apache License 2.0 and the GNU Lesser General Public
+License 2.1 or later, and this app uses it under the Apache License 2.0, whose text
+appears with the Rust crates below. https://github.com/java-native-access/jna
+
+================================================================================
+Guava ListenableFuture and JSpecify
+
+Both are licensed under the Apache License 2.0, whose text appears with the Rust
+crates below. https://github.com/google/guava, https://jspecify.dev

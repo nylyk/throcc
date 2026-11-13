@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, Context, Div, FontFeatures, FontWeight, InteractiveElement, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement, Pixels, RenderImage, Size as Area, Stateful,
-    StatefulInteractiveElement, StyleRefinement, Styled, Window, canvas, div, px, size,
+    AnyElement, ClickEvent, Context, Div, FontFeatures, FontWeight, InteractiveElement,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, RenderImage, Size as Area,
+    Stateful, StatefulInteractiveElement, StyleRefinement, Styled, Window, canvas, div, px, size,
 };
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
@@ -16,8 +16,8 @@ use throcc_client_core::state::{Person, State, share_label};
 use throcc_proto::ids::{RoomId, UserId};
 
 use super::common::{
-    CONTROLS_LINGER, TRAFFIC_LIGHTS, Trust, Typeset, audience, avatar, bottom_bar, caption,
-    danger_menu_item, description, ghost_icon, icon, primary, rate, section, sharing_icon,
+    CONTROLS_LINGER, TRAFFIC_LIGHTS, Trust, Typeset, audience, avatar, blocked_avatar, bottom_bar,
+    caption, danger_menu_item, description, ghost_icon, icon, primary, rate, section, sharing_icon,
     toggle_icon, top_bar, trust,
 };
 use super::mascot;
@@ -440,20 +440,20 @@ fn occupant(
         .rounded(theme::RADIUS_ROW)
         .cursor_pointer()
         .hover(|s| s.bg(theme::raised()))
-        .on_click(cx.listener(move |app, _, _, cx| app.open_profile(user, cx)))
+        .on_click(cx.listener(move |app, event: &ClickEvent, window, cx| {
+            app.open_person(user, event.position(), window, cx);
+        }))
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |app, event: &MouseDownEvent, window, cx| {
                 app.open_person_menu(user, event.position, window, cx)
             }),
         )
-        .child(avatar(
-            &person.name,
-            user.0,
-            picture,
-            px(26.),
-            person.speaking,
-        ))
+        .child(if person.blocked {
+            blocked_avatar(px(26.))
+        } else {
+            avatar(&person.name, user.0, picture, px(26.), person.speaking)
+        })
         .child(
             div()
                 .min_w_0()
@@ -464,10 +464,14 @@ fn occupant(
                     div()
                         .min_w_0()
                         .truncate()
-                        .text_color(theme::text_2_muted())
+                        .text_color(if person.blocked {
+                            theme::text_3()
+                        } else {
+                            theme::text_2_muted()
+                        })
                         .child(person.name.clone()),
                 )
-                .children(trust_marker(user, trust)),
+                .children(trust_marker(user, trust).filter(|_| !person.blocked)),
         )
         .child(div().flex_1())
         .children(person.sharing.is_some().then(|| sharing_icon(px(16.))))
@@ -1117,13 +1121,11 @@ fn person_card(t: &Tile, height: Pixels, compact: bool, cx: &mut Context<ThroccA
         .justify_center()
         .gap(if compact { px(4.) } else { px(10.) })
         .p_2()
-        .child(avatar(
-            &person.name,
-            user.0,
-            t.picture.clone(),
-            picture_size,
-            false,
-        ))
+        .child(if person.blocked {
+            blocked_avatar(picture_size)
+        } else {
+            avatar(&person.name, user.0, t.picture.clone(), picture_size, false)
+        })
         .child(
             div()
                 .flex()
@@ -1134,6 +1136,11 @@ fn person_card(t: &Tile, height: Pixels, compact: bool, cx: &mut Context<ThroccA
                     div()
                         .typeset(if compact { theme::CAPTION } else { theme::BODY })
                         .font_weight(FontWeight::MEDIUM)
+                        .text_color(if person.blocked {
+                            theme::text_3()
+                        } else {
+                            theme::text()
+                        })
                         .truncate()
                         .child(if t.mine {
                             format!("{} (you)", person.name)

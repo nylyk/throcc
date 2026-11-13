@@ -37,6 +37,9 @@ pub fn key_changed(state: &State, user: UserId) -> bool {
 /// The name `person` was verified under, where the server now shows another: the server
 /// picks the name, so it alone doesn't say who is verified.
 pub fn verified_as(verified: &[VerifiedIdentity], person: &Person) -> Option<String> {
+    if person.blocked {
+        return None;
+    }
     let key = Fingerprint(person.identity_key.filter(|_| person.verified)?);
     let stored = &verified.iter().find(|v| v.key == key)?.name;
     (*stored != person.name).then(|| stored.clone())
@@ -141,6 +144,26 @@ pub fn server_seed(address: &str) -> u64 {
     address.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
     })
+}
+
+/// The grey disc in place of a blocked person's picture.
+pub fn blocked_avatar(size: Pixels) -> Div {
+    div()
+        .flex_none()
+        .size(size + px(4.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .size(size)
+                .rounded_full()
+                .bg(theme::control())
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon("ban").size(size * 0.5).text_color(theme::text_3())),
+        )
 }
 
 /// The person's picture, or their initials on a muted hue, with the speaking ring when

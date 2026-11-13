@@ -19,6 +19,7 @@ throcc-client-core = { path = "crates/throcc-client-core" }
 
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "zeroize"] }
 anyhow = "1.0.104"
+apple-native-keyring-store = { version = "1.0.2", features = ["protected"] }
 arc-swap = "1.9.3"
 ashpd = { version = "=0.13.13", default-features = false, features = ["async-io", "inhibit", "screencast"] }
 async-io = "2.6.0"
@@ -31,10 +32,15 @@ directories = "6.0.0"
 futures-core = "0.3.34"
 getrandom = "0.4.3"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+jni = "0.22.4"
+ndk = { version = "0.9.0", default-features = false, features = ["audio", "api-level-28"] }
 keyring = "4.2.0"
+keyring-core = "1.0.1"
 libc = "0.2.191"
 objc2 = "0.6.5"
 objc2-core-foundation = { version = "0.3.2", default-features = false }
+objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = ["std", "AUComponent", "AudioComponent", "AudioOutputUnit", "AudioUnitProperties", "objc2-core-audio-types"] }
+objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSButton", "NSControl", "NSResponder", "NSView", "NSWindow"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSProcessInfo", "NSString"] }
 raw-window-handle = "0.6.2"
@@ -80,6 +86,7 @@ tempfile = "3.27.0"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1.44"
+uniffi = { version = "0.32.2", default-features = false }
 ureq = { version = "3.5.1", default-features = false, features = ["rustls-no-provider"] }
 windows = { version = "0.62.2", features = [
     "Foundation",

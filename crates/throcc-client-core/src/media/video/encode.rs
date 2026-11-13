@@ -316,10 +316,19 @@ impl Encoder {
         self.backend.engine()
     }
 
+    /// How this encoder heals a broken picture: by its intra refresh on NVENC, by an IDR on
+    /// request everywhere else.
+    pub fn recovery(&self) -> Recovery {
+        match self.backend {
+            Backend::Nvenc => Recovery::Refresh,
+            _ => Recovery::Idr,
+        }
+    }
+
     /// Asks for recovery: an IDR, or for `Refresh`, whatever the encoder's intra refresh
-    /// does on its own. Only NVENC has intra refresh; the others treat `Refresh` as `Idr`.
+    /// does on its own. An encoder without intra refresh treats `Refresh` as `Idr`.
     pub fn recover(&mut self, kind: Recovery) {
-        if kind == Recovery::Idr || self.backend != Backend::Nvenc {
+        if kind == Recovery::Idr || self.recovery() == Recovery::Idr {
             self.idr_next = true;
         }
     }

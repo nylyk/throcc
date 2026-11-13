@@ -289,29 +289,43 @@ async fn failed_set_room_leaves_the_client_in_place() {
 }
 
 #[tokio::test]
-async fn reconnect_returns_to_the_wanted_room_with_fresh_tracks() {
+async fn a_profile_is_kept_only_with_its_owners_signature_and_shown_with_it() {
     let server = start_server();
     let mut alice = admin(&server).await;
-    let general = create_room(&mut alice, "General").await;
     let mut bob = invited(&server, &alice).await;
-    let first = bob.join(Some(general)).await;
-
-    bob.reconnect(&server.addr, Some(general)).await;
-    let placement = bob.link.welcome.placement;
-    assert_eq!(placement.room, Some(general));
-    assert!(placement.epoch > first.epoch);
-    let (old, new) = (first.tracks.unwrap(), placement.tracks.unwrap());
-    assert!(new.mic > old.shares[0].audio);
+    let general = create_room(&mut alice, "General").await;
+    alice.join(Some(general)).await;
+    bob.join(Some(general)).await;
+    let alice_id = alice.link.welcome.me;
+    let forged = signed_profile(&alice, &bob, "Alice");
+    assert_error(&alice.request(forged).await, ErrorCode::Invalid);
+    let server_fingerprint = &alice.link.connected.fingerprint;
+    let other_name = Request::SetProfile {
+        name: "Alice".into(),
+        avatar: None,
+        sig: alice
+            .keystore
+            .profile_sig(server_fingerprint, alice_id, "Mallory", None),
+    };
+    assert_error(&alice.request(other_name).await, ErrorCode::Invalid);
+    let own = signed_profile(&alice, &alice, "Alice");
+    assert_eq!(alice.request(own.clone()).await, Response::Ok);
+    let shown = bob
+        .event(|e| match e {
+            Event::PresenceChanged(p) if p.user == alice_id && p.name == "Alice" => {
+                Some(p.profile_sig)
+            }
+            _ => None,
+        })
+        .await;
+    assert!(matches!(own, Request::SetProfile { sig, .. } if shown == Some(sig)));
 }
 
 #[tokio::test]
 async fn profile_changes_are_rate_limited_and_avatars_capped() {
     let server = start_server();
     let alice = admin(&server).await;
-    let profile = |name: &str| Request::SetProfile {
-        name: name.into(),
-        avatar: None,
-    };
+    let profile = |name: &str| signed_profile(&alice, &alice, name);
     assert_eq!(alice.request(profile("Alice")).await, Response::Ok);
     let second = alice.request(profile("Alicia")).await;
     assert_error(&second, ErrorCode::RateLimited);
@@ -323,23 +337,35 @@ async fn profile_changes_are_rate_limited_and_avatars_capped() {
     assert_error(&empty_name, ErrorCode::Invalid);
 }
 
+/// A reconnect returns to the wanted room with fresh tracks and a newer epoch, and media ids
+/// keep growing across a server restart.
 #[tokio::test]
-async fn media_ids_never_repeat_across_a_restart() {
+async fn reconnects_get_fresh_tracks_and_media_ids_never_repeat_across_a_restart() {
     let first = ProcessLikeServer::start_temp();
     let addr = first.addr.to_string();
     let mut alice = enroll_at(&addr, &first.admin_invite()).await;
     let general = create_room(&mut alice, "General").await;
-    let before = alice.join(Some(general)).await.tracks.unwrap();
-    let _second = first.restart(|_| {});
+    let joined = alice.join(Some(general)).await;
 
     alice.reconnect(&addr, Some(general)).await;
-    let placement = &alice.link.welcome.placement;
-    let after = placement.tracks.as_ref().unwrap();
+    let reconnected = alice.link.welcome.placement.clone();
+    assert_eq!(reconnected.room, Some(general));
+    assert!(reconnected.epoch > joined.epoch);
+    let (before, after) = (joined.tracks.unwrap(), reconnected.tracks.unwrap());
     assert!(
         after.mic > before.shares[0].audio,
         "{before:?} then {after:?}"
     );
-    assert!(placement.epoch > Epoch(1));
+
+    let _second = first.restart(|_| {});
+    alice.reconnect(&addr, Some(general)).await;
+    let restarted = &alice.link.welcome.placement;
+    let latest = restarted.tracks.as_ref().unwrap();
+    assert!(
+        latest.mic > after.shares[0].audio,
+        "{after:?} then {latest:?}"
+    );
+    assert!(restarted.epoch > reconnected.epoch);
 }
 
 /// A relay that forwards both ways until the returned flag is set.
@@ -890,6 +916,18 @@ async fn managers_kick_lower_ranks_out_of_rooms() {
     assert_error(&bob.request(elsewhere).await, ErrorCode::NotFound);
 }
 
+/// A request setting `client`'s name to `name`, signed by `signer` for `client`'s server.
+fn signed_profile(client: &TestClient, signer: &TestClient, name: &str) -> Request {
+    let server = &client.link.connected.fingerprint;
+    Request::SetProfile {
+        name: name.into(),
+        avatar: None,
+        sig: signer
+            .keystore
+            .profile_sig(server, client.link.welcome.me, name, None),
+    }
+}
+
 /// `client`'s encryption key replaced by `key`, signed for the server it is connected to.
 fn signed_key(client: &TestClient, key: [u8; 32]) -> SignedEncryptionKey {
     let server = client.link.connected.fingerprint;
@@ -919,14 +957,14 @@ async fn only_a_new_encryption_key_rekeys_the_room_and_new_keys_are_rate_limited
     }
     assert_eq!(alice.join(Some(general)).await.epoch, epoch);
 
-    for (i, key) in [[1; 32], [2; 32], [3; 32]].into_iter().enumerate() {
-        let set = Request::SetEncryptionKey(signed_key(&alice, key));
+    for i in 0..6 {
+        let set = Request::SetEncryptionKey(signed_key(&alice, [i + 1; 32]));
         assert_eq!(alice.request(set).await, Response::Ok);
-        let rekeyed = Epoch(epoch.0 + 1 + i as u32);
+        let rekeyed = Epoch(epoch.0 + 1 + u32::from(i));
         assert_eq!(alice.join(Some(general)).await.epoch, rekeyed);
     }
-    let fourth = Request::SetEncryptionKey(signed_key(&alice, [4; 32]));
-    assert_error(&alice.request(fourth).await, ErrorCode::RateLimited);
+    let seventh = Request::SetEncryptionKey(signed_key(&alice, [7; 32]));
+    assert_error(&alice.request(seventh).await, ErrorCode::RateLimited);
 }
 
 #[tokio::test]

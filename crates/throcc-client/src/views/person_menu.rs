@@ -32,6 +32,23 @@ pub fn render(
         .values()
         .any(|popout| AnyWindowHandle::from(*popout) == menu.window);
     let streams_audio = person.sharing.is_some_and(|c| c.audio);
+    let unblock = person.blocked.then(|| {
+        group().child(
+            action("person-menu-unblock", "ban", "Unblock").on_click(cx.listener(
+                move |app, _, _, cx| {
+                    app.close_person_menu(cx);
+                    app.command(UiCommand::Unblock(user));
+                },
+            )),
+        )
+    });
+    let block = (!mine && !person.blocked).then(|| {
+        action("person-menu-block", "ban", "Block").on_click(cx.listener(move |app, _, _, cx| {
+            app.close_person_menu(cx);
+            app.command(UiCommand::Block(user));
+        }))
+    });
+    let shown = !person.blocked;
     let panel = div()
         .id("person-menu")
         .w(px(264.))
@@ -53,10 +70,12 @@ pub fn render(
                 .typeset(theme::HEADLINE)
                 .child(person.name.clone()),
         )
+        .children(unblock)
         .children(
-            (!mine).then(|| playback("Voice", Sound::Voice, &menu.voice, ("mic", "mic-off"), cx)),
+            (!mine && shown)
+                .then(|| playback("Voice", Sound::Voice, &menu.voice, ("mic", "mic-off"), cx)),
         )
-        .children((!mine && streams_audio).then(|| {
+        .children((!mine && shown && streams_audio).then(|| {
             playback(
                 "Stream audio",
                 Sound::Share,
@@ -65,7 +84,7 @@ pub fn render(
                 cx,
             )
         }))
-        .children((!in_popout).then(|| {
+        .children((!in_popout && shown).then(|| {
             group()
                 .child(
                     action("person-menu-profile", "circle-user", "Profile").on_click(cx.listener(
@@ -75,6 +94,7 @@ pub fn render(
                         },
                     )),
                 )
+                .children(block)
                 .children(mine.then(|| {
                     action(
                         "person-menu-audio",

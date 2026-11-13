@@ -176,6 +176,7 @@ impl ShareSender {
             audio: audio_encoder.is_some(),
             width: u16::try_from(width).unwrap_or(wanted.width),
             height: u16::try_from(height).unwrap_or(wanted.height),
+            recovery: encoder.recovery(),
             ..wanted
         };
         let name = encoder.name();
@@ -680,6 +681,7 @@ mod receive_tests {
             width,
             height,
             fps: 30,
+            recovery: Recovery::Idr,
         }
     }
 

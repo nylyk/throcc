@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use throcc_client_core::account;
 use throcc_client_core::call::Call;
-use throcc_client_core::control::{ControlLink, Requester};
+use throcc_client_core::control::ControlLink;
 use throcc_client_core::keystore::{IdentityMissing, Keystore, StartedOver};
 use throcc_client_core::profile::Profile;
 use throcc_client_core::settings::Settings;
@@ -185,7 +185,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Rooms { address } => one_shot(&keystore, &address, "rooms").await?,
         Command::Join { address, room } => {
             let link = sign_in(&keystore, &address).await?;
-            run_command(&link.requester, &link.welcome, &format!("join {room}")).await?;
+            run_command(&keystore, &link, &format!("join {room}")).await?;
             interactive(&keystore, link).await?;
         }
         Command::Leave { address } => one_shot(&keystore, &address, "leave").await?,
@@ -303,8 +303,10 @@ fn voice_call(
     input: Option<String>,
     output: Option<String>,
 ) -> Result<()> {
+    use throcc_client_core::blocked::BlockedStore;
     use throcc_client_core::client::{Client, ClientApi, UiCommand, UiEvent};
     use throcc_client_core::media::voice::AudioEngine;
+    use throcc_client_core::state::ConnectionStatus;
     use throcc_client_core::verified::VerifiedStore;
     let saved = Settings::load(keystore.dir())?.audio;
     let audio = if audio {
@@ -320,9 +322,13 @@ fn voice_call(
         eprintln!("Couldn't read who you verified ({e:#}), so everyone shows as not verified.");
         VerifiedStore::empty(keystore.dir())
     });
+    let blocked = BlockedStore::load(keystore.dir()).unwrap_or_else(|e| {
+        eprintln!("Couldn't read who you blocked ({e:#}), so nobody is blocked.");
+        BlockedStore::empty(keystore.dir())
+    });
     let profile = load_profile(&keystore, None)?;
     let profile = tokio::sync::watch::channel(profile).1;
-    let client = Client::connect(address, keystore, None, profile, audio, verified)?;
+    let client = Client::connect(address, keystore, None, profile, audio, verified, blocked)?;
     let state = client.state();
     let rooms = state.rooms.iter().map(|r| (r.id, r.name.as_str()));
     let room = find_room(rooms, room)?;
@@ -333,6 +339,16 @@ fn voice_call(
     let mut speaking = std::collections::BTreeSet::new();
     loop {
         match events.blocking_recv() {
+            Ok(UiEvent::State(state))
+                if state.connection == ConnectionStatus::SignedInElsewhere =>
+            {
+                bail!("disconnected: signed in on another device")
+            }
+            Ok(UiEvent::State(state))
+                if state.connection == ConnectionStatus::AwaitingReconnect =>
+            {
+                bail!("disconnected: the connection was down too long to sign in again unasked")
+            }
             Ok(UiEvent::State(state)) => {
                 let now: std::collections::BTreeSet<String> = state
                     .people
@@ -418,8 +434,9 @@ fn given_code(arg: Option<String>, env: Option<String>) -> Option<String> {
     }
 }
 
+/// Signs in to `address`, and signs the kept profile there if the server keeps it unsigned.
 async fn sign_in(keystore: &Keystore, address: &str) -> Result<ControlLink> {
-    let link = account::sign_in(keystore, address, None)
+    let mut link = account::sign_in(keystore, address, None)
         .await
         .inspect_err(|e| {
             if let Some((expected, actual)) = e.pin_mismatch() {
@@ -429,6 +446,9 @@ async fn sign_in(keystore: &Keystore, address: &str) -> Result<ControlLink> {
                 eprintln!("Re-enroll with a fresh invite code to trust the new key.");
             }
         })?;
+    if let Some(profile) = Settings::load(keystore.dir()).ok().and_then(|s| s.profile) {
+        account::sign_profile_if_kept(keystore, &mut link, &profile.name, profile.avatar()).await;
+    }
     Ok(link)
 }
 
@@ -440,7 +460,7 @@ async fn start_call(keystore: &Keystore, address: &str, room: &str) -> Result<(C
 
 async fn one_shot(keystore: &Keystore, address: &str, command: &str) -> Result<()> {
     let link = sign_in(keystore, address).await?;
-    let result = run_command(&link.requester, &link.welcome, command).await;
+    let result = run_command(keystore, &link, command).await;
     link.connected.close().await;
     result
 }
@@ -472,7 +492,7 @@ async fn read_commands(keystore: &Keystore, link: &mut ControlLink) -> Result<()
                 let Some(event) = event else { bail!("disconnected") };
                 print_event(&event);
                 follow(&mut link.welcome, &event);
-                if let Event::RemovedFromServer { .. } = event {
+                if let Event::RemovedFromServer { .. } | Event::SignedInElsewhere = event {
                     return Ok(());
                 }
             }
@@ -488,10 +508,11 @@ async fn run_typed(keystore: &Keystore, link: &ControlLink, line: &str) -> Resul
         }
         _ => line.to_owned(),
     };
-    run_command(&link.requester, &link.welcome, &line).await
+    run_command(keystore, link, &line).await
 }
 
-async fn run_command(requester: &Requester, welcome: &Welcome, line: &str) -> Result<()> {
+async fn run_command(keystore: &Keystore, link: &ControlLink, line: &str) -> Result<()> {
+    let welcome = &link.welcome;
     let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
     let request = match word {
         "rooms" => {
@@ -509,13 +530,21 @@ async fn run_command(requester: &Requester, welcome: &Welcome, line: &str) -> Re
             name: rest.to_owned(),
             password: None,
         },
-        "name" => Request::SetProfile {
-            name: rest.to_owned(),
-            avatar: welcome.profile.avatar,
-        },
+        "name" => {
+            let kept = Settings::load(keystore.dir())?.profile;
+            let avatar = kept
+                .and_then(|profile| profile.avatar())
+                .filter(|kept| welcome.profile.avatar == Some(*kept));
+            let server = &link.connected.fingerprint;
+            Request::SetProfile {
+                name: rest.to_owned(),
+                avatar,
+                sig: keystore.profile_sig(server, welcome.me, rest, avatar),
+            }
+        }
         other => bail!("unknown command {other}"),
     };
-    match requester.request(request).await? {
+    match link.requester.request(request).await? {
         Response::Ok => println!("ok"),
         Response::Err { code, message } => bail!("{message} ({code:?})"),
         Response::Placement(placement) => match placement.room {
@@ -647,6 +676,7 @@ fn print_event(event: &Event) {
             )
         }
         Event::RemovedFromServer { reason } => println!("* disconnected: {}", shown(reason)),
+        Event::SignedInElsewhere => println!("* disconnected: signed in on another device"),
         other => println!("* {other:?}"),
     }
 }
@@ -750,6 +780,7 @@ mod tests {
             profile: UserProfile {
                 name: "Ilse".into(),
                 avatar: None,
+                sig: None,
             },
         }
     }
@@ -764,6 +795,8 @@ mod tests {
             deafened: false,
             sharing: false,
             role: Role::User,
+            identity_key: [0; 32],
+            profile_sig: None,
         }
     }
 

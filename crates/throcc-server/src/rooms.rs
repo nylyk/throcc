@@ -13,8 +13,8 @@ use throcc_proto::limits::{
 use throcc_proto::messages::{
     Audience, Audiences, AuthError, ErrorCode, Event, MAX_AVATAR_BYTES, MAX_NAME_CHARS,
     MAX_PASSWORD_CHARS, MediaState, Peer, Placement, Presence, Recovery, Request, Response, Room,
-    ServerMessage, ServerProfile, ShareTracks, SignedEncryptionKey, Tracks, UserProfile, Welcome,
-    valid_name, valid_password,
+    ServerMessage, ServerProfile, ShareTracks, Signature, SignedEncryptionKey, Tracks, UserProfile,
+    Welcome, valid_name, valid_password,
 };
 use throcc_proto::permissions;
 use throcc_proto::transport::close;
@@ -64,8 +64,9 @@ const ROOM_CHANGES_PER_SECOND: f64 = 0.5;
 /// the rate of room hopping.
 const REJOIN_BURST: f64 = 10.0;
 const REJOINS_PER_SECOND: f64 = 0.1;
-/// A new encryption key re-keys the user's room. Clients replace theirs once a month.
-const ENCRYPTION_KEY_CHANGE_BURST: f64 = 3.0;
+/// A new encryption key re-keys the user's room. Clients replace theirs once a month, and
+/// each device has its own, so switching between two devices changes it at every sign-in.
+const ENCRYPTION_KEY_CHANGE_BURST: f64 = 6.0;
 const ENCRYPTION_KEY_CHANGES_PER_SECOND: f64 = 1.0 / 60.0;
 /// Starting or changing a share sends the room's peers to every member. Stopping is free.
 const SHARE_CHANGE_BURST: f64 = 5.0;
@@ -168,11 +169,21 @@ pub enum Outbound {
     Message(ServerMessage),
     /// A message that keeps its share of the connection's queue budget until it is written.
     Budgeted(ServerMessage, OwnedSemaphorePermit),
-    /// Sends `RemovedFromServer`, finishes the stream once the client has read it, then closes.
+    /// Sends `event`, finishes the stream once the client has read it, then closes.
     Kick {
-        reason: String,
+        event: Event,
         code: u32,
+        reason: &'static str,
     },
+}
+
+/// Why the hub ends a connection.
+#[derive(Clone, Copy)]
+enum Kick {
+    /// The user was removed from the server.
+    Removed,
+    /// The user signed in again, on the connection that replaces this one.
+    Replaced,
 }
 
 /// What the hub needs to reach one live connection.
@@ -183,17 +194,31 @@ pub struct ConnectionHandle {
 }
 
 impl ConnectionHandle {
-    fn kick(&self, reason: &str, code: u32) {
+    fn kick(&self, kick: Kick) {
+        let (event, code, reason) = match kick {
+            Kick::Removed => {
+                let reason = "you were removed from this server";
+                let event = Event::RemovedFromServer {
+                    reason: reason.to_owned(),
+                };
+                (event, close::REMOVED, reason)
+            }
+            Kick::Replaced => (
+                Event::SignedInElsewhere,
+                close::SIGNED_IN_ELSEWHERE,
+                "you signed in from somewhere else",
+            ),
+        };
         let kick = Outbound::Kick {
-            reason: reason.to_owned(),
+            event,
             code,
+            reason,
         };
         if self.outgoing.try_send(kick).is_err() {
             self.connection.close(code.into(), reason.as_bytes());
             return;
         }
         let connection = self.connection.clone();
-        let reason = reason.to_owned();
         tokio::spawn(async move {
             tokio::time::sleep(crate::session::LINGER).await;
             connection.close(code.into(), reason.as_bytes());
@@ -328,13 +353,14 @@ impl Hub {
         if full && !self.sessions.contains_key(&user) {
             return Ok(Err(AuthError::ServerFull));
         }
-        self.evict(user, "you signed in from somewhere else");
+        self.evict(user, Kick::Replaced);
         self.next_conn += 1;
         let conn_id = self.next_conn;
         let role = row.role;
         let profile = UserProfile {
             name: row.name.clone(),
             avatar: row.avatar,
+            sig: row.profile_sig,
         };
         self.sessions.insert(
             user,
@@ -450,7 +476,7 @@ impl Hub {
             Request::SetRoomPassword { room, password } => {
                 return self.set_room_password(user, room, password);
             }
-            Request::SetProfile { name, avatar } => self.set_profile(user, name, avatar),
+            Request::SetProfile { name, avatar, sig } => self.set_profile(user, name, avatar, sig),
             Request::UploadAvatar(bytes) => self.set_avatar(user, bytes),
             Request::FetchAvatar(hash) => self.get_avatar(hash),
             Request::SetEncryptionKey(encryption_key) => {
@@ -523,10 +549,10 @@ impl Hub {
         }
     }
 
-    fn evict(&mut self, user: UserId, reason: &str) {
+    fn evict(&mut self, user: UserId, kick: Kick) {
         self.leave_room(user);
         if let Some(session) = self.sessions.remove(&user) {
-            session.handle.kick(reason, close::REMOVED);
+            session.handle.kick(kick);
         }
     }
 
@@ -947,13 +973,43 @@ impl Hub {
         })
     }
 
-    fn set_profile(&mut self, user: UserId, name: String, avatar: Option<Hash>) -> Outcome {
+    /// Keeps a signed name and picture. A signature over the kept ones skips the rate limit
+    /// and is stored only while no valid signature is.
+    fn set_profile(
+        &mut self,
+        user: UserId,
+        name: String,
+        avatar: Option<Hash>,
+        sig: Signature,
+    ) -> Outcome {
         let name = checked_name(&name)?;
         self.require_picture(avatar)?;
         let session = self.session(user)?;
-        if session
-            .last_profile
-            .is_some_and(|t| t.elapsed() < PROFILE_INTERVAL)
+        let signed = |sig: &Signature| {
+            identity::verify_profile(
+                &session.row.pubkey,
+                &self.fingerprint.0,
+                user,
+                &name,
+                avatar,
+                sig,
+            )
+            .is_ok()
+        };
+        if !signed(&sig) {
+            return Err(Refusal::new(
+                ErrorCode::Invalid,
+                "the profile's signature is wrong",
+            ));
+        }
+        let renames = (session.row.name.as_str(), session.row.avatar) != (name.as_str(), avatar);
+        if !renames && session.row.profile_sig.as_ref().is_some_and(signed) {
+            return Ok(Response::Ok);
+        }
+        if renames
+            && session
+                .last_profile
+                .is_some_and(|t| t.elapsed() < PROFILE_INTERVAL)
         {
             return Err(Refusal::new(
                 ErrorCode::RateLimited,
@@ -964,12 +1020,15 @@ impl Hub {
             ));
         }
         self.db
-            .set_profile(user, &name, avatar)
+            .set_profile(user, &name, avatar, &sig)
             .map_err(Refusal::internal)?;
         let session = self.session_mut(user)?;
         session.row.name = name;
         session.row.avatar = avatar;
-        session.last_profile = Some(Instant::now());
+        session.row.profile_sig = Some(sig);
+        if renames {
+            session.last_profile = Some(Instant::now());
+        }
         self.announce_presence(user);
         Ok(Response::Ok)
     }
@@ -1113,9 +1172,9 @@ impl Hub {
         if applied.share != stored.share {
             self.broadcast_peers(room, None);
         }
-        // Audiences list only running shares, so a share starting or ending changes them.
-        if applied.deafened != stored.deafened || applied.share.is_some() != stored.share.is_some()
-        {
+        // Audiences list only running shares, so a share starting or ending changes them, and
+        // routes carry a share's recovery.
+        if applied.deafened != stored.deafened || applied.share != stored.share {
             self.rebuild_routes();
         }
         self.announce_presence(user);
@@ -1394,7 +1453,7 @@ impl Hub {
         self.db.remove_users(users)?;
         for id in users {
             self.last_joined.remove(id);
-            self.evict(*id, "you were removed from this server");
+            self.evict(*id, Kick::Removed);
             self.emit_user_list_change(Event::UserRemoved(*id));
         }
         Ok(())
@@ -1426,7 +1485,7 @@ impl Hub {
         self.rebuild_routes();
         let now = Instant::now();
         for id in started {
-            if let Some((owner, TrackKind::Video)) = self.share_track(id)
+            if let Some((owner, TrackKind::Video(_))) = self.share_track(id)
                 && let Some(kind) = self.keyframes.first_picture(id, now)
             {
                 self.emit_to(owner, Event::KeyframeRequested { media_id: id, kind });
@@ -1442,7 +1501,7 @@ impl Hub {
                 "you aren't watching that track",
             ));
         }
-        let Some((owner, TrackKind::Video)) = self.share_track(media_id) else {
+        let Some((owner, TrackKind::Video(_))) = self.share_track(media_id) else {
             return Err(Refusal::new(ErrorCode::Invalid, "not a video track"));
         };
         if let Some(kind) = self.keyframes.request(media_id, user, kind, Instant::now()) {
@@ -1451,9 +1510,30 @@ impl Hub {
         Ok(Response::Ok)
     }
 
-    /// Forwards keyframe requests that waited out their interval.
+    /// Asks for a keyframe for every track a receiver's egress holds back, as that receiver
+    /// would, and forwards the requests that waited out their interval.
     pub fn flush_keyframes(&mut self) {
-        for (media_id, kind) in self.keyframes.due(Instant::now()) {
+        let now = Instant::now();
+        let held: Vec<(UserId, MediaId)> = self
+            .sessions
+            .values()
+            .flat_map(|s| {
+                s.handle
+                    .egress
+                    .held()
+                    .into_iter()
+                    .filter(|id| s.watching.contains(id))
+                    .map(|id| (s.row.id, id))
+            })
+            .collect();
+        for (user, media_id) in held {
+            if let Some((owner, TrackKind::Video(_))) = self.share_track(media_id)
+                && let Some(kind) = self.keyframes.request(media_id, user, Recovery::Idr, now)
+            {
+                self.emit_to(owner, Event::KeyframeRequested { media_id, kind });
+            }
+        }
+        for (media_id, kind) in self.keyframes.due(now) {
             match self.share_track(media_id) {
                 Some((owner, _)) => {
                     self.emit_to(owner, Event::KeyframeRequested { media_id, kind })
@@ -1511,7 +1591,7 @@ impl Hub {
                 .iter()
                 .find(|sh| sh.video == media_id || sh.audio == media_id)?;
             let kind = if share.video == media_id {
-                TrackKind::Video
+                TrackKind::Video(recovery_of(s))
             } else {
                 TrackKind::Audio
             };
@@ -1562,9 +1642,8 @@ impl Hub {
                         .filter(|m| sees(m) || hears(m))
                         .map(|m| m.row.id)
                         .collect();
-                    table
-                        .routes
-                        .insert(share.video, route(owner, TrackKind::Video, video));
+                    let kind = TrackKind::Video(recovery_of(sender));
+                    table.routes.insert(share.video, route(owner, kind, video));
                     table
                         .routes
                         .insert(share.audio, route(owner, TrackKind::Audio, audio));
@@ -1671,6 +1750,15 @@ fn send(session: &Session, event: Event) {
     }
 }
 
+/// How the sender's share heals a broken picture. A share that ended has no video left to
+/// hold back.
+fn recovery_of(sender: &Session) -> Recovery {
+    sender
+        .media
+        .share
+        .map_or(Recovery::Refresh, |share| share.recovery)
+}
+
 fn route<'a>(
     owner: u64,
     kind: TrackKind,
@@ -1693,6 +1781,8 @@ fn presence(session: &Session) -> Option<Presence> {
         deafened: session.media.deafened,
         sharing: session.media.share.is_some(),
         role: session.row.role,
+        identity_key: session.row.pubkey,
+        profile_sig: session.row.profile_sig,
     })
 }
 

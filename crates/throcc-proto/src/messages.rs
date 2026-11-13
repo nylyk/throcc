@@ -4,9 +4,9 @@ use crate::framing::FrameError;
 use crate::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
 
 /// The protocol this build speaks.
-pub const PROTOCOL: u16 = 1;
-/// The oldest protocol a server of this build accepts.
-pub const MIN_PROTOCOL: u16 = 1;
+pub const PROTOCOL: u16 = 2;
+/// The oldest protocol a server of this build accepts. Protocol 2 dropped protocol 1.
+pub const MIN_PROTOCOL: u16 = 2;
 pub const MAX_AVATAR_BYTES: usize = 64 * 1024;
 pub const MAX_NAME_CHARS: usize = 32;
 pub const MAX_PASSWORD_CHARS: usize = 128;
@@ -140,6 +140,10 @@ pub struct Welcome {
 pub struct UserProfile {
     pub name: String,
     pub avatar: Option<Hash>,
+    /// Our identity key's signature over `name` and `avatar` for this server and user, once
+    /// we have given one.
+    #[serde(with = "optional_sig")]
+    pub sig: Option<Signature>,
 }
 
 /// The server's own name and picture, which admins set.
@@ -189,9 +193,12 @@ pub enum Request {
     },
     /// Moves us out of our room, into the lobby.
     LeaveRoom,
+    /// Sets our name and picture, signed by our identity key for this server and user.
     SetProfile {
         name: String,
         avatar: Option<Hash>,
+        #[serde(with = "sig")]
+        sig: Signature,
     },
     UploadAvatar(Vec<u8>),
     FetchAvatar(Hash),
@@ -316,6 +323,8 @@ pub enum Event {
     },
     /// Who receives each share in our room now.
     AudiencesChanged(Audiences),
+    /// Another connection signed in as us and replaces this one, which the server closes.
+    SignedInElsewhere,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -377,6 +386,10 @@ pub struct ShareConfig {
     pub width: u16,
     pub height: u16,
     pub fps: u8,
+    /// How the sender heals a picture a loss broke. The SFU holds an `Idr` share's video back
+    /// from a receiver it dropped a unit for, until a keyframe, and asks for one; a `Refresh`
+    /// share heals by itself, so its video keeps flowing.
+    pub recovery: Recovery,
 }
 
 /// Announced by the sender, never negotiated.
@@ -388,6 +401,7 @@ pub enum Codec {
     Vp9,
 }
 
+/// A way to heal a broken picture: an intra refresh that sweeps it, or a keyframe.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Recovery {
     Refresh,
@@ -417,6 +431,12 @@ pub struct Presence {
     pub deafened: bool,
     pub sharing: bool,
     pub role: Role,
+    /// The identity key the server knows this user by, which `profile_sig` proves.
+    pub identity_key: PublicKey,
+    /// The signature of `identity_key` over `name` and `avatar` for this server and user,
+    /// once they have given one.
+    #[serde(with = "optional_sig")]
+    pub profile_sig: Option<Signature>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -468,6 +488,23 @@ mod sig {
             }
         }
         d.deserialize_bytes(SigVisitor)
+    }
+}
+
+mod optional_sig {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::Signature;
+
+    #[derive(Serialize, Deserialize)]
+    struct Sig(#[serde(with = "super::sig")] Signature);
+
+    pub fn serialize<S: Serializer>(sig: &Option<Signature>, s: S) -> Result<S::Ok, S::Error> {
+        sig.map(Sig).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Signature>, D::Error> {
+        Ok(Option::<Sig>::deserialize(d)?.map(|Sig(sig)| sig))
     }
 }
 

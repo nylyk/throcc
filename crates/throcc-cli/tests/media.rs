@@ -9,7 +9,9 @@ use throcc_client_core::media::engine::{Kind, Outgoing};
 use throcc_client_core::verified::VerifiedStore;
 use throcc_proto::frame::{DATAGRAM_PAYLOAD_FLOOR, Flags, Header, TAG_BYTES, VIDEO_CLOCK_HZ};
 use throcc_proto::ids::{Epoch, MediaId, UserId};
-use throcc_proto::messages::{Audience, Codec, Event, MediaState, Recovery, Request, Response};
+use throcc_proto::messages::{
+    Audience, Codec, Event, MediaState, Recovery, Request, Response, ShareConfig, TrackStats,
+};
 use throcc_proto::transport::close;
 use throcc_server::{AUDIO_BURST_PACKETS, AUDIO_PACKETS_PER_SECOND};
 
@@ -288,11 +290,7 @@ async fn keyframes_arrive_whole_through_two_percent_loss() {
     );
     let video_id = first_share(&bob, &alice).await.video;
     let mut units = watch(&bob, video_id, KEYFRAMES as usize).await;
-    wait_for("both at one epoch with keys", || {
-        let epoch = alice.engine.keys().epoch();
-        epoch == bob.engine.keys().epoch() && bob.engine.keys().recv_key(video_id, epoch).is_some()
-    })
-    .await;
+    wait_for_keys(&alice, &bob, video_id).await;
 
     relay.lossy.store(true, Ordering::Relaxed);
     for index in 0..KEYFRAMES {
@@ -337,11 +335,7 @@ async fn a_unit_lost_on_the_way_asks_its_sender_for_a_refresh() {
     start_sharing(&alice).await;
     let video_id = first_share(&bob, &alice).await.video;
     let _units = watch(&bob, video_id, UNITS as usize).await;
-    wait_for("both at one epoch with keys", || {
-        let epoch = alice.engine.keys().epoch();
-        epoch == bob.engine.keys().epoch() && bob.engine.keys().recv_key(video_id, epoch).is_some()
-    })
-    .await;
+    wait_for_keys(&alice, &bob, video_id).await;
 
     relay.lossy.store(true, Ordering::Relaxed);
     let abandoned = || bob.engine.stats.abandoned_units.load(Ordering::Relaxed);
@@ -358,6 +352,42 @@ async fn a_unit_lost_on_the_way_asks_its_sender_for_a_refresh() {
         kind: Recovery::Refresh,
     };
     server_event(&mut alice, |e| (e == refresh).then_some(())).await;
+}
+
+/// When the server drops a unit of an `Idr` share for a receiver whose link can't carry it,
+/// the server asks the sender for a keyframe on that receiver's behalf.
+#[tokio::test]
+async fn a_receiver_too_slow_for_an_idr_share_has_a_keyframe_asked_for_it() {
+    const UNITS: u32 = 3_000;
+    let server = start_server();
+    let relay = capped_relay(&server.addr).await;
+    let (mut alice, bob, _) = room_with_two_at(&server, &relay.addr).await;
+    let share = ShareConfig {
+        recovery: Recovery::Idr,
+        ..share_1080p60(Codec::H264, 8000)
+    };
+    let share = Request::SetMedia(sharing(share));
+    assert_eq!(alice.request(share).await.unwrap(), Response::Ok);
+    let video_id = first_share(&bob, &alice).await.video;
+    let _units = watch(&bob, video_id, UNITS as usize).await;
+    let idr = Event::KeyframeRequested {
+        media_id: video_id,
+        kind: Recovery::Idr,
+    };
+    server_event(&mut alice, |e| (e == idr).then_some(())).await;
+    wait_for_keys(&alice, &bob, video_id).await;
+
+    relay.kbps.store(500, Ordering::Relaxed);
+    let sender = alice.engine.clone();
+    tokio::spawn(async move {
+        for index in 0..UNITS {
+            let sent = Outgoing::new(video_id, unit(index, 20 * 1100), index * 1500, index == 0);
+            sender.send(Kind::Video, sent);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    // Bob's own requests after a loss are refreshes; only the server asks for an IDR.
+    server_event(&mut alice, |e| (e == idr).then_some(())).await;
 }
 
 #[tokio::test]
@@ -469,16 +499,29 @@ async fn a_datagram_larger_than_any_client_seals_is_not_forwarded() {
             .unwrap();
     }
 
-    let forwarded = bob
+    let mic_forwarded = |tracks: &[TrackStats]| {
+        tracks
+            .iter()
+            .find(|t| t.media_id == mic)
+            .map_or(0, |t| t.forwarded)
+    };
+    let first = bob
         .event(|event| match event {
             Event::ReceiveStats { tracks } => tracks
                 .iter()
-                .find(|t| t.media_id == mic)
-                .map(|t| t.forwarded),
+                .any(|t| t.media_id == mic)
+                .then(|| mic_forwarded(tracks)),
             _ => None,
         })
         .await;
-    assert_eq!(forwarded, 1);
+    let next_report = bob.event(|event| match event {
+        Event::ReceiveStats { tracks } => Some(mic_forwarded(tracks)),
+        _ => None,
+    });
+    let next = tokio::time::timeout(Duration::from_secs(3), next_report)
+        .await
+        .unwrap_or(0);
+    assert_eq!(first + next, 1);
 }
 
 #[tokio::test]

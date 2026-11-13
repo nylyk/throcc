@@ -295,9 +295,8 @@ impl MediaEngine {
         notices
     }
 
-    /// Queues requests the key manager made. Called with the keys still locked: the session
-    /// and the call's event pump both re-key, and peers keep the secret that reaches them
-    /// last, so the requests must leave in the order the secrets were made.
+    /// Queues requests the key manager made. Callers hold the keys locked, so requests leave
+    /// in the order their secrets were made, and peers keep the secret that reaches them last.
     fn send_requests(&self, requests: impl IntoIterator<Item = Request>) {
         for request in requests {
             self.requests.send(request).ok();
@@ -596,21 +595,28 @@ impl Track {
         }
     }
 
+    /// Delivers units in order, and asks for recovery after a gap unless a keyframe ended it,
+    /// as one does when the SFU held a share's video back after dropping some of it.
     fn emit(&mut self, outputs: Vec<Output>) {
+        let mut broken = false;
         for output in outputs {
             match output {
                 Output::Unit(unit) => {
+                    broken &= !unit.flags.contains(Flags::KEYFRAME);
                     self.reassembler.forget_before(unit.first_seq);
                     self.deliver(unit.into());
                 }
                 Output::Abandoned { .. } => {
                     self.stats.abandoned_units.fetch_add(1, Ordering::Relaxed);
-                    self.ask_refresh();
+                    broken = true;
                 }
                 Output::Late => {
                     self.stats.late_units.fetch_add(1, Ordering::Relaxed);
                 }
             }
+        }
+        if broken {
+            self.ask_refresh();
         }
     }
 
@@ -794,12 +800,26 @@ mod tests {
 
     /// A track task for `media_id` on `receiver`'s keys, and what it delivers.
     fn track(receiver: Member, media_id: MediaId, kind: Kind) -> (Track, mpsc::Receiver<Received>) {
+        let (track, out, _) = asking_track(receiver, media_id, kind);
+        (track, out)
+    }
+
+    /// [`track`], and the requests it makes.
+    fn asking_track(
+        receiver: Member,
+        media_id: MediaId,
+        kind: Kind,
+    ) -> (
+        Track,
+        mpsc::Receiver<Received>,
+        mpsc::UnboundedReceiver<Request>,
+    ) {
         let keys = Arc::new(Mutex::new(receiver.keys));
         let sinks = Arc::new(Mutex::new(HashMap::from([(media_id, Sink::default())])));
-        let (requests, _) = mpsc::unbounded_channel();
+        let (requests, requests_rx) = mpsc::unbounded_channel();
         let (out, out_rx) = mpsc::channel(16);
         let track = Track::new(media_id, kind, keys, sinks, Arc::default(), requests, out);
-        (track, out_rx)
+        (track, out_rx, requests_rx)
     }
 
     /// `sender`'s unit on `media_id`, sealed under its current key.
@@ -891,6 +911,30 @@ mod tests {
             .collect();
         assert_eq!(received, [(1, true), (2, false)]);
         assert_eq!(track.stats.late_units.load(Ordering::Relaxed), 0);
+    }
+
+    /// A gap a keyframe ends, as the SFU leaves after holding a share's video back, needs no
+    /// recovery; one a delta ends does.
+    #[test]
+    fn only_a_gap_a_delta_ends_asks_for_recovery() {
+        for (keyframe, asks) in [(true, 0), (false, 1)] {
+            let now = Instant::now();
+            let (mut a, mut b) = (member(1), member(2));
+            rekey(&mut [&mut a, &mut b], 1, now);
+            let video = a.tracks.shares[0].video;
+            let mut sealer = Sealer::default();
+            let first = sealed(&a, &mut sealer, video, 100, 1, true);
+            let _held = sealed(&a, &mut sealer, video, 100, 2, false);
+            let after = sealed(&a, &mut sealer, video, 100, 3, keyframe);
+            let (mut track, mut out, mut requests) = asking_track(b, video, Kind::Video);
+            for datagram in first.into_iter().chain(after) {
+                track.receive(datagram, now);
+            }
+            track.tick(now + crate::media::reorder::REORDER_WINDOW);
+            assert_eq!(timestamps(&mut out), [1, 3]);
+            let asked = std::iter::from_fn(|| requests.try_recv().ok()).count();
+            assert_eq!(asked, asks, "keyframe: {keyframe}");
+        }
     }
 
     /// Only datagrams that authenticate move the replay window, so a forged one can't

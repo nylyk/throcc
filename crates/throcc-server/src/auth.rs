@@ -137,9 +137,8 @@ impl Enrollment<'_> {
         };
         let enrolled = {
             let mut hub = self.shared.hub();
-            // Said only to someone who knew the invite's secret and holds the key, so it
-            // tells a stranger nothing, and under the lock every account is made under, so
-            // the count is exact. The try the run used is given back: the code was right.
+            // The refusal reaches only someone who knew the invite's secret, so it tells a
+            // stranger nothing. The count is exact under the lock every account is made under.
             if self.no_account_is_left(&hub, &invite).map_err(internal)? {
                 hub.db.return_invite_try(&self.code_id).map_err(internal)?;
                 info!(code_id = %self.code_id, "enrollment refused: the server keeps no more accounts");
@@ -170,9 +169,8 @@ impl Enrollment<'_> {
         }
     }
 
-    /// Whether enrolling would make one account more than the server keeps. An admin invite
-    /// always enrolls, so a server holding every account it keeps can still be managed, and
-    /// a key that has an account gets no new one.
+    /// Whether enrolling would add an account past the server's limit. An admin invite, or a
+    /// key that already has an account, never does.
     fn no_account_is_left(&self, hub: &Hub, invite: &InviteRow) -> anyhow::Result<bool> {
         Ok(invite.minted_by.is_some()
             && hub.db.user_count()? >= self.shared.max_accounts

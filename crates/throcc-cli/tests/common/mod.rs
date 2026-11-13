@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use serde::de::DeserializeOwned;
 use tempfile::TempDir;
 use throcc_client_core::account::{self, SignInError};
+use throcc_client_core::blocked::BlockedStore;
 use throcc_client_core::call::{Call, CallEvent};
 use throcc_client_core::client::{Client, ClientApi};
 use throcc_client_core::connection::{self, Connected};
@@ -30,8 +31,8 @@ use throcc_proto::ids::{MediaId, RoomId};
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
     AuthResult, ClientHello, Codec, ErrorCode, Event, MediaState, PROTOCOL, PakeFinish, PakeReply,
-    PakeStep, Placement, Request, Response, ServerHello, ShareConfig, ShareTracks, SignIn, Tracks,
-    Welcome,
+    PakeStep, Placement, Recovery, Request, Response, ServerHello, ShareConfig, ShareTracks,
+    SignIn, Tracks, Welcome,
 };
 use throcc_server::database::Database;
 use throcc_server::identity::ServerIdentity;
@@ -281,6 +282,33 @@ pub async fn create_room(client: &mut TestClient, name: &str) -> RoomId {
         .await
 }
 
+/// Waits until `viewer` and `sender` share an epoch and `viewer` holds the key for `track`.
+pub async fn wait_for_keys(sender: &Call, viewer: &Call, track: MediaId) {
+    wait_for("both at one epoch with keys", || {
+        let epoch = sender.engine.keys().epoch();
+        epoch == viewer.engine.keys().epoch()
+            && viewer.engine.keys().recv_key(track, epoch).is_some()
+    })
+    .await;
+}
+
+/// Has every keyframe request the server sends `call` recover `sender`'s share.
+#[cfg(feature = "ffmpeg")]
+pub fn forward_keyframe_requests(
+    call: &mut Call,
+    sender: Arc<throcc_client_core::media::share::ShareSender>,
+) {
+    let (_, closed) = mpsc::channel(1);
+    let mut events = std::mem::replace(&mut call.events, closed);
+    tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            if let CallEvent::Server(Event::KeyframeRequested { kind, .. }) = event {
+                sender.recover(kind);
+            }
+        }
+    });
+}
+
 pub async fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(15);
     while !ready() {
@@ -304,8 +332,9 @@ pub fn client_as(
 ) -> Client {
     let keystore = Keystore::open_in(dir).unwrap();
     let verified = VerifiedStore::load(dir).unwrap();
+    let blocked = BlockedStore::load(dir).unwrap();
     let profile = tokio::sync::watch::channel(profile).1;
-    Client::connect(address, keystore, invite, profile, None, verified).unwrap()
+    Client::connect(address, keystore, invite, profile, None, verified, blocked).unwrap()
 }
 
 pub fn wait_for_state_within(
@@ -392,6 +421,7 @@ pub async fn watch(viewer: &Call, video: MediaId, capacity: usize) -> mpsc::Rece
     units
 }
 
+/// A 1080p60 share whose video the SFU never holds back for a keyframe.
 pub const fn share_1080p60(codec: Codec, kbps: u32) -> ShareConfig {
     ShareConfig {
         audio: false,
@@ -400,6 +430,7 @@ pub const fn share_1080p60(codec: Codec, kbps: u32) -> ShareConfig {
         width: 1920,
         height: 1080,
         fps: 60,
+        recovery: Recovery::Refresh,
     }
 }
 

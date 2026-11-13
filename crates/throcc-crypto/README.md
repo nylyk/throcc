@@ -5,7 +5,7 @@ The cryptography of enrollment, sign-in and end-to-end media encryption. It does
 | Module | Holds |
 | --- | --- |
 | `pake.rs` | The PAKE behind enrollment with an invite code, bound to the TLS session through its transcript |
-| `identity.rs` | Ed25519 identity keys, and the messages they sign to log in and to vouch for an encryption key |
+| `identity.rs` | Ed25519 identity keys, and the messages they sign to log in, to vouch for an encryption key and to give a name and picture |
 | `hpke.rs` | X25519 encryption keys, and HPKE auth-mode wrapping of a sender secret to one room member. Behind the `media` feature |
 | `media.rs` | AES-128-GCM per datagram under a track key derived from the sender secret. Behind the `media` feature |
 | `safety.rs` | The 60-digit safety number of two identity keys |
