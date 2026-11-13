@@ -29,6 +29,28 @@ Left as is, and worth a look:
 - A brand-new Android codec on a still screen stays black until the sender's screen changes (see 7).
 - `Shared.outputs` keeps a view for a share only until it is unwatched; a view set for a share never watched stays until the session ends.
 
+## Shared client logic
+
+After phase 5, logic the desktop, Android and iOS each had separately moved into `throcc-client-core` (new `install.rs`, `picture.rs`, `safety.rs`; additions in `state.rs`, `profile.rs`, `account.rs`, `theme.rs`) and `throcc-mobile`, with the desktop's behaviour where they differed:
+- name, password and picture checks and their wording
+- sign-in errors: phones now get a changed server key and a missing identity as dialogs
+- the connection notice
+- trust per person, "Verified as"
+- the safety-number comparison (`SafetyCheck`): Android used to send whatever key the person presented
+- profile picture preparation, and only PNG/JPEG of at most 512 px from others
+- theme colours: Oklab mixes and one 4.5:1 readability rule, which now applies on the desktop too
+- loading the stores without failing on a damaged file
+- the verified, blocked and known-server lists
+- the volume curve, the desktop's dB curve everywhere
+- joining a locked room, the room we are live in
+- the phones' one-share-at-a-time watching and their stack of share views (`Core::show_share`/`hide_share`)
+
+The phones' Lobby lists are gone: the server never shows anyone outside a room.
+
+A security review covered the safety-number move, and a Fable 5.2 review covered the whole move; their findings are fixed. CI compiles both apps (iOS green on `d3aab1d`).
+
+Not run anywhere: the apps' new pin-mismatch and identity-missing dialogs (samples `pinmismatch`, `identitymissing` on both), the rebuilt safety-number sheets, the volume sliders, the slow-connection pill and the picture preparation. Check them with item 1 below.
+
 ## What is left
 
 In order:
