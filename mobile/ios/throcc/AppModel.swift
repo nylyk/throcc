@@ -78,7 +78,7 @@ final class AppModel {
     var sheet: Sheet?
     var settingsPath: [SettingsPage] = []
     /// The connection that the samples of a lost connection show in place of the state's.
-    var sampleConnection: SampleConnection?
+    var sampleConnection: Connection?
     /// The share shown over the whole screen, if any.
     var fullscreenShare: UInt64?
     @ObservationIgnored private let decoded = NSCache<NSData, UIImage>()
@@ -341,8 +341,8 @@ final class AppModel {
         }
         callAudio?.follow(inRoom: new.liveRoom != nil)
         if let sampleConnection {
-            state.connection = sampleConnection.connection
-            state.notice = sampleConnection.notice
+            state.connection = sampleConnection
+            state.notice = connectionNotice(connection: sampleConnection)
         }
         if state.connection != .connected {
             serverSave = nil

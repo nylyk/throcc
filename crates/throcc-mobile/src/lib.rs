@@ -1002,6 +1002,15 @@ pub fn format_color(color: u32) -> String {
     theme::format_hex(color & 0xFF_FFFF)
 }
 
+/// What to tell the user about `connection`, as `CoreState::notice` says it. For samples
+/// that show a connection of their own.
+#[uniffi::export]
+pub fn connection_notice(connection: Connection) -> Option<ConnectionNotice> {
+    core_state::ConnectionStatus::from(connection)
+        .notice()
+        .map(ConnectionNotice::from)
+}
+
 /// The letter a picture stands in with for `name`.
 #[uniffi::export]
 pub fn initial(name: String) -> String {

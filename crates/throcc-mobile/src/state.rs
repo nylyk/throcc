@@ -399,3 +399,16 @@ impl From<core::KeyTrust> for KeyTrust {
         }
     }
 }
+
+impl From<Connection> for core::ConnectionStatus {
+    fn from(connection: Connection) -> Self {
+        match connection {
+            Connection::Disconnected => Self::Disconnected,
+            Connection::Connected => Self::Connected,
+            Connection::Reconnecting { attempt, reason } => Self::Reconnecting { attempt, reason },
+            Connection::AwaitingReconnect => Self::AwaitingReconnect,
+            Connection::SignedInElsewhere => Self::SignedInElsewhere,
+            Connection::Failed { reason } => Self::Failed(reason),
+        }
+    }
+}

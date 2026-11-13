@@ -10,41 +10,6 @@ enum Sample: String {
     case pinmismatch, identitymissing
 }
 
-/// A lost connection the samples show in place of the state's, with the notice the core
-/// gives for it.
-struct SampleConnection {
-    let connection: Connection
-    let notice: ConnectionNotice
-
-    static var awaitingReconnect: SampleConnection {
-        SampleConnection(
-            connection: .awaitingReconnect,
-            notice: ConnectionNotice(
-                summary: "Disconnected after a while away. Reconnect from the room.",
-                hint: "The connection was down for a while. Reconnecting here signs you out on any other device.",
-                problem: nil,
-                action: .reconnect,
-                busy: false,
-                serious: false
-            )
-        )
-    }
-
-    static var signedInElsewhere: SampleConnection {
-        SampleConnection(
-            connection: .signedInElsewhere,
-            notice: ConnectionNotice(
-                summary: "Disconnected: signed in on another device",
-                hint: "Pick the server to sign in here again.",
-                problem: "Signed in on another device.",
-                action: .signInHere,
-                busy: false,
-                serious: true
-            )
-        )
-    }
-}
-
 extension AppModel {
     func show(_ sample: Sample) async {
         switch sample {
