@@ -7,15 +7,14 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
-use throcc_client_core::call::{Call, CallEvent};
+use throcc_client_core::call::Call;
 use throcc_client_core::client::{Client, ClientApi, UiCommand};
 use throcc_client_core::media::capture::{CaptureConfig, TestPattern};
 use throcc_client_core::media::share::ShareSender;
 use throcc_client_core::state::{ConnectionStatus, State, TrackHealth};
 use throcc_proto::ids::UserId;
-use throcc_proto::messages::{Codec, Event, Request, Response, ShareConfig};
+use throcc_proto::messages::{Codec, Request, Response, ShareConfig};
 use tokio::runtime::Runtime;
-use tokio::sync::mpsc;
 
 use common::*;
 
@@ -129,18 +128,6 @@ impl Watching {
             s.health.slow_shares.contains(&self.sharer) == shown
         });
     }
-}
-
-fn forward_keyframe_requests(call: &mut Call, sender: Arc<ShareSender>) {
-    let (_, closed) = mpsc::channel(1);
-    let mut events = std::mem::replace(&mut call.events, closed);
-    tokio::spawn(async move {
-        while let Some(event) = events.recv().await {
-            if let CallEvent::Server(Event::KeyframeRequested { kind, .. }) = event {
-                sender.recover(kind);
-            }
-        }
-    });
 }
 
 fn wait_for_state(client: &Client, what: &str, ready: impl FnMut(&State) -> bool) {

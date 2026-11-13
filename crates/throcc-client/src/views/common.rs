@@ -3,7 +3,7 @@ use std::sync::Arc;
 use gpui::{
     Context, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton,
     ObjectFit, ParentElement, Pixels, Point, RenderImage, SharedString, Stateful,
-    StatefulInteractiveElement, Styled, StyledImage, Task, TitlebarOptions,
+    StatefulInteractiveElement, Styled, StyledImage, Task, TitlebarOptions, Window,
     WindowBackgroundAppearance, WindowOptions, div, img, px, relative,
 };
 use gpui_component::button::{Button, ButtonVariants};
@@ -37,6 +37,9 @@ pub fn key_changed(state: &State, user: UserId) -> bool {
 /// The name `person` was verified under, where the server now shows another: the server
 /// picks the name, so it alone doesn't say who is verified.
 pub fn verified_as(verified: &[VerifiedIdentity], person: &Person) -> Option<String> {
+    if person.blocked {
+        return None;
+    }
     let key = Fingerprint(person.identity_key.filter(|_| person.verified)?);
     let stored = &verified.iter().find(|v| v.key == key)?.name;
     (*stored != person.name).then(|| stored.clone())
@@ -141,6 +144,26 @@ pub fn server_seed(address: &str) -> u64 {
     address.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
     })
+}
+
+/// The grey disc in place of a blocked person's picture.
+pub fn blocked_avatar(size: Pixels) -> Div {
+    div()
+        .flex_none()
+        .size(size + px(4.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .size(size)
+                .rounded_full()
+                .bg(theme::control())
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon("ban").size(size * 0.5).text_color(theme::text_3())),
+        )
 }
 
 /// The person's picture, or their initials on a muted hue, with the speaking ring when
@@ -463,6 +486,26 @@ pub fn moves_window<E: InteractiveElement>(element: E) -> E {
 pub const CONTROLS_LINGER: std::time::Duration = std::time::Duration::from_secs(2);
 /// How long a tile's overlay stays after the pointer leaves the tile.
 pub const OVERLAY_LINGER: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Redraws once `delay` has passed, so the controls over a share hide, and hides the cursor
+/// with them until it moves, while it is over `window` and `over_share` still holds there.
+pub fn hide_controls_after<T: 'static>(
+    delay: std::time::Duration,
+    over_share: impl Fn(&T) -> bool + 'static,
+    window: &Window,
+    cx: &mut Context<T>,
+) -> Task<()> {
+    cx.spawn_in(window, async move |this, cx| {
+        cx.background_executor().timer(delay).await;
+        this.update_in(cx, |this, window, cx| {
+            if window.is_window_hovered() && over_share(this) {
+                cx.hide_cursor_until_mouse_moves();
+            }
+            cx.notify();
+        })
+        .ok();
+    })
+}
 
 pub fn notify_after<T: 'static>(delay: std::time::Duration, cx: &mut Context<T>) -> Task<()> {
     cx.spawn(async move |this, cx| {

@@ -1,5 +1,6 @@
 pub mod account;
 pub mod avatars;
+pub mod blocked;
 pub mod call;
 pub mod client;
 pub mod connection;
@@ -19,6 +20,7 @@ mod servers;
 mod session;
 pub mod settings;
 pub mod state;
+pub mod theme;
 mod trust;
 pub mod verified;
 

@@ -12,6 +12,7 @@ use tracing::{debug, info, warn};
 
 use crate::database::{Enrolled, InviteRow, UserRow};
 use crate::limits::SourceKey;
+use crate::rooms::Hub;
 use crate::session::{FrameStream, read_handshake, write_frame};
 use crate::{ServerState, unix_now};
 
@@ -41,6 +42,7 @@ pub async fn authenticate(
     stream: &mut FrameStream,
     server_nonce: &[u8; 32],
     sign_in: SignIn,
+    source: SourceKey,
 ) -> Result<Authenticated, AuthRefusal> {
     let exporter = exporter(connection).map_err(AuthRefusal::Auth)?;
     match sign_in {
@@ -73,7 +75,7 @@ pub async fn authenticate(
                 .to_owned();
             let run = Enrollment {
                 shared,
-                source: SourceKey::of(connection.remote_address().ip()),
+                source,
                 code_id: invite::normalize(&code_id),
                 pubkey,
                 name,
@@ -130,11 +132,18 @@ impl Enrollment<'_> {
         });
 
         let exchanged = self.exchange(stream, &secret, pake_a).await.is_some();
-        if !exchanged || invite.is_none() {
+        let Some(invite) = invite.filter(|_| exchanged) else {
             return Err(AuthRefusal::Auth(AuthError::BadInvite));
-        }
+        };
         let enrolled = {
             let mut hub = self.shared.hub();
+            // The refusal reaches only someone who knew the invite's secret, so it tells a
+            // stranger nothing. The count is exact under the lock every account is made under.
+            if self.no_account_is_left(&hub, &invite).map_err(internal)? {
+                hub.db.return_invite_try(&self.code_id).map_err(internal)?;
+                info!(code_id = %self.code_id, "enrollment refused: the server keeps no more accounts");
+                return Err(AuthRefusal::Auth(AuthError::ServerFull));
+            }
             let enrolled = hub.db.enroll(&self.pubkey, &self.code_id, &self.name, now);
             match &enrolled {
                 Ok(Some(Enrolled::Added(row))) => {
@@ -158,6 +167,14 @@ impl Enrollment<'_> {
             }
             Err(e) => Err(internal(e)),
         }
+    }
+
+    /// Whether enrolling would add an account past the server's limit. An admin invite, or a
+    /// key that already has an account, never does.
+    fn no_account_is_left(&self, hub: &Hub, invite: &InviteRow) -> anyhow::Result<bool> {
+        Ok(invite.minted_by.is_some()
+            && hub.db.user_count()? >= self.shared.max_accounts
+            && hub.db.user_by_pubkey(&self.pubkey)?.is_none())
     }
 
     /// Looks up the invite and uses up one of its tries before any PAKE message is sent,

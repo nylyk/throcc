@@ -13,14 +13,14 @@ The server: sign-in, rooms and presence, the key relay, and an SFU that forwards
 | `main.rs`, `lib.rs` | Command-line arguments, binding, the accept loop and connection caps, and `admin_invite` behind `throcc-server admin-invite` |
 | `files.rs` | The data directory and its private files: created at 0700 and 0600, tightened if they are looser, refused if another user owns them |
 | `identity.rs`, `tls.rs` | `server_key`, the certificate derived from it, and the QUIC configuration |
-| `session.rs` | One connection: handshake, which refuses a protocol outside `MIN_PROTOCOL..=PROTOCOL` before reading the sign-in, and the control-stream read and write loops |
+| `session.rs` | One connection: handshake, which refuses a protocol outside `MIN_PROTOCOL..=PROTOCOL` before reading the sign-in, and the control-stream read and write loops. A sign-in ends the user's earlier connection with `SignedInElsewhere` and a close code of its own |
 | `auth.rs` | Sign-in for known keys, and enrollment with an invite through the PAKE |
 | `rooms.rs` | The `Hub`: rooms, membership, presence, invites, profiles, key relay, request handling |
 | `room_password.rs` | Argon2id hashes of room passwords, which run on the blocking pool, a few at a time, never under the hub lock; and the backoff for wrong guesses |
 | `limits.rs` | Token buckets, per-source connection caps, the new-connection rate and the enrollment limiter, which counts failed runs per source, network and region |
 | `refusals.rs` | Counts of connections refused or failed before sign-in, logged every 10 s instead of one line each |
-| `sfu.rs` | Ingress: the per-connection rate limits, the per-track audio allowance, the ownership check, the forwarding table and keyframe-request merging |
-| `egress.rs` | One task per receiver: audio first, a turn per track, then video in whole units within a 150 ms budget; receive stats |
+| `sfu.rs` | Ingress: the per-connection rate limits, the per-track audio allowance, the ownership check, the forwarding table, and keyframe requests merged per track and backed off per watcher, so one watcher on a slow link can't have the sender make keyframes for everyone every second |
+| `egress.rs` | One task per receiver: audio first, a turn per track, then video in whole units within a 150 ms budget; receive stats. A share whose sender heals only with a keyframe (`Recovery::Idr`) is held back from this receiver after a loss on the way to it, until a keyframe from after the loss, since nothing in between would decode; `Queues::hold` has the details. The hub asks the sender for that keyframe each tick, as the receiver would, through the receiver's own backoff |
 | `database.rs` | The SQLite schema, its migrations and every query. WAL with `synchronous=FULL`, so a commit survives a power loss and a room's epoch never rolls back |
 
 ## Admin invites
@@ -37,14 +37,14 @@ An invite without a minter enrolls an admin, or promotes the member whose identi
 
 ## Limits
 
-The limits in `throcc_proto::limits` hold always, for admins too: a full room refuses a join, a reconnect into it lands in the lobby, and a sixth screen share in a room is refused. The one exception is the server's: with 250 people signed in it refuses the next sign-in, unless that is an admin with an account, so a full server can still be managed; up to 10 admins sign in past it, and nobody past that. Enrolling, admin invites included, is refused while the server is full. An account nobody has signed in to for a year is removed, unless it is an admin's; whoever it invited stays.
+The limits in `throcc_proto::limits` hold always, for admins too: a full room refuses a join, a reconnect into it lands in the lobby, and a sixth screen share in a room is refused. The one exception is the server's: with 250 people signed in it refuses the next sign-in, unless that is an admin with an account, so a full server can still be managed; up to 10 admins sign in past it, and nobody past that. Enrolling, admin invites included, is refused while the server is full. A server keeps 5,000 accounts: with that many it enrolls nobody new through a member's invite, only through an admin invite, so the list of users fits one message and a server filled with accounts can still be managed. The refusal comes after the invite code proved right and costs the invite no try. An account nobody has signed in to for a year is removed, unless it is an admin's; whoever it invited stays. Whoever a removed account invited, when it leaves too, passes to that account's own inviter: they stay within reach of a cascade removal and keep counting against an invite allowance, so nobody sheds the people they brought in by having an account in between leave.
 
 ## Media limits
 
 Ingress polices each sender; egress shares each receiver's link. A well-behaved client never reaches any of these.
 
 - A connection that sends more than 25 Mbps is closed.
-- Datagrams beyond 6,000 a second per connection are dropped and counted. 25 Mbps of full-size datagrams is about 2,600.
+- Datagrams beyond 6,000 a second per connection, or larger than 1,162 bytes (`DATAGRAM_PAYLOAD_FLOOR`), are dropped and counted. 25 Mbps of full-size datagrams is about 2,600.
 - Each audio track may send 150 packets and 80 KiB a second, with bursts of 2,500 packets and 256 KiB. That covers Opus at its 510 kbps ceiling, and a flush of a client's whole 64 KiB datagram send buffer after a stall. Packets over it are dropped and counted, and the connection stays open. This is admission policing of a sender that doesn't conform, not an egress drop policy.
 - Egress never drops audio by policy. Each receiver queues audio per track and sends one packet per track in turn. Its cap of two seconds of every audio track a full room sends (3,400 packets) guards against a receiver that stops reading; at the cap the longest track's oldest packet goes, so a track that floods only loses its own packets.
 - Egress drops video in whole units. Beyond the 150 ms budget it drops only units that haven't started sending. A unit that has started is dropped only at the hard cap, the 150 ms budget of five shares at the 25 Mbps ingress limit (about 2.2 MiB), a guard against a receiver that stops reading, or when it can't arrive whole anyway: one of its fragments is lost, none comes for a second, or it grows past 4,096 fragments.

@@ -5,7 +5,7 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
 use throcc_proto::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
-use throcc_proto::messages::{PublicKey, ServerProfile, SignedEncryptionKey, User};
+use throcc_proto::messages::{PublicKey, ServerProfile, Signature, SignedEncryptionKey, User};
 
 use crate::files;
 
@@ -45,11 +45,16 @@ type Migration = fn(&Transaction) -> rusqlite::Result<()>;
 
 /// Migration `i` moves the schema from version `i` to `i + 1`, kept in `PRAGMA user_version`.
 /// Version 1 is the schema throcc 0.1 shipped; changing the schema means adding a migration.
-const MIGRATIONS: [Migration; 1] = [to_v1];
+const MIGRATIONS: [Migration; 2] = [to_v1, to_v2];
 
 /// Creates the first schema in an empty database.
 fn to_v1(tx: &Transaction) -> rusqlite::Result<()> {
     tx.execute_batch(SCHEMA_V1)
+}
+
+/// Keeps each user's signature over their name and picture.
+fn to_v2(tx: &Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch("ALTER TABLE users ADD COLUMN profile_sig BLOB")
 }
 
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
@@ -91,6 +96,8 @@ pub struct UserRow {
     pub encryption_key: Option<SignedEncryptionKey>,
     pub name: String,
     pub avatar: Option<Hash>,
+    /// The identity key's signature over `name` and `avatar`, once the user has given one.
+    pub profile_sig: Option<Signature>,
     pub role: Role,
     pub invited_by: Option<UserId>,
     pub created_at: u64,
@@ -222,6 +229,13 @@ impl Database {
         )? as u64)
     }
 
+    pub fn user_count(&self) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?;
+        Ok(count as usize)
+    }
+
     pub fn user_by_pubkey(&self, pubkey: &PublicKey) -> Result<Option<UserRow>> {
         Ok(self
             .conn
@@ -327,10 +341,16 @@ impl Database {
         Ok(())
     }
 
-    pub fn set_profile(&self, user: UserId, name: &str, avatar: Option<Hash>) -> Result<()> {
+    pub fn set_profile(
+        &self,
+        user: UserId,
+        name: &str,
+        avatar: Option<Hash>,
+        sig: &Signature,
+    ) -> Result<()> {
         self.conn.execute(
-            "UPDATE users SET name = ?1, avatar_hash = ?2 WHERE id = ?3",
-            params![name, hash_param(&avatar), user.0 as i64],
+            "UPDATE users SET name = ?1, avatar_hash = ?2, profile_sig = ?3 WHERE id = ?4",
+            params![name, hash_param(&avatar), sig.as_slice(), user.0 as i64],
         )?;
         Ok(())
     }
@@ -376,7 +396,8 @@ impl Database {
             .collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Removes these users in one transaction, clearing `invited_by` on anyone they invited.
+    /// Removes these users in one transaction. Whoever one of them invited passes to that
+    /// one's own inviter.
     pub fn remove_users(&mut self, users: &[UserId]) -> Result<()> {
         let tx = self.write()?;
         for user in users {
@@ -479,6 +500,14 @@ impl Database {
     pub fn consume_invite_try(&self, code_id: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE invites SET failures = failures + 1 WHERE code_id = ?1",
+            [code_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn return_invite_try(&self, code_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE invites SET failures = failures - 1 WHERE code_id = ?1 AND failures > 0",
             [code_id],
         )?;
         Ok(())
@@ -611,7 +640,7 @@ fn check_private_files(database: &Path) -> Result<()> {
     Ok(())
 }
 
-const USER_SELECT: &str = "SELECT id, pubkey, encryption_key, encryption_key_sig, encryption_key_not_after, name, avatar_hash, role, invited_by, created_at FROM users";
+const USER_SELECT: &str = "SELECT id, pubkey, encryption_key, encryption_key_sig, encryption_key_not_after, name, avatar_hash, role, invited_by, created_at, profile_sig FROM users";
 
 fn user_row(r: &rusqlite::Row) -> rusqlite::Result<UserRow> {
     let encryption_key: Option<Vec<u8>> = r.get(2)?;
@@ -634,6 +663,9 @@ fn user_row(r: &rusqlite::Row) -> rusqlite::Result<UserRow> {
         encryption_key,
         name: r.get(5)?,
         avatar: hash_column(r.get(6)?),
+        profile_sig: r
+            .get::<_, Option<Vec<u8>>>(10)?
+            .and_then(|sig| sig.try_into().ok()),
         role: Role::from_rank(r.get(7)?).unwrap_or(Role::User),
         invited_by: r.get::<_, Option<i64>>(8)?.map(|id| UserId(id as u64)),
         created_at: r.get::<_, i64>(9)? as u64,
@@ -665,7 +697,8 @@ fn fixed<const N: usize>(bytes: Vec<u8>) -> rusqlite::Result<[u8; N]> {
 
 fn remove_one(tx: &Transaction, id: i64) -> rusqlite::Result<()> {
     tx.execute(
-        "UPDATE users SET invited_by = NULL WHERE invited_by = ?1",
+        "UPDATE users SET invited_by = (SELECT invited_by FROM users WHERE id = ?1)
+         WHERE invited_by = ?1",
         [id],
     )?;
     tx.execute("DELETE FROM invites WHERE minted_by = ?1", [id])?;
@@ -813,7 +846,7 @@ mod tests {
             db.put_blob(&hash, b"png", 100).unwrap();
         }
         db.put_blob(&fresh, b"png", 200).unwrap();
-        db.set_profile(user, "a", Some(used)).unwrap();
+        db.set_profile(user, "a", Some(used), &[0; 64]).unwrap();
         db.set_server_avatar(Some(server)).unwrap();
         assert_eq!(db.delete_unused_blobs(150).unwrap(), 1);
         assert!(db.blob(&unused).unwrap().is_none());
@@ -852,6 +885,30 @@ mod tests {
     }
 
     #[test]
+    fn a_version_1_database_keeps_its_users_and_gains_profile_signatures() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        drop(Database::open(&path).unwrap());
+        let v1 = Connection::open(&path).unwrap();
+        v1.execute_batch("ALTER TABLE users DROP COLUMN profile_sig; PRAGMA user_version = 1")
+            .unwrap();
+        v1.execute(
+            "INSERT INTO users (pubkey, name, role, created_at, last_seen) VALUES (?1, 'Ilse', 0, 1, 1)",
+            [[1u8; 32].as_slice()],
+        )
+        .unwrap();
+        drop(v1);
+        let db = Database::open(&path).unwrap();
+        let user = db.user_by_pubkey(&[1; 32]).unwrap().unwrap();
+        assert_eq!((user.name.as_str(), user.profile_sig), ("Ilse", None));
+        db.set_profile(user.id, "Ilse", None, &[7; 64]).unwrap();
+        assert_eq!(
+            db.user(user.id).unwrap().unwrap().profile_sig,
+            Some([7; 64])
+        );
+    }
+
+    #[test]
     fn a_database_from_a_newer_server_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db");
@@ -883,6 +940,26 @@ mod tests {
     }
 
     #[test]
+    fn whoever_a_removed_user_invited_passes_to_that_users_inviter() {
+        let mut db = Database::open_in_memory().unwrap();
+        let root = enroll(&mut db, 1, None);
+        let between = enroll(&mut db, 2, Some(root));
+        let invited: Vec<UserId> = (3..6)
+            .map(|key| enroll(&mut db, key, Some(between)))
+            .collect();
+        assert_eq!(db.invites_used(root, 100, 0).unwrap(), 1);
+
+        db.remove_users(&[between]).unwrap();
+        for user in &invited {
+            assert_eq!(db.user(*user).unwrap().unwrap().invited_by, Some(root));
+        }
+        assert_eq!(db.invites_used(root, 100, 0).unwrap(), 3);
+        let mut tree = db.invite_tree(root).unwrap();
+        tree.sort();
+        assert_eq!(tree, [vec![root], invited].concat());
+    }
+
+    #[test]
     fn re_enrolling_an_existing_key_keeps_the_user() {
         let mut db = Database::open_in_memory().unwrap();
         let root = enroll(&mut db, 1, None);
@@ -890,7 +967,7 @@ mod tests {
         let first = enroll(&mut db, 2, Some(root));
         assert_eq!(db.user(first).unwrap().unwrap().name, "Ilse");
         db.set_role(first, Role::Manager).unwrap();
-        db.set_profile(first, "Moss", None).unwrap();
+        db.set_profile(first, "Moss", None, &[0; 64]).unwrap();
         let again = enroll(&mut db, 2, Some(root));
         assert_eq!(again, first);
         let row = db.user(first).unwrap().unwrap();

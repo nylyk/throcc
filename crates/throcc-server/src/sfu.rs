@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
-use throcc_proto::frame::Header;
-use throcc_proto::ids::MediaId;
+use throcc_proto::frame::{DATAGRAM_PAYLOAD_FLOOR, Header};
+use throcc_proto::ids::{MediaId, UserId};
 use throcc_proto::messages::Recovery;
 use throcc_proto::transport::close;
 use tracing::warn;
@@ -15,6 +15,9 @@ use crate::limits::TokenBucket;
 
 /// Keyframe requests for one track are forwarded at most this often.
 pub const KEYFRAME_INTERVAL: Duration = Duration::from_secs(1);
+/// The longest a watcher waits between its own requests, its wait doubling from
+/// [`KEYFRAME_INTERVAL`] with each one taken. A watcher quiet this long past its wait starts over.
+pub const KEYFRAME_BACKOFF_MAX: Duration = Duration::from_secs(8);
 /// The most a connection may send in datagrams, voice and share together: 25 Mbps.
 pub const MAX_INGRESS_BYTES_PER_SECOND: f64 = 25_000_000.0 / 8.0;
 const INGRESS_BURST_BYTES: f64 = MAX_INGRESS_BYTES_PER_SECOND;
@@ -57,10 +60,10 @@ impl Sfu {
     /// Forwards datagrams from one connection until it closes. Never reads past the header.
     ///
     /// A connection that sends more bytes than [`MAX_INGRESS_BYTES_PER_SECOND`] is closed.
-    /// Datagrams over [`MAX_INGRESS_PACKETS_PER_SECOND`], or over an audio track's
-    /// [`AudioAllowance`], are dropped and counted: admission policing of a sender that
-    /// doesn't conform, which a well-behaved client never reaches. Egress itself never
-    /// drops audio by policy.
+    /// Datagrams over [`MAX_INGRESS_PACKETS_PER_SECOND`], over an audio track's
+    /// [`AudioAllowance`] or larger than [`DATAGRAM_PAYLOAD_FLOOR`] are dropped and
+    /// counted: admission policing of a sender that doesn't conform, which a well-behaved
+    /// client never reaches. Egress itself never drops audio by policy.
     pub async fn ingress(self: Arc<Self>, conn_id: u64, connection: quinn::Connection) {
         let start = Instant::now();
         let mut bytes = TokenBucket::full(INGRESS_BURST_BYTES, MAX_INGRESS_BYTES_PER_SECOND, start);
@@ -75,7 +78,9 @@ impl Sfu {
                 connection.close(close::PROTOCOL_ERROR.into(), b"sent media too fast");
                 break;
             }
-            if !packets.take(1.0, now) {
+            // No client seals a larger one, and a receiver whose path carries no more than
+            // the floor could not be sent it.
+            if !packets.take(1.0, now) || datagram.len() > DATAGRAM_PAYLOAD_FLOOR {
                 policed.count(conn_id, now);
                 continue;
             }
@@ -197,20 +202,75 @@ impl DropReport {
 struct Pending {
     last_sent: Option<Instant>,
     wanted: Option<Recovery>,
+    watchers: HashMap<UserId, Backoff>,
 }
 
-/// Merges keyframe requests: at most one per track per [`KEYFRAME_INTERVAL`], and an
-/// `Idr` beats a `Refresh` within one interval.
+/// When a watcher's next request is taken, and how long the one after it then waits.
+struct Backoff {
+    next: Instant,
+    wait: Duration,
+}
+
+impl Backoff {
+    fn new(now: Instant) -> Self {
+        Self {
+            next: now,
+            wait: KEYFRAME_INTERVAL,
+        }
+    }
+
+    fn take(&mut self, now: Instant) -> bool {
+        if now < self.next {
+            return false;
+        }
+        if self.is_spent(now) {
+            self.wait = KEYFRAME_INTERVAL;
+        }
+        self.next = now + self.wait;
+        self.wait = (self.wait * 2).min(KEYFRAME_BACKOFF_MAX);
+        true
+    }
+
+    fn is_spent(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.next) >= KEYFRAME_BACKOFF_MAX
+    }
+}
+
+/// Merges keyframe requests: at most one per track per [`KEYFRAME_INTERVAL`], an `Idr`
+/// beating a `Refresh` within one, and each watcher backed off on the requests it starts.
 #[derive(Default)]
 pub struct KeyframeAggregator {
     tracks: HashMap<MediaId, Pending>,
 }
 
 impl KeyframeAggregator {
-    /// Records a request. Returns the request to forward now, if the track is due.
-    pub fn request(&mut self, media_id: MediaId, kind: Recovery, now: Instant) -> Option<Recovery> {
+    /// Records a request from `watcher`, whose backoff may drop it unless one is already
+    /// waiting. Returns the request to forward at once, if the track is due.
+    pub fn request(
+        &mut self,
+        media_id: MediaId,
+        watcher: UserId,
+        kind: Recovery,
+        now: Instant,
+    ) -> Option<Recovery> {
         let pending = self.tracks.entry(media_id).or_default();
+        if pending.wanted.is_none() {
+            let backoff = pending
+                .watchers
+                .entry(watcher)
+                .or_insert_with(|| Backoff::new(now));
+            if !backoff.take(now) {
+                return None;
+            }
+        }
         pending.wanted = pending.wanted.max(Some(kind));
+        Self::take_if_due(pending, now)
+    }
+
+    /// Records the keyframe a new watcher needs to start, which no backoff holds back.
+    pub fn first_picture(&mut self, media_id: MediaId, now: Instant) -> Option<Recovery> {
+        let pending = self.tracks.entry(media_id).or_default();
+        pending.wanted = Some(Recovery::Idr);
         Self::take_if_due(pending, now)
     }
 
@@ -218,7 +278,10 @@ impl KeyframeAggregator {
     pub fn due(&mut self, now: Instant) -> Vec<(MediaId, Recovery)> {
         self.tracks
             .iter_mut()
-            .filter_map(|(media_id, pending)| Some((*media_id, Self::take_if_due(pending, now)?)))
+            .filter_map(|(media_id, pending)| {
+                pending.watchers.retain(|_, backoff| !backoff.is_spent(now));
+                Some((*media_id, Self::take_if_due(pending, now)?))
+            })
             .collect()
     }
 
@@ -241,6 +304,8 @@ impl KeyframeAggregator {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -248,25 +313,118 @@ mod tests {
         let t = Instant::now();
         let mut agg = KeyframeAggregator::default();
         let id = MediaId(3);
+        let ms = Duration::from_millis;
         assert_eq!(
-            agg.request(id, Recovery::Refresh, t),
+            agg.request(id, UserId(1), Recovery::Refresh, t),
             Some(Recovery::Refresh)
         );
         assert_eq!(
-            agg.request(id, Recovery::Refresh, t + Duration::from_millis(10)),
+            agg.request(id, UserId(2), Recovery::Refresh, t + ms(10)),
             None
         );
+        assert_eq!(agg.request(id, UserId(3), Recovery::Idr, t + ms(20)), None);
         assert_eq!(
-            agg.request(id, Recovery::Idr, t + Duration::from_millis(20)),
+            agg.request(id, UserId(4), Recovery::Refresh, t + ms(30)),
             None
         );
-        assert_eq!(
-            agg.request(id, Recovery::Refresh, t + Duration::from_millis(30)),
-            None
-        );
-        assert!(agg.due(t + Duration::from_millis(999)).is_empty());
+        assert!(agg.due(t + ms(999)).is_empty());
         assert_eq!(agg.due(t + KEYFRAME_INTERVAL), vec![(id, Recovery::Idr)]);
         assert!(agg.due(t + KEYFRAME_INTERVAL * 3).is_empty());
+    }
+
+    /// The seconds at which the only watcher, asking every `every` seconds, gets a keyframe.
+    fn taken(agg: &mut KeyframeAggregator, watcher: UserId, every: u64, until: u64) -> Vec<u64> {
+        let start = Instant::now();
+        (0..until)
+            .step_by(every as usize)
+            .filter(|&second| {
+                let now = start + Duration::from_secs(second);
+                let forwarded = agg
+                    .request(MediaId(3), watcher, Recovery::Idr, now)
+                    .is_some();
+                forwarded || !agg.due(now).is_empty()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_watcher_quiet_long_enough_starts_over() {
+        let t = Instant::now();
+        let mut agg = KeyframeAggregator::default();
+        let at = |s| t + Duration::from_secs(s);
+        let mut ask = |second| agg.request(MediaId(3), UserId(1), Recovery::Idr, at(second));
+        for second in [0, 1, 3, 7] {
+            assert!(ask(second).is_some());
+        }
+        assert!(ask(15 + 8).is_some());
+        assert!(ask(24).is_some());
+    }
+
+    #[test]
+    fn joining_a_waiting_request_costs_nothing() {
+        let t = Instant::now();
+        let mut agg = KeyframeAggregator::default();
+        let id = MediaId(3);
+        let ms = Duration::from_millis;
+        assert!(agg.request(id, UserId(1), Recovery::Idr, t).is_some());
+        assert_eq!(agg.request(id, UserId(2), Recovery::Idr, t + ms(10)), None);
+        for watcher in 3..30 {
+            assert_eq!(
+                agg.request(id, UserId(watcher), Recovery::Idr, t + ms(20)),
+                None
+            );
+        }
+        let watchers = &agg.tracks[&id].watchers;
+        assert_eq!(
+            watchers.keys().map(|w| w.0).collect::<BTreeSet<_>>(),
+            [1, 2].into()
+        );
+    }
+
+    #[test]
+    fn a_watcher_asking_without_end_backs_off_to_its_longest_wait() {
+        let mut agg = KeyframeAggregator::default();
+        assert_eq!(
+            taken(&mut agg, UserId(1), 1, 40),
+            [0, 1, 3, 7, 15, 23, 31, 39]
+        );
+    }
+
+    #[test]
+    fn a_watcher_asking_now_and_then_is_never_held_back() {
+        let mut agg = KeyframeAggregator::default();
+        assert_eq!(taken(&mut agg, UserId(1), 10, 60), [0, 10, 20, 30, 40, 50]);
+    }
+
+    #[test]
+    fn one_watcher_backing_off_holds_back_no_other() {
+        let t = Instant::now();
+        let mut agg = KeyframeAggregator::default();
+        let id = MediaId(3);
+        let at = |s| t + Duration::from_secs(s);
+        for second in [0, 1, 3] {
+            assert!(
+                agg.request(id, UserId(1), Recovery::Idr, at(second))
+                    .is_some()
+            );
+        }
+        assert_eq!(agg.request(id, UserId(1), Recovery::Idr, at(4)), None);
+        assert_eq!(
+            agg.request(id, UserId(2), Recovery::Idr, at(4)),
+            Some(Recovery::Idr)
+        );
+    }
+
+    #[test]
+    fn quiet_watchers_are_forgotten() {
+        let t = Instant::now();
+        let mut agg = KeyframeAggregator::default();
+        let id = MediaId(3);
+        for watcher in 0..30 {
+            agg.request(id, UserId(watcher), Recovery::Refresh, t);
+        }
+        agg.due(t + KEYFRAME_INTERVAL + KEYFRAME_BACKOFF_MAX);
+        assert!(agg.tracks[&id].watchers.is_empty());
     }
 
     /// The smallest datagram a sender could make: the header and an AEAD tag.

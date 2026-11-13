@@ -5,14 +5,13 @@ mod common;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use throcc_client_core::call::{Call, CallEvent};
+use throcc_client_core::call::Call;
 use throcc_client_core::media::capture::{self, CaptureConfig, TestPattern};
 use throcc_client_core::media::engine::Kind;
 use throcc_client_core::media::share::{self, ShareSender};
 use throcc_client_core::media::share_audio::audio_to_video;
 use throcc_proto::frame::VIDEO_CLOCK_HZ;
-use throcc_proto::messages::{Codec, Event, Request, Response, ShareConfig, ShareTracks};
-use tokio::sync::mpsc;
+use throcc_proto::messages::{Codec, Request, Response, ShareConfig, ShareTracks};
 
 use common::*;
 
@@ -46,16 +45,7 @@ async fn share_pattern(
         Response::Ok
     );
 
-    let (_, closed) = mpsc::channel(1);
-    let mut events = std::mem::replace(&mut alice.events, closed);
-    let forward = sender.clone();
-    tokio::spawn(async move {
-        while let Some(event) = events.recv().await {
-            if let CallEvent::Server(Event::KeyframeRequested { kind, .. }) = event {
-                forward.recover(kind);
-            }
-        }
-    });
+    forward_keyframe_requests(alice, sender.clone());
     Some((sender, tracks))
 }
 

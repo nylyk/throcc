@@ -15,4 +15,4 @@ The wire types that the server and clients share. It is plain data and pure func
 | `transport.rs` | QUIC settings both sides use, and the connection close codes |
 | `limits.rs` | The limits both sides hold to: 30 people and 5 screen shares in a room, 50 rooms and 250 people signed in on a server, with room for 10 admins past that. The server enforces them; clients refuse a server that goes past them |
 
-Any change to `messages.rs` bumps `PROTOCOL`. New enum variants go last, because postcard encodes a variant by its index. The media header in `frame.rs` is security-critical, and changing its layout changes the protocol.
+Any change to `messages.rs` bumps `PROTOCOL`. A server keeps speaking the protocol before, so a changed message also needs its old shape kept for those sessions; protocol 2 alone dropped protocol 1 instead. New enum variants go last, because postcard encodes a variant by its index. The media header in `frame.rs` is security-critical, and changing its layout changes the protocol.

@@ -236,10 +236,14 @@ fn sonora_level(choice: NoiseSuppression) -> NoiseSuppressionLevel {
     }
 }
 
+/// Whether the capture chain cancels echo. On a phone the platform's voice processing
+/// does, between the mic and the speaker it opens together.
+const CANCELS_ECHO: bool = cfg!(not(any(target_os = "ios", target_os = "android")));
+
 fn processing_config(settings: &VoiceSettings) -> Config {
     Config {
         high_pass_filter: Some(HighPassFilter::default()),
-        echo_canceller: settings.echo_cancellation.then(EchoCanceller::default),
+        echo_canceller: (CANCELS_ECHO && settings.echo_cancellation).then(EchoCanceller::default),
         noise_suppression: settings.noise_suppression.map(|choice| {
             sonora::config::NoiseSuppression {
                 level: sonora_level(choice),

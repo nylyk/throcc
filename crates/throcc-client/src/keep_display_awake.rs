@@ -1,8 +1,22 @@
 /// Keeps the display from sleeping while the user is idle, until dropped.
 pub use platform::KeepDisplayAwake;
+/// Keeps the session awake while one more window showing a share is visible, where the
+/// compositor needs that from each window: Wayland. Elsewhere [`KeepDisplayAwake`] does it all.
+pub use platform::KeepWindowAwake;
 
 #[cfg(not(windows))]
 const REASON: &str = "Watching a screen share";
+
+/// A window's hold that holds nothing, for platforms that keep the whole session awake at once.
+#[cfg(not(target_os = "linux"))]
+pub enum NoWindowHold {}
+
+#[cfg(not(target_os = "linux"))]
+impl NoWindowHold {
+    pub fn new(_: &gpui::Window) -> Option<Self> {
+        None
+    }
+}
 
 #[cfg(target_os = "macos")]
 mod platform {
@@ -13,7 +27,7 @@ mod platform {
     pub struct KeepDisplayAwake(Retained<ProtocolObject<dyn NSObjectProtocol>>);
 
     impl KeepDisplayAwake {
-        pub fn new(_: &gpui::App) -> Self {
+        pub fn new(_: &gpui::Window, _: &gpui::App) -> Self {
             let activity = NSProcessInfo::processInfo().beginActivityWithOptions_reason(
                 NSActivityOptions::IdleDisplaySleepDisabled,
                 &NSString::from_str(super::REASON),
@@ -28,6 +42,8 @@ mod platform {
             unsafe { NSProcessInfo::processInfo().endActivity(&self.0) };
         }
     }
+
+    pub use super::NoWindowHold as KeepWindowAwake;
 }
 
 #[cfg(windows)]
@@ -41,7 +57,7 @@ mod platform {
     pub struct KeepDisplayAwake;
 
     impl KeepDisplayAwake {
-        pub fn new(_: &gpui::App) -> Self {
+        pub fn new(_: &gpui::Window, _: &gpui::App) -> Self {
             // SAFETY: plain flags, no pointers.
             unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED) };
             Self
@@ -54,6 +70,8 @@ mod platform {
             unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
         }
     }
+
+    pub use super::NoWindowHold as KeepWindowAwake;
 }
 
 #[cfg(target_os = "linux")]
@@ -62,12 +80,17 @@ mod platform {
     use gpui::AppContext;
     use tokio::sync::oneshot;
 
+    pub use crate::idle_inhibit::IdleInhibitor as KeepWindowAwake;
+
+    /// Asks the desktop portal, which GNOME, KDE and X11 sessions answer, and inhibits idle on
+    /// the main window for Wayland compositors that follow only their own inhibitors.
     pub struct KeepDisplayAwake {
         _release: oneshot::Sender<()>,
+        _window: Option<KeepWindowAwake>,
     }
 
     impl KeepDisplayAwake {
-        pub fn new(cx: &gpui::App) -> Self {
+        pub fn new(window: &gpui::Window, cx: &gpui::App) -> Self {
             let (release, released) = oneshot::channel();
             cx.background_spawn(async move {
                 if let Err(e) = inhibit_until(released).await {
@@ -75,7 +98,10 @@ mod platform {
                 }
             })
             .detach();
-            Self { _release: release }
+            Self {
+                _release: release,
+                _window: KeepWindowAwake::new(window),
+            }
         }
     }
 

@@ -6,8 +6,8 @@ use serde::de::DeserializeOwned;
 use throcc_crypto::identity::random;
 use throcc_proto::framing::{self, FrameError, LEN_BYTES};
 use throcc_proto::messages::{
-    AuthResult, ClientHello, ClientMessage, ErrorCode, Event, MIN_PROTOCOL, PROTOCOL, PakeStep,
-    Request, Response, ServerHello, ServerMessage,
+    AuthResult, ClientHello, ClientMessage, ErrorCode, MIN_PROTOCOL, PROTOCOL, PakeStep, Request,
+    Response, ServerHello, ServerMessage,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{Semaphore, mpsc};
@@ -84,11 +84,16 @@ pub async fn write_frame<T: Serialize>(
     Ok(())
 }
 
-/// Serves one connection. Everything before sign-in is logged as counts, since one source
-/// can fail sign-ins as fast as it can connect.
-pub async fn run(shared: Arc<ServerState>, connection: quinn::Connection, unauthenticated: Pass) {
+/// Serves one connection, counting every limit against `source`, the address a retry validated.
+/// `remote_address()` follows a client to an address not yet validated, a forged one too.
+pub async fn run(
+    shared: Arc<ServerState>,
+    connection: quinn::Connection,
+    source: SourceKey,
+    unauthenticated: Pass,
+) {
     let peer = connection.remote_address();
-    match serve(&shared, &connection, unauthenticated).await {
+    match serve(&shared, &connection, source, unauthenticated).await {
         Ok(()) => debug!(%peer, "session ended"),
         Err(ReadError::Closed) => {
             debug!(%peer, "closed before signing in");
@@ -106,13 +111,13 @@ pub async fn run(shared: Arc<ServerState>, connection: quinn::Connection, unauth
 async fn serve(
     shared: &ServerState,
     connection: &quinn::Connection,
+    source: SourceKey,
     unauthenticated: Pass,
 ) -> Result<(), ReadError> {
     let peer = connection.remote_address();
     // Nothing reads datagrams until sign-in, and quinn would otherwise keep them, together
     // with the receive buffers they arrived in.
     let discarding = AbortOnDrop(tokio::spawn(discard_datagrams(connection.clone())));
-    let source = SourceKey::of(peer.ip());
     let Ok(permit) = tokio::time::timeout(HELLO_TIMEOUT, shared.handshakes.enter(source)).await
     else {
         debug!(%peer, "no handshake slot in time");
@@ -150,7 +155,14 @@ async fn serve(
         return Ok(());
     };
 
-    let signing_in = auth::authenticate(shared, connection, &mut stream, &server_nonce, sign_in);
+    let signing_in = auth::authenticate(
+        shared,
+        connection,
+        &mut stream,
+        &server_nonce,
+        sign_in,
+        source,
+    );
     let authenticated = match tokio::time::timeout(SIGN_IN_TIMEOUT, signing_in).await {
         Ok(Ok(authenticated)) => authenticated,
         Ok(Err(refused)) => {
@@ -197,7 +209,8 @@ async fn serve(
     info!(user = user.0, %peer, "authenticated");
 
     let FrameStream { mut send, mut recv } = stream;
-    let sent = write_frame(&mut send, &AuthResult::Ok(Box::new(welcome))).await;
+    let welcome = AuthResult::Ok(Box::new(welcome));
+    let sent = write_frame(&mut send, &welcome).await;
     let writer = tokio::spawn(write_loop(send, outgoing_rx, connection.clone()));
     let result = match sent {
         Ok(()) => read_loop(shared, user, conn_id, &mut recv, &outgoing).await,
@@ -339,11 +352,14 @@ async fn write_loop(
         let (message, budget) = match next {
             Outbound::Message(message) => (message, None),
             Outbound::Budgeted(message, budget) => (message, Some(budget)),
-            Outbound::Kick { reason, code } => {
-                let kicked = ServerMessage::Event(Event::RemovedFromServer {
-                    reason: reason.clone(),
-                });
-                if write_frame(&mut send, &kicked).await.is_ok() && send.finish().is_ok() {
+            Outbound::Kick {
+                event,
+                code,
+                reason,
+            } => {
+                let kicked = ServerMessage::Event(event);
+                let written = write_frame(&mut send, &kicked).await;
+                if written.is_ok() && send.finish().is_ok() {
                     tokio::time::timeout(LINGER, send.stopped()).await.ok();
                 }
                 connection.close(code.into(), reason.as_bytes());

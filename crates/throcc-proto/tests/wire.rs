@@ -71,10 +71,11 @@ fn control_messages_encode_to_pinned_bytes() {
                     width: 2560,
                     height: 1440,
                     fps: 60,
+                    recovery: Recovery::Idr,
                 }),
             }),
         },
-        "00ac020601000101c03e038014a00b3c",
+        "00ac020601000101c03e038014a00b3c01",
     );
     pinned(
         ClientMessage::Request {
@@ -116,9 +117,17 @@ fn control_messages_encode_to_pinned_bytes() {
             deafened: false,
             sharing: true,
             role: Role::Admin,
+            identity_key: [3; 32],
+            profile_sig: Some([5; 64]),
         })),
-        "01000201610106060606060606060606060606060606060606060606060606060606060606060001000102",
+        concat!(
+            "01000201610106060606060606060606060606060606060606060606060606060606060606060001000102",
+            "0303030303030303030303030303030303030303030303030303030303030303",
+            "0140",
+            "05050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505",
+        ),
     );
+    pinned(ServerMessage::Event(Event::SignedInElsewhere), "0112");
     pinned(
         ServerMessage::Event(Event::KickedFromRoom {
             by: UserId(1),

@@ -14,13 +14,14 @@ use gpui_component::{Disableable, IndexPath};
 use throcc_client_core::media::cues::Cue;
 use throcc_client_core::media::voice::MicLevel;
 use throcc_client_core::settings::{
-    AudioSettings, DEFAULT_GATE_DBFS, NoiseSuppression, Transmit, VoiceSettings,
+    AudioSettings, DEFAULT_GATE_DBFS, NoiseSuppression, QUIETEST_GATE_DBFS, Transmit, VoiceSettings,
 };
+use throcc_client_core::state::BLOCKED_NAME;
 use throcc_proto::Fingerprint;
 
 use super::common::{
-    Typeset, caption, card, field_error, ghost_icon, key_cap, mono, primary, section, slider_gain,
-    slider_value, update_notice, volume_slider,
+    Typeset, avatar, caption, card, field_error, ghost_icon, key_cap, mono, primary, section,
+    slider_gain, slider_value, update_notice, volume_slider,
 };
 use super::page::{field, frame, nav, picture_editor, row, save_line, segmented, switch_row};
 use crate::app::{DeviceNames, PictureFor, Screen, SettingsPage, ThroccApp, typed_name};
@@ -43,6 +44,7 @@ pub fn render(
         SettingsPage::Audio => audio(app, cx),
         SettingsPage::Appearance => appearance(app, cx),
         SettingsPage::Verified => verified(app, cx),
+        SettingsPage::Blocked => blocked(app, cx),
         SettingsPage::About => about(app, cx),
     };
     let content = match app.settings_problem.clone() {
@@ -123,8 +125,6 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
 }
 
 const SYSTEM_DEFAULT: &str = "System default";
-/// The quietest level the meter and the threshold slider show.
-const METER_FLOOR_DBFS: f32 = -80.0;
 const METER_EVERY: Duration = Duration::from_millis(100);
 
 type Devices = Vec<SharedString>;
@@ -157,7 +157,7 @@ impl AudioControls {
         let cue_volume = cx.new(|_| volume_slider(voice.cue_volume));
         let threshold = cx.new(|_| {
             SliderState::new()
-                .min(METER_FLOOR_DBFS)
+                .min(QUIETEST_GATE_DBFS)
                 .max(0.)
                 .step(1.)
                 .default_value(gate_dbfs(voice.transmit))
@@ -296,7 +296,7 @@ fn keep_metering(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) {
 /// The mic level as a bar, green while the gate lets it through, with a mark at
 /// `threshold_dbfs`.
 fn meter(level: MicLevel, threshold_dbfs: f32) -> Div {
-    let fraction = |dbfs: f32| (1. - dbfs / METER_FLOOR_DBFS).clamp(0., 1.);
+    let fraction = |dbfs: f32| (1. - dbfs / QUIETEST_GATE_DBFS).clamp(0., 1.);
     div()
         .relative()
         .h(px(8.))
@@ -549,19 +549,25 @@ fn about(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .into_any_element()
 }
 
+/// The address `server` is known by, or its short fingerprint when it isn't known.
+fn server_address(app: &ThroccApp, server: &Fingerprint) -> String {
+    app.known_servers
+        .iter()
+        .find(|(_, known)| known == server)
+        .map_or_else(|| server.short(), |(address, _)| address.clone())
+}
+
 /// Everyone verified on this computer, on any server, each with the servers they were seen
 /// on and a way to take them off.
 fn verified(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
-    let address_of = |server: &Fingerprint| {
-        app.known_servers
-            .iter()
-            .find(|(_, known)| known == server)
-            .map_or_else(|| server.short(), |(address, _)| address.clone())
-    };
     let people = app.verified.list();
     let rows = people.iter().enumerate().map(|(i, person)| {
         let key = person.key;
-        let servers: Vec<String> = person.servers.iter().map(address_of).collect();
+        let servers: Vec<String> = person
+            .servers
+            .iter()
+            .map(|server| server_address(app, server))
+            .collect();
         div()
             .flex()
             .items_center()
@@ -574,7 +580,11 @@ fn verified(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .child(div().truncate().child(person.name.clone()))
+                    .child(div().truncate().child(if app.blocked.is_blocked(&key.0) {
+                        BLOCKED_NAME.to_owned()
+                    } else {
+                        person.name.clone()
+                    }))
                     .child(
                         div()
                             .child(servers.join(", "))
@@ -609,6 +619,70 @@ fn verified(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             }),
         )
         .children(app.verified_problem.clone().map(field_error))
+        .into_any_element()
+}
+
+/// Everyone blocked on this computer, as they looked when blocked, each with the server
+/// they were blocked on and a way to take the block off.
+fn blocked(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
+    let rows = app.blocked_people.iter().enumerate().map(|(i, look)| {
+        let person = &look.person;
+        let key = person.key;
+        let seed = u64::from_le_bytes(key.0.first_chunk().copied().unwrap_or_default());
+        div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .min_h(theme::TOUCH)
+            .px_2()
+            .child(avatar(
+                &person.name,
+                seed,
+                look.picture.clone(),
+                px(26.),
+                false,
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().truncate().child(person.name.clone()))
+                    .children(person.server.as_ref().map(|server| {
+                        div()
+                            .child(server_address(app, server))
+                            .truncate()
+                            .typeset(theme::CAPTION)
+                            .text_color(theme::text_3())
+                    })),
+            )
+            .child(
+                mono(key.short())
+                    .typeset(theme::CAPTION)
+                    .text_color(theme::text_3()),
+            )
+            .child(
+                ghost_icon(("unblock", i), "x", "Unblock").on_click(cx.listener(
+                    move |app, _, window, cx| {
+                        app.unblock(key, window, cx);
+                        cx.notify();
+                    },
+                )),
+            )
+    });
+    card()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(section("People that you have blocked"))
+        .children(rows)
+        .children(
+            app.blocked_people
+                .is_empty()
+                .then(|| caption("Nobody. Right-click someone in a room to block them.")),
+        )
+        .children(app.blocked_problem.clone().map(field_error))
         .into_any_element()
 }
 

@@ -10,11 +10,12 @@ use throcc_client_core::state::share_label;
 use throcc_proto::ids::UserId;
 
 use crate::app::ThroccApp;
+use crate::keep_display_awake::KeepWindowAwake;
 use crate::theme;
 use crate::video::Feeds;
 use crate::views::common::{
-    CONTROLS_LINGER, TRAFFIC_LIGHTS, Typeset, app_titlebar, caption, ghost_icon, moves_window,
-    notify_after,
+    CONTROLS_LINGER, TRAFFIC_LIGHTS, Typeset, app_titlebar, caption, ghost_icon,
+    hide_controls_after, moves_window,
 };
 use crate::views::overlay::{self, ShareOverlay};
 
@@ -35,6 +36,7 @@ pub struct PopOut {
     hide_controls: Option<Task<()>>,
     traffic_lights_shown: bool,
     focus: FocusHandle,
+    _keep_awake: Option<KeepWindowAwake>,
     _released: Subscription,
 }
 
@@ -68,6 +70,7 @@ impl PopOut {
                     hide_controls: None,
                     traffic_lights_shown: true,
                     focus: cx.focus_handle(),
+                    _keep_awake: KeepWindowAwake::new(window),
                     _released: cx.on_release(move |this: &mut Self, cx| {
                         let app = this.app.clone();
                         cx.defer(move |cx| {
@@ -81,7 +84,7 @@ impl PopOut {
                         });
                     }),
                 };
-                popout.show_controls_for(controls_for, cx);
+                popout.show_controls_for(controls_for, window, cx);
                 popout
             });
             cx.new(|cx| Root::new(view, window, cx))
@@ -96,16 +99,16 @@ impl PopOut {
         if window.is_fullscreen() != on {
             window.toggle_fullscreen();
         }
-        self.show_controls(cx);
+        self.show_controls(window, cx);
     }
 
-    fn show_controls(&mut self, cx: &mut Context<Self>) {
-        self.show_controls_for(CONTROLS_LINGER, cx);
+    fn show_controls(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.show_controls_for(CONTROLS_LINGER, window, cx);
     }
 
-    fn show_controls_for(&mut self, linger: Duration, cx: &mut Context<Self>) {
+    fn show_controls_for(&mut self, linger: Duration, window: &Window, cx: &mut Context<Self>) {
         self.controls_until = Instant::now() + linger;
-        self.hide_controls = Some(notify_after(linger, cx));
+        self.hide_controls = Some(hide_controls_after(linger, |_| true, window, cx));
         cx.notify();
     }
 }
@@ -179,7 +182,7 @@ impl Render for PopOut {
             .text_color(theme::text())
             .font_family(theme::font())
             .typeset(theme::BODY)
-            .on_mouse_move(cx.listener(|this, _, _, cx| this.show_controls(cx)))
+            .on_mouse_move(cx.listener(|this, _, window, cx| this.show_controls(window, cx)))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {

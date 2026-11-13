@@ -168,34 +168,23 @@ fn uploads_only_when_the_generation_changes() {
     assert_eq!(draw(3, flat(16, 18, 100, 128, 128)), 100);
 }
 
+/// A frame whose planes are shorter than its size says, or one with no pixels at all.
 #[test]
-fn short_planes_draw_nothing() {
-    let mut renderer = renderer();
-    let mut frame = flat(32, 32, 200, 128, 128);
-    frame.uv.truncate(10);
-    let scene = scene_of([surface(
-        nv12(SurfaceId::new(), 0, frame),
-        bounds(0.0, 0.0, 32.0, 32.0),
-        0.0,
-    )]);
-    let image = renderer
-        .render_scene_to_image(&scene, device_size(32, 32))
-        .unwrap();
-    assert_rgb(&image, 16, 16, [0, 0, 0]);
-}
-
-#[test]
-fn empty_frames_draw_nothing() {
-    let mut renderer = renderer();
-    let scene = scene_of([surface(
-        nv12(SurfaceId::new(), 0, flat(0, 0, 200, 128, 128)),
-        bounds(0.0, 0.0, 32.0, 32.0),
-        0.0,
-    )]);
-    let image = renderer
-        .render_scene_to_image(&scene, device_size(32, 32))
-        .unwrap();
-    assert_rgb(&image, 16, 16, [0, 0, 0]);
+fn short_or_empty_frames_draw_nothing() {
+    let mut short = flat(32, 32, 200, 128, 128);
+    short.uv.truncate(10);
+    for frame in [short, flat(0, 0, 200, 128, 128)] {
+        let mut renderer = renderer();
+        let scene = scene_of([surface(
+            nv12(SurfaceId::new(), 0, frame),
+            bounds(0.0, 0.0, 32.0, 32.0),
+            0.0,
+        )]);
+        let image = renderer
+            .render_scene_to_image(&scene, device_size(32, 32))
+            .unwrap();
+        assert_rgb(&image, 16, 16, [0, 0, 0]);
+    }
 }
 
 #[cfg(all(target_os = "macos", feature = "ffmpeg"))]

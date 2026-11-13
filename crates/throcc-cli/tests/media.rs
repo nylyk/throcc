@@ -6,9 +6,12 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use throcc_client_core::call::Call;
 use throcc_client_core::media::engine::{Kind, Outgoing};
-use throcc_proto::frame::{Flags, Header, TAG_BYTES, VIDEO_CLOCK_HZ};
+use throcc_client_core::verified::VerifiedStore;
+use throcc_proto::frame::{DATAGRAM_PAYLOAD_FLOOR, Flags, Header, TAG_BYTES, VIDEO_CLOCK_HZ};
 use throcc_proto::ids::{Epoch, MediaId, UserId};
-use throcc_proto::messages::{Audience, Codec, Event, MediaState, Recovery, Request, Response};
+use throcc_proto::messages::{
+    Audience, Codec, Event, MediaState, Recovery, Request, Response, ShareConfig, TrackStats,
+};
 use throcc_proto::transport::close;
 use throcc_server::{AUDIO_BURST_PACKETS, AUDIO_PACKETS_PER_SECOND};
 
@@ -287,11 +290,7 @@ async fn keyframes_arrive_whole_through_two_percent_loss() {
     );
     let video_id = first_share(&bob, &alice).await.video;
     let mut units = watch(&bob, video_id, KEYFRAMES as usize).await;
-    wait_for("both at one epoch with keys", || {
-        let epoch = alice.engine.keys().epoch();
-        epoch == bob.engine.keys().epoch() && bob.engine.keys().recv_key(video_id, epoch).is_some()
-    })
-    .await;
+    wait_for_keys(&alice, &bob, video_id).await;
 
     relay.lossy.store(true, Ordering::Relaxed);
     for index in 0..KEYFRAMES {
@@ -336,11 +335,7 @@ async fn a_unit_lost_on_the_way_asks_its_sender_for_a_refresh() {
     start_sharing(&alice).await;
     let video_id = first_share(&bob, &alice).await.video;
     let _units = watch(&bob, video_id, UNITS as usize).await;
-    wait_for("both at one epoch with keys", || {
-        let epoch = alice.engine.keys().epoch();
-        epoch == bob.engine.keys().epoch() && bob.engine.keys().recv_key(video_id, epoch).is_some()
-    })
-    .await;
+    wait_for_keys(&alice, &bob, video_id).await;
 
     relay.lossy.store(true, Ordering::Relaxed);
     let abandoned = || bob.engine.stats.abandoned_units.load(Ordering::Relaxed);
@@ -357,6 +352,42 @@ async fn a_unit_lost_on_the_way_asks_its_sender_for_a_refresh() {
         kind: Recovery::Refresh,
     };
     server_event(&mut alice, |e| (e == refresh).then_some(())).await;
+}
+
+/// When the server drops a unit of an `Idr` share for a receiver whose link can't carry it,
+/// the server asks the sender for a keyframe on that receiver's behalf.
+#[tokio::test]
+async fn a_receiver_too_slow_for_an_idr_share_has_a_keyframe_asked_for_it() {
+    const UNITS: u32 = 3_000;
+    let server = start_server();
+    let relay = capped_relay(&server.addr).await;
+    let (mut alice, bob, _) = room_with_two_at(&server, &relay.addr).await;
+    let share = ShareConfig {
+        recovery: Recovery::Idr,
+        ..share_1080p60(Codec::H264, 8000)
+    };
+    let share = Request::SetMedia(sharing(share));
+    assert_eq!(alice.request(share).await.unwrap(), Response::Ok);
+    let video_id = first_share(&bob, &alice).await.video;
+    let _units = watch(&bob, video_id, UNITS as usize).await;
+    let idr = Event::KeyframeRequested {
+        media_id: video_id,
+        kind: Recovery::Idr,
+    };
+    server_event(&mut alice, |e| (e == idr).then_some(())).await;
+    wait_for_keys(&alice, &bob, video_id).await;
+
+    relay.kbps.store(500, Ordering::Relaxed);
+    let sender = alice.engine.clone();
+    tokio::spawn(async move {
+        for index in 0..UNITS {
+            let sent = Outgoing::new(video_id, unit(index, 20 * 1100), index * 1500, index == 0);
+            sender.send(Kind::Video, sent);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    // Bob's own requests after a loss are refreshes; only the server asks for an IDR.
+    server_event(&mut alice, |e| (e == idr).then_some(())).await;
 }
 
 #[tokio::test]
@@ -389,6 +420,108 @@ async fn a_member_who_sends_too_fast_is_disconnected() {
     };
     assert_eq!(closed.error_code, close::PROTOCOL_ERROR.into());
     assert_eq!(&closed.reason[..], b"sent media too fast");
+}
+
+#[tokio::test]
+async fn a_client_that_shows_people_gives_its_key_to_nobody_it_has_not_shown() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let room = create_room(&mut alice, "General").await;
+    let bob = invited(&server, &alice).await;
+    let verified = VerifiedStore::in_memory();
+    let mut alice = Call::start_shown(alice.link, &alice.keystore, verified).unwrap();
+    let bob = Call::start(bob.link, &bob.keystore).unwrap();
+    alice.join(Some(room), None).await.unwrap();
+    bob.join(Some(room), None).await.unwrap();
+
+    // The room state names Bob and his presence has arrived, but nothing has shown him.
+    let (mut named, mut present) = (false, false);
+    while !(named && present) {
+        let is_room_state = server_event(&mut alice, |event| match event {
+            Event::PeersChanged { peers, .. } if peers.iter().any(|p| p.user == bob.me()) => {
+                Some(true)
+            }
+            Event::PresenceChanged(p) if (p.user, p.room) == (bob.me(), Some(room)) => Some(false),
+            _ => None,
+        })
+        .await;
+        named |= is_room_state;
+        present |= !is_room_state;
+    }
+    assert!(alice.engine.keys().trusted_room_peers().is_empty());
+
+    alice.engine.set_presence(bob.me(), Some(room));
+    let trusted = alice.engine.keys().trusted_room_peers();
+    assert_eq!(
+        trusted.iter().map(|p| p.user).collect::<Vec<_>>(),
+        [bob.me()]
+    );
+
+    alice.engine.end_presence(bob.me());
+    assert!(alice.engine.keys().trusted_room_peers().is_empty());
+}
+
+#[tokio::test]
+async fn a_datagram_larger_than_any_client_seals_is_not_forwarded() {
+    let server = start_server();
+    let mut alice = admin(&server).await;
+    let general = create_room(&mut alice, "General").await;
+    let mut bob = invited(&server, &alice).await;
+    let mic = alice.join(Some(general)).await.tracks.unwrap().mic;
+    bob.join(Some(general)).await;
+
+    let connection = &alice.link.connected.connection;
+    let too_large = DATAGRAM_PAYLOAD_FLOOR + 1;
+    let grown = || {
+        connection
+            .max_datagram_size()
+            .is_some_and(|max| max >= too_large)
+    };
+    let waited = Instant::now();
+    while !grown() {
+        if waited.elapsed() > Duration::from_secs(5) {
+            return skip("the path to the server carries no larger datagram");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    for (seq, len) in [(0, too_large), (1, DATAGRAM_PAYLOAD_FLOOR)] {
+        let header = Header {
+            media_id: mic,
+            epoch: Epoch(0),
+            seq,
+            flags: Flags::FIRST | Flags::LAST,
+        };
+        let mut datagram = header.encode().to_vec();
+        datagram.resize(len, 0);
+        connection
+            .send_datagram_wait(datagram.into())
+            .await
+            .unwrap();
+    }
+
+    let mic_forwarded = |tracks: &[TrackStats]| {
+        tracks
+            .iter()
+            .find(|t| t.media_id == mic)
+            .map_or(0, |t| t.forwarded)
+    };
+    let first = bob
+        .event(|event| match event {
+            Event::ReceiveStats { tracks } => tracks
+                .iter()
+                .any(|t| t.media_id == mic)
+                .then(|| mic_forwarded(tracks)),
+            _ => None,
+        })
+        .await;
+    let next_report = bob.event(|event| match event {
+        Event::ReceiveStats { tracks } => Some(mic_forwarded(tracks)),
+        _ => None,
+    });
+    let next = tokio::time::timeout(Duration::from_secs(3), next_report)
+        .await
+        .unwrap_or(0);
+    assert_eq!(first + next, 1);
 }
 
 #[tokio::test]

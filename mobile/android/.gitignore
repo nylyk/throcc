@@ -1,0 +1,7 @@
+.gradle
+.kotlin
+.idea
+build
+local.properties
+*.iml
+/app/src/main/assets/THIRD-PARTY-NOTICES.txt

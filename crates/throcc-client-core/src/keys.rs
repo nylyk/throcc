@@ -75,8 +75,10 @@ pub struct KeyManager {
     /// Our encryption key before the last renewal, until the time it is dropped.
     retired_encryption: Option<(EncryptionKeyPair, Instant)>,
     server: Fingerprint,
-    /// The room each user's presence shows them in.
-    present: HashMap<UserId, RoomId>,
+    /// The people we were told are signed in, with the room each is in, at most
+    /// [`MAX_SIGNED_IN`]. A client that shows people tells us of exactly those it shows, so
+    /// nobody it leaves out is trusted.
+    present: HashMap<UserId, Option<RoomId>>,
     /// The peers of the room state last applied, as the server sent them.
     room_peers: Vec<Peer>,
     room: Option<RoomId>,
@@ -110,6 +112,9 @@ pub struct KeyManager {
     /// The newest room state for a room we haven't been placed in yet.
     stashed: Option<(RoomId, Epoch, Vec<Peer>)>,
     generation: u64,
+    /// Every identity key that became trusted since they were last taken, in order. A key
+    /// trusted only between two looks at the room is still in here.
+    newly_trusted: Vec<(UserId, PublicKey)>,
 }
 
 impl KeyManager {
@@ -146,6 +151,7 @@ impl KeyManager {
             early: HashMap::new(),
             stashed: None,
             generation: 0,
+            newly_trusted: Vec::new(),
         }
     }
 
@@ -157,17 +163,30 @@ impl KeyManager {
         self.room
     }
 
-    /// Records the room `user`'s presence shows them in. True when that changes who is
-    /// shown in our room, so the current room state should be applied again.
+    /// Records `user`'s presence and the room it shows them in, unless that would hold more
+    /// than [`MAX_SIGNED_IN`] people. True when that changes who is shown in our room, so the
+    /// current room state should be applied again.
     pub fn set_presence(&mut self, user: UserId, room: Option<RoomId>) -> bool {
-        let before = match room {
-            Some(_) if self.present.len() >= MAX_SIGNED_IN && !self.present.contains_key(&user) => {
-                return false;
-            }
-            Some(room) => self.present.insert(user, room),
-            None => self.present.remove(&user),
-        };
-        user != self.me && self.room.is_some() && (before == self.room) != (room == self.room)
+        if self.present.len() >= MAX_SIGNED_IN && !self.present.contains_key(&user) {
+            return false;
+        }
+        let before = self.present.insert(user, room).flatten();
+        self.changes_our_room(user, before, room)
+    }
+
+    /// Forgets `user`, whose presence ended. True as for [`Self::set_presence`].
+    pub fn end_presence(&mut self, user: UserId) -> bool {
+        let before = self.present.remove(&user).flatten();
+        self.changes_our_room(user, before, None)
+    }
+
+    fn changes_our_room(&self, user: UserId, before: Option<RoomId>, now: Option<RoomId>) -> bool {
+        user != self.me && self.room.is_some() && (before == self.room) != (now == self.room)
+    }
+
+    /// The identity keys that became trusted since this was last called, oldest first.
+    pub fn take_newly_trusted(&mut self) -> Vec<(UserId, PublicKey)> {
+        std::mem::take(&mut self.newly_trusted)
     }
 
     /// Applies the room state last applied again, after a presence changed.
@@ -326,6 +345,12 @@ impl KeyManager {
             .map(|(user, _)| *user)
             .collect();
         self.retire_received(now, |from, _| departed.contains(&from));
+        for (user, peer) in &trusted {
+            let known = self.peers.get(user).map(|old| old.identity_key);
+            if known != Some(peer.identity_key) {
+                self.newly_trusted.push((*user, peer.identity_key));
+            }
+        }
         self.peers = trusted;
         self.owners = self
             .peers
@@ -348,7 +373,14 @@ impl KeyManager {
                 .map(|user| KeyNotice::BadEncryptionKey { user }),
         );
         for ((from, early_epoch), (arrived, wrapped)) in std::mem::take(&mut self.early) {
-            if now.duration_since(arrived) < OLD_KEY_GRACE {
+            if keeps_early(
+                &self.room_peers,
+                self.epoch,
+                from,
+                early_epoch,
+                arrived,
+                now,
+            ) {
                 self.sender_key_at(from, early_epoch, wrapped, arrived, now)
                     .ok();
             }
@@ -382,7 +414,7 @@ impl KeyManager {
         let mut notices = Vec::new();
         let mut trusted = BTreeMap::new();
         let unix_now = crate::unix_now().unwrap_or(0);
-        let shown = |p: &&Peer| p.user != self.me && self.present.get(&p.user) == Some(&room);
+        let shown = |p: &&Peer| p.user != self.me && self.present.get(&p.user) == Some(&Some(room));
         let shown: Vec<&Peer> = peers.iter().filter(shown).collect();
         for peer in shown {
             let signed = &peer.encryption_key;
@@ -435,9 +467,11 @@ impl KeyManager {
             self.retire_received(now, |_, old| old < epoch);
             self.epoch = epoch;
             self.epoch_since = now;
-            if let Some(room) = self.room {
-                self.floors.raise(self.me, room, epoch);
-            }
+        }
+        // The floor covers the epoch a stay starts at. A room change resets our epoch to 0,
+        // and a stay at epoch 0 needs a floor too, or it could be replayed.
+        if let Some(room) = self.room {
+            self.floors.raise(self.me, room, epoch);
         }
         self.wrapped_to.clear();
         let Some(tracks) = &self.my_tracks else {
@@ -510,9 +544,8 @@ impl KeyManager {
         (request, refused.into_iter().map(|(user, _)| user).collect())
     }
 
-    /// Stores a peer's sender secret. One that arrives before its room state is held for
-    /// up to [`OLD_KEY_GRACE`]. One for an earlier epoch is accepted only within the grace
-    /// period after our epoch moved on, and expires with it.
+    /// Stores a peer's sender secret, holding an early one as [`keeps_early`] says. One for an
+    /// earlier epoch is kept only within the grace period after our epoch moved on.
     pub fn sender_key(
         &mut self,
         from: UserId,
@@ -636,9 +669,27 @@ impl KeyManager {
         let received = &self.received;
         self.recv_keys
             .retain(|(_, epoch), (owner, _)| received.contains_key(&(*owner, *epoch)));
-        self.early
-            .retain(|_, (arrived, _)| now.duration_since(*arrived) < OLD_KEY_GRACE);
+        let (room_peers, epoch) = (&self.room_peers, self.epoch);
+        self.early.retain(|(from, early_epoch), (arrived, _)| {
+            keeps_early(room_peers, epoch, *from, *early_epoch, *arrived, now)
+        });
     }
+}
+
+/// Whether a sender key that came early is still kept: for [`OLD_KEY_GRACE`], and past it
+/// while the room state names its sender at our epoch.
+fn keeps_early(
+    room_peers: &[Peer],
+    epoch: Epoch,
+    from: UserId,
+    early_epoch: Epoch,
+    arrived: Instant,
+    now: Instant,
+) -> bool {
+    // A sender the room names may only be waiting for a client that shows people to show
+    // them, and sends its key just once.
+    now.duration_since(arrived) < OLD_KEY_GRACE
+        || (early_epoch == epoch && room_peers.iter().any(|p| p.user == from))
 }
 
 fn too_many_shares(tracks: &Tracks) -> bool {
@@ -1453,5 +1504,115 @@ pub(crate) mod tests {
         assert!(a.keys.retired_encryption.is_some());
         a.keys.tick(now + RETIRED_ENCRYPTION_KEPT);
         assert!(a.keys.retired_encryption.is_none());
+    }
+
+    #[test]
+    fn nobody_past_the_people_shown_gets_our_key() {
+        let now = Instant::now();
+        let (mut a, ghost) = (member(1), member(2));
+        for id in 0..MAX_SIGNED_IN as u64 {
+            a.keys.set_presence(UserId(1000 + id), None);
+        }
+        a.keys.set_presence(ghost.id, Some(ROOM));
+        let peers = [peer(&a), peer(&ghost)];
+        let tracks = Some(a.tracks.clone());
+        let (requests, _) = a
+            .keys
+            .apply_placement(Some(ROOM), Epoch(1), tracks, &peers, now);
+        assert!(requests.is_empty());
+        assert!(a.keys.trusted_room_peers().is_empty());
+        assert!(a.keys.take_newly_trusted().is_empty());
+
+        a.keys.end_presence(UserId(1000));
+        assert!(a.keys.set_presence(ghost.id, Some(ROOM)));
+        let (request, _) = reapply(&mut a, now);
+        assert_eq!(wrapped_to(request.as_ref()), [ghost.id]);
+    }
+
+    #[test]
+    fn a_key_trusted_and_then_replaced_is_still_reported() {
+        let now = Instant::now();
+        let (mut a, b, impostor) = (member(1), member(2), member(2));
+        let real = [peer(&a), peer(&b)];
+        let swapped = [peer(&a), peer(&impostor)];
+        show(&mut a.keys, &real);
+        let tracks = Some(a.tracks.clone());
+        a.keys
+            .apply_placement(Some(ROOM), Epoch(1), tracks, &real, now);
+        assert_eq!(a.keys.take_newly_trusted(), [(b.id, b.identity.public())]);
+
+        let (request, _) = a.keys.peers_changed(ROOM, Epoch(1), &swapped, now);
+        assert_eq!(wrapped_to(request.as_ref()), [b.id]);
+        a.keys.peers_changed(ROOM, Epoch(1), &real, now);
+        assert_eq!(
+            a.keys.take_newly_trusted(),
+            [
+                (b.id, impostor.identity.public()),
+                (b.id, b.identity.public())
+            ]
+        );
+        a.keys.peers_changed(ROOM, Epoch(1), &real, now);
+        assert!(a.keys.take_newly_trusted().is_empty());
+    }
+
+    #[test]
+    fn a_stay_at_epoch_zero_leaves_a_floor() {
+        let now = Instant::now();
+        let (mut a, mut b) = (member(1), member(2));
+        let key = blob(&rekey(&mut [&mut a, &mut b], 0, now), a.id, b.id);
+        let peers = [peer(&a), peer(&b)];
+        place(&mut b, None, 0, &[], now);
+        assert!(place(&mut b, Some(ROOM), 0, &peers, now).contains(&KeyNotice::OldEpoch));
+        assert_eq!(
+            b.keys.sender_key(a.id, key.0, &key.1, now),
+            Err(KeyError::Stale)
+        );
+        assert!(!can_read(&mut b, &a, 0));
+    }
+
+    #[test]
+    fn a_key_from_someone_the_room_names_waits_until_they_are_shown() {
+        let now = Instant::now();
+        let (mut a, mut b) = (member(1), member(2));
+        let peers = [peer(&a), peer(&b)];
+        show(&mut b.keys, &peers);
+        let tracks = Some(b.tracks.clone());
+        let (requests, _) = b
+            .keys
+            .apply_placement(Some(ROOM), Epoch(1), tracks, &peers, now);
+        let Some(Request::PublishSenderKey { epoch, wrapped }) = requests.into_iter().next() else {
+            panic!()
+        };
+
+        // Alice has the room state and Bob's key, but nothing has shown her Bob yet.
+        let tracks = Some(a.tracks.clone());
+        a.keys
+            .apply_placement(Some(ROOM), Epoch(1), tracks, &peers, now);
+        a.keys.sender_key(b.id, epoch, &wrapped[0].1, now).unwrap();
+        let later = now + 10 * OLD_KEY_GRACE;
+        a.keys.tick(later);
+        assert!(!can_read(&mut a, &b, 1));
+
+        assert!(a.keys.set_presence(b.id, Some(ROOM)));
+        a.keys.reapply_peers(later);
+        assert!(can_read(&mut a, &b, 1));
+    }
+
+    #[test]
+    fn an_early_key_from_nobody_the_room_names_is_dropped_after_a_while() {
+        let now = Instant::now();
+        let mut a = member(1);
+        let tracks = Some(a.tracks.clone());
+        let peers = [peer(&a)];
+        a.keys
+            .apply_placement(Some(ROOM), Epoch(1), tracks, &peers, now);
+        for epoch in [1, 2] {
+            a.keys
+                .sender_key(UserId(9), Epoch(epoch), &[0; WRAPPED_BYTES], now)
+                .unwrap();
+        }
+        assert_eq!(a.keys.early.len(), 2);
+        a.keys.tick(now + OLD_KEY_GRACE);
+        assert!(a.keys.early.is_empty());
     }
 }

@@ -1,3 +1,10 @@
+#[cfg(target_os = "android")]
+#[path = "keystore/android.rs"]
+mod platform;
+#[cfg(not(target_os = "android"))]
+#[path = "keystore/keychain.rs"]
+mod platform;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -6,8 +13,8 @@ use anyhow::{Context, Result, bail};
 use throcc_crypto::hpke::EncryptionKeyPair;
 use throcc_crypto::identity::{self, IdentityKey};
 use throcc_proto::Fingerprint;
-use throcc_proto::ids::UserId;
-use throcc_proto::messages::SignedEncryptionKey;
+use throcc_proto::ids::{Hash, UserId};
+use throcc_proto::messages::{Signature, SignedEncryptionKey};
 use tracing::warn;
 use zeroize::Zeroizing;
 
@@ -15,8 +22,6 @@ use crate::files::{read_if_exists, replace_file};
 use crate::known_servers::KnownServers;
 use crate::unix_now;
 
-const KEYCHAIN_SERVICE: &str = "throcc";
-const KEYCHAIN_IDENTITY: &str = "identity";
 const IDENTITY_FILE: &str = "identity_key";
 const ENCRYPTION_KEY_FILE: &str = "encryption_key";
 const ENCRYPTION_KEY_LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -87,12 +92,14 @@ impl Keystore {
     fn open_platform(when_missing: WhenMissing) -> Result<(Self, bool)> {
         let dir = config_dir()?;
         fs::create_dir_all(&dir)?;
-        let found = match keychain_identity(&dir, when_missing) {
-            Err(e) if matches!(e.downcast_ref(), Some(keyring::Error::NoDefaultStore)) => {
-                warn!("no OS keychain ({e:#}); keeping the identity key in a file");
+        let found = match keychain_identity(&dir, when_missing)
+            .context("reading the identity key from the OS keychain")?
+        {
+            Some(found) => found,
+            None => {
+                warn!("no OS keychain; keeping the identity key in a file");
                 Found::kept(fallback_identity(&dir)?)
             }
-            other => other.context("reading the identity key from the OS keychain")?,
         };
         Ok((Self::assemble(dir, cache_dir()?, found.key)?, found.new))
     }
@@ -162,6 +169,18 @@ impl Keystore {
         }
     }
 
+    /// The identity key's signature over `name` and `avatar` for one server and user.
+    pub fn profile_sig(
+        &self,
+        server: &Fingerprint,
+        user: UserId,
+        name: &str,
+        avatar: Option<Hash>,
+    ) -> Signature {
+        let message = identity::profile_message(&server.0, user, name, avatar);
+        self.identity.sign(&message)
+    }
+
     /// Where the keys, pins and settings are kept.
     pub fn dir(&self) -> &Path {
         &self.dir
@@ -174,17 +193,45 @@ impl Keystore {
 
 /// Where throcc keeps its keys, pins and settings on this machine.
 pub fn config_dir() -> Result<PathBuf> {
-    Ok(project_dirs()?.config_dir().to_owned())
+    Ok(app_dirs()?.config)
 }
 
 /// Where throcc keeps what it can fetch again, such as pictures.
 pub fn cache_dir() -> Result<PathBuf> {
-    Ok(project_dirs()?.cache_dir().to_owned())
+    Ok(app_dirs()?.cache)
 }
 
-fn project_dirs() -> Result<directories::ProjectDirs> {
-    directories::ProjectDirs::from("", "", "throcc")
-        .context("no home directory to keep throcc's data in")
+#[derive(Clone)]
+struct AppDirs {
+    config: PathBuf,
+    cache: PathBuf,
+}
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+fn app_dirs() -> Result<AppDirs> {
+    let dirs = directories::ProjectDirs::from("", "", "throcc")
+        .context("no home directory to keep throcc's data in")?;
+    Ok(AppDirs {
+        config: dirs.config_dir().to_owned(),
+        cache: dirs.cache_dir().to_owned(),
+    })
+}
+
+#[cfg(any(target_os = "ios", target_os = "android"))]
+static APP_DIRS: std::sync::OnceLock<AppDirs> = std::sync::OnceLock::new();
+
+/// Sets where the app keeps its data and what it can fetch again. The first call wins.
+#[cfg(any(target_os = "ios", target_os = "android"))]
+pub fn set_app_dirs(config: PathBuf, cache: PathBuf) {
+    let _ = APP_DIRS.set(AppDirs { config, cache });
+}
+
+#[cfg(any(target_os = "ios", target_os = "android"))]
+fn app_dirs() -> Result<AppDirs> {
+    APP_DIRS
+        .get()
+        .cloned()
+        .context("the app hasn't set its directories")
 }
 
 fn renewal_due(created: u64, now: u64) -> bool {
@@ -245,24 +292,18 @@ trait SeedEntry {
     fn write(&self, seed: &[u8]) -> Result<()>;
 }
 
-impl SeedEntry for keyring::Entry {
-    fn read(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
-        match self.get_secret() {
-            Ok(secret) => Ok(Some(Zeroizing::new(secret))),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    fn write(&self, seed: &[u8]) -> Result<()> {
-        Ok(self.set_secret(seed)?)
-    }
-}
-
-/// The identity key in the OS keychain, put there when it has none.
-fn keychain_identity(dir: &Path, when_missing: WhenMissing) -> Result<Found> {
-    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_IDENTITY)?;
-    identity_in(&entry, dir, when_missing)
+/// The identity key in the OS keychain, put there when it has none. `None` on a platform
+/// without a keychain.
+fn keychain_identity(dir: &Path, when_missing: WhenMissing) -> Result<Option<Found>> {
+    // Two first runs at once would each start an identity, and the one whose write loses
+    // would sign in with a key that is stored nowhere. On Android the later wrapping key
+    // would also replace the earlier one, leaving a seed nothing can unwrap.
+    static OPENING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _opening = crate::lock(&OPENING);
+    let Some(entry) = platform::identity_entry(dir)? else {
+        return Ok(None);
+    };
+    identity_in(&entry, dir, when_missing).map(Some)
 }
 
 fn identity_in(keychain: &impl SeedEntry, dir: &Path, when_missing: WhenMissing) -> Result<Found> {

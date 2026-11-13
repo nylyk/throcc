@@ -9,7 +9,9 @@ use throcc_client_core::call::{Call, CallEvent};
 use throcc_client_core::client::{Client, ClientApi, UiCommand, UiEvent};
 use throcc_client_core::keystore::Keystore;
 use throcc_client_core::profile::Profile;
-use throcc_client_core::state::{ConnectionStatus, KeyWarning, Sound, SoundLevel, State};
+use throcc_client_core::state::{
+    BLOCKED_NAME, ConnectionStatus, KeyWarning, Sound, SoundLevel, State,
+};
 use throcc_client_core::verified::VerifiedStore;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{RoomId, UserId};
@@ -642,16 +644,7 @@ fn a_new_key_for_a_verified_persons_user_id_is_warned_of_and_still_hears_us() {
     let rebuilt = ProcessLikeServer::start(rebuilt_dir.path(), addr);
     let alice = client_in(alice_dir.path(), &address, Some(&rebuilt.admin_invite()));
     wait_connected(&alice, "alice on the rebuilt server");
-    let room = create_room(&alice);
-    alice.command(UiCommand::CreateRoom("Elsewhere".into(), None));
-    wait_for(&alice, "the other room", |s| s.rooms.len() == 2);
-    let elsewhere = alice
-        .state()
-        .rooms
-        .iter()
-        .find(|r| r.id != room)
-        .unwrap()
-        .id;
+    let (room, elsewhere) = room_and_elsewhere(&alice);
     alice.command(UiCommand::Join(Some(room)));
     wait_for(&alice, "alice in the room", |s| s.current.is_some());
     let alice_id = alice.state().me.unwrap();
@@ -881,4 +874,60 @@ fn a_removed_member_stops_reconnecting() {
     wait_for_state_within(Duration::from_secs(10), &bob, "bob to give up", |s| {
         matches!(s.connection, ConnectionStatus::Failed(_))
     });
+}
+
+#[test]
+fn a_client_replaced_by_another_device_stays_signed_out() {
+    let (address, invite, _server) = server();
+    let (first, dir) = client(&address, &invite);
+    let second = client_in(dir.path(), &address, None);
+    wait_for(&first, "the first device to be signed out", |s| {
+        s.connection == ConnectionStatus::SignedInElsewhere
+    });
+
+    std::thread::sleep(Duration::from_secs(4));
+    assert_eq!(
+        first.state().connection,
+        ConnectionStatus::SignedInElsewhere
+    );
+    assert_eq!(second.state().connection, ConnectionStatus::Connected);
+}
+
+#[test]
+fn a_blocked_person_stays_in_the_room_unnamed_and_still_gets_our_key() {
+    let (address, admin_invite, _server) = server();
+    let (alice, alice_dir) = client(&address, &admin_invite);
+    wait_connected(&alice, "connected");
+    let room = create_room(&alice);
+    alice.command(UiCommand::Join(Some(room)));
+    wait_for(&alice, "alice in the room", |s| s.current.is_some());
+    let alice_id = alice.state().me.unwrap();
+    let code = invite(&alice);
+    let runtime = Runtime::new().unwrap();
+    let bob_dir = tempfile::tempdir().unwrap();
+    let bob = call_in(&runtime, bob_dir.path(), &address, &code, room);
+    let shown_blocked = |s: &State| {
+        s.person(bob.me()).is_some_and(|p| {
+            p.blocked && p.name == BLOCKED_NAME && p.avatar.is_none() && p.room == Some(room)
+        })
+    };
+    let shown_by_name = |s: &State| {
+        s.person(bob.me())
+            .is_some_and(|p| p.name == "Ilse" && !p.blocked)
+    };
+    wait_for(&alice, "bob by name", shown_by_name);
+
+    alice.command(UiCommand::Block(bob.me()));
+    wait_for(&alice, "bob blocked but still shown", shown_blocked);
+
+    drop(alice);
+    let alice = client_in(alice_dir.path(), &address, None);
+    alice.command(UiCommand::Join(Some(room)));
+    wait_for(&alice, "bob still blocked after a restart", shown_blocked);
+    wait_until("blocked bob to hold alice's new key", || {
+        holds_key_of(&bob, alice_id)
+    });
+
+    alice.command(UiCommand::Unblock(bob.me()));
+    wait_for(&alice, "bob by name again", shown_by_name);
 }

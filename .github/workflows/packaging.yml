@@ -3,7 +3,7 @@ name: packaging
 on:
   push:
     branches: [develop]
-    tags: ['client-v*']
+    tags: ['client-v*', 'android-v*']
     paths:
       - 'packaging/**'
       - 'crates/throcc-client/build.rs'
@@ -34,6 +34,7 @@ env:
 
 jobs:
   notices:
+    if: ${{ !startsWith(github.ref, 'refs/tags/android-v') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -228,6 +229,55 @@ jobs:
           path: throcc.flatpak
           retention-days: 7
 
+  android:
+    if: ${{ !startsWith(github.ref, 'refs/tags/client-v') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: host libraries for uniffi-bindgen
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev
+      - run: rustup toolchain install && rustup target add aarch64-linux-android x86_64-linux-android
+      - run: |
+          cargo install cargo-ndk --version 4.1.2 --locked
+          cargo install cargo-about --locked --version 0.9.3 --features cli
+      - name: NDK and JDK
+        run: |
+          ndk=$(sed -n 's/^ *ndkVersion = "\(.*\)"$/\1/p' mobile/android/app/build.gradle.kts)
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$ndk" >/dev/null
+          echo "JAVA_HOME=$JAVA_HOME_21_X64" >>"$GITHUB_ENV"
+      - name: notices
+        shell: bash
+        run: |
+          ./scripts/ci-run.sh packaging/licenses/notices.sh android
+          mkdir -p mobile/android/app/src/main/assets
+          cp packaging/licenses/android-notices.txt mobile/android/app/src/main/assets/THIRD-PARTY-NOTICES.txt
+      - name: signing key
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        env:
+          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+        run: |
+          [ -n "$ANDROID_KEYSTORE" ] || { echo "::error::no ANDROID_KEYSTORE secret"; exit 1; }
+          base64 --decode <<<"$ANDROID_KEYSTORE" >"$RUNNER_TEMP/release.keystore"
+          echo "ANDROID_KEYSTORE_FILE=$RUNNER_TEMP/release.keystore" >>"$GITHUB_ENV"
+      - run: ./scripts/ci-run.sh mobile/android/gradlew -p mobile/android assembleRelease
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      - if: always()
+        run: rm -f "$RUNNER_TEMP/release.keystore"
+      - run: |
+          mkdir -p target/android
+          cp mobile/android/app/build/outputs/apk/release/app-release*.apk target/android/throcc.apk
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: throcc-android
+          path: target/android/throcc.apk
+          retention-days: 7
+
   release:
     if: startsWith(github.ref, 'refs/tags/client-v')
     needs: [macos-app, windows-app, flatpak]
@@ -251,3 +301,25 @@ jobs:
           sha256sum "${files[@]}" >SHA256SUMS
           gh release create "$TAG" --draft --verify-tag --generate-notes \
             --title "throcc ${TAG#client-v}" "${files[@]}" SHA256SUMS
+
+  android-release:
+    if: startsWith(github.ref, 'refs/tags/android-v')
+    needs: android
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: throcc-android
+          path: out
+      - name: Draft the release
+        working-directory: out
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          sha256sum throcc.apk >SHA256SUMS
+          gh release create "$TAG" --draft --verify-tag --generate-notes --latest=false \
+            --title "throcc for Android ${TAG#android-v}" throcc.apk SHA256SUMS

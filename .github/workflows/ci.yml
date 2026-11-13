@@ -116,6 +116,41 @@ jobs:
       - run: ./scripts/ci-run.sh cargo test -p throcc-client-core --features ffmpeg --lib -- media::video media::share
         shell: bash
 
+  mobile:
+    name: mobile (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ios
+            os: macos-26
+            targets: aarch64-apple-ios aarch64-apple-ios-sim
+            cargo: cargo
+            target_flags: --target aarch64-apple-ios --target aarch64-apple-ios-sim
+          - platform: android
+            os: ubuntu-latest
+            targets: aarch64-linux-android x86_64-linux-android
+            cargo: cargo ndk -t arm64-v8a -t x86_64 -P 31
+    runs-on: ${{ matrix.os }}
+    env:
+      IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install && rustup target add ${{ matrix.targets }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+      - if: matrix.platform == 'android'
+        run: |
+          cargo install cargo-ndk --version 4.1.2 --locked
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >>"$GITHUB_ENV"
+      - run: ./scripts/ci-run.sh ${{ matrix.cargo }} clippy --locked -p throcc-mobile ${{ matrix.target_flags }} -- -D warnings
+        shell: bash
+      - run: ./scripts/ci-run.sh ${{ matrix.cargo }} build --locked -p throcc-mobile ${{ matrix.target_flags }}
+        shell: bash
+
   surface:
     runs-on: ubuntu-latest
     steps:
