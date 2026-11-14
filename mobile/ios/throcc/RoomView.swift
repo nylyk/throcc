@@ -17,7 +17,11 @@ struct RoomView: View {
                     VStack(spacing: 16) {
                         ForEach(watched, id: \.user) { person in
                             if let share = person.sharing {
-                                ShareTile(person: person, share: share, maxHeight: window.size.height * 0.6)
+                                ShareTile(
+                                    person: person,
+                                    share: share,
+                                    space: CGSize(width: window.size.width - 32, height: window.size.height * 0.6)
+                                )
                             }
                         }
                         CenteredGrid(minimumWidth: 150, spacing: 12) {

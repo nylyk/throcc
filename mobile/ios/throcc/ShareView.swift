@@ -64,12 +64,15 @@ struct ShareSurface: UIViewRepresentable {
 struct ShareTile: View {
     let person: Person
     let share: Share
-    let maxHeight: CGFloat
+    /// The room the tile may take, which it fills as far as the share's shape allows.
+    let space: CGSize
     @Environment(AppModel.self) private var model
     @State private var surface = SurfaceHandle()
     @State private var controls = true
 
     var body: some View {
+        let aspect = CGFloat(max(share.aspect, 0.5))
+        let width = min(space.width, space.height * aspect)
         ZStack {
             Color.black
             // Kept under fullscreen, so the share goes back to it unchanged.
@@ -78,9 +81,8 @@ struct ShareTile: View {
             ShareOverlay(person: person, share: share, fullscreen: false, surface: surface, controls: $controls)
         }
         .togglesControls($controls)
-        .aspectRatio(CGFloat(max(share.aspect, 0.5)), contentMode: .fit)
+        .frame(width: width, height: width / aspect)
         .clipShape(.rect(cornerRadius: 16))
-        .frame(maxWidth: .infinity, maxHeight: maxHeight)
     }
 }
 
