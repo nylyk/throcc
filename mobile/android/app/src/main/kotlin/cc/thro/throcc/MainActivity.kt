@@ -31,6 +31,12 @@ class MainActivity : ComponentActivity() {
         model.core.command(Command.Reconnect)
         (application as ThroccApp).startVoice()
     }
+
+    /** Closing the app, from the recent apps or the Picture in Picture window, ends the connection. */
+    override fun onDestroy() {
+        super.onDestroy()
+        if (isFinishing) model.disconnect()
+    }
 }
 
 /** Keeps a phone's window upright; a tablet's turns freely. */
