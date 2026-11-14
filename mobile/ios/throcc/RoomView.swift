@@ -115,8 +115,6 @@ private struct PersonCard: View {
 }
 
 struct MicButton: View {
-    /// The colour the button takes while on: the theme's text, or white over a share.
-    var onColor: Color?
     @Environment(AppModel.self) private var model
 
     var body: some View {
@@ -128,14 +126,12 @@ struct MicButton: View {
                 model.core.command(command: .setMic(on: !model.state.mic))
             }
         }
-        .tint(on ? onColor ?? model.theme.text : model.theme.bad)
+        .tint(on ? model.theme.text : model.theme.bad)
         .accessibilityValue(on ? "On" : "Off")
     }
 }
 
 struct SoundButton: View {
-    /// The colour the button takes while on: the theme's text, or white over a share.
-    var onColor: Color?
     @Environment(AppModel.self) private var model
 
     var body: some View {
@@ -143,7 +139,7 @@ struct SoundButton: View {
         Button("Sound", systemImage: deafened ? "speaker.slash.fill" : "speaker.wave.2.fill") {
             model.core.command(command: .setDeafened(on: !deafened))
         }
-        .tint(deafened ? model.theme.bad : onColor ?? model.theme.text)
+        .tint(deafened ? model.theme.bad : model.theme.text)
         .accessibilityValue(deafened ? "Off" : "On")
     }
 }

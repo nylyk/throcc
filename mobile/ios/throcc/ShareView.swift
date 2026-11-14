@@ -154,9 +154,9 @@ private struct ShareOverlay: View {
                     }
                     if fullscreen {
                         HStack(spacing: 12) {
-                            HStack(spacing: 16) {
-                                MicButton(onColor: .white)
-                                SoundButton(onColor: .white)
+                            HStack(spacing: 0) {
+                                MicButton()
+                                SoundButton()
                                 LeaveButton()
                             }
                             .buttonPill()
@@ -191,10 +191,26 @@ extension View {
     /// Icon buttons in the translucent pill laid over a share.
     func buttonPill() -> some View {
         labelStyle(.iconOnly)
-            .buttonStyle(.borderless)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(.black.opacity(0.6), in: .capsule)
+            .buttonStyle(OverlayButtonStyle())
+            .padding(.horizontal, 4)
+            .overlayBackground(in: .capsule)
+    }
+
+    /// The theme's panel colour, a little see-through, behind a label or pill over a share.
+    func overlayBackground(in shape: some Shape) -> some View {
+        background(.panel.opacity(0.8), in: shape)
+    }
+}
+
+/// An icon button of the size Android gives its own, in its tint.
+private struct OverlayButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 20))
+            .foregroundStyle(.tint)
+            .frame(width: 48, height: 48)
+            .contentShape(.rect)
+            .opacity(configuration.isPressed ? 0.5 : 1)
     }
 }
 
@@ -207,7 +223,7 @@ private struct ShareButtons: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 0) {
             Button("Stop Watching", systemImage: "eye.slash") {
                 model.core.command(command: .unwatch(user: person.user))
             }
@@ -229,7 +245,7 @@ private struct ShareButtons: View {
                 }
             }
         }
-        .tint(.white)
+        .tint(model.theme.text)
         .buttonPill()
     }
 }
@@ -255,14 +271,14 @@ private struct Sharer: View {
     var body: some View {
         HStack(spacing: 8) {
             PersonPicture(person: person, size: 24)
-            Text(person.name).lineLimit(1).foregroundStyle(.white)
-            Text(details).lineLimit(1).foregroundStyle(.white.opacity(0.7))
+            Text(person.name).lineLimit(1).foregroundStyle(.text)
+            Text(details).lineLimit(1).foregroundStyle(.muted)
         }
         .font(.footnote.weight(.medium))
         .padding(.leading, 4)
         .padding(.trailing, 10)
         .padding(.vertical, 4)
-        .background(.black.opacity(0.6), in: .capsule)
+        .overlayBackground(in: .capsule)
     }
 }
 
@@ -285,7 +301,7 @@ private struct RoomStrip: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(.black.opacity(0.6), in: .rect(cornerRadius: 20))
+        .overlayBackground(in: .rect(cornerRadius: 20))
         // As wide as its pictures, up to the whole width.
         .frame(maxWidth: CGFloat(people.count) * 36 + 16)
     }
@@ -327,7 +343,7 @@ private struct WarningPill: View {
 
     var body: some View {
         Label {
-            Text(warning.label).foregroundStyle(.white)
+            Text(warning.label).foregroundStyle(.text)
         } icon: {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.warning)
         }
@@ -335,7 +351,7 @@ private struct WarningPill: View {
         .font(.footnote.weight(.medium))
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(.black.opacity(0.6), in: .capsule)
+        .overlayBackground(in: .capsule)
         .accessibilityElement(children: .combine)
         .accessibilityHint(warning.hint)
         .help(warning.hint)
