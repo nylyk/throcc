@@ -169,6 +169,7 @@ struct ThemedList<Content: View>: View {
                 .listRowBackground(isSidePane ? theme.raised : theme.panel)
                 .listRowSeparatorTint(theme.line)
         }
+        .listStyle(.insetGrouped)
         // A reused row can keep the default separator after a theme change; a new list colours every row anew.
         .id(theme.line)
         .scrollContentBackground(.hidden)
