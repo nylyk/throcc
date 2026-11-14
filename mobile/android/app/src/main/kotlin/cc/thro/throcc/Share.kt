@@ -33,6 +33,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.PictureInPictureAlt
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Card
@@ -198,6 +199,22 @@ private fun Sharer(model: AppModel, person: Person, details: String, modifier: M
     }
 }
 
+/** How many people watch the share. */
+@Composable
+private fun Audience(count: UInt) {
+    Row(
+        Modifier
+            .background(MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.8f), CircleShape)
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .semantics(mergeDescendants = true) {},
+        Arrangement.spacedBy(6.dp),
+        Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Default.Visibility, "Watching", Modifier.size(18.dp))
+        Text(count.toString(), style = MaterialTheme.typography.labelLarge)
+    }
+}
+
 /** Shows `user`'s share fullscreen in a small window over other apps. */
 private fun enterPictureInPicture(activity: Activity, model: AppModel, user: ULong, share: Share) {
     // Android takes no window wider than 2.39:1 or narrower than its inverse.
@@ -268,11 +285,11 @@ fun ShareFullscreen(model: AppModel, state: CoreState) {
 }
 
 /** How long the overlay's controls stay after they show. */
-private const val CONTROLS_LINGER_MS = 3_000L
+private const val CONTROLS_LINGER_MS = 5_000L
 
 /**
  * The labels and controls over a watched share, the same in the tile as fullscreen: who shares
- * what top left, a warning top right and the share's buttons along the bottom, with the room and the
+ * what top left with a warning under it, how many watch top right and the share's buttons along the bottom, with the room and the
  * call's controls added fullscreen. A tap shows or hides the controls, which also hide after a
  * moment; a warning stays.
  */
@@ -290,15 +307,14 @@ private fun ShareOverlay(model: AppModel, state: CoreState, person: Person, shar
         Row(
             Modifier.fillMaxWidth().align(Alignment.TopStart).then(insets).padding(12.dp),
             Arrangement.spacedBy(8.dp),
-            Alignment.CenterVertically,
         ) {
-            // Holds the room left of a warning, shown or not, so the warning stays at the end.
-            Box(Modifier.weight(1f)) {
+            Column(Modifier.weight(1f), Arrangement.spacedBy(8.dp)) {
                 androidx.compose.animation.AnimatedVisibility(controls, enter = fadeIn(), exit = fadeOut()) {
                     Sharer(model, person, share.label)
                 }
+                shareWarning(state, person.user)?.let { WarningPill(it) }
             }
-            shareWarning(state, person.user)?.let { WarningPill(it) }
+            AnimatedVisibility(controls, enter = fadeIn(), exit = fadeOut()) { Audience(person.audience) }
         }
         AnimatedVisibility(controls, Modifier.align(Alignment.BottomCenter), enter = fadeIn(), exit = fadeOut()) {
             Column(

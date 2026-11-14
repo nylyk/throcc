@@ -120,10 +120,10 @@ struct ShareFullscreen: View {
 }
 
 /// How long the overlay's controls stay after they show.
-private let controlsLinger: Duration = .seconds(3)
+private let controlsLinger: Duration = .seconds(5)
 
 /// The labels and controls over a watched share, the same in the tile as fullscreen: who shares
-/// what top left, a warning top right and the share's buttons along the bottom, with the room and the
+/// what top left with a warning under it, how many watch top right and the share's buttons along the bottom, with the room and the
 /// call's buttons added fullscreen. `controls` shows all but a warning, which always shows.
 private struct ShareOverlay: View {
     let person: Person
@@ -137,13 +137,18 @@ private struct ShareOverlay: View {
     var body: some View {
         let state = model.state
         VStack {
-            HStack(spacing: 8) {
-                if controls {
-                    Sharer(person: person, details: share.label).transition(.opacity)
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 8) {
+                    if controls {
+                        Sharer(person: person, details: share.label).transition(.opacity)
+                    }
+                    if let warning = ShareWarning(health: state.health, user: person.user) {
+                        WarningPill(warning: warning)
+                    }
                 }
                 Spacer()
-                if let warning = ShareWarning(health: state.health, user: person.user) {
-                    WarningPill(warning: warning)
+                if controls {
+                    Audience(count: person.audience).transition(.opacity)
                 }
             }
             Spacer()
@@ -264,6 +269,25 @@ private struct Loading: View {
 }
 
 /// Whose share this is, over the picture.
+/// How many people watch the share.
+private struct Audience: View {
+    let count: UInt32
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "eye")
+            Text("\(count)")
+        }
+        .font(.footnote.weight(.medium))
+        .foregroundStyle(.text)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .overlayBackground(in: .capsule)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(count) watching")
+    }
+}
+
 private struct Sharer: View {
     let person: Person
     let details: String
