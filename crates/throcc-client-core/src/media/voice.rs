@@ -142,9 +142,17 @@ impl AudioEngine {
 
     /// Plays through the phone's speaker and captures from its mic `with_mic`, once what
     /// was open before is closed. On an error the engine runs without devices.
-    #[cfg(any(target_os = "ios", target_os = "android"))]
+    #[cfg(target_os = "ios")]
     pub fn open_devices(&self, with_mic: bool) -> anyhow::Result<()> {
         self.open(move || devices::open(with_mic))
+    }
+
+    /// Plays through the phone's speaker and captures from its mic `with_mic`, as a call
+    /// or as media, once what was open before is closed. On an error the engine runs
+    /// without devices.
+    #[cfg(target_os = "android")]
+    pub fn open_devices(&self, with_mic: bool, as_call: bool) -> anyhow::Result<()> {
+        self.open(move || devices::open(with_mic, as_call))
     }
 
     /// Closes the open devices, which frees the mic and the speaker for other apps, and
@@ -529,7 +537,11 @@ impl Worker {
             }
             Command::OpenDevices { open, opened } => {
                 self.close_devices();
-                let result = open().map(|devices| self.io = Some(DeviceIo::new(devices)));
+                let result = open().map(|devices| {
+                    self.chain
+                        .set_platform_cancels_echo(devices.platform_cancels_echo, &self.settings);
+                    self.io = Some(DeviceIo::new(devices));
+                });
                 opened.send(result).ok();
             }
             #[cfg(any(target_os = "ios", target_os = "android"))]

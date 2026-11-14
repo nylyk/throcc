@@ -200,6 +200,7 @@ pub fn open(input: Option<&str>, output: Option<&str>) -> Result<Devices, Device
         capture,
         playback,
         counters,
+        platform_cancels_echo: false,
     })
 }
 

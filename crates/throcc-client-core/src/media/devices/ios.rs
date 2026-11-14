@@ -161,6 +161,7 @@ pub fn open(with_mic: bool) -> Result<Devices, DeviceError> {
         capture,
         playback,
         counters,
+        platform_cancels_echo: true,
     })
 }
 

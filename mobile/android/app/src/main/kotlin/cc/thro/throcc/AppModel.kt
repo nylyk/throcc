@@ -196,9 +196,11 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
     private val asked = mutableSetOf<String>()
     private var afterAnswer: (() -> Unit)? = null
 
-    /** What the room's sound is to become: open with or without the mic, or closed with null. A newer wish
-     *  takes the place of one that still waits. */
-    private val sound = Channel<Boolean?>(Channel.CONFLATED)
+    /** What the room's sound is to become: open with or without the mic, as a call or as media, or closed with
+     *  null. A newer wish takes the place of one that still waits. */
+    private val sound = Channel<Sound?>(Channel.CONFLATED)
+
+    private data class Sound(val withMic: Boolean, val asCall: Boolean)
 
     private val pictures = mutableStateMapOf<String, Picture>()
     private var serverPictures by mutableStateOf(emptyMap<String, Picture>())
@@ -226,9 +228,9 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
         core.setListener(listener)
         scope.launch { loadServers() }
         scope.launch(Dispatchers.IO) {
-            for (withMic in sound) {
+            for (wish in sound) {
                 try {
-                    if (withMic == null) core.closeAudio() else core.openAudio(withMic)
+                    if (wish == null) core.closeAudio() else core.openAudio(wish.withMic, wish.asCall)
                 } catch (failure: CoreException) {
                     notices.trySend("The room has no sound: ${failure.explained}")
                 }
@@ -323,9 +325,10 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
         afterAnswer = null
     }
 
-    /** The room's sound opens anew, with the mic `withMic`, once the open or close under way has finished. */
-    fun openAudio(withMic: Boolean) {
-        sound.trySend(withMic)
+    /** The room's sound opens anew, with the mic `withMic` and as a call `asCall`, once the open or close under
+     *  way has finished. */
+    fun openAudio(withMic: Boolean, asCall: Boolean) {
+        sound.trySend(Sound(withMic, asCall))
     }
 
     fun closeAudio() {
