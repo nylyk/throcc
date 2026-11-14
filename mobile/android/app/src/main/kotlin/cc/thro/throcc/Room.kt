@@ -2,20 +2,22 @@ package cc.thro.throcc
 
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.GridItemSpan
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ScreenShare
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
@@ -36,9 +38,11 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
@@ -75,27 +79,47 @@ fun RoomPane(model: AppModel, state: CoreState, onBack: (() -> Unit)?) {
         floatingButton = { RoomControls(model, state) },
         buttonPosition = FabPosition.Center,
     ) { padding ->
-        LazyVerticalGrid(
-            GridCells.Adaptive(152.dp),
-            Modifier.padding(padding.exceptBottom()).padding(horizontal = 16.dp),
-            contentPadding = PaddingValues(bottom = padding.calculateBottomPadding() + 96.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            if (onBack != null) item(span = { GridItemSpan(maxLineSpan) }) { ConnectionBanner(model, state) }
-            for (person in people) {
-                val share = person.sharing.takeUnless { person.blocked || person.user !in watching } ?: continue
-                item("share-${person.user}", span = { GridItemSpan(maxLineSpan) }) {
-                    ShareTile(model, state, person, share)
+        BoxWithConstraints(Modifier.padding(padding.exceptBottom()).fillMaxSize()) {
+            val spacing = 12.dp
+            val width = maxWidth - 32.dp
+            val columns = ((width + spacing) / (CARD_MIN_WIDTH + spacing)).toInt().coerceAtLeast(1)
+            // Whole pixels, so that a full row's cards and gaps never add up past the row and wrap.
+            val cardWidth = with(LocalDensity.current) { ((width - spacing * (columns - 1)) / columns).toPx().toInt().toDp() }
+            Column(
+                Modifier
+                    .verticalScroll(rememberScrollState())
+                    .heightIn(min = maxHeight)
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = padding.calculateBottomPadding() + 96.dp),
+                Arrangement.spacedBy(spacing),
+            ) {
+                if (onBack != null) ConnectionBanner(model, state)
+                Spacer(Modifier.weight(1f))
+                for (person in people) {
+                    val share = person.sharing.takeUnless { person.blocked || person.user !in watching } ?: continue
+                    key("share-${person.user}") { ShareTile(model, state, person, share) }
                 }
+                FlowRow(
+                    Modifier.fillMaxWidth(),
+                    Arrangement.spacedBy(spacing, Alignment.CenterHorizontally),
+                    Arrangement.spacedBy(spacing),
+                ) {
+                    for (person in people) {
+                        key(person.user) {
+                            PersonCard(model, person, person.user in watching, Modifier.width(cardWidth))
+                        }
+                    }
+                }
+                Spacer(Modifier.weight(1f))
             }
-            items(people, { it.user.toLong() }) { PersonCard(model, it, it.user in watching) }
         }
     }
 }
 
+private val CARD_MIN_WIDTH = 152.dp
+
 @Composable
-private fun PersonCard(model: AppModel, person: Person, watched: Boolean) {
+private fun PersonCard(model: AppModel, person: Person, watched: Boolean, modifier: Modifier) {
     val scheme = MaterialTheme.colorScheme
     val colors = if (person.blocked) {
         CardDefaults.cardColors(scheme.surfaceContainerLow, scheme.onSurfaceVariant)
@@ -103,7 +127,7 @@ private fun PersonCard(model: AppModel, person: Person, watched: Boolean) {
         panelColors()
     }
     val ring = if (person.speaking) scheme.tertiary else Color.Transparent
-    Card({ model.sheetPerson = person.user }, shape = MaterialTheme.shapes.extraLarge, colors = colors) {
+    Card({ model.sheetPerson = person.user }, modifier, shape = MaterialTheme.shapes.extraLarge, colors = colors) {
         Column(
             Modifier.fillMaxWidth().padding(16.dp),
             Arrangement.spacedBy(8.dp),

@@ -312,7 +312,7 @@ private struct RoomStrip: View {
 
     var body: some View {
         // Wraps, so a full room of 30 stays on screen.
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 32, maximum: 32), spacing: 4)], spacing: 4) {
+        CenteredGrid(minimumWidth: 32, maximumWidth: 32, spacing: 4) {
             ForEach(people, id: \.user) { person in
                 PersonPicture(person: person, size: 28)
                     .padding(2)

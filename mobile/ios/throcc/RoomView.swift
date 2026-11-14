@@ -14,24 +14,26 @@ struct RoomView: View {
             let watched = people.filter { !$0.blocked && $0.sharing != nil && current.watching.contains($0.user) }
             GeometryReader { window in
                 ScrollView {
-                    ForEach(watched, id: \.user) { person in
-                        if let share = person.sharing {
-                            ShareTile(person: person, share: share, maxHeight: window.size.height * 0.6)
-                                .padding([.horizontal, .top], 16)
+                    VStack(spacing: 16) {
+                        ForEach(watched, id: \.user) { person in
+                            if let share = person.sharing {
+                                ShareTile(person: person, share: share, maxHeight: window.size.height * 0.6)
+                            }
                         }
-                    }
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
-                        ForEach(people, id: \.user) { person in
-                            PersonCard(person: person, watched: current.watching.contains(person.user))
-                                .contentShape(.rect(cornerRadius: 16))
-                                .onTapGesture { model.sheet = .person(person.user) }
-                                .accessibilityElement(children: .contain)
-                                .accessibilityAddTraits(.isButton)
-                                .accessibilityAction { model.sheet = .person(person.user) }
-                                .accessibilityValue(person.speaking ? "Speaking" : "")
+                        CenteredGrid(minimumWidth: 150, spacing: 12) {
+                            ForEach(people, id: \.user) { person in
+                                PersonCard(person: person, watched: current.watching.contains(person.user))
+                                    .contentShape(.rect(cornerRadius: 16))
+                                    .onTapGesture { model.sheet = .person(person.user) }
+                                    .accessibilityElement(children: .contain)
+                                    .accessibilityAddTraits(.isButton)
+                                    .accessibilityAction { model.sheet = .person(person.user) }
+                                    .accessibilityValue(person.speaking ? "Speaking" : "")
+                            }
                         }
                     }
                     .padding(16)
+                    .frame(maxWidth: .infinity, minHeight: window.size.height)
                 }
             }
             .background(.bg)
