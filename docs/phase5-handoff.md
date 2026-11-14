@@ -29,15 +29,16 @@ On an M4 Mac, a Pixel 8 (GrapheneOS), a Galaxy Tab S6 Lite (LineageOS, no AV1 ha
 
 ## What is left
 
-1. **The rest on a real iPhone**, through TestFlight: picture in picture (the simulator has none, so the button hides there), backgrounding, and whether the volume reaches silence. iOS still plays the room as a call (`.voiceChat`), which may keep a floor; Android moved to media for that reason.
-2. **Backgrounding on Android**: home screen mid-share for a while, then back.
-3. **Picture preparation**: a large photo as a profile picture, on a phone.
-4. **The macOS desktop by hand**: watch a Windows share, pop out, fullscreen; `sending_1440p60_takes_under_one_core` (ignored test in `throcc-client-core`) with moving content; HEVC low latency at a height that isn't a multiple of 16.
-5. **A signed build**: `gh workflow run packaging.yml --ref feature/mobile-5`, then the dmg on a clean Mac without Homebrew ffmpeg, and the signed APK.
-6. **VP9 on the tablet**, on its `OMX.Exynos.vp9.dec`: share with `THROCC_CODEC=vp9`.
-7. **Windows still screens**: `repeat_timestamp` for the Windows capture.
-8. **README screenshots**, once the phone UI is final.
-9. **Before merging**: keep or drop `ci.yml` on pushes to `feature/**`; delete this file.
+1. **The iPhone's volume doesn't reach silence**, confirmed on the iPhone 15 Pro: iOS plays the room as a call (`.playAndRecord` with `.voiceChat`, and the voice-processing unit in `devices/ios.rs`), whose volume keeps a floor. The likely fix mirrors Android: plain remote I/O with `platform_cancels_echo: false`, so the core's echo canceller runs, the session's mode `.default`, and `.allowBluetoothA2DP` in place of `.allowBluetoothHFP`, so headphones stay in full quality and the phone's mic is used. Check on the iPhone that the volume reaches silence, there is no echo on the speaker, and Bluetooth plays over A2DP.
+2. **The rest on a real iPhone**, through TestFlight: picture in picture (the simulator has none, so the button hides there) and backgrounding.
+3. **Backgrounding on Android**: home screen mid-share for a while, then back.
+4. **Picture preparation**: a large photo as a profile picture, on a phone.
+5. **The macOS desktop by hand**: watch a Windows share, pop out, fullscreen; `sending_1440p60_takes_under_one_core` (ignored test in `throcc-client-core`) with moving content; HEVC low latency at a height that isn't a multiple of 16.
+6. **A signed build**: `gh workflow run packaging.yml --ref feature/mobile-5`, then the dmg on a clean Mac without Homebrew ffmpeg, and the signed APK.
+7. **VP9 on the tablet**, on its `OMX.Exynos.vp9.dec`: share with `THROCC_CODEC=vp9`.
+8. **Windows still screens**: `repeat_timestamp` for the Windows capture.
+9. **README screenshots**, once the phone UI is final.
+10. **Before merging**: keep or drop `ci.yml` on pushes to `feature/**`; delete this file.
 
 Smaller:
 - `crates/throcc-cli/tests/share.rs` calls `share::receive` with too few arguments; it builds only with `--features ffmpeg`, so CI misses it.
