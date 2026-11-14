@@ -146,14 +146,14 @@ final class CallAudio {
                 try session.setCategory(.playback)
             }
             try session.setActive(true)
-            try core.openAudio(withMic: withMic, asCall: true)
+            try core.openAudio(withMic: withMic)
         }
     }
 
     private func reopen() async {
         failed = await !run { [core, withMic] in
             core.closeAudio()
-            try core.openAudio(withMic: withMic, asCall: true)
+            try core.openAudio(withMic: withMic)
         }
     }
 

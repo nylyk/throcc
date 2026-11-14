@@ -549,22 +549,16 @@ impl Core {
         self.end_connection();
     }
 
-    /// Opens the speaker, and the mic `with_mic`, for the room we are in. Android plays as a
-    /// call `as_call`, else as media; iOS always as a call. The app sets up the platform's
-    /// audio session first. It blocks until the devices run.
-    pub fn open_audio(&self, with_mic: bool, as_call: bool) -> Result<(), CoreError> {
+    /// Opens the speaker, and the mic `with_mic`, for the room we are in. The app sets up
+    /// the platform's audio session first. It blocks until the devices run.
+    pub fn open_audio(&self, with_mic: bool) -> Result<(), CoreError> {
         let Some(audio) = self.audio() else {
             return Ok(());
         };
-        #[cfg(target_os = "android")]
-        audio.open_devices(with_mic, as_call)?;
-        #[cfg(target_os = "ios")]
-        {
-            let _ = as_call;
-            audio.open_devices(with_mic)?;
-        }
+        #[cfg(any(target_os = "ios", target_os = "android"))]
+        audio.open_devices(with_mic)?;
         #[cfg(not(any(target_os = "ios", target_os = "android")))]
-        let _ = (audio, with_mic, as_call);
+        let _ = (audio, with_mic);
         Ok(())
     }
 

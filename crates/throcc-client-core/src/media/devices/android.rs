@@ -31,25 +31,16 @@ impl Drop for Streams {
     }
 }
 
-/// Opens the phone's speaker, and its mic `with_mic`: `as_call` as voice-communication streams,
-/// which the platform cancels echo between, else as media, whose volume goes down to silence.
-/// The app sets the audio mode and device first.
-pub fn open(with_mic: bool, as_call: bool) -> Result<Devices, DeviceError> {
+/// Opens the phone's speaker, and its mic `with_mic`, as media, whose volume goes down to
+/// silence.
+pub fn open(with_mic: bool) -> Result<Devices, DeviceError> {
     let counters = Arc::new(DeviceCounters::default());
-    let (usage, input_preset) = if as_call {
-        (
-            AudioUsage::VoiceCommunication,
-            AudioInputPreset::VoiceCommunication,
-        )
-    } else {
-        (AudioUsage::Media, AudioInputPreset::VoiceRecognition)
-    };
 
     let (playback, ring) =
         rtrb::RingBuffer::new((SAMPLE_RATE * PLAYBACK_RING_MS / 1000) as usize * 2);
     let speaker = builder(&counters)?
         .direction(AudioDirection::Output)
-        .usage(usage)
+        .usage(AudioUsage::Media)
         .content_type(AudioContentType::Speech)
         .channel_count(2)
         .data_callback(plays(ring, counters.clone()));
@@ -59,7 +50,7 @@ pub fn open(with_mic: bool, as_call: bool) -> Result<Devices, DeviceError> {
     let (mic, input_rate) = if with_mic {
         let mic = builder(&counters)?
             .direction(AudioDirection::Input)
-            .input_preset(input_preset)
+            .input_preset(AudioInputPreset::VoiceRecognition)
             .channel_count(1)
             .data_callback(hears(ring, counters.clone()));
         let (mic, rate) = start(mic)?;
@@ -75,7 +66,7 @@ pub fn open(with_mic: bool, as_call: bool) -> Result<Devices, DeviceError> {
         capture,
         playback,
         counters,
-        platform_cancels_echo: as_call,
+        platform_cancels_echo: false,
     })
 }
 
