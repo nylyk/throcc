@@ -68,19 +68,51 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 enum Turning {
     private static let phone = UIDevice.current.userInterfaceIdiom == .phone
     static private(set) var allowed: UIInterfaceOrientationMask = phone ? .portrait : .all
+    /// Follows the phone's turns while the window may turn.
+    private static var following: NSObjectProtocol?
 
     /// Lets a phone's window turn with the phone, or turns it back upright.
     static func allow(_ turning: Bool) {
         guard phone else { return }
         allowed = turning ? .allButUpsideDown : .portrait
+        if let following {
+            NotificationCenter.default.removeObserver(following)
+        }
+        following = nil
+        if turning {
+            UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+            following = NotificationCenter.default.addObserver(
+                forName: UIDevice.orientationDidChangeNotification,
+                object: nil,
+                queue: .main
+            ) { _ in
+                MainActor.assumeIsolated { turn(to: deviceMask()) }
+            }
+        }
+        turn(to: turning ? deviceMask() : .portrait)
+    }
+
+    /// The window orientation that matches how the phone is held, or `nil` when flat or upside down.
+    private static func deviceMask() -> UIInterfaceOrientationMask? {
+        // A device turned left shows its interface turned right.
+        switch UIDevice.current.orientation {
+        case .portrait: .portrait
+        case .landscapeLeft: .landscapeRight
+        case .landscapeRight: .landscapeLeft
+        default: nil
+        }
+    }
+
+    /// Updates what each window may show and turns it to `mask`, if given.
+    private static func turn(to mask: UIInterfaceOrientationMask?) {
         for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
             var controller = scene.keyWindow?.rootViewController
             while let shown = controller {
                 shown.setNeedsUpdateOfSupportedInterfaceOrientations()
                 controller = shown.presentedViewController
             }
-            if !turning {
-                scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait))
+            if let mask {
+                scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask))
             }
         }
     }

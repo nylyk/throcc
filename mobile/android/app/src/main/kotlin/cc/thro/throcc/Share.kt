@@ -272,7 +272,7 @@ private const val CONTROLS_LINGER_MS = 3_000L
 
 /**
  * The labels and controls over a watched share, the same in the tile as fullscreen: who shares
- * what top left, a warning top right and the share's buttons bottom right, with the room and the
+ * what top left, a warning top right and the share's buttons along the bottom, with the room and the
  * call's controls added fullscreen. A tap shows or hides the controls, which also hide after a
  * moment; a warning stays.
  */
@@ -313,7 +313,7 @@ private fun ShareOverlay(model: AppModel, state: CoreState, person: Person, shar
                         ShareButtons(model, person, share, fullscreen = true, Modifier)
                     }
                 } else {
-                    ShareButtons(model, person, share, fullscreen = false, Modifier.align(Alignment.End))
+                    ShareButtons(model, person, share, fullscreen = false, Modifier)
                 }
             }
         }

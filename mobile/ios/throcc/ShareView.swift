@@ -123,7 +123,7 @@ struct ShareFullscreen: View {
 private let controlsLinger: Duration = .seconds(3)
 
 /// The labels and controls over a watched share, the same in the tile as fullscreen: who shares
-/// what top left, a warning top right and the share's buttons bottom right, with the room and the
+/// what top left, a warning top right and the share's buttons along the bottom, with the room and the
 /// call's buttons added fullscreen. `controls` shows all but a warning, which always shows.
 private struct ShareOverlay: View {
     let person: Person
@@ -155,18 +155,15 @@ private struct ShareOverlay: View {
                     if fullscreen {
                         HStack(spacing: 12) {
                             HStack(spacing: 16) {
-                                MicButton()
-                                SoundButton()
+                                MicButton(onColor: .white)
+                                SoundButton(onColor: .white)
                                 LeaveButton()
                             }
                             .buttonPill()
                             ShareButtons(person: person, share: share, fullscreen: true, surface: surface)
                         }
                     } else {
-                        HStack {
-                            Spacer()
-                            ShareButtons(person: person, share: share, fullscreen: false, surface: surface)
-                        }
+                        ShareButtons(person: person, share: share, fullscreen: false, surface: surface)
                     }
                 }
                 .transition(.opacity)
@@ -288,7 +285,9 @@ private struct RoomStrip: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(.panel.opacity(0.8), in: .rect(cornerRadius: 20))
+        .background(.black.opacity(0.6), in: .rect(cornerRadius: 20))
+        // As wide as its pictures, up to the whole width.
+        .frame(maxWidth: CGFloat(people.count) * 36 + 16)
     }
 }
 
