@@ -13,6 +13,7 @@
     <application
         android:name=".ThroccApp"
         android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
         android:label="throcc"
         android:supportsRtl="true"
         android:theme="@style/Theme.Throcc">
