@@ -153,16 +153,13 @@ private struct ShareOverlay: View {
                         RoomStrip(people: state.people.filter { $0.room == state.current?.room })
                     }
                     if fullscreen {
-                        CentredBesideTrailing {
+                        HStack(spacing: 12) {
                             HStack(spacing: 16) {
                                 MicButton()
                                 SoundButton()
                                 LeaveButton()
                             }
-                            .labelStyle(.iconOnly)
-                            .buttonStyle(.bordered)
-                            .buttonBorderShape(.circle)
-                            .controlSize(.large)
+                            .buttonPill()
                             ShareButtons(person: person, share: share, fullscreen: true, surface: surface)
                         }
                     } else {
@@ -193,28 +190,14 @@ extension View {
     }
 }
 
-/// Two subviews on one line: the first centred, the second at the trailing edge. Where the
-/// second would cover the first, the first centres in the room left of the second instead.
-private struct CentredBesideTrailing: Layout {
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
-        let width = proposal.width ?? sizes.reduce(0) { $0 + $1.width }
-        return CGSize(width: width, height: sizes.map(\.height).max() ?? 0)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        guard subviews.count == 2 else {
-            return
-        }
-        let centred = subviews[0].sizeThatFits(.unspecified)
-        let trailing = subviews[1].sizeThatFits(.unspecified)
-        let trailingX = bounds.maxX - trailing.width
-        let fitsCentred = bounds.midX + centred.width / 2 <= trailingX
-        let centredX = fitsCentred
-            ? bounds.midX - centred.width / 2
-            : bounds.minX + (trailingX - bounds.minX - centred.width) / 2
-        subviews[0].place(at: CGPoint(x: max(centredX, bounds.minX), y: bounds.midY), anchor: .leading, proposal: .unspecified)
-        subviews[1].place(at: CGPoint(x: trailingX, y: bounds.midY), anchor: .leading, proposal: .unspecified)
+extension View {
+    /// Icon buttons in the translucent pill laid over a share.
+    func buttonPill() -> some View {
+        labelStyle(.iconOnly)
+            .buttonStyle(.borderless)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(.black.opacity(0.6), in: .capsule)
     }
 }
 
@@ -249,12 +232,8 @@ private struct ShareButtons: View {
                 }
             }
         }
-        .labelStyle(.iconOnly)
-        .buttonStyle(.borderless)
         .tint(.white)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(.black.opacity(0.6), in: .capsule)
+        .buttonPill()
     }
 }
 

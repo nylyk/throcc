@@ -47,6 +47,12 @@ import androidx.compose.material3.TooltipAnchorPosition
 import androidx.compose.material3.TooltipBox
 import androidx.compose.material3.TooltipDefaults
 import androidx.compose.material3.rememberTooltipState
+import androidx.compose.material.icons.filled.CallEnd
+import androidx.compose.material.icons.filled.Headset
+import androidx.compose.material.icons.filled.HeadsetOff
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -57,7 +63,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalWindowInfo
@@ -303,8 +308,8 @@ private fun ShareOverlay(model: AppModel, state: CoreState, person: Person, shar
             ) {
                 if (fullscreen) {
                     RoomStrip(model, state.people.filter { it.room == state.current?.room })
-                    CentredBesideEnd(Modifier.fillMaxWidth()) {
-                        RoomControls(model, state, small = true)
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        CallButtons(model, state)
                         ShareButtons(model, person, share, fullscreen = true, Modifier)
                     }
                 } else {
@@ -315,23 +320,30 @@ private fun ShareOverlay(model: AppModel, state: CoreState, person: Person, shar
     }
 }
 
-/**
- * Two children on one line: the first centred, the second at the end. Where the second would
- * cover the first, the first centres in the room left of the second instead.
- */
+/** The mic, sound and leave controls in a pill like the share's buttons, for fullscreen. */
 @Composable
-private fun CentredBesideEnd(modifier: Modifier, content: @Composable () -> Unit) {
-    Layout(content, modifier) { measurables, constraints ->
-        val loose = constraints.copy(minWidth = 0, minHeight = 0)
-        val (centred, end) = measurables.map { it.measure(loose) }
-        val width = constraints.maxWidth
-        val height = maxOf(centred.height, end.height)
-        val endX = width - end.width
-        val fitsCentred = (width + centred.width) / 2 <= endX
-        val centredX = if (fitsCentred) (width - centred.width) / 2 else (endX - centred.width) / 2
-        layout(width, height) {
-            centred.place(centredX.coerceAtLeast(0), (height - centred.height) / 2)
-            end.place(endX, (height - end.height) / 2)
+private fun CallButtons(model: AppModel, state: CoreState) {
+    val scheme = MaterialTheme.colorScheme
+    val mic = state.mic && !model.micDenied
+    Row(Modifier.background(scheme.surfaceContainer.copy(alpha = 0.8f), CircleShape)) {
+        IconButton({
+            if (model.micDenied) {
+                model.notices.trySend("To talk, allow the microphone for throcc in the system settings.")
+            } else {
+                model.core.command(Command.SetMic(!state.mic))
+            }
+        }) {
+            Icon(if (mic) Icons.Default.Mic else Icons.Default.MicOff, "Mute", tint = if (mic) LocalContentColor.current else scheme.error)
+        }
+        IconButton({ model.core.command(Command.SetDeafened(!state.deafened)) }) {
+            Icon(
+                if (state.deafened) Icons.Default.HeadsetOff else Icons.Default.Headset,
+                "Deafen",
+                tint = if (state.deafened) scheme.error else LocalContentColor.current,
+            )
+        }
+        IconButton({ model.core.command(Command.Join(null)) }) {
+            Icon(Icons.Default.CallEnd, "Leave Room", tint = scheme.error)
         }
     }
 }
