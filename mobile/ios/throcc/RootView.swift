@@ -42,6 +42,7 @@ struct RootView: View {
             Text(alert.message)
         }
         .modifier(Themed())
+        .onGeometryChange(for: CGSize.self, of: \.size) { _ in Turning.screenChanged() }
         .task {
             if let sample {
                 await model.show(sample)

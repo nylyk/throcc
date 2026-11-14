@@ -26,6 +26,11 @@ class MainActivity : ComponentActivity() {
         if (!inPictureInPicture) model.fullscreenShare = model.fullscreenBeforePictureInPicture
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (model.fullscreenShare == null && !isInPictureInPictureMode) uprightOnPhones()
+    }
+
     override fun onStart() {
         super.onStart()
         model.core.command(Command.Reconnect)

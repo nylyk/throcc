@@ -33,12 +33,13 @@ On an M4 Mac, a Pixel 8 (GrapheneOS), a Galaxy Tab S6 Lite (LineageOS, no AV1 ha
 2. **The rest on a real iPhone**, through TestFlight: picture in picture (the simulator has none, so the button hides there) and backgrounding.
 3. **Backgrounding on Android**: home screen mid-share for a while, then back.
 4. **Picture preparation**: a large photo as a profile picture, on a phone.
-5. **The macOS desktop by hand**: watch a Windows share, pop out, fullscreen; `sending_1440p60_takes_under_one_core` (ignored test in `throcc-client-core`) with moving content; HEVC low latency at a height that isn't a multiple of 16.
-6. **A signed build**: `gh workflow run packaging.yml --ref feature/mobile-5`, then the dmg on a clean Mac without Homebrew ffmpeg, and the signed APK.
-7. **VP9 on the tablet**, on its `OMX.Exynos.vp9.dec`: share with `THROCC_CODEC=vp9`.
-8. **Windows still screens**: `repeat_timestamp` for the Windows capture.
-9. **README screenshots**, once the phone UI is final.
-10. **Before merging**: keep or drop `ci.yml` on pushes to `feature/**`; delete this file.
+5. **Foldables**: on a foldable, open and closed, the window stays upright on the small screen and turns freely on the large one, and fullscreen still turns on both. Both apps draw the line at a shorter side of 600 dp or points and check it again when the screen size changes (`onConfigurationChanged` in `MainActivity`, `Turning.screenChanged` from `RootView`); the Android emulator has a foldable profile, iOS has no simulator for one.
+6. **The macOS desktop by hand**: watch a Windows share, pop out, fullscreen; `sending_1440p60_takes_under_one_core` (ignored test in `throcc-client-core`) with moving content; HEVC low latency at a height that isn't a multiple of 16.
+7. **A signed build**: `gh workflow run packaging.yml --ref feature/mobile-5`, then the dmg on a clean Mac without Homebrew ffmpeg, and the signed APK.
+8. **VP9 on the tablet**, on its `OMX.Exynos.vp9.dec`: share with `THROCC_CODEC=vp9`.
+9. **Windows still screens**: `repeat_timestamp` for the Windows capture.
+10. **README screenshots**, once the phone UI is final.
+11. **Before merging**: keep or drop `ci.yml` on pushes to `feature/**`; delete this file.
 
 Smaller:
 - `crates/throcc-cli/tests/share.rs` calls `share::receive` with too few arguments; it builds only with `--features ffmpeg`, so CI misses it.

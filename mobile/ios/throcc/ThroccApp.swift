@@ -59,27 +59,44 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         supportedInterfaceOrientationsFor window: UIWindow?
     ) -> UIInterfaceOrientationMask {
-        Turning.allowed
+        Turning.allowed(in: window?.windowScene)
     }
 }
 
-/// Which ways the window may turn: a phone stays upright except while a share fills it.
+/// Which ways the window may turn: a phone-sized screen stays upright except while a share fills it.
 @MainActor
 enum Turning {
-    private static let phone = UIDevice.current.userInterfaceIdiom == .phone
-    static private(set) var allowed: UIInterfaceOrientationMask = phone ? .portrait : .all
+    private static var sharing = false
+    private static var phoneSized: Bool?
     /// Follows the phone's turns while the window may turn.
     private static var following: NSObjectProtocol?
 
-    /// Lets a phone's window turn with the phone, or turns it back upright.
+    static func allowed(in scene: UIWindowScene?) -> UIInterfaceOrientationMask {
+        guard isPhoneSized(scene) else { return .all }
+        return sharing ? .allButUpsideDown : .portrait
+    }
+
+    /// Lets a phone-sized window turn with the phone, or turns it back upright.
     static func allow(_ turning: Bool) {
-        guard phone else { return }
-        allowed = turning ? .allButUpsideDown : .portrait
+        sharing = turning
+        apply()
+    }
+
+    /// Applies the lock again when the screen folds or unfolds across the phone size.
+    static func screenChanged() {
+        let now = isPhoneSized(keyScene)
+        guard now != phoneSized else { return }
+        phoneSized = now
+        apply()
+    }
+
+    private static func apply() {
         if let following {
             NotificationCenter.default.removeObserver(following)
         }
         following = nil
-        if turning {
+        guard isPhoneSized(keyScene) else { return turn(to: nil) }
+        if sharing {
             UIDevice.current.beginGeneratingDeviceOrientationNotifications()
             following = NotificationCenter.default.addObserver(
                 forName: UIDevice.orientationDidChangeNotification,
@@ -89,7 +106,16 @@ enum Turning {
                 MainActor.assumeIsolated { turn(to: deviceMask()) }
             }
         }
-        turn(to: turning ? deviceMask() : .portrait)
+        turn(to: sharing ? deviceMask() : .portrait)
+    }
+
+    private static var keyScene: UIWindowScene? {
+        UIApplication.shared.connectedScenes.first { $0 is UIWindowScene } as? UIWindowScene
+    }
+
+    private static func isPhoneSized(_ scene: UIWindowScene?) -> Bool {
+        guard let bounds = scene?.screen.bounds else { return UIDevice.current.userInterfaceIdiom == .phone }
+        return min(bounds.width, bounds.height) < 600
     }
 
     /// The window orientation that matches how the phone is held, or `nil` when flat or upside down.
