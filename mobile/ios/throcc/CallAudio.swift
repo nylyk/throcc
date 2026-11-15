@@ -141,7 +141,7 @@ final class CallAudio {
         failed = await !run { [core, withMic] in
             let session = AVAudioSession.sharedInstance()
             if withMic {
-                try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP, .defaultToSpeaker])
+                try session.setCategory(.playAndRecord, options: [.allowBluetoothA2DP, .defaultToSpeaker])
             } else {
                 try session.setCategory(.playback)
             }

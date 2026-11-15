@@ -65,6 +65,4 @@ pub struct Devices {
     /// Left and right samples, interleaved.
     pub playback: rtrb::Producer<f32>,
     pub counters: Arc<DeviceCounters>,
-    /// Whether the platform cancels the speaker's echo from the mic.
-    pub platform_cancels_echo: bool,
 }

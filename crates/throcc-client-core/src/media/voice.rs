@@ -529,11 +529,7 @@ impl Worker {
             }
             Command::OpenDevices { open, opened } => {
                 self.close_devices();
-                let result = open().map(|devices| {
-                    self.chain
-                        .set_platform_cancels_echo(devices.platform_cancels_echo, &self.settings);
-                    self.io = Some(DeviceIo::new(devices));
-                });
+                let result = open().map(|devices| self.io = Some(DeviceIo::new(devices)));
                 opened.send(result).ok();
             }
             #[cfg(any(target_os = "ios", target_os = "android"))]

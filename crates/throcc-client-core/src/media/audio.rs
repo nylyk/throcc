@@ -55,8 +55,6 @@ pub struct CaptureChain {
     input_volume: f32,
     /// Echo cancellation, noise suppression and gain control as last applied.
     processing: (bool, Option<NoiseSuppression>, bool),
-    /// Whether the open devices cancel echo themselves, which turns ours off.
-    platform_cancels_echo: bool,
     processed: [f32; PULL],
     frame: [f32; FRAME],
     frame_len: usize,
@@ -78,7 +76,7 @@ impl CaptureChain {
             .capture_config(StreamConfig::new(SAMPLE_RATE, 1))
             .render_config(StreamConfig::new(SAMPLE_RATE, 1))
             .build();
-        let processing = processing_choice(settings, false);
+        let processing = processing_choice(settings);
         apm.apply_config(processing_config(processing));
         let encoder = Encoder::builder(SAMPLE_RATE, Channels::Mono, Application::Voip)
             .frame_duration(FrameDuration::Ms20)
@@ -99,7 +97,6 @@ impl CaptureChain {
             ),
             input_volume: settings.input_volume,
             processing,
-            platform_cancels_echo: false,
             processed: [0.0; PULL],
             frame: [0.0; FRAME],
             frame_len: 0,
@@ -115,7 +112,7 @@ impl CaptureChain {
     }
 
     pub fn apply(&mut self, settings: &VoiceSettings) {
-        let processing = processing_choice(settings, self.platform_cancels_echo);
+        let processing = processing_choice(settings);
         if processing != self.processing {
             self.apm.apply_config(processing_config(processing));
             self.processing = processing;
@@ -123,12 +120,6 @@ impl CaptureChain {
         self.transmit = settings.transmit;
         self.speech_only = settings.speech_only;
         self.input_volume = settings.input_volume;
-    }
-
-    /// Runs our echo canceller only where the open devices don't cancel echo themselves.
-    pub fn set_platform_cancels_echo(&mut self, cancels: bool, settings: &VoiceSettings) {
-        self.platform_cancels_echo = cancels;
-        self.apply(settings);
     }
 
     /// Closes the gate while keeping processing and the media clock running.
@@ -230,12 +221,9 @@ impl CaptureChain {
     }
 }
 
-fn processing_choice(
-    settings: &VoiceSettings,
-    platform_cancels_echo: bool,
-) -> (bool, Option<NoiseSuppression>, bool) {
+fn processing_choice(settings: &VoiceSettings) -> (bool, Option<NoiseSuppression>, bool) {
     (
-        settings.echo_cancellation && !platform_cancels_echo,
+        settings.echo_cancellation,
         settings.noise_suppression,
         settings.automatic_gain,
     )
