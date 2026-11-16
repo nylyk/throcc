@@ -79,9 +79,9 @@ pub async fn authenticate(
             pake_a,
             name,
         } => {
-            let name = valid_name(&name)
-                .ok_or(AuthRefusal::Enroll(AuthError::BadName))?
-                .to_owned();
+            if valid_name(&name) != Some(name.as_str()) {
+                return Err(AuthRefusal::Enroll(AuthError::BadName));
+            }
             let run = Enrollment {
                 shared,
                 source,

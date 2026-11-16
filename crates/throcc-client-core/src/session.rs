@@ -1960,8 +1960,14 @@ impl Session {
                     Some(shown) => shown.blocked,
                     None => self.blocks(&p),
                 };
-                if p.user != self.call.me() && proves_identity(&p, &self.call.server()) {
-                    self.note_identities(&[(p.user, p.identity_key)]);
+                // A room peer presents its key with a fresh signed encryption key, which a
+                // replayed presence must not displace, not even for a moment.
+                if p.user != self.call.me() && !self.peers.contains_key(&p.user) {
+                    if proves_identity(&p, &self.call.server()) {
+                        self.note_identities(&[(p.user, p.identity_key)]);
+                    } else {
+                        self.trust.forget(p.user);
+                    }
                 }
                 let (verified, identity_key) = self.trust.of(p.user);
                 let playback = self.playback_of(p.user);

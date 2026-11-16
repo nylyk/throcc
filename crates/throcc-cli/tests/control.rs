@@ -23,29 +23,23 @@ async fn concurrent_requests_match_by_id() {
     let server = start_server();
     let alice = Arc::new(admin(&server).await);
     let bob = Arc::new(invited(&server, &alice).await);
-    let picture = vec![1, 2, 3];
-    let set = alice
-        .request(Request::SetServerAvatar(Some(picture.clone())))
-        .await;
-    assert_eq!(set, Response::Ok);
+    let pictures: Vec<Vec<u8>> = (0..40u8).map(|i| vec![i, 7]).collect();
+    for picture in &pictures {
+        let set = alice
+            .request(Request::SetServerAvatar(Some(picture.clone())))
+            .await;
+        assert_eq!(set, Response::Ok);
+    }
 
     let mut tasks = JoinSet::new();
     for client in [alice.clone(), bob.clone()] {
-        for i in 0..40u8 {
-            let (client, picture) = (client.clone(), picture.clone());
+        for picture in pictures.clone() {
+            let client = client.clone();
             tasks.spawn(async move {
-                let held = i % 2 == 0;
-                let hash = if held {
-                    Hash::of(&picture)
-                } else {
-                    Hash([i; 32])
-                };
-                let answer = client.request(Request::FetchAvatar(hash)).await;
-                match answer {
-                    Response::Avatar(back) => assert!(held && back == picture),
-                    Response::Err { .. } => assert!(!held),
-                    other => panic!("unexpected {other:?}"),
-                }
+                let fetched = client
+                    .request(Request::FetchAvatar(Hash::of(&picture)))
+                    .await;
+                assert_eq!(fetched, Response::Avatar(picture));
             });
         }
     }

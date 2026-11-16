@@ -106,17 +106,19 @@ async fn a_name_the_server_would_refuse_spends_nothing_of_the_invite() {
     let code = invite(&alice).await;
     let dir = tempfile::tempdir().unwrap();
     let mut keystore = throcc_client_core::keystore::Keystore::open_in(dir.path()).unwrap();
-    let err = account::enroll(&mut keystore, &server.addr, &code, &named("   "))
-        .await
-        .err()
-        .unwrap();
-    assert!(
-        matches!(
-            err,
-            SignInError::Login(LoginError::Refused(AuthError::BadName))
-        ),
-        "{err}"
-    );
+    for name in ["   ", " Ilse"] {
+        let err = account::enroll(&mut keystore, &server.addr, &code, &named(name))
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(
+                err,
+                SignInError::Login(LoginError::Refused(AuthError::BadName))
+            ),
+            "{name:?}: {err}"
+        );
+    }
     assert_eq!(failures(&server, &code), Some(0));
     try_enroll_at(&server.addr, &code).await.unwrap();
 }
