@@ -842,6 +842,14 @@ impl Session {
         // A new connection counts audiences afresh.
         self.audiences = Audiences::default();
         let fingerprint = self.call.server();
+        let me = welcome.me;
+        let proven: Vec<(UserId, PublicKey)> = welcome
+            .presence
+            .iter()
+            .filter(|p| p.user != me && proves_identity(p, &fingerprint))
+            .map(|p| (p.user, p.identity_key))
+            .collect();
+        self.note_identities(&proven);
         self.remember_server(welcome.server.name.clone(), welcome.server.avatar);
         let address = self.address.clone();
         let media = self.media;
@@ -942,7 +950,7 @@ impl Session {
         let current: BTreeMap<UserId, Peer> = trusted.into_iter().map(|p| (p.user, p)).collect();
         let changed = current != self.peers;
         self.note_trusted(earlier);
-        self.note_identities(&current);
+        self.note_identities(&presented_by(&current));
         let arrived: Vec<UserId> = current
             .iter()
             .filter(|(user, peer)| {
@@ -1003,15 +1011,11 @@ impl Session {
         }
     }
 
-    /// Notes the identity keys `peers` present, saves playback set before under them, then
-    /// shows who is verified and whose verified key changed.
-    fn note_identities(&mut self, peers: &BTreeMap<UserId, Peer>) {
-        let presented: Vec<(UserId, PublicKey)> = peers
-            .iter()
-            .map(|(user, peer)| (*user, peer.identity_key))
-            .collect();
-        let noted = self.trust.note(&presented);
-        for (user, key) in &presented {
+    /// Notes the identity keys room peers or signed presences present, saves playback set
+    /// before under them, then shows who is verified and whose verified key changed.
+    fn note_identities(&mut self, presented: &[(UserId, PublicKey)]) {
+        let noted = self.trust.note(presented);
+        for (user, key) in presented {
             for sound in Sound::ALL {
                 if let Some(playback) = self.unkeyed_playback.remove(&(*user, sound)) {
                     self.saved_playback.set(key, sound, playback);
@@ -1109,9 +1113,7 @@ impl Session {
                     "{name}'s key changed before you confirmed, so nothing changed. Compare the new safety number."
                 )
             } else {
-                format!(
-                    "{name} isn't presenting a key right now, so nothing changed. Compare the safety number again once they're in a room with you."
-                )
+                format!("{name} isn't presenting a signed key right now, so nothing changed.")
             });
             return;
         }
@@ -1932,8 +1934,7 @@ impl Session {
             CallEvent::Trusted(keys) => {
                 self.note_trusted(keys);
                 // Noting may have dropped the keys of people here to stay under its limit.
-                let peers = self.peers.clone();
-                self.note_identities(&peers);
+                self.note_identities(&presented_by(&self.peers));
             }
         }
     }
@@ -1959,6 +1960,9 @@ impl Session {
                     Some(shown) => shown.blocked,
                     None => self.blocks(&p),
                 };
+                if p.user != self.call.me() && proves_identity(&p, &self.call.server()) {
+                    self.note_identities(&[(p.user, p.identity_key)]);
+                }
                 let (verified, identity_key) = self.trust.of(p.user);
                 let playback = self.playback_of(p.user);
                 let sharing = self.sharing_of(p.user);
@@ -1997,6 +2001,7 @@ impl Session {
             ServerEvent::PresenceEnded(user) => {
                 self.room_cue(user, None);
                 self.shown.remove(&user);
+                self.trust.forget(user);
                 let notices = self.call.engine.end_presence(user);
                 self.notices(notices);
                 self.shared.update(|s| {
@@ -2222,6 +2227,14 @@ fn shown_as(presence: &Presence, person: &Person, server: &Fingerprint) -> Shown
         avatar: presence.avatar,
         blocked: person.blocked,
     }
+}
+
+/// The identity key each of `peers` presents.
+fn presented_by(peers: &BTreeMap<UserId, Peer>) -> Vec<(UserId, PublicKey)> {
+    peers
+        .iter()
+        .map(|(user, peer)| (*user, peer.identity_key))
+        .collect()
 }
 
 /// Whether `shown` is proven, and `peer`, the room peer we hear under the same user, if any,

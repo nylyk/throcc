@@ -587,7 +587,10 @@ fn profile(
         .rounded(theme::RADIUS_CARD)
         .bg(theme::raised())
         .child(if groups.is_empty() {
-            description("Their safety number appears once you share a room.").into_any_element()
+            description(
+                "No safety number: the server shows no key that signed this name and picture.",
+            )
+            .into_any_element()
         } else {
             div()
                 .grid()

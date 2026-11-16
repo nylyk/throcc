@@ -150,8 +150,9 @@ pub struct Person {
     pub playback: Playback,
     /// Whether the user verified the identity key they presented this session.
     pub verified: bool,
-    /// The identity key they presented this session, in a room with us. None until then,
-    /// even for someone verified before: nothing else ties their account here to that key.
+    /// The identity key they presented this session, by signing their presence or as a peer
+    /// in our room. None until then, even for someone verified before: nothing else ties
+    /// their account here to that key.
     pub identity_key: Option<PublicKey>,
     pub role: Role,
     /// Whether the user blocked them. A blocked person keeps their place in the room, under

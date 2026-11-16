@@ -104,7 +104,7 @@ struct PersonView: View {
                 }
                 .disabled(keyChangedWhileOpen || shownKey != person.identityKey)
             } else {
-                Text("Their safety number appears once you share a room.").foregroundStyle(.muted)
+                Text("No safety number: the server shows no key that signed this name and picture.").foregroundStyle(.muted)
             }
         } header: {
             Text("Safety Number").foregroundStyle(.muted)

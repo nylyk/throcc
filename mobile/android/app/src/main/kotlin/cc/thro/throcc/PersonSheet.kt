@@ -155,7 +155,7 @@ private fun SafetyNumber(model: AppModel, person: Person, warning: KeyWarning?) 
     val number = remember(key?.toHexString()) { key?.let(model.core::safetyNumber) }
     val quiet = MaterialTheme.colorScheme.onSurfaceVariant
     if (key == null || number == null) {
-        Text("Their safety number appears once you share a room.", color = quiet)
+        Text("No safety number: the server shows no key that signed this name and picture.", color = quiet)
         return
     }
     Text(

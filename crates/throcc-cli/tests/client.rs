@@ -516,16 +516,8 @@ fn only_the_compared_key_is_verified_and_it_stays_verified_in_the_next_session()
     drop(bob);
 
     let bob = client_in(bob_dir.path(), &address, None);
-    wait_connected(&bob, "bob back");
-    assert!(
-        bob.state()
-            .person(alice_id)
-            .is_some_and(|p| !p.verified && p.identity_key.is_none()),
-        "verified before alice presented her key"
-    );
-    bob.command(UiCommand::Join(Some(room)));
-    wait_for(&bob, "alice still verified", |s| {
-        s.person(alice_id).is_some_and(|p| p.verified)
+    wait_for(&bob, "alice verified from her signed presence", |s| {
+        s.current.is_none() && s.person(alice_id).is_some_and(|p| p.verified)
     });
 }
 
@@ -571,19 +563,17 @@ fn room_and_elsewhere(admin: &Client) -> (RoomId, RoomId) {
     (room, elsewhere)
 }
 
-/// Has `alice`, the admin, set `bob`'s voice playback while he is in another room, so before
-/// he presents his key, then brings him into her room until she holds his key.
-fn set_before_his_key(alice: &Client, bob: &Client, voice: SoundLevel) -> UserId {
-    let (room, elsewhere) = room_and_elsewhere(alice);
+/// Has `alice`, the admin, set `bob`'s voice playback while he is in a room of his own, where
+/// only his signed presence presents his key.
+fn set_while_elsewhere(alice: &Client, bob: &Client, voice: SoundLevel) -> UserId {
+    let (_, elsewhere) = room_and_elsewhere(alice);
     let bob_id = bob.state().me.unwrap();
     bob.command(UiCommand::Join(Some(elsewhere)));
-    wait_for(alice, "bob in the other room", |s| {
-        s.person(bob_id).is_some_and(|p| p.identity_key.is_none())
+    wait_for(alice, "bob in the other room, with his key", |s| {
+        s.person(bob_id)
+            .is_some_and(|p| p.room == Some(elsewhere) && p.identity_key.is_some())
     });
     alice.command(UiCommand::SetSoundLevel(bob_id, Sound::Voice, voice));
-    alice.command(UiCommand::Join(Some(room)));
-    bob.command(UiCommand::Join(Some(room)));
-    key_of(alice, bob_id);
     bob_id
 }
 
@@ -607,7 +597,7 @@ fn playback_follows_the_identity_key_to_every_server() {
         let alice = client_in(alice_dir.path(), &first, Some(&first_admin));
         wait_connected(&alice, "alice connected");
         let bob = client_in(bob_dir.path(), &first, Some(&invite(&alice)));
-        let bob_id = set_before_his_key(&alice, &bob, quiet);
+        let bob_id = set_while_elsewhere(&alice, &bob, quiet);
         alice.command(UiCommand::SetSoundLevel(bob_id, Sound::Share, muted));
         wait_for(&alice, "bob quiet and his stream muted", |s| {
             s.person(bob_id)
@@ -619,7 +609,7 @@ fn playback_follows_the_identity_key_to_every_server() {
     let alice = client_in(alice_dir.path(), &second, Some(&second_admin));
     wait_connected(&alice, "alice on the second server");
     let bob = client_in(bob_dir.path(), &second, Some(&invite(&alice)));
-    let bob_id = set_before_his_key(&alice, &bob, loud);
+    let bob_id = set_while_elsewhere(&alice, &bob, loud);
     wait_for(&alice, "bob louder, his stream still muted", |s| {
         s.person(bob_id)
             .is_some_and(|p| p.playback.voice == loud && p.playback.share == muted)
@@ -656,23 +646,22 @@ fn a_new_key_for_a_verified_persons_user_id_is_warned_of_and_still_hears_us() {
     let carol = call_in(&runtime, carol_dir.path(), &address, &code, elsewhere);
     assert_eq!(carol.me(), bob_id, "carol didn't get bob's old user id");
 
-    wait_for(&alice, "carol in the other room", |s| {
-        s.person(bob_id).is_some_and(|p| p.room == Some(elsewhere))
-    });
-    let shown = alice.state().person(bob_id).cloned().unwrap();
-    assert!(
-        !shown.verified && shown.identity_key.is_none(),
-        "carol shown with bob's verified key: {shown:?}"
-    );
-    assert!(alice.state().key_warnings.is_empty());
-
-    runtime.block_on(carol.join(Some(room), None)).unwrap();
     let warning = KeyWarning {
         user: bob_id,
         verified: Fingerprint(identity_in(bob_dir.path())),
         now: Fingerprint(identity_in(carol_dir.path())),
     };
-    wait_for(&alice, "a warning that bob's key changed", |s| {
+    wait_for(&alice, "a warning from carol's signed presence", |s| {
+        s.key_warnings == [warning.clone()]
+            && s.person(bob_id).is_some_and(|p| {
+                p.room == Some(elsewhere)
+                    && !p.verified
+                    && p.identity_key == Some(identity_in(carol_dir.path()))
+            })
+    });
+
+    runtime.block_on(carol.join(Some(room), None)).unwrap();
+    wait_for(&alice, "the same warning once carol shares the room", |s| {
         s.key_warnings == [warning.clone()] && s.person(bob_id).is_some_and(|p| !p.verified)
     });
     wait_until("carol to hold alice's key", || {
