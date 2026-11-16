@@ -4,12 +4,13 @@ use std::sync::Arc;
 
 use throcc_client_core::connection;
 use throcc_client_core::control;
-use throcc_crypto::identity::IdentityKey;
+use throcc_crypto::identity::{self, IdentityKey, profile_message};
 use throcc_proto::framing;
 use throcc_proto::ids::{Epoch, Hash, Role, UserId};
 use throcc_proto::messages::{
-    AuthResult, ClientHello, MIN_PROTOCOL, PROTOCOL, Placement, Request, Response, ServerHello,
-    ServerMessage, ServerProfile, UserProfile, Welcome,
+    AccountStep, AuthError, AuthResult, ClientHello, MAX_AVATAR_BYTES, MIN_PROTOCOL, PROTOCOL,
+    Placement, Request, Response, ServerHello, ServerMessage, ServerProfile, SignIn, SignedProfile,
+    Welcome,
 };
 use throcc_proto::transport::{IDLE_TIMEOUT, close};
 use throcc_server::{Congestion, tls};
@@ -111,6 +112,11 @@ async fn unknown_reply_id_closes_the_connection() {
             .await
             .unwrap();
         let _: ClientHello = read_message(&mut recv).await;
+        let step: AccountStep = Ok(UserId(1));
+        send.write_all(&framing::encode(&step).unwrap())
+            .await
+            .unwrap();
+        let _: SignedProfile = read_message(&mut recv).await;
         let welcome = Welcome {
             me: UserId(1),
             role: Role::User,
@@ -124,11 +130,6 @@ async fn unknown_reply_id_closes_the_connection() {
                 audiences: Default::default(),
             },
             server: ServerProfile::default(),
-            profile: UserProfile {
-                name: "Ilse".into(),
-                avatar: None,
-                sig: None,
-            },
         };
         send.write_all(&framing::encode(&AuthResult::Ok(Box::new(welcome))).unwrap())
             .await
@@ -144,7 +145,7 @@ async fn unknown_reply_id_closes_the_connection() {
     });
 
     let connected = connection::connect(&addr, None).await.unwrap();
-    let _link = control::login(connected, &IdentityKey::generate(), None)
+    let _link = control::login(connected, &IdentityKey::generate(), &ilse(), None)
         .await
         .unwrap();
     match fake.await.unwrap() {
@@ -154,4 +155,82 @@ async fn unknown_reply_id_closes_the_connection() {
         }
         other => panic!("expected the client to close, got {other}"),
     }
+}
+
+#[tokio::test]
+async fn a_sign_in_is_refused_unless_its_key_signed_its_valid_profile_for_it() {
+    let server = start_server();
+    let alice = admin(&server).await;
+    let bob = invited(&server, &alice).await;
+    let identity = alice.keystore.identity();
+    let me = alice.link.welcome.me;
+    let stranger = IdentityKey::generate();
+    let fingerprint = alice.link.connected.fingerprint;
+    let signed = |signer: &IdentityKey, user: UserId, name: &str, picture: Option<Vec<u8>>| {
+        let avatar = picture.as_deref().map(Hash::of);
+        SignedProfile {
+            name: name.into(),
+            sig: signer.sign(&profile_message(&fingerprint.0, user, name, avatar)),
+            picture,
+        }
+    };
+    for bad in [
+        signed(&stranger, me, "Ilse", None),
+        signed(identity, UserId(me.0 + 1), "Ilse", None),
+        signed(identity, me, " Ilse", None),
+        signed(identity, me, "Ilse", Some(vec![1; MAX_AVATAR_BYTES + 1])),
+        SignedProfile {
+            name: "Mallory".into(),
+            ..signed(identity, me, "Ilse", None)
+        },
+    ] {
+        let answer = sign_in_giving(&server.addr, identity, me, &bad).await;
+        assert_eq!(answer, Some(AuthError::BadProfile), "{:?}", bad.name);
+    }
+    let picture = vec![2; MAX_AVATAR_BYTES];
+    let good = signed(identity, me, "Ilse", Some(picture.clone()));
+    assert_eq!(
+        sign_in_giving(&server.addr, identity, me, &good).await,
+        None
+    );
+    let fetched = bob.request(Request::FetchAvatar(Hash::of(&picture))).await;
+    assert_eq!(fetched, Response::Avatar(picture));
+}
+
+/// Signs in to `addr` as `identity` over a bare connection, giving `profile` once the server
+/// names the user `me`, and returns the server's refusal, if any.
+async fn sign_in_giving(
+    addr: &str,
+    identity: &IdentityKey,
+    me: UserId,
+    profile: &SignedProfile,
+) -> Option<AuthError> {
+    let connected = connection::connect(addr, None).await.unwrap();
+    let (mut send, mut recv) = connected.connection.accept_bi().await.unwrap();
+    let hello: ServerHello = read_message(&mut recv).await;
+    let client_nonce = [7; 32];
+    let message = identity::auth_message(&hello.nonce, &client_nonce, &connected.exporter);
+    let sign_in = ClientHello {
+        protocol: PROTOCOL,
+        sign_in: SignIn::Auth {
+            pubkey: identity.public(),
+            client_nonce,
+            want_room: None,
+            signature: identity.sign(&message),
+        },
+    };
+    send.write_all(&framing::encode(&sign_in).unwrap())
+        .await
+        .unwrap();
+    let step: AccountStep = read_message(&mut recv).await;
+    assert_eq!(step, Ok(me));
+    send.write_all(&framing::encode(profile).unwrap())
+        .await
+        .unwrap();
+    let answer = match read_message::<AuthResult>(&mut recv).await {
+        AuthResult::Ok(_) => None,
+        AuthResult::Err(e) => Some(e),
+    };
+    connected.close().await;
+    answer
 }

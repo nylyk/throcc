@@ -118,12 +118,12 @@ fn control_messages_encode_to_pinned_bytes() {
             sharing: true,
             role: Role::Admin,
             identity_key: [3; 32],
-            profile_sig: Some([5; 64]),
+            profile_sig: [5; 64],
         })),
         concat!(
             "01000201610106060606060606060606060606060606060606060606060606060606060606060001000102",
             "0303030303030303030303030303030303030303030303030303030303030303",
-            "0140",
+            "40",
             "05050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505",
         ),
     );
@@ -136,6 +136,19 @@ fn control_messages_encode_to_pinned_bytes() {
         "01100102",
     );
     pinned(AuthResult::Err(AuthError::RateLimited), "0105");
+    pinned::<AccountStep>(Ok(UserId(7)), "0007");
+    pinned::<AccountStep>(Err(AuthError::BadProfile), "0108");
+    pinned(
+        SignedProfile {
+            name: "a".into(),
+            picture: Some(vec![1, 2]),
+            sig: [3; 64],
+        },
+        concat!(
+            "0161010201024003030303030303030303030303030303030303030303030303030303030303030303",
+            "030303030303030303030303030303030303030303030303030303030303",
+        ),
+    );
     pinned(
         Event::PeersChanged {
             room: RoomId(1),

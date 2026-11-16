@@ -13,8 +13,8 @@ use throcc_proto::limits::{
 use throcc_proto::messages::{
     Audience, Audiences, AuthError, ErrorCode, Event, MAX_AVATAR_BYTES, MAX_NAME_CHARS,
     MAX_PASSWORD_CHARS, MediaState, Peer, Placement, Presence, Recovery, Request, Response, Room,
-    ServerMessage, ServerProfile, ShareTracks, Signature, SignedEncryptionKey, Tracks, UserProfile,
-    Welcome, valid_name, valid_password,
+    ServerMessage, ServerProfile, ShareTracks, Signature, SignedEncryptionKey, SignedProfile,
+    Tracks, Welcome, valid_name, valid_password,
 };
 use throcc_proto::permissions;
 use throcc_proto::transport::close;
@@ -230,6 +230,8 @@ struct Session {
     conn_id: u64,
     handle: ConnectionHandle,
     row: UserRow,
+    /// The identity key's signature over the row's name and avatar.
+    profile_sig: Signature,
     room: Option<RoomId>,
     tracks: Option<Tracks>,
     media: MediaState,
@@ -322,16 +324,18 @@ impl Hub {
         })
     }
 
-    /// Registers a connection authenticated as `row`, notes the sign-in and kicks the user's
-    /// earlier connection. Refuses a removed user, and a newcomer past the sign-in limits.
+    /// Registers a connection authenticated as `row`, notes the sign-in, keeps its checked
+    /// `profile` and kicks the user's earlier connection. Refuses a removed user, and a
+    /// newcomer past the sign-in limits.
     pub fn connect(
         &mut self,
         row: UserRow,
+        profile: SignedProfile,
         handle: ConnectionHandle,
         want_room: Option<RoomId>,
     ) -> anyhow::Result<Result<(u64, Welcome), AuthError>> {
         let user = row.id;
-        let Some(row) = self
+        let Some(mut row) = self
             .db
             .user(user)?
             .filter(|current| current.pubkey == row.pubkey)
@@ -353,21 +357,31 @@ impl Hub {
         if full && !self.sessions.contains_key(&user) {
             return Ok(Err(AuthError::ServerFull));
         }
+        let avatar = profile.picture.as_deref().map(Hash::of);
+        if let (Some(hash), Some(bytes)) = (avatar, &profile.picture)
+            && !self.db.has_blob(&hash)?
+        {
+            let cost = bytes.len().max(MIN_UPLOAD_COST) as f64;
+            if !self.uploads.take(user, cost, Instant::now()) {
+                return Ok(Err(AuthError::RateLimited));
+            }
+            delete_unused_blobs(&self.db, now)?;
+            self.db.put_blob(&hash, bytes, now)?;
+        }
+        self.db
+            .set_profile(user, &profile.name, avatar, &profile.sig)?;
+        (row.name, row.avatar) = (profile.name, avatar);
         self.evict(user, Kick::Replaced);
         self.next_conn += 1;
         let conn_id = self.next_conn;
         let role = row.role;
-        let profile = UserProfile {
-            name: row.name.clone(),
-            avatar: row.avatar,
-            sig: row.profile_sig,
-        };
         self.sessions.insert(
             user,
             Session {
                 conn_id,
                 handle,
                 row,
+                profile_sig: profile.sig,
                 room: None,
                 tracks: None,
                 media: MediaState::default(),
@@ -392,7 +406,6 @@ impl Hub {
             presence: self.sessions.values().filter_map(presence).collect(),
             placement,
             server,
-            profile,
         };
         Ok(Ok((conn_id, welcome)))
     }
@@ -973,8 +986,8 @@ impl Hub {
         })
     }
 
-    /// Keeps a signed name and picture. A signature over the kept ones skips the rate limit
-    /// and is stored only while no valid signature is.
+    /// Keeps a signed name and picture. The kept ones again change nothing and skip the rate
+    /// limit.
     fn set_profile(
         &mut self,
         user: UserId,
@@ -985,31 +998,26 @@ impl Hub {
         let name = checked_name(&name)?;
         self.require_picture(avatar)?;
         let session = self.session(user)?;
-        let signed = |sig: &Signature| {
-            identity::verify_profile(
-                &session.row.pubkey,
-                &self.fingerprint.0,
-                user,
-                &name,
-                avatar,
-                sig,
-            )
-            .is_ok()
-        };
-        if !signed(&sig) {
+        let signed = identity::verify_profile(
+            &session.row.pubkey,
+            &self.fingerprint.0,
+            user,
+            &name,
+            avatar,
+            &sig,
+        );
+        if signed.is_err() {
             return Err(Refusal::new(
                 ErrorCode::Invalid,
                 "the profile's signature is wrong",
             ));
         }
-        let renames = (session.row.name.as_str(), session.row.avatar) != (name.as_str(), avatar);
-        if !renames && session.row.profile_sig.as_ref().is_some_and(signed) {
+        if (session.row.name.as_str(), session.row.avatar) == (name.as_str(), avatar) {
             return Ok(Response::Ok);
         }
-        if renames
-            && session
-                .last_profile
-                .is_some_and(|t| t.elapsed() < PROFILE_INTERVAL)
+        if session
+            .last_profile
+            .is_some_and(|t| t.elapsed() < PROFILE_INTERVAL)
         {
             return Err(Refusal::new(
                 ErrorCode::RateLimited,
@@ -1025,10 +1033,8 @@ impl Hub {
         let session = self.session_mut(user)?;
         session.row.name = name;
         session.row.avatar = avatar;
-        session.row.profile_sig = Some(sig);
-        if renames {
-            session.last_profile = Some(Instant::now());
-        }
+        session.profile_sig = sig;
+        session.last_profile = Some(Instant::now());
         self.announce_presence(user);
         Ok(Response::Ok)
     }
@@ -1782,7 +1788,7 @@ fn presence(session: &Session) -> Option<Presence> {
         sharing: session.media.share.is_some(),
         role: session.row.role,
         identity_key: session.row.pubkey,
-        profile_sig: session.row.profile_sig,
+        profile_sig: session.profile_sig,
     })
 }
 

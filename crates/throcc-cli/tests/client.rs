@@ -22,7 +22,9 @@ use throcc_proto::messages::{
 use throcc_server::identity::KEY_FILE;
 use tokio::runtime::Runtime;
 
-use common::{ProcessLikeServer, client_as, named, share_1080p60, sharing, wait_for_state_within};
+use common::{
+    ProcessLikeServer, client_as, ilse, named, share_1080p60, sharing, wait_for_state_within,
+};
 
 /// A server's address and an admin invite. It runs until the returned handle drops.
 fn server() -> (String, InviteCode, ProcessLikeServer) {
@@ -68,7 +70,7 @@ fn call_in(
 ) -> Call {
     runtime.block_on(async {
         let mut keystore = Keystore::open_in(dir).unwrap();
-        let link = account::enroll(&mut keystore, address, invite, "Ilse")
+        let link = account::enroll(&mut keystore, address, invite, &ilse())
             .await
             .unwrap();
         let call = Call::start(link, &keystore).unwrap();
@@ -745,7 +747,7 @@ fn an_epoch_floor_outlives_a_restart_and_refuses_a_replayed_sender_key() {
     let bob_dir = tempfile::tempdir().unwrap();
     let (mut bob, placement) = runtime.block_on(async {
         let mut keystore = Keystore::open_in(bob_dir.path()).unwrap();
-        let link = account::enroll(&mut keystore, &address, &code, "Ilse")
+        let link = account::enroll(&mut keystore, &address, &code, &ilse())
             .await
             .unwrap();
         let bob = Call::start(link, &keystore).unwrap();
@@ -784,7 +786,9 @@ fn an_epoch_floor_outlives_a_restart_and_refuses_a_replayed_sender_key() {
     let replayed = |dir: &Path| {
         let bob = runtime.block_on(async {
             let keystore = Keystore::open_in(dir).unwrap();
-            let link = account::sign_in(&keystore, &address, None).await.unwrap();
+            let link = account::sign_in(&keystore, &address, &ilse(), None)
+                .await
+                .unwrap();
             Call::start(link, &keystore).unwrap()
         });
         let notices = format!("{:?}", bob.engine.apply_placement(&placement));
@@ -839,7 +843,7 @@ fn enrolling_again_takes_a_new_encryption_key_and_drops_that_accounts_floors() {
     let runtime = Runtime::new().unwrap();
     let notices = runtime.block_on(async {
         let mut keystore = Keystore::open_in(alice_dir.path()).unwrap();
-        let link = account::enroll(&mut keystore, &address, &rebuilt.admin_invite(), "Ilse")
+        let link = account::enroll(&mut keystore, &address, &rebuilt.admin_invite(), &ilse())
             .await
             .unwrap();
         assert_ne!(keystore.encryption_key().public(), first_key);

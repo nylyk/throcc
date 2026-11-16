@@ -6,8 +6,8 @@ use serde::de::DeserializeOwned;
 use throcc_crypto::identity::random;
 use throcc_proto::framing::{self, FrameError, LEN_BYTES};
 use throcc_proto::messages::{
-    AuthResult, ClientHello, ClientMessage, ErrorCode, MIN_PROTOCOL, PROTOCOL, PakeStep, Request,
-    Response, ServerHello, ServerMessage,
+    AccountStep, AuthResult, ClientHello, ClientMessage, ErrorCode, MAX_AVATAR_BYTES, MIN_PROTOCOL,
+    PROTOCOL, PakeStep, Request, Response, ServerHello, ServerMessage,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{Semaphore, mpsc};
@@ -25,6 +25,8 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 /// Longest a sign-in or enrollment may take after `ClientHello`, PAKE included.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(40);
 pub const HANDSHAKE_FRAME_BYTES: usize = 4096;
+/// A sign-in's profile: its picture, and as much again as any other handshake frame.
+const PROFILE_FRAME_BYTES: usize = MAX_AVATAR_BYTES + HANDSHAKE_FRAME_BYTES;
 const EVENT_QUEUE: usize = 1024;
 /// Picture bytes a connection may have waiting for its client to read.
 const QUEUED_PICTURE_BYTES: usize = 256 * 1024;
@@ -56,6 +58,15 @@ pub async fn read_handshake<T: DeserializeOwned>(
 ) -> Result<T, ReadError> {
     Ok(framing::decode(
         &read_body(recv, HANDSHAKE_FRAME_BYTES).await?,
+    )?)
+}
+
+/// Reads a sign-in's profile, which is never larger than [`PROFILE_FRAME_BYTES`].
+pub async fn read_profile<T: DeserializeOwned>(
+    recv: &mut quinn::RecvStream,
+) -> Result<T, ReadError> {
+    Ok(framing::decode(
+        &read_body(recv, PROFILE_FRAME_BYTES).await?,
     )?)
 }
 
@@ -186,14 +197,17 @@ async fn serve(
         connection: connection.clone(),
         egress: egress::spawn(connection.clone(), outgoing.clone()),
     };
-    let connected = shared
-        .hub()
-        .connect(authenticated.row, handle, authenticated.want_room);
+    let connected = shared.hub().connect(
+        authenticated.row,
+        authenticated.profile,
+        handle,
+        authenticated.want_room,
+    );
     let (conn_id, welcome) = match connected {
         Ok(Ok(connected)) => connected,
         Ok(Err(refused)) => {
             debug!(%peer, "connection refused: {refused}");
-            refuse(connection, stream, AuthRefusal::Auth(refused)).await;
+            refuse(connection, stream, AuthRefusal::Welcome(refused)).await;
             return Ok(());
         }
         Err(e) => {
@@ -376,8 +390,9 @@ async fn write_loop(
 /// Sends a refusal and lets the client close first, so the refusal isn't lost to our close.
 async fn refuse(connection: &quinn::Connection, mut stream: FrameStream, refused: AuthRefusal) {
     let written = match refused {
-        AuthRefusal::Auth(e) => send_within(&mut stream.send, &AuthResult::Err(e)).await,
         AuthRefusal::Enroll(e) => send_within(&mut stream.send, &PakeStep::Err(e)).await,
+        AuthRefusal::Account(e) => send_within(&mut stream.send, &AccountStep::Err(e)).await,
+        AuthRefusal::Welcome(e) => send_within(&mut stream.send, &AuthResult::Err(e)).await,
         AuthRefusal::Internal => {
             connection.close(close::SERVER_BUSY.into(), b"internal server error");
             return;

@@ -10,8 +10,8 @@ use throcc_proto::framing::{self, FrameError, LEN_BYTES};
 use throcc_proto::ids::RoomId;
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
-    AuthError, AuthResult, ClientHello, ClientMessage, Event, PROTOCOL, PakeFinish, PakeStep,
-    Request, Response, ServerHello, ServerMessage, SignIn, Welcome,
+    AccountStep, AuthError, AuthResult, ClientHello, ClientMessage, Event, PROTOCOL, PakeFinish,
+    PakeStep, Request, Response, ServerHello, ServerMessage, SignIn, SignedProfile, Welcome,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{mpsc, oneshot};
@@ -19,6 +19,7 @@ use tracing::warn;
 
 use crate::connection::Connected;
 use crate::lock;
+use crate::profile::Profile;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long a request waits for its reply, so a server that never answers can't hold up
@@ -63,10 +64,11 @@ pub struct ControlLink {
     pub events: mpsc::Receiver<Event>,
 }
 
-/// Logs in with a key this server already knows.
+/// Logs in with a key this server already knows, giving it `profile`.
 pub async fn login(
     connected: Connected,
     identity: &IdentityKey,
+    profile: &Profile,
     want_room: Option<RoomId>,
 ) -> Result<ControlLink, LoginError> {
     let (mut send, recv, hello) = greet(&connected).await?;
@@ -82,16 +84,16 @@ pub async fn login(
         },
     };
     write(&mut send, &auth).await?;
-    finish_login(connected, send, recv).await
+    finish_login(connected, identity, profile, send, recv).await
 }
 
-/// Enrolls with an invite code, as `name` if the account is new. A server that can't prove it
+/// Enrolls with an invite code, giving the server `profile`. A server that can't prove it
 /// knows the code fails here.
 pub async fn enroll(
     connected: Connected,
     identity: &IdentityKey,
     code: &InviteCode,
-    name: &str,
+    profile: &Profile,
 ) -> Result<ControlLink, LoginError> {
     let (mut send, mut recv, hello) = greet(&connected).await?;
     let client_nonce: [u8; 32] = random();
@@ -104,7 +106,7 @@ pub async fn enroll(
             pubkey,
             client_nonce,
             pake_a: pake_a.clone(),
-            name: name.to_owned(),
+            name: profile.name.clone(),
         },
     };
     write(&mut send, &enroll).await?;
@@ -135,7 +137,7 @@ pub async fn enroll(
         signature: identity.sign(&transcript.to_bytes()),
     };
     write(&mut send, &finish).await?;
-    finish_login(connected, send, recv).await
+    finish_login(connected, identity, profile, send, recv).await
 }
 
 /// Accepts the control stream the server opens and reads its hello, whose protocol range must
@@ -169,11 +171,34 @@ fn outdated(hello: &ServerHello) -> Option<LoginError> {
     }
 }
 
+/// Signs `profile` for the user id the server gives, then takes its welcome.
 async fn finish_login(
     connected: Connected,
-    send: quinn::SendStream,
+    identity: &IdentityKey,
+    profile: &Profile,
+    mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
 ) -> Result<ControlLink, LoginError> {
+    let step: AccountStep = read(&mut recv).await?;
+    let me = match step {
+        Ok(me) => me,
+        Err(e) => {
+            connected.connection.close(close::NORMAL.into(), b"");
+            return Err(e.into());
+        }
+    };
+    let message = identity::profile_message(
+        &connected.fingerprint.0,
+        me,
+        &profile.name,
+        profile.avatar(),
+    );
+    let signed = SignedProfile {
+        name: profile.name.clone(),
+        picture: profile.picture.as_deref().map(<[u8]>::to_vec),
+        sig: identity.sign(&message),
+    };
+    write(&mut send, &signed).await?;
     let result: AuthResult = read(&mut recv).await?;
     let welcome = match result {
         AuthResult::Ok(welcome) => *welcome,

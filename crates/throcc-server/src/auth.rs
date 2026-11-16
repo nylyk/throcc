@@ -3,17 +3,19 @@ use std::time::{Duration, Instant};
 
 use throcc_crypto::identity::{self, random};
 use throcc_crypto::pake::{ServerPake, Transcript};
+use throcc_proto::ids::Hash;
 use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::invite::{self, ID_CHARS, SECRET_CHARS};
 use throcc_proto::messages::{
-    AuthError, Event, PakeFinish, PakeReply, PakeStep, PublicKey, SignIn, valid_name,
+    AccountStep, AuthError, Event, MAX_AVATAR_BYTES, PakeFinish, PakeReply, PakeStep, PublicKey,
+    SignIn, SignedProfile, valid_name,
 };
 use tracing::{debug, info, warn};
 
 use crate::database::{Enrolled, InviteRow, UserRow};
 use crate::limits::SourceKey;
 use crate::rooms::Hub;
-use crate::session::{FrameStream, read_handshake, write_frame};
+use crate::session::{FrameStream, read_handshake, read_profile, write_frame};
 use crate::{ServerState, unix_now};
 
 pub const INVITE_TRIES: u32 = 3;
@@ -25,15 +27,23 @@ const EXPORTER_LABEL: &[u8] = b"throcc/exporter/1";
 /// A refusal, tagged with the message type the client is waiting for.
 #[derive(Debug)]
 pub enum AuthRefusal {
-    Auth(AuthError),
+    /// In place of the PAKE reply.
     Enroll(AuthError),
+    /// In place of the [`AccountStep`]'s user id.
+    Account(AuthError),
+    /// In place of the welcome.
+    Welcome(AuthError),
     /// A failure on the server's side. The connection is closed without an answer.
     Internal,
 }
 
+const BAD_PROFILE: AuthRefusal = AuthRefusal::Welcome(AuthError::BadProfile);
+
 pub struct Authenticated {
     pub row: UserRow,
     pub want_room: Option<RoomId>,
+    /// Checked against the row's key, for this server and user.
+    pub profile: SignedProfile,
 }
 
 pub async fn authenticate(
@@ -44,8 +54,8 @@ pub async fn authenticate(
     sign_in: SignIn,
     source: SourceKey,
 ) -> Result<Authenticated, AuthRefusal> {
-    let exporter = exporter(connection).map_err(AuthRefusal::Auth)?;
-    match sign_in {
+    let exporter = exporter(connection).map_err(AuthRefusal::Account)?;
+    let (row, want_room) = match sign_in {
         SignIn::Auth {
             pubkey,
             client_nonce,
@@ -54,14 +64,14 @@ pub async fn authenticate(
         } => {
             let message = identity::auth_message(server_nonce, &client_nonce, &exporter);
             identity::verify(&pubkey, &message, &signature)
-                .map_err(|_| AuthRefusal::Auth(AuthError::BadSignature))?;
+                .map_err(|_| AuthRefusal::Account(AuthError::BadSignature))?;
             let row = shared
                 .hub()
                 .db
                 .user_by_pubkey(&pubkey)
                 .map_err(internal)?
-                .ok_or(AuthRefusal::Auth(AuthError::UnknownKey))?;
-            Ok(Authenticated { row, want_room })
+                .ok_or(AuthRefusal::Account(AuthError::UnknownKey))?;
+            (row, want_room)
         }
         SignIn::Enroll {
             code_id,
@@ -83,13 +93,49 @@ pub async fn authenticate(
                 client_nonce,
                 exporter,
             };
-            let row = run.run(stream, &pake_a).await?;
-            Ok(Authenticated {
-                row,
-                want_room: None,
-            })
+            (run.run(stream, &pake_a).await?, None)
         }
+    };
+    let profile = take_profile(shared, stream, &row).await?;
+    Ok(Authenticated {
+        row,
+        want_room,
+        profile,
+    })
+}
+
+/// Tells the client its user id and takes the profile it signs for it. A profile that fails
+/// to arrive, or whose name, picture or signature is wrong, is refused.
+async fn take_profile(
+    shared: &ServerState,
+    stream: &mut FrameStream,
+    row: &UserRow,
+) -> Result<SignedProfile, AuthRefusal> {
+    let step: AccountStep = Ok(row.id);
+    write_frame(&mut stream.send, &step)
+        .await
+        .map_err(|_| BAD_PROFILE)?;
+    let profile: SignedProfile = read_profile(&mut stream.recv)
+        .await
+        .map_err(|_| BAD_PROFILE)?;
+    let avatar = profile.picture.as_deref().map(Hash::of);
+    let signed = identity::verify_profile(
+        &row.pubkey,
+        &shared.fingerprint.0,
+        row.id,
+        &profile.name,
+        avatar,
+        &profile.sig,
+    );
+    let fits = profile
+        .picture
+        .as_ref()
+        .is_none_or(|picture| picture.len() <= MAX_AVATAR_BYTES);
+    if signed.is_err() || !fits || valid_name(&profile.name) != Some(profile.name.as_str()) {
+        debug!(user = row.id.0, "refusing a sign-in's profile");
+        return Err(BAD_PROFILE);
     }
+    Ok(profile)
 }
 
 struct Enrollment<'a> {
@@ -133,7 +179,7 @@ impl Enrollment<'_> {
 
         let exchanged = self.exchange(stream, &secret, pake_a).await.is_some();
         let Some(invite) = invite.filter(|_| exchanged) else {
-            return Err(AuthRefusal::Auth(AuthError::BadInvite));
+            return Err(AuthRefusal::Account(AuthError::BadInvite));
         };
         let enrolled = {
             let mut hub = self.shared.hub();
@@ -142,7 +188,7 @@ impl Enrollment<'_> {
             if self.no_account_is_left(&hub, &invite).map_err(internal)? {
                 hub.db.return_invite_try(&self.code_id).map_err(internal)?;
                 info!(code_id = %self.code_id, "enrollment refused: the server keeps no more accounts");
-                return Err(AuthRefusal::Auth(AuthError::ServerFull));
+                return Err(AuthRefusal::Account(AuthError::ServerFull));
             }
             let enrolled = hub.db.enroll(&self.pubkey, &self.code_id, &self.name, now);
             match &enrolled {
@@ -163,7 +209,7 @@ impl Enrollment<'_> {
             }
             Ok(None) => {
                 info!(code_id = %self.code_id, "invite was used up during the run");
-                Err(AuthRefusal::Auth(AuthError::BadInvite))
+                Err(AuthRefusal::Account(AuthError::BadInvite))
             }
             Err(e) => Err(internal(e)),
         }

@@ -11,7 +11,7 @@ use throcc_proto::limits::{MAX_ROOM_MEMBERS, MAX_ROOM_SHARES};
 use throcc_proto::messages::{
     Audiences, AuthError, ErrorCode, Event as ServerEvent, MediaState, Peer, Placement, Presence,
     PublicKey, Recovery, Request, Response, ShareConfig, ShareTracks, Signature, Tracks, User,
-    UserProfile, Welcome,
+    Welcome,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{Semaphore, broadcast, mpsc, watch};
@@ -265,13 +265,11 @@ pub(crate) struct Session {
     /// Whether the mic was on when we deafened, so undeafening restores it.
     mic_before_deafen: bool,
     profile: Profile,
-    /// Our profile as saved while we joined, newer than `profile` once it changes.
-    kept_profile: watch::Receiver<Profile>,
     /// Our profile as the server has it.
-    server_profile: UserProfile,
+    server_profile: Profile,
     /// Our profile as the server refused it for coming too soon after the last change. Its
     /// picture is uploaded, and the health refresh sets it again.
-    too_soon_profile: Option<UserProfile>,
+    too_soon_profile: Option<Profile>,
     saved_playback: SavedPlayback,
     /// Each sound set for people who presented no identity key yet, saved under the key
     /// once they do.
@@ -389,13 +387,12 @@ impl Session {
         shared: Arc<Shared>,
         keystore: Keystore,
         address: String,
-        mut kept_profile: watch::Receiver<Profile>,
+        profile: Profile,
         audio: Option<Arc<AudioEngine>>,
         call: Call,
         lists: Lists,
     ) -> Self {
         let Lists { verified, blocked } = lists;
-        let profile = kept_profile.borrow_and_update().clone();
         let server = call.server();
         let saved_playback = SavedPlayback::load(keystore.dir()).unwrap_or_else(|e| {
             warn!("no saved playback: {e:#}");
@@ -426,10 +423,9 @@ impl Session {
             last_audience_cue: None,
             watched_shares: HashMap::new(),
             mic_before_deafen: false,
-            server_profile: call.welcome.profile.clone(),
+            server_profile: profile.clone(),
             too_soon_profile: None,
             profile,
-            kept_profile,
             saved_playback,
             unkeyed_playback: HashMap::new(),
             server_look,
@@ -449,37 +445,23 @@ impl Session {
         session
     }
 
-    /// Takes the profile saved during the join, if one came since we last looked.
-    fn take_kept_profile(&mut self) {
-        let kept = self.kept_profile.borrow_and_update();
-        if kept.has_changed() {
-            self.profile = kept.clone();
-        }
-    }
-
     /// Gives the server our profile, uploading the picture only if the server lacks it, and
     /// tells the UI how that went.
     async fn push_profile(&mut self) {
         self.too_soon_profile = None;
-        self.take_kept_profile();
-        let (name, avatar) = (self.profile.name.clone(), self.profile.avatar());
-        let wanted = UserProfile {
-            sig: Some(self.profile_sig(&name, avatar)),
-            name,
-            avatar,
-        };
+        let wanted = self.profile.clone();
         if wanted == self.server_profile {
             return self.shared.emit(UiEvent::ProfileSaved);
         }
-        if let Some(bytes) = &self.profile.picture
-            && wanted.avatar != self.server_profile.avatar
+        if let Some(bytes) = &wanted.picture
+            && wanted.avatar() != self.server_profile.avatar()
         {
             match self
                 .call
                 .request(Request::UploadAvatar(bytes.to_vec()))
                 .await
             {
-                Ok(Response::AvatarHash(hash)) if Some(hash) == wanted.avatar => {}
+                Ok(Response::AvatarHash(hash)) if Some(hash) == wanted.avatar() => {}
                 other => return self.profile_refused(other),
             }
         }
@@ -488,11 +470,12 @@ impl Session {
 
     /// Puts `wanted`, whose picture the server holds, on our profile and tells the UI how that
     /// went. A refusal for coming too soon tells it nothing until a later try settles it.
-    async fn set_profile(&mut self, wanted: UserProfile) {
+    async fn set_profile(&mut self, wanted: Profile) {
+        let avatar = wanted.avatar();
         let request = Request::SetProfile {
             name: wanted.name.clone(),
-            avatar: wanted.avatar,
-            sig: self.profile_sig(&wanted.name, wanted.avatar),
+            avatar,
+            sig: self.profile_sig(&wanted.name, avatar),
         };
         match self.call.request(request).await {
             Ok(Response::Ok) => {
@@ -572,7 +555,6 @@ impl Session {
     }
 
     async fn run_until_done(&mut self, mut commands: mpsc::Receiver<UiCommand>) {
-        self.push_profile().await;
         let mut levels = tokio::time::interval(LEVELS_EVERY);
         let mut health = tokio::time::interval(HEALTH_EVERY);
         let mut renewal = tokio::time::interval(RENEWAL_CHECK_EVERY);
@@ -595,7 +577,6 @@ impl Session {
                                 return;
                             }
                         }
-                        self.push_profile().await;
                     }
                 },
                 _ = levels.tick() => {
@@ -799,6 +780,8 @@ impl Session {
             match Call::restart(link, &self.keystore, &self.call) {
                 Ok(call) => {
                     self.call = call;
+                    self.server_profile = self.profile.clone();
+                    self.too_soon_profile = None;
                     self.last_alive = SystemTime::now();
                     self.trust.forget_presented();
                     self.reset_room();
@@ -833,7 +816,8 @@ impl Session {
             return Ok(SignIn::Stale);
         }
         let connection = connected.connection.clone();
-        let failed = match account::sign_in_over(&self.keystore, connected, want_room).await {
+        let signing_in = account::sign_in_over(&self.keystore, connected, &self.profile, want_room);
+        let failed = match signing_in.await {
             Ok(link) => return Ok(SignIn::Done(Box::new(link))),
             Err(e) => e,
         };
@@ -880,7 +864,6 @@ impl Session {
         // A new connection counts audiences afresh.
         self.audiences = Audiences::default();
         let fingerprint = self.call.server();
-        self.server_profile = welcome.profile.clone();
         self.remember_server(welcome.server.name.clone(), welcome.server.avatar);
         let address = self.address.clone();
         let media = self.media;
@@ -1382,7 +1365,6 @@ impl Session {
                 });
             }
             UiCommand::SetProfile(profile) => {
-                self.kept_profile.mark_unchanged();
                 self.profile = profile;
                 self.push_profile().await;
             }
@@ -2280,17 +2262,15 @@ fn proves_whom_we_hear(shown: &Shown, peer: Option<&Peer>) -> bool {
 /// Whether the identity key of `presence` signed its name and picture for its user on the
 /// server `server`, which only the holder of that identity key can do.
 fn proves_identity(presence: &Presence, server: &Fingerprint) -> bool {
-    presence.profile_sig.is_some_and(|sig| {
-        identity::verify_profile(
-            &presence.identity_key,
-            &server.0,
-            presence.user,
-            &presence.name,
-            presence.avatar,
-            &sig,
-        )
-        .is_ok()
-    })
+    identity::verify_profile(
+        &presence.identity_key,
+        &server.0,
+        presence.user,
+        &presence.name,
+        presence.avatar,
+        &presence.profile_sig,
+    )
+    .is_ok()
 }
 
 /// How [`Session::sign_in_unless_stale`] ended without failing.
@@ -2604,7 +2584,7 @@ mod tests {
             IdentityKey::from_seed(&[4; 32]),
         );
         let signed_by = |key: &IdentityKey, user: UserId, name: &str| {
-            Some(key.sign(&profile_message(&server.0, user, name, None)))
+            key.sign(&profile_message(&server.0, user, name, None))
         };
         let presence = |identity_key, profile_sig| Presence {
             user: UserId(7),
@@ -2620,7 +2600,10 @@ mod tests {
         };
         let own = signed_by(&holder, UserId(7), "mara");
         assert!(proves_identity(&presence(holder.public(), own), &server));
-        assert!(!proves_identity(&presence(holder.public(), None), &server));
+        assert!(!proves_identity(
+            &presence(holder.public(), [0; 64]),
+            &server
+        ));
         assert!(!proves_identity(&presence(other.public(), own), &server));
         for forged in [
             signed_by(&holder, UserId(8), "mara"),

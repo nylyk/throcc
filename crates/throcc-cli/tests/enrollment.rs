@@ -106,7 +106,7 @@ async fn a_name_the_server_would_refuse_spends_nothing_of_the_invite() {
     let code = invite(&alice).await;
     let dir = tempfile::tempdir().unwrap();
     let mut keystore = throcc_client_core::keystore::Keystore::open_in(dir.path()).unwrap();
-    let err = account::enroll(&mut keystore, &server.addr, &code, "   ")
+    let err = account::enroll(&mut keystore, &server.addr, &code, &named("   "))
         .await
         .err()
         .unwrap();
@@ -118,8 +118,7 @@ async fn a_name_the_server_would_refuse_spends_nothing_of_the_invite() {
         "{err}"
     );
     assert_eq!(failures(&server, &code), Some(0));
-    let bob = try_enroll_at(&server.addr, &code).await.unwrap();
-    assert_eq!(bob.link.welcome.profile.name, "Ilse");
+    try_enroll_at(&server.addr, &code).await.unwrap();
 }
 
 #[tokio::test]
@@ -130,7 +129,7 @@ async fn an_admin_invite_promotes_a_member_who_redeems_it() {
     let bob_id = bob.link.welcome.me;
 
     let minted = throcc_server::admin_invite(server.dir.path()).unwrap();
-    let link = account::enroll(&mut bob.keystore, &server.addr, &minted.code, "Ilse")
+    let link = account::enroll(&mut bob.keystore, &server.addr, &minted.code, &ilse())
         .await
         .unwrap();
     assert_eq!(link.welcome.me, bob_id);
@@ -380,7 +379,7 @@ async fn removal_closes_the_connection_and_cascades() {
     .await
     .unwrap();
 
-    let err = account::sign_in(&carol.keystore, &server.addr, None)
+    let err = account::sign_in(&carol.keystore, &server.addr, &ilse(), None)
         .await
         .err()
         .unwrap();

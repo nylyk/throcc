@@ -23,7 +23,7 @@ async fn signing_in_again_replaces_the_earlier_connection() {
     let alice = admin(&server).await;
     let mut bob = invited(&server, &alice).await;
 
-    let bob_again = account::sign_in(&bob.keystore, &server.addr, None)
+    let bob_again = account::sign_in(&bob.keystore, &server.addr, &ilse(), None)
         .await
         .unwrap();
     let last = tokio::time::timeout(Duration::from_secs(5), bob.link.events.recv())

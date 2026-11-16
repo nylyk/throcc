@@ -96,8 +96,6 @@ pub struct UserRow {
     pub encryption_key: Option<SignedEncryptionKey>,
     pub name: String,
     pub avatar: Option<Hash>,
-    /// The identity key's signature over `name` and `avatar`, once the user has given one.
-    pub profile_sig: Option<Signature>,
     pub role: Role,
     pub invited_by: Option<UserId>,
     pub created_at: u64,
@@ -640,7 +638,7 @@ fn check_private_files(database: &Path) -> Result<()> {
     Ok(())
 }
 
-const USER_SELECT: &str = "SELECT id, pubkey, encryption_key, encryption_key_sig, encryption_key_not_after, name, avatar_hash, role, invited_by, created_at, profile_sig FROM users";
+const USER_SELECT: &str = "SELECT id, pubkey, encryption_key, encryption_key_sig, encryption_key_not_after, name, avatar_hash, role, invited_by, created_at FROM users";
 
 fn user_row(r: &rusqlite::Row) -> rusqlite::Result<UserRow> {
     let encryption_key: Option<Vec<u8>> = r.get(2)?;
@@ -663,9 +661,6 @@ fn user_row(r: &rusqlite::Row) -> rusqlite::Result<UserRow> {
         encryption_key,
         name: r.get(5)?,
         avatar: hash_column(r.get(6)?),
-        profile_sig: r
-            .get::<_, Option<Vec<u8>>>(10)?
-            .and_then(|sig| sig.try_into().ok()),
         role: Role::from_rank(r.get(7)?).unwrap_or(Role::User),
         invited_by: r.get::<_, Option<i64>>(8)?.map(|id| UserId(id as u64)),
         created_at: r.get::<_, i64>(9)? as u64,
@@ -900,12 +895,18 @@ mod tests {
         drop(v1);
         let db = Database::open(&path).unwrap();
         let user = db.user_by_pubkey(&[1; 32]).unwrap().unwrap();
-        assert_eq!((user.name.as_str(), user.profile_sig), ("Ilse", None));
+        let profile_sig = || {
+            db.conn
+                .query_row(
+                    "SELECT profile_sig FROM users WHERE id = ?1",
+                    [user.id.0 as i64],
+                    |r| r.get::<_, Option<Vec<u8>>>(0),
+                )
+                .unwrap()
+        };
+        assert_eq!((user.name.as_str(), profile_sig()), ("Ilse", None));
         db.set_profile(user.id, "Ilse", None, &[7; 64]).unwrap();
-        assert_eq!(
-            db.user(user.id).unwrap().unwrap().profile_sig,
-            Some([7; 64])
-        );
+        assert_eq!(profile_sig(), Some(vec![7; 64]));
     }
 
     #[test]

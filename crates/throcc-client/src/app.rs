@@ -30,7 +30,6 @@ use throcc_proto::ids::{Hash, Role, RoomId, UserId};
 use throcc_proto::invite::{self, InviteCode};
 use throcc_proto::messages::{MAX_NAME_CHARS, User, shows_something, valid_name, valid_password};
 use throcc_proto::{Fingerprint, permissions};
-use tokio::sync::watch;
 
 use crate::keep_display_awake::KeepDisplayAwake;
 use crate::theme;
@@ -522,8 +521,6 @@ pub struct ThroccApp {
     /// Pictures by hash, `None` while one decodes in the background or if it can't be shown.
     pub pictures: HashMap<Hash, Option<Arc<RenderImage>>>,
     pub joining: bool,
-    /// Our profile as the join in progress pushes it, updated by saves until the join ends.
-    joining_profile: Option<watch::Sender<Profile>>,
     /// Whether the join in progress was asked for on a settings page, so it leaves them.
     join_asked_in_settings: bool,
     pub mascot: views::mascot::Shown,
@@ -723,7 +720,6 @@ impl ThroccApp {
             palette_fields,
             pictures: HashMap::new(),
             joining: false,
-            joining_profile: None,
             join_asked_in_settings: false,
             mascot: views::mascot::Shown::default(),
             join_attempt: 0,
@@ -874,7 +870,6 @@ impl ThroccApp {
         let mut events = client.events();
         self.client = Some(client);
         self.joining = false;
-        self.joining_profile = None;
         self.join_error = None;
         self.dialog = None;
         if self.join_asked_in_settings || !matches!(self.screen, Screen::Settings(_)) {
@@ -1645,9 +1640,6 @@ impl ThroccApp {
     fn keep_profile(&mut self, profile: Profile, window: &mut Window, cx: &mut Context<Self>) {
         self.profile_form.outdate_pick();
         self.profile_form.edit = None;
-        if let Some(joining) = &self.joining_profile {
-            joining.send_replace(profile.clone());
-        }
         self.set_profile(profile, cx);
         self.save_settings();
         if let Some(problem) = self.settings_problem.clone() {
@@ -1915,8 +1907,6 @@ impl ThroccApp {
         let audio = Some(self.audio_engine.clone());
         let window_handle = window.window_handle();
         let joined_as = profile.clone();
-        let (joining_profile, profile) = watch::channel(profile);
-        self.joining_profile = Some(joining_profile);
         let connecting = cx.background_executor().spawn({
             let address = address.clone();
             let verified = self.verified.clone();
@@ -1955,7 +1945,6 @@ impl ThroccApp {
                         }
                         Err(e) => {
                             app.joining = false;
-                            app.joining_profile = None;
                             match e.pin_mismatch() {
                                 Some((expected, actual)) => {
                                     app.dialog = Some(Dialog::PinMismatch {

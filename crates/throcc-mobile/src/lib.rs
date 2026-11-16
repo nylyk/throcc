@@ -26,8 +26,8 @@ use throcc_proto::messages::{
     valid_password,
 };
 use throcc_proto::permissions;
+use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{broadcast, watch};
 
 pub use messages::{Command, Event, NameChange, PictureChange, User};
 pub use state::{
@@ -216,8 +216,6 @@ struct Connected {
     client: Arc<dyn ClientApi>,
     /// What the room's sound runs through. The mock has none.
     audio: Option<Arc<AudioEngine>>,
-    /// Carries a profile saved while the client runs to its session.
-    profile: watch::Sender<CoreProfile>,
 }
 
 #[uniffi::export]
@@ -358,7 +356,6 @@ impl Core {
         let invite = invite.map(|code| parse_invite(&code)).transpose()?;
         let _switching = lock(&self.switching);
         self.end_connection();
-        let (kept_profile, profile_changes) = watch::channel(profile.clone());
         let (verified, blocked) = (self.verified.clone(), self.blocked.clone());
         let mut audio = None;
         let client: Arc<dyn ClientApi> = if self.mock {
@@ -372,7 +369,7 @@ impl Core {
                 &address,
                 keystore,
                 invite.as_ref(),
-                profile_changes,
+                profile.clone(),
                 Some(engine),
                 verified,
                 blocked,
@@ -386,7 +383,6 @@ impl Core {
             address,
             client,
             audio,
-            profile: kept_profile,
         });
         let _ = self.told.send((connection, Told::State(Box::new(state))));
         self.forward(events, connection);
@@ -585,7 +581,6 @@ impl Core {
     /// sign-ins.
     fn pass_on(&self, profile: CoreProfile) {
         if let Some(connected) = &*lock(&self.connected) {
-            connected.profile.send_replace(profile.clone());
             connected.client.command(UiCommand::SetProfile(profile));
         }
     }

@@ -156,13 +156,13 @@ pub struct Client {
 }
 
 impl Client {
-    /// Signs in, or enrolls with `invite`, and blocks until the server has answered. The
-    /// server gets the newest `profile` unless it has it already.
+    /// Signs in, or enrolls with `invite`, giving the server `profile`, and blocks until the
+    /// server has answered.
     pub fn connect(
         address: &str,
         mut keystore: Keystore,
         invite: Option<&InviteCode>,
-        profile: watch::Receiver<Profile>,
+        profile: Profile,
         audio: Option<Arc<AudioEngine>>,
         verified: VerifiedStore,
         blocked: BlockedStore,
@@ -174,11 +174,10 @@ impl Client {
             .build()
             .map_err(|e| SignInError::Store(e.into()))?;
         keystore.renew_encryption_key_if_due()?;
-        let name = profile.borrow().name.clone();
         let link = runtime.block_on(async {
             match invite {
-                Some(code) => account::enroll(&mut keystore, address, code, &name).await,
-                None => account::sign_in(&keystore, address, None).await,
+                Some(code) => account::enroll(&mut keystore, address, code, &profile).await,
+                None => account::sign_in(&keystore, address, &profile, None).await,
             }
         })?;
         let identity = keystore.identity().public();

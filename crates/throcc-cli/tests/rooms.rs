@@ -318,7 +318,7 @@ async fn a_profile_is_kept_only_with_its_owners_signature_and_shown_with_it() {
             _ => None,
         })
         .await;
-    assert!(matches!(own, Request::SetProfile { sig, .. } if shown == Some(sig)));
+    assert!(matches!(own, Request::SetProfile { sig, .. } if shown == sig));
 }
 
 #[tokio::test]
