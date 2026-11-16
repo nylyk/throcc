@@ -345,6 +345,7 @@ private struct VerifiedPage: View {
                         } label: {
                             Label("Mark as Not Verified", systemImage: "xmark.shield")
                                 .labelStyle(.iconOnly)
+                                .foregroundStyle(.text)
                                 .touchTarget()
                         }
                         .buttonStyle(.borderless)
