@@ -17,8 +17,8 @@ const IN_FLIGHT: usize = 64;
 
 /// Decodes one remote share into the view the app hands over through its [`Output`]:
 /// MediaCodec renders straight into it, hardware first, and AV1 or VP9 that MediaCodec
-/// can't take decode in dav1d or libvpx and are copied into it. Without a view there is no
-/// codec; one starts with the next view, from the next keyframe.
+/// can't take decode in dav1d or libvpx and are copied into it. Without a view nothing is
+/// decoded; decoding starts again with the next view, from the next keyframe.
 pub struct Decoder {
     codec: Codec,
     max_size: MaxSize,
@@ -28,6 +28,8 @@ pub struct Decoder {
     engine: Engine,
     /// Whether reference pictures were dropped since [`Decoder::take_flushed`] last ran.
     flushed: bool,
+    /// Whether units went undecoded without a view, so the next view needs a keyframe.
+    skipped: bool,
     /// Whether the running codec has put out a picture.
     codec_worked: bool,
     /// Each unit's sequence number and timestamp, until its picture comes out.
@@ -62,6 +64,7 @@ impl Decoder {
             output,
             engine: Engine::MediaCodec(None),
             flushed: false,
+            skipped: false,
             codec_worked: false,
             in_flight: VecDeque::new(),
             sequence: 0,
@@ -117,6 +120,10 @@ impl Decoder {
 
     pub fn decode(&mut self, unit: &[u8], timestamp: u32) -> Result<Option<Frame>, DecodeError> {
         self.follow_view();
+        if self.output.view().is_none() {
+            self.skipped = true;
+            return Ok(None);
+        }
         if matches!(self.engine, Engine::MediaCodec(None)) {
             self.reopen(timestamp);
         }
@@ -186,6 +193,9 @@ impl Decoder {
             return false;
         }
         self.seen = changes;
+        if self.output.view().is_some() && std::mem::take(&mut self.skipped) {
+            self.flushed = true;
+        }
         let Engine::MediaCodec(codec) = &mut self.engine else {
             return true;
         };
