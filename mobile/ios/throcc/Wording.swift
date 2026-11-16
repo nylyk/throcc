@@ -31,6 +31,7 @@ extension Error {
         case .Failed(let reason): reason
         case .PinMismatch: "The server’s key changed."
         case .IdentityMissing: "Your identity is missing from this device."
+        case .Cancelled: "Connecting was cancelled."
         case nil: localizedDescription
         }
     }

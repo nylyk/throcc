@@ -13,7 +13,9 @@ use gpui_component::slider::{SliderEvent, SliderState};
 use gpui_component::{Root, WindowExt};
 use throcc_client_core::account::{self, SignInError};
 use throcc_client_core::blocked::BlockedStore;
-use throcc_client_core::client::{self, Client, ClientApi, Entry, MockClient, UiCommand, UiEvent};
+use throcc_client_core::client::{
+    self, Client, ClientApi, Entry, MockClient, SignIns, UiCommand, UiEvent,
+};
 use throcc_client_core::install::{self, KnownServer};
 use throcc_client_core::keystore::{self, Keystore, StartedOver};
 use throcc_client_core::media::devices;
@@ -32,7 +34,7 @@ use throcc_proto::ids::{Hash, Role, RoomId, UserId};
 use throcc_proto::invite::{self, InviteCode};
 use throcc_proto::messages::User;
 use throcc_proto::{Fingerprint, permissions};
-use tokio::sync::{oneshot, watch};
+use tokio::sync::watch;
 
 use crate::keep_display_awake::KeepDisplayAwake;
 use crate::theme;
@@ -441,10 +443,7 @@ pub struct ThroccApp {
     /// Whether the join in progress was asked for on a settings page, so it leaves them.
     join_asked_in_settings: bool,
     pub mascot: views::mascot::Shown,
-    /// Counts joins started, so a join that was overtaken by a newer one is ignored.
-    join_attempt: u64,
-    /// Dropped to cancel the sign-in under way.
-    join_cancel: Option<oneshot::Sender<()>>,
+    sign_ins: SignIns,
     pub join_error: Option<String>,
     pub start_over: StartOver,
     pub profile_avatar: Option<Hash>,
@@ -613,8 +612,7 @@ impl ThroccApp {
             joining_profile: None,
             join_asked_in_settings: false,
             mascot: views::mascot::Shown::default(),
-            join_attempt: 0,
-            join_cancel: None,
+            sign_ins: SignIns::default(),
             join_error: None,
             start_over: StartOver::NotStarted,
             profile_avatar: None,
@@ -763,7 +761,6 @@ impl ThroccApp {
         self.client = Some(client);
         self.joining = false;
         self.joining_profile = None;
-        self.join_cancel = None;
         self.join_error = None;
         self.dialog = None;
         if self.join_asked_in_settings || !matches!(self.screen, Screen::Settings(_)) {
@@ -1773,10 +1770,8 @@ impl ThroccApp {
         };
         self.verified_problem = install::read_verified(&self.verified);
         self.joining = true;
-        self.join_attempt += 1;
-        let attempt = self.join_attempt;
-        let (join_cancel, cancelled) = oneshot::channel();
-        self.join_cancel = Some(join_cancel);
+        let attempt = self.sign_ins.start();
+        let cancelled = attempt.superseded();
         self.join_error = None;
         let audio = Some(self.audio_engine.clone());
         let window_handle = window.window_handle();
@@ -1790,11 +1785,7 @@ impl ThroccApp {
                 let keystore = Keystore::open_default().map_err(SignInError::Store)?;
                 let entry = match &invite {
                     Some(code) => Entry::Enroll(code),
-                    None => Entry::SignIn {
-                        cancelled: Box::pin(async {
-                            let _ = cancelled.await;
-                        }),
-                    },
+                    None => Entry::SignIn { cancelled },
                 };
                 Client::connect(&address, keystore, entry, profile, audio, verified, blocked)
             }
@@ -1806,7 +1797,7 @@ impl ThroccApp {
                     if result.is_ok() {
                         app.reload_known_servers();
                     }
-                    if app.join_attempt != attempt {
+                    if !attempt.is_newest() {
                         return;
                     }
                     match result {
@@ -1816,7 +1807,6 @@ impl ThroccApp {
                         Err(e) => {
                             app.joining = false;
                             app.joining_profile = None;
-                            app.join_cancel = None;
                             match e.pin_mismatch() {
                                 Some((expected, actual)) => {
                                     app.dialog = Some(Dialog::PinMismatch {
@@ -1927,10 +1917,9 @@ impl ThroccApp {
 
     /// Gives up the join under way.
     pub fn cancel_join(&mut self, cx: &mut Context<Self>) {
+        self.sign_ins.cancel();
         self.joining = false;
-        self.join_attempt += 1;
         self.joining_profile = None;
-        self.join_cancel = None;
         cx.notify();
     }
 

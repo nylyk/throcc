@@ -149,6 +149,57 @@ const COMMANDS: usize = 64;
 /// How long dropping a client waits for its session to say goodbye to the server.
 const CLOSE_WAIT: Duration = Duration::from_secs(2);
 
+/// Sign-ins where the newest wins: starting one gives up every older one, and only the
+/// newest one's result counts.
+pub struct SignIns {
+    started: watch::Sender<u64>,
+}
+
+impl Default for SignIns {
+    fn default() -> Self {
+        Self {
+            started: watch::Sender::new(0),
+        }
+    }
+}
+
+impl SignIns {
+    /// Starts a sign-in, giving up every older one.
+    pub fn start(&self) -> SignInAttempt {
+        let mut started = self.started.subscribe();
+        self.cancel();
+        let mine = *started.borrow_and_update();
+        SignInAttempt { started, mine }
+    }
+
+    /// Gives up every sign-in started so far.
+    pub fn cancel(&self) {
+        self.started.send_modify(|count| *count += 1);
+    }
+}
+
+/// One sign-in from [`SignIns::start`].
+pub struct SignInAttempt {
+    started: watch::Receiver<u64>,
+    mine: u64,
+}
+
+impl SignInAttempt {
+    /// Whether no newer sign-in started and nothing cancelled this one, so its result counts.
+    pub fn is_newest(&self) -> bool {
+        *self.started.borrow() == self.mine
+    }
+
+    /// Resolves once this sign-in is no longer the newest.
+    pub fn superseded(&self) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        let mut started = self.started.clone();
+        let mine = self.mine;
+        Box::pin(async move {
+            let _ = started.wait_for(|count| *count != mine).await;
+        })
+    }
+}
+
 /// How [`Client::connect`] gets onto a server.
 pub enum Entry<'a> {
     /// Signs in with a key the server knows, giving up once `cancelled` resolves.
@@ -865,6 +916,19 @@ fn sample_users() -> Vec<User> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_newest_sign_in_wins_and_a_cancel_ends_it_too() {
+        let sign_ins = SignIns::default();
+        let first = sign_ins.start();
+        let second = sign_ins.start();
+        assert!(!first.is_newest());
+        assert!(second.is_newest());
+        first.superseded().await;
+        sign_ins.cancel();
+        assert!(!second.is_newest());
+        second.superseded().await;
+    }
 
     #[test]
     fn mock_reacts_to_commands() {

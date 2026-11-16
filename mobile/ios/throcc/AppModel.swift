@@ -95,10 +95,8 @@ final class AppModel {
     @ObservationIgnored private var askedPictures: Set<Data> = []
     /// The alert that waits for the sheet over the root to close.
     @ObservationIgnored private var heldAlert: AlertText?
-    /// Runs the core's connects, disconnects and forgets off the main actor, in the order asked.
+    /// Runs the core's disconnects, forgets and start-overs off the main actor, in the order asked.
     @ObservationIgnored private let switching = DispatchQueue(label: "cc.thro.throcc.switching", qos: .userInitiated)
-    /// The number of connects and disconnects asked for, by which a connect sees a later one.
-    @ObservationIgnored private var switches = 0
     /// Runs the theme's saves off the main actor, in the order asked.
     @ObservationIgnored private let themeSaves = DispatchQueue(label: "cc.thro.throcc.theme-saves", qos: .utility)
     /// Waits for the Custom theme's colours to rest before it saves them.
@@ -194,23 +192,19 @@ final class AppModel {
             showsRooms = true
             return
         }
-        if connecting != nil {
-            cancelConnect()
-        }
-        switches += 1
-        let (asked, core, switching) = (switches, core, switching)
         connecting = address
-        defer {
-            if asked == switches {
-                connecting = nil
-            }
-        }
+        let core = core
         do {
+            // Not on `switching`: a newer connect has to reach the core while this one waits.
             try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, Error>) in
-                switching.async { done.resume(with: Result { try core.connect(address: address, invite: code) }) }
+                DispatchQueue.global(qos: .userInitiated).async {
+                    done.resume(with: Result { try core.connect(address: address, invite: code) })
+                }
             }
+        } catch CoreError.Cancelled {
+            return
         } catch {
-            guard asked == switches else { return }
+            connecting = nil
             connectedAddress = nil
             showsRooms = false
             switch error as? CoreError {
@@ -218,12 +212,12 @@ final class AppModel {
                 sheet = .pinMismatch(address: address, code: code, expected: expected, actual: actual)
             case .IdentityMissing:
                 sheet = .identityMissing(address: address, code: code)
-            case .Failed, nil:
+            case .Failed, .Cancelled, nil:
                 throw error
             }
             return
         }
-        guard asked == switches else { return }
+        connecting = nil
         connectedAddress = address
         users = []
         invite = nil
@@ -273,9 +267,7 @@ final class AppModel {
 
     /// Gives up the sign-in under way.
     func cancelConnect() {
-        switches += 1
         connecting = nil
-        // Called here, since the sign-in it cancels holds `switching` until it gives up.
         core.cancelConnect()
     }
 
@@ -283,7 +275,6 @@ final class AppModel {
         if connecting != nil {
             cancelConnect()
         }
-        switches += 1
         connectedAddress = nil
         showsRooms = false
         sheet = nil
@@ -299,7 +290,6 @@ final class AppModel {
             cancelConnect()
         }
         if address == connectedAddress {
-            switches += 1
             connectedAddress = nil
         }
         servers.removeAll { $0.address == address }

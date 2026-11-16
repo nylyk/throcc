@@ -12,7 +12,9 @@ use std::collections::HashMap;
 use anyhow::{Context, Result, anyhow};
 use throcc_client_core::account::SignInError;
 use throcc_client_core::blocked::BlockedStore;
-use throcc_client_core::client::{self, Client, ClientApi, Entry, MockClient, UiCommand, UiEvent};
+use throcc_client_core::client::{
+    self, Client, ClientApi, Entry, MockClient, SignIns, UiCommand, UiEvent,
+};
 use throcc_client_core::install;
 use throcc_client_core::keystore::{self, Keystore};
 use throcc_client_core::media::video::View;
@@ -82,6 +84,9 @@ pub enum CoreError {
     /// Anything else, in words for the user.
     #[error("{reason}")]
     Failed { reason: String },
+    /// A newer `connect`, `cancel_connect` or `disconnect` took over from this `connect`.
+    #[error("connecting was cancelled")]
+    Cancelled,
 }
 
 impl From<anyhow::Error> for CoreError {
@@ -302,8 +307,7 @@ pub struct Core {
     connection: Arc<AtomicU64>,
     /// Held while the connection is made or ended, so that happens one at a time.
     switching: Mutex<()>,
-    /// Counts the cancellations; a sign-in gives up once the count passes the one it began at.
-    cancellations: watch::Sender<u64>,
+    sign_ins: SignIns,
     connected: Mutex<Option<Connected>>,
 }
 
@@ -501,9 +505,10 @@ impl Core {
     }
 
     /// Signs in to the server at `address`, joining it first with `invite`, and waits for
-    /// its answer. It takes the place of any connection there was.
+    /// its answer. It takes the place of any connection there was, and of any `connect` under
+    /// way, which fails with [`CoreError::Cancelled`].
     pub fn connect(&self, address: String, invite: Option<String>) -> Result<(), CoreError> {
-        let cancelled = self.next_cancellation();
+        let attempt = self.sign_ins.start();
         let invite = invite.map(|code| parse_invite(&code)).transpose()?;
         let _switching = lock(&self.switching);
         self.end_connection();
@@ -530,7 +535,7 @@ impl Core {
             let entry = match &invite {
                 Some(code) => Entry::Enroll(code),
                 None => Entry::SignIn {
-                    cancelled: Box::pin(cancelled),
+                    cancelled: attempt.superseded(),
                 },
             };
             let connected = Client::connect(
@@ -542,6 +547,9 @@ impl Core {
                 verified,
                 blocked,
             );
+            if !attempt.is_newest() {
+                return Err(CoreError::Cancelled);
+            }
             Arc::new(connected.map_err(|e| CoreError::sign_in(&e, &address))?)
         };
         let events = client.events();
@@ -574,10 +582,10 @@ impl Core {
         self.end_connection();
     }
 
-    /// Cancels every `connect` that is signing in or waiting to, which then fails at once.
-    /// One enrolling with an invite runs to its end.
+    /// Cancels every `connect` under way, which then fails with [`CoreError::Cancelled`]. One
+    /// signing in gives up at once; one enrolling with an invite finishes first.
     pub fn cancel_connect(&self) {
-        self.cancellations.send_modify(|count| *count += 1);
+        self.sign_ins.cancel();
     }
 
     /// Opens the speaker, and the mic `with_mic`, for the room we are in. The app sets up
@@ -829,18 +837,9 @@ impl Core {
             told,
             connection,
             switching: Mutex::new(()),
-            cancellations: watch::Sender::new(0),
+            sign_ins: SignIns::default(),
             connected: Mutex::new(None),
         })
-    }
-
-    /// Resolves once `cancel_connect` is called after this.
-    fn next_cancellation(&self) -> impl Future<Output = ()> + use<> {
-        let mut cancellations = self.cancellations.subscribe();
-        let now = *cancellations.borrow_and_update();
-        async move {
-            let _ = cancellations.wait_for(|count| *count != now).await;
-        }
     }
 
     /// Ends the connection there is, after which the listener hears nothing more of it.

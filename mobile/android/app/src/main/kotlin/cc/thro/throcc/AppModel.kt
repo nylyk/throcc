@@ -86,6 +86,7 @@ val CoreException.explained
         is CoreException.Failed -> reason
         is CoreException.PinMismatch -> "This server’s key changed."
         is CoreException.IdentityMissing -> "Your identity is missing."
+        is CoreException.Cancelled -> "Connecting was cancelled."
     }
 
 /** Whether `address`, a host with or without a port, is on the local network. */
@@ -164,9 +165,6 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
 
     var connectingTo by mutableStateOf<String?>(null)
         private set
-
-    /** Counts the sign-ins asked for and cancelled, so one that was overtaken is ignored. */
-    private var connects = 0
 
     /** Why the last sign-in failed, where the user has a choice to make. */
     var signInProblem by mutableStateOf<SignInProblem?>(null)
@@ -264,7 +262,6 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
 
     /** Gives up the sign-in under way. */
     fun cancelConnect() {
-        connects++
         connectingTo = null
         core.cancelConnect()
     }
@@ -310,12 +307,10 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
     /** Signs in at `address` and opens its rooms, or says why it couldn't. It takes over from a sign-in under way. */
     fun connect(address: String, invite: String? = null) {
         withPermissions(networkPermissions(address)) {
-            if (connectingTo != null) cancelConnect()
-            val attempt = ++connects
             scope.launch {
                 connectingTo = address
                 val failure = signIn(address, invite)
-                if (attempt != connects) return@launch
+                if (failure is CoreException.Cancelled) return@launch
                 connectingTo = null
                 // The dialog opens only once this sign-in is over, so its Try Again never finds it under way.
                 when (failure) {
@@ -327,6 +322,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
                         signInProblem = SignInProblem.IdentityMissing(address, invite)
                     }
                     is CoreException.Failed -> notices.trySend(failure.reason)
+                    is CoreException.Cancelled -> {}
                 }
                 if (failure != null && Screen.Rooms in stack) showPages()
             }
