@@ -15,7 +15,7 @@ use crate::client::SAMPLE_SERVER_PICTURE;
 use crate::keystore::{self, Keystore};
 use crate::server_look::ServerLook;
 use crate::settings::Settings;
-use crate::state::{BLOCKED_NAME, BlockedPerson};
+use crate::state::{BLOCKED_NAME, BlockedPerson, VerifiedIdentity};
 use crate::verified::VerifiedStore;
 
 /// This install's settings, or the defaults with why they couldn't be read.
@@ -136,6 +136,8 @@ pub struct ListedVerified {
     pub key: Fingerprint,
     /// The name they were verified under, or [`BLOCKED_NAME`] while blocked.
     pub name: String,
+    /// The picture they had when verified, as [`verified_picture`] finds it.
+    pub picture: Option<Arc<[u8]>>,
     /// The servers they were seen on, by address where the server is known.
     pub servers: Vec<String>,
 }
@@ -145,8 +147,10 @@ pub fn verified_people(
     verified: &VerifiedStore,
     blocked: &BlockedStore,
     servers: &[KnownServer],
+    fetched: impl Fn(Hash) -> Option<Arc<[u8]>>,
 ) -> Vec<ListedVerified> {
     let listed = verified.list().into_iter().map(|person| ListedVerified {
+        picture: verified_picture(&person, blocked, &fetched),
         name: if blocked.is_blocked(&person.key.0) {
             BLOCKED_NAME.to_owned()
         } else {
@@ -160,6 +164,19 @@ pub fn verified_people(
         key: person.key,
     });
     listed.collect()
+}
+
+/// The picture `person` had when verified, from the cache or else from `fetched`, and none
+/// while they are blocked.
+pub fn verified_picture(
+    person: &VerifiedIdentity,
+    blocked: &BlockedStore,
+    fetched: impl Fn(Hash) -> Option<Arc<[u8]>>,
+) -> Option<Arc<[u8]>> {
+    if blocked.is_blocked(&person.key.0) {
+        return None;
+    }
+    find_picture(person.avatar?, fetched)
 }
 
 /// Someone blocked on this install, as the blocked list shows them.
@@ -180,13 +197,16 @@ pub fn blocked_people(
     fetched: impl Fn(Hash) -> Option<Arc<[u8]>>,
 ) -> Vec<ListedBlocked> {
     let listed = blocked.list().into_iter().map(|person| ListedBlocked {
-        picture: person
-            .avatar
-            .and_then(|hash| cached_picture(hash).or_else(|| fetched(hash))),
+        picture: person.avatar.and_then(|hash| find_picture(hash, &fetched)),
         server: person.server.map(|server| address_of(servers, &server)),
         person,
     });
     listed.collect()
+}
+
+/// The picture behind `hash` from this install's cache, or else from `fetched`.
+fn find_picture(hash: Hash, fetched: impl Fn(Hash) -> Option<Arc<[u8]>>) -> Option<Arc<[u8]>> {
+    cached_picture(hash).or_else(|| fetched(hash))
 }
 
 /// The picture behind `hash` from this install's cache.

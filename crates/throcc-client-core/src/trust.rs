@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use throcc_proto::Fingerprint;
-use throcc_proto::ids::UserId;
+use throcc_proto::ids::{Hash, UserId};
 use throcc_proto::limits::MAX_SIGNED_IN;
 use throcc_proto::messages::PublicKey;
 use tracing::warn;
@@ -94,21 +94,24 @@ impl Trust {
         })
     }
 
-    /// Verifies `key` as `name`, or takes it off the verified ones, if `user` still presents
-    /// it: the user compared the safety number of that key, not of one presented since.
-    /// False, changing nothing, when they don't.
+    /// Verifies `key` as `name` with `avatar`, or takes it off the verified ones, if `user`
+    /// still presents it: the user compared the safety number of that key, not of one
+    /// presented since. False, changing nothing, when they don't.
     pub fn set_verified(
         &mut self,
         user: UserId,
         key: &PublicKey,
         verified: bool,
         name: &str,
+        avatar: Option<Hash>,
     ) -> Result<bool> {
         if self.presented.get(&user) != Some(key) {
             return Ok(false);
         }
         if verified {
-            self.verified.lock().verify(&self.server, user, key, name)?;
+            self.verified
+                .lock()
+                .verify(&self.server, user, key, name, avatar)?;
         } else {
             self.verified.lock().unverify(key)?;
         }
@@ -148,7 +151,7 @@ mod tests {
     fn verified_then_changed(dir: &std::path::Path) -> Trust {
         let mut trust = trust_in(dir);
         trust.note(&[(MARA, REAL)]);
-        trust.set_verified(MARA, &REAL, true, "Mara").unwrap();
+        trust.set_verified(MARA, &REAL, true, "Mara", None).unwrap();
         trust.note(&[(MARA, IMPOSTOR)]);
         trust
     }
@@ -160,12 +163,20 @@ mod tests {
         trust.note(&[(MARA, REAL)]);
         let compared = trust.of(MARA).1.unwrap();
         trust.note(&[(MARA, IMPOSTOR)]);
-        assert!(!trust.set_verified(MARA, &compared, true, "Mara").unwrap());
+        assert!(
+            !trust
+                .set_verified(MARA, &compared, true, "Mara", None)
+                .unwrap()
+        );
         assert_eq!(trust.of(MARA), (false, Some(IMPOSTOR)));
         assert!(trust.verified.list().is_empty());
 
         trust.note(&[(MARA, REAL)]);
-        assert!(trust.set_verified(MARA, &compared, true, "Mara").unwrap());
+        assert!(
+            trust
+                .set_verified(MARA, &compared, true, "Mara", None)
+                .unwrap()
+        );
         assert_eq!(trust.of(MARA), (true, Some(REAL)));
         trust.note(&[(MARA, IMPOSTOR)]);
         assert_eq!(trust.of(MARA), (false, Some(IMPOSTOR)));
@@ -175,15 +186,15 @@ mod tests {
             (Fingerprint(REAL), Fingerprint(IMPOSTOR))
         );
 
-        assert!(!trust.set_verified(MARA, &REAL, false, "").unwrap());
+        assert!(!trust.set_verified(MARA, &REAL, false, "", None).unwrap());
         assert_eq!(
             trust.verified.list().len(),
             1,
             "unverified while another key was shown"
         );
-        assert!(!trust.set_verified(MARA, &REAL, true, "Mara").unwrap());
+        assert!(!trust.set_verified(MARA, &REAL, true, "Mara", None).unwrap());
         trust.note(&[(MARA, REAL)]);
-        assert!(trust.set_verified(MARA, &REAL, false, "").unwrap());
+        assert!(trust.set_verified(MARA, &REAL, false, "", None).unwrap());
         assert!(trust.verified.list().is_empty());
         assert!(trust.warning(MARA).is_none());
     }
@@ -193,7 +204,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut trust = trust_in(dir.path());
         trust.note(&[(MARA, REAL)]);
-        trust.set_verified(MARA, &REAL, true, "Mara").unwrap();
+        trust.set_verified(MARA, &REAL, true, "Mara", None).unwrap();
         trust.forget(MARA);
         assert_eq!(trust.of(MARA), (false, None));
         assert!(trust.note(&[(MARA, REAL)]));
@@ -205,7 +216,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut trust = trust_in(dir.path());
         trust.note(&[(MARA, REAL)]);
-        trust.set_verified(MARA, &REAL, true, "Mara").unwrap();
+        trust.set_verified(MARA, &REAL, true, "Mara", None).unwrap();
 
         let mut next = trust_in(dir.path());
         assert_eq!(next.of(MARA), (false, None));

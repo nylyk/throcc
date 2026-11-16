@@ -145,7 +145,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_from_0_1_gains_an_empty_blocked_list_and_moves_to_version_2() {
+    fn a_file_from_0_1_gains_an_empty_blocked_list_and_moves_to_the_current_version() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FILE);
         fs::write(
@@ -158,7 +158,7 @@ mod tests {
 
         store.block(mara()).unwrap();
         let written: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(written["version"], 2);
+        assert_eq!(written["version"], 3);
         assert_eq!(written["blocked"].as_object().unwrap().len(), 1);
         assert!(written["verified"].is_object());
     }

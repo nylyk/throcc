@@ -328,7 +328,8 @@ private struct VerifiedPage: View {
         ThemedList {
             Section {
                 ForEach(people, id: \.key) { person in
-                    HStack {
+                    HStack(spacing: 12) {
+                        Avatar(picture: model.picture(in: person.picture), initial: initial(name: person.name), size: 28)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(blocked.contains(person.key) ? blockedName() : person.name).lineLimit(1).foregroundStyle(.text)
                             Text(person.servers.joined(separator: ", "))

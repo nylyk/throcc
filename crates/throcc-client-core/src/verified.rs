@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use throcc_proto::Fingerprint;
-use throcc_proto::ids::UserId;
+use throcc_proto::ids::{Hash, UserId};
 use throcc_proto::messages::PublicKey;
 
 use crate::lock;
@@ -48,6 +48,8 @@ pub(crate) struct VerifiedRecords {
 struct VerifiedEntry {
     /// The name they were shown with when verified, to tell them apart in the list.
     name: String,
+    /// The picture they were shown with when verified.
+    avatar: Option<Hex>,
     seen: BTreeSet<SeenAs>,
 }
 
@@ -169,17 +171,20 @@ impl VerifiedKeys {
         })
     }
 
-    /// Verifies `key`, which `server` shows as `user` under `name`.
+    /// Verifies `key`, which `server` shows as `user` under `name` and `avatar`.
     pub fn verify(
         &mut self,
         server: &Fingerprint,
         user: UserId,
         key: &PublicKey,
         name: &str,
+        avatar: Option<Hash>,
     ) -> Result<()> {
         let at = seen_as(server, user);
         self.change(|records| {
-            records.verified.entry(Hex(*key)).or_default().name = name.to_owned();
+            let verified = records.verified.entry(Hex(*key)).or_default();
+            verified.name = name.to_owned();
+            verified.avatar = avatar.map(|hash| Hex(hash.0));
             records.see(key, at);
             records.forget_change(at);
             records.changed.retain(|c| c.now.0 != *key);
@@ -223,6 +228,7 @@ impl VerifiedKeys {
             .map(|(Hex(key), verified)| VerifiedIdentity {
                 key: Fingerprint(*key),
                 name: verified.name.clone(),
+                avatar: verified.avatar.map(|Hex(hash)| Hash(hash)),
                 servers: verified
                     .seen
                     .iter()
@@ -338,7 +344,9 @@ mod tests {
     fn a_verified_key_is_verified_on_every_server_and_after_a_reload() {
         let dir = tempfile::tempdir().unwrap();
         let mut verified = VerifiedKeys::load(dir.path()).unwrap();
-        verified.verify(&HERE, UserId(4), &[4; 32], "Mara").unwrap();
+        verified
+            .verify(&HERE, UserId(4), &[4; 32], "Mara", Some(Hash([6; 32])))
+            .unwrap();
         let reloaded = VerifiedKeys::load(dir.path()).unwrap();
         assert!(reloaded.is_verified(&[4; 32]));
         assert!(!reloaded.is_verified(&[5; 32]));
@@ -350,6 +358,7 @@ mod tests {
         assert_eq!(reloaded.verified_at(&THERE, UserId(9)), Some([4; 32]));
         assert_eq!(reloaded.list()[0].servers, [HERE, THERE]);
         assert_eq!(reloaded.list()[0].name, "Mara");
+        assert_eq!(reloaded.list()[0].avatar, Some(Hash([6; 32])));
     }
 
     #[test]
@@ -365,8 +374,12 @@ mod tests {
     fn the_key_seen_last_as_a_user_is_the_one_expected_there() {
         let dir = tempfile::tempdir().unwrap();
         let mut verified = VerifiedKeys::load(dir.path()).unwrap();
-        verified.verify(&HERE, UserId(4), &[4; 32], "Mara").unwrap();
-        verified.verify(&HERE, UserId(5), &[5; 32], "Teo").unwrap();
+        verified
+            .verify(&HERE, UserId(4), &[4; 32], "Mara", None)
+            .unwrap();
+        verified
+            .verify(&HERE, UserId(5), &[5; 32], "Teo", None)
+            .unwrap();
         verified.presented(&HERE, UserId(4), &[5; 32]).unwrap();
         assert_eq!(verified.verified_at(&HERE, UserId(4)), Some([5; 32]));
 
@@ -385,7 +398,9 @@ mod tests {
     fn a_changed_key_stays_noted_until_verified_or_dismissed() {
         let dir = tempfile::tempdir().unwrap();
         let mut verified = VerifiedKeys::load(dir.path()).unwrap();
-        verified.verify(&HERE, UserId(4), &[4; 32], "Mara").unwrap();
+        verified
+            .verify(&HERE, UserId(4), &[4; 32], "Mara", None)
+            .unwrap();
         verified.presented(&HERE, UserId(4), &[9; 32]).unwrap();
         verified.presented(&HERE, UserId(4), &[4; 32]).unwrap();
         let reloaded = VerifiedKeys::load(dir.path()).unwrap();
@@ -394,7 +409,7 @@ mod tests {
         assert_eq!(reloaded.changed_at(&THERE, UserId(4)), None);
 
         verified
-            .verify(&THERE, UserId(2), &[9; 32], "Mara")
+            .verify(&THERE, UserId(2), &[9; 32], "Mara", None)
             .unwrap();
         assert_eq!(
             verified.changed_at(&HERE, UserId(4)),
@@ -416,7 +431,9 @@ mod tests {
     fn a_server_flipping_between_new_keys_does_not_rewrite_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let mut verified = VerifiedKeys::load(dir.path()).unwrap();
-        verified.verify(&HERE, UserId(4), &[4; 32], "Mara").unwrap();
+        verified
+            .verify(&HERE, UserId(4), &[4; 32], "Mara", None)
+            .unwrap();
         verified.presented(&HERE, UserId(4), &[9; 32]).unwrap();
         let written = std::fs::read(dir.path().join(FILE)).unwrap();
         for _ in 0..10 {
@@ -428,13 +445,15 @@ mod tests {
         assert_eq!(std::fs::read(dir.path().join(FILE)).unwrap(), written);
         assert_eq!(verified.changed_at(&HERE, UserId(4)), Some([8; 32]));
 
-        verified.verify(&HERE, UserId(5), &[5; 32], "Teo").unwrap();
+        verified
+            .verify(&HERE, UserId(5), &[5; 32], "Teo", None)
+            .unwrap();
         let reloaded = VerifiedKeys::load(dir.path()).unwrap();
         assert_eq!(reloaded.changed_at(&HERE, UserId(4)), Some([8; 32]));
 
         verified.presented(&HERE, UserId(4), &[9; 32]).unwrap();
         verified
-            .verify(&THERE, UserId(2), &[9; 32], "Mara")
+            .verify(&THERE, UserId(2), &[9; 32], "Mara", None)
             .unwrap();
         assert_eq!(
             verified.changed_at(&HERE, UserId(4)),
@@ -448,8 +467,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut first = VerifiedKeys::load(dir.path()).unwrap();
         let mut second = VerifiedKeys::load(dir.path()).unwrap();
-        first.verify(&HERE, UserId(4), &[4; 32], "Mara").unwrap();
-        second.verify(&HERE, UserId(5), &[5; 32], "Teo").unwrap();
+        first
+            .verify(&HERE, UserId(4), &[4; 32], "Mara", None)
+            .unwrap();
+        second
+            .verify(&HERE, UserId(5), &[5; 32], "Teo", None)
+            .unwrap();
         assert!(second.is_verified(&[4; 32]));
         let reloaded = VerifiedKeys::load(dir.path()).unwrap();
         assert!(reloaded.is_verified(&[4; 32]) && reloaded.is_verified(&[5; 32]));
@@ -462,7 +485,7 @@ mod tests {
         let elsewhere = VerifiedStore::load(dir.path()).unwrap();
         elsewhere
             .lock()
-            .verify(&HERE, UserId(4), &[4; 32], "Mara")
+            .verify(&HERE, UserId(4), &[4; 32], "Mara", None)
             .unwrap();
         assert!(here.list().is_empty());
         here.reload().unwrap();
@@ -476,13 +499,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_file_from_0_2_keeps_its_verified_people_without_pictures() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = "04".repeat(32);
+        let file = format!(
+            r#"{{"version": 2, "verified": {{"{key}": {{"name": "Mara", "seen": []}}}}, "changed": [], "playback": {{}}, "blocked": {{}}}}"#
+        );
+        std::fs::write(dir.path().join(FILE), file).unwrap();
+        let mut verified = VerifiedKeys::load(dir.path()).unwrap();
+        assert_eq!(verified.list()[0].name, "Mara");
+        assert_eq!(verified.list()[0].avatar, None);
+
+        verified
+            .verify(&HERE, UserId(5), &[5; 32], "Teo", Some(Hash([6; 32])))
+            .unwrap();
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join(FILE)).unwrap()).unwrap();
+        assert_eq!(written["version"], 3);
+        assert_eq!(VerifiedKeys::load(dir.path()).unwrap().list().len(), 2);
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_file_is_private() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let mut verified = VerifiedKeys::load(dir.path()).unwrap();
-        verified.verify(&HERE, UserId(4), &[4; 32], "Mara").unwrap();
+        verified
+            .verify(&HERE, UserId(4), &[4; 32], "Mara", None)
+            .unwrap();
         let mode = std::fs::metadata(dir.path().join(FILE))
             .unwrap()
             .permissions()

@@ -240,6 +240,7 @@ pub struct VerifiedPerson {
     pub key: Vec<u8>,
     /// The name they had when verified.
     pub name: String,
+    pub picture: Option<Vec<u8>>,
     /// The servers they were seen on, by address where the server is still known.
     pub servers: Vec<String>,
 }
@@ -758,10 +759,13 @@ impl Core {
     /// Everyone verified on this install.
     pub fn verified(&self) -> Vec<VerifiedPerson> {
         let servers = self.known_servers();
-        let people = install::verified_people(&self.verified, &self.blocked, &servers);
+        let connected = lock(&self.connected);
+        let fetched = |hash| connected.as_ref()?.client.avatar(hash);
+        let people = install::verified_people(&self.verified, &self.blocked, &servers, fetched);
         let people = people.into_iter().map(|person| VerifiedPerson {
             key: person.key.0.to_vec(),
             name: person.name,
+            picture: showable(person.picture),
             servers: person.servers,
         });
         people.collect()

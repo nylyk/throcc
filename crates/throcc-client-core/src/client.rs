@@ -616,11 +616,11 @@ impl ClientApi for MockClient {
                 }
                 p.verified = verified;
                 p.verified_name = verified.then(|| p.name.clone());
-                let name = p.name.clone();
+                let (name, avatar) = (p.name.clone(), p.avatar);
                 let mut keys = self.verified.lock();
                 if verified {
                     if let Some(server) = s.server.as_ref().map(|s| s.fingerprint) {
-                        let _ = keys.verify(&server, user, &key.0, &name);
+                        let _ = keys.verify(&server, user, &key.0, &name, avatar);
                     }
                     s.key_warnings.retain(|w| w.user != user);
                 } else {
@@ -884,7 +884,8 @@ fn add_sample_verified(verified: &VerifiedStore) {
         (here, 5, sample_key(5), "sleepyfox"),
         (here, 6, sample_key(6), "Juno"),
     ] {
-        let _ = keys.verify(&server, UserId(user), &key, name);
+        let avatar = sample_picture(UserId(user)).map(Hash::of);
+        let _ = keys.verify(&server, UserId(user), &key, name, avatar);
     }
 }
 

@@ -560,9 +560,15 @@ fn server_address(app: &ThroccApp, server: &Fingerprint) -> String {
 /// Everyone verified on this computer, on any server, each with the servers they were seen
 /// on and a way to take them off.
 fn verified(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
-    let people = app.verified.list();
-    let rows = people.iter().enumerate().map(|(i, person)| {
+    let rows = app.verified_people.iter().enumerate().map(|(i, look)| {
+        let person = &look.person;
         let key = person.key;
+        let name = if app.blocked.is_blocked(&key.0) {
+            BLOCKED_NAME.to_owned()
+        } else {
+            person.name.clone()
+        };
+        let seed = u64::from_le_bytes(key.0.first_chunk().copied().unwrap_or_default());
         let servers: Vec<String> = person
             .servers
             .iter()
@@ -574,17 +580,14 @@ fn verified(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             .gap_3()
             .min_h(theme::TOUCH)
             .px_2()
+            .child(avatar(&name, seed, look.picture.clone(), px(26.), false))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .child(div().truncate().child(if app.blocked.is_blocked(&key.0) {
-                        BLOCKED_NAME.to_owned()
-                    } else {
-                        person.name.clone()
-                    }))
+                    .child(div().truncate().child(name))
                     .child(
                         div()
                             .child(servers.join(", "))
@@ -614,7 +617,7 @@ fn verified(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .child(section("People that you have verified"))
         .children(rows)
         .children(
-            people.is_empty().then(|| {
+            app.verified_people.is_empty().then(|| {
                 caption("Nobody yet. Compare safety numbers with someone to verify them.")
             }),
         )

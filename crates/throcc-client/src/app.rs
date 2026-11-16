@@ -26,7 +26,7 @@ use throcc_client_core::safety::SafetyCheck;
 use throcc_client_core::settings::{Appearance, AudioSettings, Settings, Transmit};
 use throcc_client_core::state::{
     BlockedPerson, ConnectionStatus, JoinAction, KeyWarning, ServerView, ShareChoice, Sound,
-    SoundLevel, State,
+    SoundLevel, State, VerifiedIdentity,
 };
 use throcc_client_core::theme as core_theme;
 use throcc_client_core::verified::VerifiedStore;
@@ -296,6 +296,12 @@ pub struct BlockedLook {
     pub picture: Option<Arc<RenderImage>>,
 }
 
+/// Someone verified, with the picture they had when verified, decoded.
+pub struct VerifiedLook {
+    pub person: VerifiedIdentity,
+    pub picture: Option<Arc<RenderImage>>,
+}
+
 /// A known server's name and picture as last seen, for while we aren't connected to it.
 pub struct CachedLook {
     pub name: Option<String>,
@@ -364,6 +370,23 @@ fn blocked_people(blocked: &BlockedStore) -> Vec<BlockedLook> {
         person: listed.person,
     };
     listed.into_iter().map(look).collect()
+}
+
+/// Everyone in `verified` with the picture they had when verified, where it is still cached
+/// or `client` has it.
+fn verified_people(
+    verified: &VerifiedStore,
+    blocked: &BlockedStore,
+    client: Option<&dyn ClientApi>,
+) -> Vec<VerifiedLook> {
+    let fetched = |hash| client?.avatar(hash);
+    let look = |person: VerifiedIdentity| VerifiedLook {
+        picture: install::verified_picture(&person, blocked, fetched)
+            .as_deref()
+            .and_then(crate::avatar::decode),
+        person,
+    };
+    verified.list().into_iter().map(look).collect()
 }
 
 /// Decoded pictures kept before the ones nothing shown uses are dropped.
@@ -447,6 +470,8 @@ pub struct ThroccApp {
     pub profile_form: PictureForm,
     pub known_servers: Vec<(String, Fingerprint)>,
     pub verified: VerifiedStore,
+    /// The verified people as the settings page lists them.
+    pub verified_people: Vec<VerifiedLook>,
     pub blocked: BlockedStore,
     /// The blocked people as the settings page lists them.
     pub blocked_people: Vec<BlockedLook>,
@@ -614,6 +639,7 @@ impl ThroccApp {
             profile_avatar: None,
             profile_form: PictureForm::default(),
             known_servers,
+            verified_people: verified_people(&verified, &blocked, None),
             verified,
             blocked_people: blocked_people(&blocked),
             blocked,
@@ -947,7 +973,13 @@ impl ThroccApp {
             tracing::warn!("could not save who is verified: {e:#}");
             self.verified_problem = Some(format!("Couldn't save who you verified: {e}"));
         }
+        self.list_verified();
         self.command(UiCommand::VerifiedChanged);
+    }
+
+    fn list_verified(&mut self) {
+        let client = self.client.as_deref();
+        self.verified_people = verified_people(&self.verified, &self.blocked, client);
     }
 
     /// Lists the blocked people again. A list with someone on it was read, whatever went
@@ -1611,6 +1643,7 @@ impl ThroccApp {
             {
                 self.command(UiCommand::ListUsers);
             }
+            Screen::Settings(SettingsPage::Verified) => self.list_verified(),
             Screen::Settings(SettingsPage::Blocked) => {
                 self.list_blocked();
             }
@@ -2156,7 +2189,7 @@ impl ThroccApp {
             }
             "settings" => self.screen = Screen::Settings(SettingsPage::Audio),
             "appearance" => self.screen = Screen::Settings(SettingsPage::Appearance),
-            "verified" => self.screen = Screen::Settings(SettingsPage::Verified),
+            "verified" => self.show_screen(Screen::Settings(SettingsPage::Verified), window, cx),
             "blocked" | "blockedmenu" | "blockedpeople" => {
                 joined(self);
                 self.command(UiCommand::Block(UserId(3)));

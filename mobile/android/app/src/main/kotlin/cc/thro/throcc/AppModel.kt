@@ -204,6 +204,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
     private val pictures = mutableStateMapOf<String, Picture>()
     private var serverPictures by mutableStateOf(emptyMap<String, Picture>())
     private var blockedPictures by mutableStateOf(emptyMap<String, Picture>())
+    private var verifiedPictures by mutableStateOf(emptyMap<String, Picture>())
 
     /** The connection a sample shows in place of the mock's. */
     private var sampleConnection: Connection? = null
@@ -399,7 +400,15 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
     }
 
     fun loadVerified() {
-        scope.launch { ask { core.verified() }?.let { verified = it } }
+        scope.launch {
+            val kept = verifiedPictures
+            val (people, peoplePictures) = ask {
+                val people = core.verified()
+                people to decoded(people.map { it.key to it.picture }, kept)
+            } ?: return@launch
+            verified = people
+            verifiedPictures = peoplePictures
+        }
     }
 
     fun unverify(key: ByteArray) {
@@ -437,6 +446,8 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
     fun picture(server: KnownServer): ImageBitmap? = serverPictures[server.fingerprint.toHexString()]?.image
 
     fun picture(person: BlockedPerson): ImageBitmap? = blockedPictures[person.key.toHexString()]?.image
+
+    fun picture(person: VerifiedPerson): ImageBitmap? = verifiedPictures[person.key.toHexString()]?.image
 
     /** What `action` gave off the main thread, or null where it failed, which shows as a notice. */
     private suspend fun <T> ask(action: () -> T): T? = withContext(Dispatchers.IO) {

@@ -128,7 +128,7 @@ mod tests {
         let mut verified = crate::verified::VerifiedKeys::load(dir.path()).unwrap();
         let server = throcc_proto::Fingerprint([1; 32]);
         let user = throcc_proto::ids::UserId(4);
-        verified.verify(&server, user, &MARA, "Mara").unwrap();
+        verified.verify(&server, user, &MARA, "Mara", None).unwrap();
         let mut saved = SavedPlayback::load(dir.path()).unwrap();
         let quiet = SoundLevel {
             volume: 0.3,

@@ -450,6 +450,8 @@ pub struct VerifiedIdentity {
     pub key: Fingerprint,
     /// The name they had when verified.
     pub name: String,
+    /// The picture they had when verified.
+    pub avatar: Option<Hash>,
     /// The servers it was seen on.
     pub servers: Vec<Fingerprint>,
 }

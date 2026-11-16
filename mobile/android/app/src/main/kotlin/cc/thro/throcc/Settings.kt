@@ -358,6 +358,7 @@ fun VerifiedPeople(model: AppModel, state: CoreState) {
                 GroupRow(
                     index,
                     people.size,
+                    leading = { Avatar(model.picture(person), initial(person.name), 40.dp) },
                     trailing = {
                         IconButton({ removing = person.key }) {
                             Icon(Icons.Default.RemoveModerator, "Mark as Not Verified")

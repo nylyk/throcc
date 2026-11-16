@@ -1137,12 +1137,11 @@ impl Session {
     /// Verifies `key`, whose safety number the user compared, or takes it off the verified
     /// ones, while `user` still presents it.
     fn set_verified(&mut self, user: UserId, key: &PublicKey, verified: bool) {
-        let name = self
-            .shared
-            .state()
-            .person(user)
-            .map_or_else(|| person_name(user, ""), |p| p.name.clone());
-        let changed = self.trust.set_verified(user, key, verified, &name);
+        let (name, avatar) = self.shared.state().person(user).map_or_else(
+            || (person_name(user, ""), None),
+            |p| (p.name.clone(), p.avatar),
+        );
+        let changed = self.trust.set_verified(user, key, verified, &name, avatar);
         if let Ok(false) = changed {
             self.shared.notice(if self.trust.of(user).1.is_some() {
                 format!(
