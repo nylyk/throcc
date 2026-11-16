@@ -23,23 +23,29 @@ async fn concurrent_requests_match_by_id() {
     let server = start_server();
     let alice = Arc::new(admin(&server).await);
     let bob = Arc::new(invited(&server, &alice).await);
+    let picture = vec![1, 2, 3];
+    let set = alice
+        .request(Request::SetServerAvatar(Some(picture.clone())))
+        .await;
+    assert_eq!(set, Response::Ok);
 
     let mut tasks = JoinSet::new();
-    for (who, client) in [(0u8, alice.clone()), (1u8, bob.clone())] {
+    for client in [alice.clone(), bob.clone()] {
         for i in 0..40u8 {
-            let client = client.clone();
+            let (client, picture) = (client.clone(), picture.clone());
             tasks.spawn(async move {
-                let bytes = vec![who, i];
-                let Response::AvatarHash(hash) =
-                    client.request(Request::UploadAvatar(bytes.clone())).await
-                else {
-                    panic!("expected a hash");
+                let held = i % 2 == 0;
+                let hash = if held {
+                    Hash::of(&picture)
+                } else {
+                    Hash([i; 32])
                 };
-                let Response::Avatar(back) = client.request(Request::FetchAvatar(hash)).await
-                else {
-                    panic!("expected an avatar");
-                };
-                assert_eq!(back, bytes);
+                let answer = client.request(Request::FetchAvatar(hash)).await;
+                match answer {
+                    Response::Avatar(back) => assert!(held && back == picture),
+                    Response::Err { .. } => assert!(!held),
+                    other => panic!("unexpected {other:?}"),
+                }
             });
         }
     }

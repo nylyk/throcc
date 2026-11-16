@@ -528,13 +528,9 @@ async fn run_command(keystore: &Keystore, link: &ControlLink, line: &str) -> Res
             password: None,
         },
         "name" => {
-            let avatar = load_profile(keystore, None)?.avatar();
+            let profile = load_profile(keystore, Some(rest.to_owned()))?;
             let server = &link.connected.fingerprint;
-            Request::SetProfile {
-                name: rest.to_owned(),
-                avatar,
-                sig: keystore.profile_sig(server, welcome.me, rest, avatar),
-            }
+            Request::SetProfile(profile.signed(keystore.identity(), server, welcome.me))
         }
         other => bail!("unknown command {other}"),
     };

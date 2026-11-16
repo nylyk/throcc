@@ -75,7 +75,7 @@ fn control_messages_encode_to_pinned_bytes() {
                 }),
             }),
         },
-        "00ac020601000101c03e038014a00b3c01",
+        "00ac020501000101c03e038014a00b3c01",
     );
     pinned(
         ClientMessage::Request {
@@ -85,7 +85,7 @@ fn control_messages_encode_to_pinned_bytes() {
                 kind: Recovery::Idr,
             },
         },
-        "0001080501",
+        "0001070501",
     );
     pinned(
         ClientMessage::Request {
@@ -95,7 +95,21 @@ fn control_messages_encode_to_pinned_bytes() {
                 room: RoomId(3),
             },
         },
-        "0001140203",
+        "0001130203",
+    );
+    pinned(
+        ClientMessage::Request {
+            id: 1,
+            request: Request::SetProfile(SignedProfile {
+                name: "a".into(),
+                picture: None,
+                sig: [3; 64],
+            }),
+        },
+        concat!(
+            "000102016100400303030303030303030303030303030303030303030303030303030303030303",
+            "0303030303030303030303030303030303030303030303030303030303030303",
+        ),
     );
     pinned(
         ServerMessage::Response {

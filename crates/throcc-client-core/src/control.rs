@@ -11,7 +11,7 @@ use throcc_proto::ids::RoomId;
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
     AccountStep, AuthError, AuthResult, ClientHello, ClientMessage, Event, PROTOCOL, PakeFinish,
-    PakeStep, Request, Response, ServerHello, ServerMessage, SignIn, SignedProfile, Welcome,
+    PakeStep, Request, Response, ServerHello, ServerMessage, SignIn, Welcome,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{mpsc, oneshot};
@@ -187,18 +187,11 @@ async fn finish_login(
             return Err(e.into());
         }
     };
-    let message = identity::profile_message(
-        &connected.fingerprint.0,
-        me,
-        &profile.name,
-        profile.avatar(),
-    );
-    let signed = SignedProfile {
-        name: profile.name.clone(),
-        picture: profile.picture.as_deref().map(<[u8]>::to_vec),
-        sig: identity.sign(&message),
-    };
-    write(&mut send, &signed).await?;
+    write(
+        &mut send,
+        &profile.signed(identity, &connected.fingerprint, me),
+    )
+    .await?;
     let result: AuthResult = read(&mut recv).await?;
     let welcome = match result {
         AuthResult::Ok(welcome) => *welcome,
@@ -306,7 +299,6 @@ pub fn refusal(response: Response) -> String {
         Response::Placement(_) => "Placement",
         Response::Invite { .. } => "Invite",
         Response::Users(_) => "Users",
-        Response::AvatarHash(_) => "AvatarHash",
         Response::Avatar(_) => "Avatar",
     };
     format!("unexpected reply {kind}")

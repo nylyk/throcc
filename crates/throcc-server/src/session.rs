@@ -336,7 +336,6 @@ fn request_kind(req: &Request) -> &'static str {
         Request::JoinRoom { .. } => "JoinRoom",
         Request::LeaveRoom => "LeaveRoom",
         Request::SetProfile { .. } => "SetProfile",
-        Request::UploadAvatar(_) => "UploadAvatar",
         Request::FetchAvatar(_) => "FetchAvatar",
         Request::SetEncryptionKey(_) => "SetEncryptionKey",
         Request::SetMedia(_) => "SetMedia",

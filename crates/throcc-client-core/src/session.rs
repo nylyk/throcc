@@ -10,8 +10,7 @@ use throcc_proto::ids::{Hash, MediaId, RoomId, UserId};
 use throcc_proto::limits::{MAX_ROOM_MEMBERS, MAX_ROOM_SHARES};
 use throcc_proto::messages::{
     Audiences, AuthError, ErrorCode, Event as ServerEvent, MediaState, Peer, Placement, Presence,
-    PublicKey, Recovery, Request, Response, ShareConfig, ShareTracks, Signature, Tracks, User,
-    Welcome,
+    PublicKey, Recovery, Request, Response, ShareConfig, ShareTracks, Tracks, User, Welcome,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{Semaphore, broadcast, mpsc, watch};
@@ -267,8 +266,8 @@ pub(crate) struct Session {
     profile: Profile,
     /// Our profile as the server has it.
     server_profile: Profile,
-    /// Our profile as the server refused it for coming too soon after the last change. Its
-    /// picture is uploaded, and the health refresh sets it again.
+    /// Our profile as the server refused it for coming too soon after the last change, which
+    /// the health refresh sets again.
     too_soon_profile: Option<Profile>,
     saved_playback: SavedPlayback,
     /// Each sound set for people who presented no identity key yet, saved under the key
@@ -445,39 +444,24 @@ impl Session {
         session
     }
 
-    /// Gives the server our profile, uploading the picture only if the server lacks it, and
-    /// tells the UI how that went.
+    /// Gives the server our profile unless it has it, and tells the UI how that went.
     async fn push_profile(&mut self) {
         self.too_soon_profile = None;
-        let wanted = self.profile.clone();
-        if wanted == self.server_profile {
+        if self.profile == self.server_profile {
             return self.shared.emit(UiEvent::ProfileSaved);
         }
-        if let Some(bytes) = &wanted.picture
-            && wanted.avatar() != self.server_profile.avatar()
-        {
-            match self
-                .call
-                .request(Request::UploadAvatar(bytes.to_vec()))
-                .await
-            {
-                Ok(Response::AvatarHash(hash)) if Some(hash) == wanted.avatar() => {}
-                other => return self.profile_refused(other),
-            }
-        }
-        self.set_profile(wanted).await;
+        self.set_profile(self.profile.clone()).await;
     }
 
-    /// Puts `wanted`, whose picture the server holds, on our profile and tells the UI how that
-    /// went. A refusal for coming too soon tells it nothing until a later try settles it.
+    /// Puts `wanted` on our profile and tells the UI how that went. A refusal for coming too
+    /// soon tells it nothing until a later try settles it.
     async fn set_profile(&mut self, wanted: Profile) {
-        let avatar = wanted.avatar();
-        let request = Request::SetProfile {
-            name: wanted.name.clone(),
-            avatar,
-            sig: self.profile_sig(&wanted.name, avatar),
-        };
-        match self.call.request(request).await {
+        let signed = wanted.signed(
+            self.keystore.identity(),
+            &self.call.server(),
+            self.call.me(),
+        );
+        match self.call.request(Request::SetProfile(signed)).await {
             Ok(Response::Ok) => {
                 self.server_profile = wanted;
                 self.shared.emit(UiEvent::ProfileSaved);
@@ -490,14 +474,8 @@ impl Session {
         }
     }
 
-    /// Our identity key's signature over `name` and `avatar` for this server and for us.
-    fn profile_sig(&self, name: &str, avatar: Option<Hash>) -> Signature {
-        self.keystore
-            .profile_sig(&self.call.server(), self.call.me(), name, avatar)
-    }
-
     /// Tells the UI the server refused our profile. A push the closing connection cut off
-    /// tells it nothing, since the session pushes again once reconnected.
+    /// tells it nothing, since signing in again gives the server our profile.
     fn profile_refused(&self, response: anyhow::Result<Response>) {
         if self.call.connection.close_reason().is_none() {
             self.shared.emit(UiEvent::ProfileRefused(refusal(response)));
@@ -1562,14 +1540,7 @@ impl Session {
         picture: Option<Option<Vec<u8>>>,
     ) -> anyhow::Result<Response> {
         if let Some(picture) = picture {
-            let avatar = match picture {
-                Some(bytes) => match self.call.request(Request::UploadAvatar(bytes)).await? {
-                    Response::AvatarHash(hash) => Some(hash),
-                    other => return Ok(other),
-                },
-                None => None,
-            };
-            let answer = self.call.request(Request::SetServerAvatar(avatar)).await?;
+            let answer = self.call.request(Request::SetServerAvatar(picture)).await?;
             if answer != Response::Ok {
                 return Ok(answer);
             }

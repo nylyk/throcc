@@ -3,18 +3,17 @@ use std::time::{Duration, Instant};
 
 use throcc_crypto::identity::{self, random};
 use throcc_crypto::pake::{ServerPake, Transcript};
-use throcc_proto::ids::Hash;
 use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::invite::{self, ID_CHARS, SECRET_CHARS};
 use throcc_proto::messages::{
-    AccountStep, AuthError, Event, MAX_AVATAR_BYTES, PakeFinish, PakeReply, PakeStep, PublicKey,
-    SignIn, SignedProfile, valid_name,
+    AccountStep, AuthError, Event, PakeFinish, PakeReply, PakeStep, PublicKey, SignIn,
+    SignedProfile, valid_name,
 };
 use tracing::{debug, info, warn};
 
 use crate::database::{Enrolled, InviteRow, UserRow};
 use crate::limits::SourceKey;
-use crate::rooms::Hub;
+use crate::rooms::{Hub, Refusal, check_profile};
 use crate::session::{FrameStream, read_handshake, read_profile, write_frame};
 use crate::{ServerState, unix_now};
 
@@ -118,21 +117,10 @@ async fn take_profile(
     let profile: SignedProfile = read_profile(&mut stream.recv)
         .await
         .map_err(|_| BAD_PROFILE)?;
-    let avatar = profile.picture.as_deref().map(Hash::of);
-    let signed = identity::verify_profile(
-        &row.pubkey,
-        &shared.fingerprint.0,
-        row.id,
-        &profile.name,
-        avatar,
-        &profile.sig,
-    );
-    let fits = profile
-        .picture
-        .as_ref()
-        .is_none_or(|picture| picture.len() <= MAX_AVATAR_BYTES);
-    if signed.is_err() || !fits || valid_name(&profile.name) != Some(profile.name.as_str()) {
-        debug!(user = row.id.0, "refusing a sign-in's profile");
+    if let Err(Refusal(_, reason)) =
+        check_profile(&profile, &row.pubkey, &shared.fingerprint, row.id)
+    {
+        debug!(user = row.id.0, "refusing a sign-in's profile: {reason}");
         return Err(BAD_PROFILE);
     }
     Ok(profile)

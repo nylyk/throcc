@@ -5,13 +5,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use throcc_client_core::profile::Profile;
 use throcc_crypto::identity::encryption_key_message;
 use throcc_proto::framing;
 use throcc_proto::ids::{Epoch, Hash, Role, RoomId, UserId};
 use throcc_proto::limits::{MAX_ROOM_MEMBERS, MAX_ROOM_SHARES, MAX_ROOMS, MAX_WATCHED};
 use throcc_proto::messages::{
     ClientMessage, Codec, ErrorCode, Event, MAX_AVATAR_BYTES, MediaState, Presence, Request,
-    Response, ServerMessage, SignedEncryptionKey, Welcome,
+    Response, ServerMessage, SignedEncryptionKey, SignedProfile, Welcome,
 };
 use throcc_server::rooms::{Handled, INACTIVE_ACCOUNT_LIFETIME, PasswordWork};
 use throcc_server::unix_now;
@@ -299,14 +300,13 @@ async fn a_profile_is_kept_only_with_its_owners_signature_and_shown_with_it() {
     let alice_id = alice.link.welcome.me;
     let forged = signed_profile(&alice, &bob, "Alice");
     assert_error(&alice.request(forged).await, ErrorCode::Invalid);
-    let server_fingerprint = &alice.link.connected.fingerprint;
-    let other_name = Request::SetProfile {
-        name: "Alice".into(),
-        avatar: None,
-        sig: alice
-            .keystore
-            .profile_sig(server_fingerprint, alice_id, "Mallory", None),
+    let Request::SetProfile(mallory) = signed_profile(&alice, &alice, "Mallory") else {
+        unreachable!()
     };
+    let other_name = Request::SetProfile(SignedProfile {
+        name: "Alice".into(),
+        ..mallory
+    });
     assert_error(&alice.request(other_name).await, ErrorCode::Invalid);
     let own = signed_profile(&alice, &alice, "Alice");
     assert_eq!(alice.request(own.clone()).await, Response::Ok);
@@ -318,7 +318,7 @@ async fn a_profile_is_kept_only_with_its_owners_signature_and_shown_with_it() {
             _ => None,
         })
         .await;
-    assert!(matches!(own, Request::SetProfile { sig, .. } if shown == sig));
+    assert!(matches!(own, Request::SetProfile(p) if shown == p.sig));
 }
 
 #[tokio::test]
@@ -329,10 +329,19 @@ async fn profile_changes_are_rate_limited_and_avatars_capped() {
     assert_eq!(alice.request(profile("Alice")).await, Response::Ok);
     let second = alice.request(profile("Alicia")).await;
     assert_error(&second, ErrorCode::RateLimited);
-    let big = alice
-        .request(Request::UploadAvatar(vec![0; MAX_AVATAR_BYTES + 1]))
-        .await;
-    assert_error(&big, ErrorCode::TooLarge);
+    let big = Profile {
+        name: "Alicia".into(),
+        picture: Some(Arc::from(vec![0; MAX_AVATAR_BYTES + 1])),
+    };
+    let big = big.signed(
+        alice.keystore.identity(),
+        &alice.link.connected.fingerprint,
+        alice.link.welcome.me,
+    );
+    assert_error(
+        &alice.request(Request::SetProfile(big)).await,
+        ErrorCode::TooLarge,
+    );
     let empty_name = alice.request(profile("   ")).await;
     assert_error(&empty_name, ErrorCode::Invalid);
 }
@@ -532,8 +541,8 @@ async fn picture_uploads_are_rate_limited() {
     let mut uploaded = 0;
     let last = loop {
         let picture = vec![uploaded as u8; MAX_AVATAR_BYTES];
-        match alice.request(Request::UploadAvatar(picture)).await {
-            Response::AvatarHash(_) if uploaded < 100 => uploaded += 1,
+        match alice.request(Request::SetServerAvatar(Some(picture))).await {
+            Response::Ok if uploaded < 100 => uploaded += 1,
             other => break other,
         }
     };
@@ -825,9 +834,9 @@ async fn a_member_who_stops_reading_pictures_stops_being_read() {
     let server = start_server();
     let alice = admin(&server).await;
     let picture: Vec<u8> = (0..MAX_AVATAR_BYTES).map(|i| (i % 251) as u8).collect();
-    let Response::AvatarHash(hash) = alice.request(Request::UploadAvatar(picture)).await else {
-        panic!("upload refused");
-    };
+    let hash = Hash::of(&picture);
+    let set = alice.request(Request::SetServerAvatar(Some(picture))).await;
+    assert_eq!(set, Response::Ok);
     let code = invite(&alice).await;
     let mut bob = raw_enroll(&server.addr, &code, small_window_transport(16 * 1024)).await;
     let bob_id = bob.welcome.me;
@@ -919,13 +928,8 @@ async fn managers_kick_lower_ranks_out_of_rooms() {
 /// A request setting `client`'s name to `name`, signed by `signer` for `client`'s server.
 fn signed_profile(client: &TestClient, signer: &TestClient, name: &str) -> Request {
     let server = &client.link.connected.fingerprint;
-    Request::SetProfile {
-        name: name.into(),
-        avatar: None,
-        sig: signer
-            .keystore
-            .profile_sig(server, client.link.welcome.me, name, None),
-    }
+    let me = client.link.welcome.me;
+    Request::SetProfile(named(name).signed(signer.keystore.identity(), server, me))
 }
 
 /// `client`'s encryption key replaced by `key`, signed for the server it is connected to.

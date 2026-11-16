@@ -123,7 +123,8 @@ pub struct PakeFinish {
 /// refusal.
 pub type AccountStep = Result<UserId, AuthError>;
 
-/// Our name and picture, which every sign-in gives the server before its [`Welcome`].
+/// Our name and picture, as every sign-in gives them to the server before its [`Welcome`] and
+/// [`Request::SetProfile`] changes them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedProfile {
     pub name: String,
@@ -200,14 +201,7 @@ pub enum Request {
     },
     /// Moves us out of our room, into the lobby.
     LeaveRoom,
-    /// Sets our name and picture, signed by our identity key for this server and user.
-    SetProfile {
-        name: String,
-        avatar: Option<Hash>,
-        #[serde(with = "sig")]
-        sig: Signature,
-    },
-    UploadAvatar(Vec<u8>),
+    SetProfile(SignedProfile),
     FetchAvatar(Hash),
     SetEncryptionKey(SignedEncryptionKey),
     SetMedia(MediaState),
@@ -246,7 +240,8 @@ pub enum Request {
         cascade: bool,
     },
     SetServerName(Option<String>),
-    SetServerAvatar(Option<Hash>),
+    /// Sets the server's picture, at most [`MAX_AVATAR_BYTES`], or removes it with `None`.
+    SetServerAvatar(Option<Vec<u8>>),
     /// Moves `user` from `room` to the lobby. Managers and admins, on lower ranks only.
     KickFromRoom {
         user: UserId,
@@ -261,7 +256,6 @@ pub enum Response {
     Placement(Placement),
     Invite { code: String, expires: u64 },
     Users(Vec<User>),
-    AvatarHash(Hash),
     Avatar(Vec<u8>),
 }
 
