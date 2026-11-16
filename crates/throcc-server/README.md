@@ -14,14 +14,14 @@ The server: sign-in, rooms and presence, the key relay, and an SFU that forwards
 | `files.rs` | The data directory and its private files: created at 0700 and 0600, tightened if they are looser, refused if another user owns them |
 | `identity.rs`, `tls.rs` | `server_key`, the certificate derived from it, and the QUIC configuration |
 | `session.rs` | One connection: handshake, which refuses a protocol outside `MIN_PROTOCOL..=PROTOCOL` before reading the sign-in, and the control-stream read and write loops. A sign-in ends the user's earlier connection with `SignedInElsewhere` and a close code of its own |
-| `auth.rs` | Sign-in for known keys, and enrollment with an invite through the PAKE |
+| `auth.rs` | Sign-in for known keys, and enrollment with an invite through the PAKE. Both end by telling the client its user id and taking the profile it signs for it; a missing, malformed or wrongly signed profile ends the sign-in with `BadProfile` |
 | `rooms.rs` | The `Hub`: rooms, membership, presence, invites, profiles, key relay, request handling |
 | `room_password.rs` | Argon2id hashes of room passwords, which run on the blocking pool, a few at a time, never under the hub lock; and the backoff for wrong guesses |
 | `limits.rs` | Token buckets, per-source connection caps, the new-connection rate and the enrollment limiter, which counts failed runs per source, network and region |
 | `refusals.rs` | Counts of connections refused or failed before sign-in, logged every 10 s instead of one line each |
 | `sfu.rs` | Ingress: the per-connection rate limits, the per-track audio allowance, the ownership check, the forwarding table, and keyframe requests merged per track and backed off per watcher, so one watcher on a slow link can't have the sender make keyframes for everyone every second |
 | `egress.rs` | One task per receiver: audio first, a turn per track, then video in whole units within a 150 ms budget; receive stats. A share whose sender heals only with a keyframe (`Recovery::Idr`) is held back from this receiver after a loss on the way to it, until a keyframe from after the loss, since nothing in between would decode; `Queues::hold` has the details. The hub asks the sender for that keyframe each tick, as the receiver would, through the receiver's own backoff |
-| `database.rs` | The SQLite schema, its migrations and every query. WAL with `synchronous=FULL`, so a commit survives a power loss and a room's epoch never rolls back |
+| `database.rs` | The SQLite schema, its migrations and every query. WAL with `synchronous=FULL`, so a commit survives a power loss and a room's epoch never rolls back. `users.profile_sig` stays empty for an account that hasn't signed in since 0.1 and is written at every sign-in; the server never reads it back, since a presence carries the signature its connection gave |
 
 ## Admin invites
 
