@@ -35,14 +35,18 @@ On an M4 Mac, a Pixel 8 (GrapheneOS), a Galaxy Tab S6 Lite (LineageOS, no AV1 ha
 
 ## What is left
 
-1. **Protocol 3 on the devices**: run a server built from this branch on this Mac, on the LAN (voice.nylyk.com stays on protocol 2 until the release), then on the Pixel, the iPhone and the desktop: sign in, join with an invite, change name and picture while connected, safety numbers before sharing a room, and a room peer's key beating its presence.
-2. **Cancelling on iOS and the desktop**: opening another server while one signs in, a second tap on the one signing in (iOS), Cancel on the joining screen (desktop). Verified on the Pixel only.
-3. **Picture preparation**: a large photo as a profile picture, on a phone. Every sign-in now carries the picture.
-4. **The macOS desktop by hand**: watch a Windows share, pop out, fullscreen; `sending_1440p60_takes_under_one_core` (ignored test in `throcc-client-core`) with moving content; HEVC low latency at a height that isn't a multiple of 16.
-5. **A signed build**: `gh workflow run packaging.yml --ref feature/mobile-5`, then the dmg on a clean Mac without Homebrew ffmpeg, and the signed APK.
-6. **VP9 on the tablet**, on its `OMX.Exynos.vp9.dec`: share with `THROCC_CODEC=vp9`.
-7. **Windows still screens on a real machine**: share a window that doesn't change from Windows, then start watching it from another client: the picture should show within a second. CI only proves `repeat_timestamp` builds and its tests pass there.
+In this order:
+
+1. **A local protocol 3 server**: build `throcc-server` from this branch and run it on this Mac, on the LAN, with `throcc-server admin-invite --data <dir>` for the first invite. `voice.nylyk.com` stays on protocol 2 until the release. Everything below but the Windows share and the signed build needs it.
+2. **The macOS desktop against it**: join with an invite; change name and picture while connected; cancelling: click an offline address, then the local server, which takes over; click the offline one again and press Cancel on the joining screen.
+3. **The Pixel**: join with an invite; set a large photo as the profile picture (picture preparation; every sign-in carries the picture); before sharing a room with the desktop, the desktop's safety number shows and Mark as Verified works.
+4. **The iPhone**: the same as the Pixel; cancelling: tap the offline server, then the local one, then the offline one twice.
+5. **Shares on the desktop**: on macOS by hand, pop out and fullscreen, `sending_1440p60_takes_under_one_core` (ignored test in `throcc-client-core`) with moving content, and HEVC low latency at a height that isn't a multiple of 16. With Windows booted, watch a Windows share on the Mac; then share a window that doesn't change and start watching it later: the picture shows within a second (CI only proves `repeat_timestamp` builds and its tests pass there).
+6. **VP9 on the tablet**, on its `OMX.Exynos.vp9.dec`: share from the desktop with `THROCC_CODEC=vp9` and watch it on the tablet.
+7. **A signed build**: `gh workflow run packaging.yml --ref feature/mobile-5`, then the dmg on a clean Mac without Homebrew ffmpeg, and the signed APK.
 8. **Before merging**: delete this file. `ci.yml` keeps running on pushes to `feature/**`.
+
+A room peer's key outranking its presence can't be forged by hand; the tests from the protocol 3 review cover it.
 
 Accepted as they are: a signed profile carries no expiry, so a server can replay one someone once signed there and show them verified (closing it needs a protocol change); an enrollment that fails after the PAKE still spends the invite, since the account must exist before the profile is signed for its user id.
 
