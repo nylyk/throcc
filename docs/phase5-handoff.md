@@ -41,7 +41,8 @@ On an M4 Mac, a Pixel 8 (GrapheneOS), a Galaxy Tab S6 Lite (LineageOS, no AV1 ha
 4. **The macOS desktop by hand**: watch a Windows share, pop out, fullscreen; `sending_1440p60_takes_under_one_core` (ignored test in `throcc-client-core`) with moving content; HEVC low latency at a height that isn't a multiple of 16.
 5. **A signed build**: `gh workflow run packaging.yml --ref feature/mobile-5`, then the dmg on a clean Mac without Homebrew ffmpeg, and the signed APK.
 6. **VP9 on the tablet**, on its `OMX.Exynos.vp9.dec`: share with `THROCC_CODEC=vp9`.
-7. **Before merging**: keep or drop `ci.yml` on pushes to `feature/**`; delete this file.
+7. **Windows still screens on a real machine**: share a window that doesn't change from Windows, then start watching it from another client: the picture should show within a second. CI only proves `repeat_timestamp` builds and its tests pass there.
+8. **Before merging**: keep or drop `ci.yml` on pushes to `feature/**`; delete this file.
 
 Smaller:
 - `crates/throcc-cli/tests/share.rs` calls `share::receive` with too few arguments; it builds only with `--features ffmpeg`, so CI misses it.
