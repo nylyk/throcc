@@ -5,6 +5,7 @@ struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.horizontalSizeClass) private var sizeClass
     let sample: Sample?
+    @State private var sampleShown = false
 
     var body: some View {
         @Bindable var model = model
@@ -43,8 +44,10 @@ struct RootView: View {
         }
         .modifier(Themed())
         .onGeometryChange(for: CGSize.self, of: \.size) { _ in Turning.screenChanged() }
-        .task {
-            if let sample {
+        // An iPad leaves changes made before the scene is first active off the screen.
+        .task(id: scenePhase == .active) {
+            if scenePhase == .active, !sampleShown, let sample {
+                sampleShown = true
                 await model.show(sample)
             }
         }
