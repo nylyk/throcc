@@ -128,7 +128,7 @@ fun Page(
         TopAppBarDefaults.pinnedScrollBehavior()
     }
     val name = @Composable {
-        Text(title, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Text(title, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
     val back = @Composable {
         if (onBack != null) IconButton(onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
