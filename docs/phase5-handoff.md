@@ -35,18 +35,14 @@ On an M4 Mac, a Pixel 8 (GrapheneOS), a Galaxy Tab S6 Lite (LineageOS, no AV1 ha
 
 ## What is left
 
-1. **Protocol 3 on the devices**: run a server built from this branch, then on the Pixel, the iPhone and the desktop: sign in, join with an invite, change name and picture while connected, safety numbers before sharing a room, and a room peer's key beating its presence.
+1. **Protocol 3 on the devices**: run a server built from this branch on this Mac, on the LAN (voice.nylyk.com stays on protocol 2 until the release), then on the Pixel, the iPhone and the desktop: sign in, join with an invite, change name and picture while connected, safety numbers before sharing a room, and a room peer's key beating its presence.
 2. **Cancelling on iOS and the desktop**: opening another server while one signs in, a second tap on the one signing in (iOS), Cancel on the joining screen (desktop). Verified on the Pixel only.
 3. **Picture preparation**: a large photo as a profile picture, on a phone. Every sign-in now carries the picture.
 4. **The macOS desktop by hand**: watch a Windows share, pop out, fullscreen; `sending_1440p60_takes_under_one_core` (ignored test in `throcc-client-core`) with moving content; HEVC low latency at a height that isn't a multiple of 16.
 5. **A signed build**: `gh workflow run packaging.yml --ref feature/mobile-5`, then the dmg on a clean Mac without Homebrew ffmpeg, and the signed APK.
 6. **VP9 on the tablet**, on its `OMX.Exynos.vp9.dec`: share with `THROCC_CODEC=vp9`.
 7. **Windows still screens on a real machine**: share a window that doesn't change from Windows, then start watching it from another client: the picture should show within a second. CI only proves `repeat_timestamp` builds and its tests pass there.
-8. **Before merging**: keep or drop `ci.yml` on pushes to `feature/**`; delete this file.
-
-Smaller:
-- `crates/throcc-cli/tests/share.rs` calls `share::receive` with too few arguments; it builds only with `--features ffmpeg`, so CI misses it.
-- On the iPad, `--screen room` and the other room samples stop at the server list with a spinner on Night Owls until it is tapped; the iPhone opens the room.
+8. **Before merging**: delete this file. `ci.yml` keeps running on pushes to `feature/**`.
 
 Accepted as they are: a signed profile carries no expiry, so a server can replay one someone once signed there and show them verified (closing it needs a protocol change); an enrollment that fails after the PAKE still spends the invite, since the account must exist before the profile is signed for its user id.
 
@@ -56,6 +52,8 @@ Set aside on purpose: AV1 in several tiles on the sender, and a sender choosing 
 
 - Android builds limited to one ABI (`-Pandroid.injected.build.abi=arm64-v8a`) leave `outputs/apk` stale; install `build/intermediates/apk/debug/app-debug.apk` with `adb install -t`.
 - The iOS simulator shows a tap's result about a second later, and often drops the first tap after a launch.
+- The iOS 27.2 simulator runtime goes in through Xcode → Settings → Components; `xcodebuild -downloadPlatform iOS` fetches only the iPhone Duo runtime, and the general one it can find is a build the SDK doesn't pick on its own.
+- `ThemedList` and `ThemedForm` rebuild on a theme change (`.id(theme.line)`) because their separators keep the old theme's colour otherwise; checked again on the iOS 27.2 simulator, switching Ink to Paper.
 - Samples with a light theme: `--theme Paper` on iOS.
 - An iPhone by cable: Developer Mode on, unlocked; build the core with `mobile/ios/build-core.sh device`, then outside the sandbox `xcodebuild -destination id=<udid> -allowProvisioningUpdates -allowProvisioningDeviceRegistration build` and `xcrun devicectl device install app` / `process launch` (`xcrun devicectl list devices` gives the id).
 - A TestFlight build: raise `CURRENT_PROJECT_VERSION`, build the core with `mobile/ios/build-core.sh`, then outside the sandbox `xcodebuild archive -allowProvisioningUpdates` for `generic/platform=iOS` and `xcodebuild -exportArchive` with `method` `app-store-connect`, `destination` `upload` and `signingCertificate` set to the SHA-1 of the local Apple Distribution certificate (`security find-identity -v -p codesigning`). The cloud-managed distribution certificate can't be used: its remote signing writes the "ö" of the account holder's name decomposed into the designated requirement, which then never matches, and App Store Connect answers "Invalid Signature". This Mac is registered as the team's one device, which automatic signing needs for the archive.
