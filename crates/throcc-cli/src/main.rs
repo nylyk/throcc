@@ -168,7 +168,7 @@ async fn run(cli: Cli) -> Result<()> {
         } => {
             let profile = load_profile(&keystore, name)?;
             let code = invite_code(code).await?;
-            let link = account::enroll(&mut keystore, &address, &code, &profile.name).await?;
+            let link = account::enroll(&mut keystore, &address, &code, &profile).await?;
             save_profile(&keystore, profile)?;
             println!(
                 "enrolled as user {} ({:?})",
@@ -327,7 +327,6 @@ fn voice_call(
         BlockedStore::empty(keystore.dir())
     });
     let profile = load_profile(&keystore, None)?;
-    let profile = tokio::sync::watch::channel(profile).1;
     let client = Client::connect(
         address,
         keystore,
@@ -444,9 +443,10 @@ fn given_code(arg: Option<String>, env: Option<String>) -> Option<String> {
     }
 }
 
-/// Signs in to `address`, and signs the kept profile there if the server keeps it unsigned.
+/// Signs in to `address` with the kept profile.
 async fn sign_in(keystore: &Keystore, address: &str) -> Result<ControlLink> {
-    let mut link = account::sign_in(keystore, address, None)
+    let profile = load_profile(keystore, None)?;
+    let link = account::sign_in(keystore, address, &profile, None)
         .await
         .inspect_err(|e| {
             if let Some((expected, actual)) = e.pin_mismatch() {
@@ -456,9 +456,6 @@ async fn sign_in(keystore: &Keystore, address: &str) -> Result<ControlLink> {
                 eprintln!("Re-enroll with a fresh invite code to trust the new key.");
             }
         })?;
-    if let Some(profile) = Settings::load(keystore.dir()).ok().and_then(|s| s.profile) {
-        account::sign_profile_if_kept(keystore, &mut link, &profile.name, profile.avatar()).await;
-    }
     Ok(link)
 }
 
@@ -541,16 +538,9 @@ async fn run_command(keystore: &Keystore, link: &ControlLink, line: &str) -> Res
             password: None,
         },
         "name" => {
-            let kept = Settings::load(keystore.dir())?.profile;
-            let avatar = kept
-                .and_then(|profile| profile.avatar())
-                .filter(|kept| welcome.profile.avatar == Some(*kept));
+            let profile = load_profile(keystore, Some(rest.to_owned()))?;
             let server = &link.connected.fingerprint;
-            Request::SetProfile {
-                name: rest.to_owned(),
-                avatar,
-                sig: keystore.profile_sig(server, welcome.me, rest, avatar),
-            }
+            Request::SetProfile(profile.signed(keystore.identity(), server, welcome.me))
         }
         other => bail!("unknown command {other}"),
     };
@@ -771,7 +761,7 @@ fn moves_terminal(c: char) -> bool {
 mod tests {
     use super::*;
     use throcc_proto::ids::{Epoch, Role, UserId};
-    use throcc_proto::messages::{Placement, ServerProfile, UserProfile};
+    use throcc_proto::messages::{Placement, ServerProfile};
 
     fn welcome() -> Welcome {
         Welcome {
@@ -787,11 +777,6 @@ mod tests {
                 audiences: Default::default(),
             },
             server: ServerProfile::default(),
-            profile: UserProfile {
-                name: "Ilse".into(),
-                avatar: None,
-                sig: None,
-            },
         }
     }
 
@@ -806,7 +791,7 @@ mod tests {
             sharing: false,
             role: Role::User,
             identity_key: [0; 32],
-            profile_sig: None,
+            profile_sig: [0; 64],
         }
     }
 

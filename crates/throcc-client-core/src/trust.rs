@@ -15,8 +15,9 @@ use crate::verified::VerifiedStore;
 /// else ties the account now behind their user id to it.
 pub(crate) struct Trust {
     server: Fingerprint,
-    /// The identity key each user last presented this session, with an encryption key it
-    /// validly signed for them here.
+    /// The identity key each user last presented this session: by a presence whose name and
+    /// picture it signed for them here, or as a room peer with an encryption key it signed
+    /// for them here.
     presented: HashMap<UserId, PublicKey>,
     verified: VerifiedStore,
 }
@@ -33,6 +34,11 @@ impl Trust {
     /// Forgets every presented key, for a new connection, where each must be presented again.
     pub fn forget_presented(&mut self) {
         self.presented.clear();
+    }
+
+    /// Forgets the key `user` presented, once they are no longer shown.
+    pub fn forget(&mut self, user: UserId) {
+        self.presented.remove(&user);
     }
 
     /// Notes the identity keys `peers` present. True if any is new. Once [`MAX_SIGNED_IN`] are
@@ -180,6 +186,18 @@ mod tests {
         assert!(trust.set_verified(MARA, &REAL, false, "").unwrap());
         assert!(trust.verified.list().is_empty());
         assert!(trust.warning(MARA).is_none());
+    }
+
+    #[test]
+    fn a_forgotten_key_counts_only_once_presented_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut trust = trust_in(dir.path());
+        trust.note(&[(MARA, REAL)]);
+        trust.set_verified(MARA, &REAL, true, "Mara").unwrap();
+        trust.forget(MARA);
+        assert_eq!(trust.of(MARA), (false, None));
+        assert!(trust.note(&[(MARA, REAL)]));
+        assert_eq!(trust.of(MARA), (true, Some(REAL)));
     }
 
     #[test]

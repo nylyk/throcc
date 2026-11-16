@@ -24,15 +24,15 @@ use throcc_client_core::media::engine::{Kind, Received};
 use throcc_client_core::profile::Profile;
 use throcc_client_core::state::State;
 use throcc_client_core::verified::VerifiedStore;
-use throcc_crypto::identity::IdentityKey;
+use throcc_crypto::identity::{IdentityKey, profile_message};
 use throcc_crypto::pake::{ClientPake, Transcript};
 use throcc_proto::framing;
 use throcc_proto::ids::{MediaId, RoomId};
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
-    AuthResult, ClientHello, Codec, ErrorCode, Event, MediaState, PROTOCOL, PakeFinish, PakeReply,
-    PakeStep, Placement, Recovery, Request, Response, ServerHello, ShareConfig, ShareTracks,
-    SignIn, Tracks, Welcome,
+    AccountStep, AuthResult, ClientHello, Codec, ErrorCode, Event, MediaState, PROTOCOL,
+    PakeFinish, PakeReply, PakeStep, Placement, Recovery, Request, Response, ServerHello,
+    ShareConfig, ShareTracks, SignIn, SignedProfile, Tracks, Welcome,
 };
 use throcc_server::database::Database;
 use throcc_server::identity::ServerIdentity;
@@ -210,10 +210,13 @@ impl TestClient {
         self.link.connected.connection.close(0u32.into(), b"");
     }
 
-    /// Drops the current connection and signs in again at `addr`, asking for `room`.
+    /// Drops the current connection and signs in again at `addr` as [`ilse`], asking for
+    /// `room`.
     pub async fn reconnect(&mut self, addr: &str, room: Option<RoomId>) {
         self.disconnect();
-        self.link = account::sign_in(&self.keystore, addr, room).await.unwrap();
+        self.link = account::sign_in(&self.keystore, addr, &ilse(), room)
+            .await
+            .unwrap();
     }
 }
 
@@ -225,10 +228,26 @@ pub async fn enroll_at(addr: &str, code: &InviteCode) -> TestClient {
     try_enroll_at(addr, code).await.unwrap()
 }
 
+/// The profile test clients sign in with.
+pub fn ilse() -> Profile {
+    Profile {
+        name: "Ilse".into(),
+        picture: None,
+    }
+}
+
 pub async fn try_enroll_at(addr: &str, code: &InviteCode) -> Result<TestClient, SignInError> {
+    enroll_as(addr, code, &ilse()).await
+}
+
+pub async fn enroll_as(
+    addr: &str,
+    code: &InviteCode,
+    profile: &Profile,
+) -> Result<TestClient, SignInError> {
     let dir = tempfile::tempdir().unwrap();
     let mut keystore = Keystore::open_in(dir.path()).unwrap();
-    let link = account::enroll(&mut keystore, addr, code, "Ilse").await?;
+    let link = account::enroll(&mut keystore, addr, code, profile).await?;
     Ok(TestClient {
         keystore,
         link,
@@ -333,7 +352,6 @@ pub fn client_as(
     let keystore = Keystore::open_in(dir).unwrap();
     let verified = VerifiedStore::load(dir).unwrap();
     let blocked = BlockedStore::load(dir).unwrap();
-    let profile = tokio::sync::watch::channel(profile).1;
     let entry = match invite {
         Some(code) => Entry::Enroll(code),
         None => Entry::SignIn {
@@ -719,6 +737,17 @@ impl PendingEnroll {
         };
         self.send
             .write_all(&framing::encode(&finish).unwrap())
+            .await
+            .unwrap();
+        let me = read_message::<AccountStep>(&mut self.recv).await.unwrap();
+        let message = profile_message(&self.connected.fingerprint.0, me, "Ilse", None);
+        let profile = SignedProfile {
+            name: "Ilse".into(),
+            picture: None,
+            sig: self.identity.sign(&message),
+        };
+        self.send
+            .write_all(&framing::encode(&profile).unwrap())
             .await
             .unwrap();
         match read_message(&mut self.recv).await {

@@ -107,7 +107,7 @@ struct PersonView: View {
                 }
             }
             if groups.isEmpty {
-                Text("Their safety number appears once you share a room.").foregroundStyle(.muted)
+                Text("No safety number: the server shows no key that signed this name and picture.").foregroundStyle(.muted)
             } else {
                 SafetyNumber(groups: groups)
             }

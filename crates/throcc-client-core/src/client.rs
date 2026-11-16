@@ -222,13 +222,13 @@ pub struct Client {
 }
 
 impl Client {
-    /// Gets onto the server through `entry` and blocks until it has answered. The server gets
-    /// the newest `profile` unless it has it already, and each one sent after.
+    /// Gets onto the server through `entry`, giving it `profile`, and blocks until it has
+    /// answered.
     pub fn connect(
         address: &str,
         mut keystore: Keystore,
         entry: Entry<'_>,
-        profile: watch::Receiver<Profile>,
+        profile: Profile,
         audio: Option<Arc<AudioEngine>>,
         verified: VerifiedStore,
         blocked: BlockedStore,
@@ -240,12 +240,13 @@ impl Client {
             .build()
             .map_err(|e| SignInError::Store(e.into()))?;
         keystore.renew_encryption_key_if_due()?;
-        let name = profile.borrow().name.clone();
         let link = runtime.block_on(async {
             match entry {
-                Entry::Enroll(code) => account::enroll(&mut keystore, address, code, &name).await,
+                Entry::Enroll(code) => {
+                    account::enroll(&mut keystore, address, code, &profile).await
+                }
                 Entry::SignIn { cancelled } => tokio::select! {
-                    link = account::sign_in(&keystore, address, None) => link,
+                    link = account::sign_in(&keystore, address, &profile, None) => link,
                     () = cancelled => Err(SignInError::Cancelled),
                 },
             }

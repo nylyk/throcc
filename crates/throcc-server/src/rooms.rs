@@ -12,9 +12,9 @@ use throcc_proto::limits::{
 };
 use throcc_proto::messages::{
     Audience, Audiences, AuthError, ErrorCode, Event, MAX_AVATAR_BYTES, MAX_NAME_CHARS,
-    MAX_PASSWORD_CHARS, MediaState, Peer, Placement, Presence, Recovery, Request, Response, Room,
-    ServerMessage, ServerProfile, ShareTracks, Signature, SignedEncryptionKey, Tracks, UserProfile,
-    Welcome, valid_name, valid_password,
+    MAX_PASSWORD_CHARS, MediaState, Peer, Placement, Presence, PublicKey, Recovery, Request,
+    Response, Room, ServerMessage, ServerProfile, ShareTracks, Signature, SignedEncryptionKey,
+    SignedProfile, Tracks, Welcome, valid_name, valid_password,
 };
 use throcc_proto::permissions;
 use throcc_proto::transport::close;
@@ -230,6 +230,8 @@ struct Session {
     conn_id: u64,
     handle: ConnectionHandle,
     row: UserRow,
+    /// The identity key's signature over the row's name and avatar.
+    profile_sig: Signature,
     room: Option<RoomId>,
     tracks: Option<Tracks>,
     media: MediaState,
@@ -322,16 +324,18 @@ impl Hub {
         })
     }
 
-    /// Registers a connection authenticated as `row`, notes the sign-in and kicks the user's
-    /// earlier connection. Refuses a removed user, and a newcomer past the sign-in limits.
+    /// Registers a connection authenticated as `row`, notes the sign-in, keeps its checked
+    /// `profile` and kicks the user's earlier connection. Refuses a removed user, and a
+    /// newcomer past the sign-in limits.
     pub fn connect(
         &mut self,
         row: UserRow,
+        profile: SignedProfile,
         handle: ConnectionHandle,
         want_room: Option<RoomId>,
     ) -> anyhow::Result<Result<(u64, Welcome), AuthError>> {
         let user = row.id;
-        let Some(row) = self
+        let Some(mut row) = self
             .db
             .user(user)?
             .filter(|current| current.pubkey == row.pubkey)
@@ -353,21 +357,22 @@ impl Hub {
         if full && !self.sessions.contains_key(&user) {
             return Ok(Err(AuthError::ServerFull));
         }
+        let avatar = profile.picture.as_deref().map(Hash::of);
+        if !self.store_profile(user, &profile, avatar)? {
+            return Ok(Err(AuthError::RateLimited));
+        }
+        (row.name, row.avatar) = (profile.name, avatar);
         self.evict(user, Kick::Replaced);
         self.next_conn += 1;
         let conn_id = self.next_conn;
         let role = row.role;
-        let profile = UserProfile {
-            name: row.name.clone(),
-            avatar: row.avatar,
-            sig: row.profile_sig,
-        };
         self.sessions.insert(
             user,
             Session {
                 conn_id,
                 handle,
                 row,
+                profile_sig: profile.sig,
                 room: None,
                 tracks: None,
                 media: MediaState::default(),
@@ -392,7 +397,6 @@ impl Hub {
             presence: self.sessions.values().filter_map(presence).collect(),
             placement,
             server,
-            profile,
         };
         Ok(Ok((conn_id, welcome)))
     }
@@ -476,8 +480,7 @@ impl Hub {
             Request::SetRoomPassword { room, password } => {
                 return self.set_room_password(user, room, password);
             }
-            Request::SetProfile { name, avatar, sig } => self.set_profile(user, name, avatar, sig),
-            Request::UploadAvatar(bytes) => self.set_avatar(user, bytes),
+            Request::SetProfile(profile) => self.set_profile(user, profile),
             Request::FetchAvatar(hash) => self.get_avatar(hash),
             Request::SetEncryptionKey(encryption_key) => {
                 self.set_encryption_key(user, encryption_key)
@@ -498,7 +501,7 @@ impl Hub {
             }
             Request::PublishSenderKey { epoch, wrapped } => self.publish_key(user, epoch, wrapped),
             Request::SetServerName(name) => self.set_server_name(user, name),
-            Request::SetServerAvatar(avatar) => self.set_server_avatar(user, avatar),
+            Request::SetServerAvatar(picture) => self.set_server_avatar(user, picture),
             Request::KickFromRoom { user: target, room } => self.kick_from_room(user, target, room),
         };
         outcome.map(Handled::Done)
@@ -616,16 +619,6 @@ impl Hub {
             .user(user)
             .map_err(Refusal::internal)?
             .ok_or_else(|| Refusal::new(ErrorCode::NotFound, "no such user"))
-    }
-
-    /// Refuses a picture that hasn't been uploaded.
-    fn require_picture(&self, avatar: Option<Hash>) -> Result<(), Refusal> {
-        match avatar {
-            Some(hash) if !self.db.has_blob(&hash).map_err(Refusal::internal)? => {
-                Err(Refusal::new(ErrorCode::NotFound, "no such picture"))
-            }
-            _ => Ok(()),
-        }
     }
 
     fn announce_presence(&self, user: UserId) {
@@ -973,43 +966,17 @@ impl Hub {
         })
     }
 
-    /// Keeps a signed name and picture. A signature over the kept ones skips the rate limit
-    /// and is stored only while no valid signature is.
-    fn set_profile(
-        &mut self,
-        user: UserId,
-        name: String,
-        avatar: Option<Hash>,
-        sig: Signature,
-    ) -> Outcome {
-        let name = checked_name(&name)?;
-        self.require_picture(avatar)?;
+    /// Keeps a signed name and picture. The kept ones again change nothing and skip the rate
+    /// limit.
+    fn set_profile(&mut self, user: UserId, profile: SignedProfile) -> Outcome {
         let session = self.session(user)?;
-        let signed = |sig: &Signature| {
-            identity::verify_profile(
-                &session.row.pubkey,
-                &self.fingerprint.0,
-                user,
-                &name,
-                avatar,
-                sig,
-            )
-            .is_ok()
-        };
-        if !signed(&sig) {
-            return Err(Refusal::new(
-                ErrorCode::Invalid,
-                "the profile's signature is wrong",
-            ));
-        }
-        let renames = (session.row.name.as_str(), session.row.avatar) != (name.as_str(), avatar);
-        if !renames && session.row.profile_sig.as_ref().is_some_and(signed) {
+        let avatar = check_profile(&profile, &session.row.pubkey, &self.fingerprint, user)?;
+        if (session.row.name.as_str(), session.row.avatar) == (profile.name.as_str(), avatar) {
             return Ok(Response::Ok);
         }
-        if renames
-            && session
-                .last_profile
-                .is_some_and(|t| t.elapsed() < PROFILE_INTERVAL)
+        if session
+            .last_profile
+            .is_some_and(|t| t.elapsed() < PROFILE_INTERVAL)
         {
             return Err(Refusal::new(
                 ErrorCode::RateLimited,
@@ -1019,16 +986,17 @@ impl Hub {
                 ),
             ));
         }
-        self.db
-            .set_profile(user, &name, avatar, &sig)
-            .map_err(Refusal::internal)?;
-        let session = self.session_mut(user)?;
-        session.row.name = name;
-        session.row.avatar = avatar;
-        session.row.profile_sig = Some(sig);
-        if renames {
-            session.last_profile = Some(Instant::now());
+        if !self
+            .store_profile(user, &profile, avatar)
+            .map_err(Refusal::internal)?
+        {
+            return Err(too_many_pictures());
         }
+        let session = self.session_mut(user)?;
+        session.row.name = profile.name;
+        session.row.avatar = avatar;
+        session.profile_sig = profile.sig;
+        session.last_profile = Some(Instant::now());
         self.announce_presence(user);
         Ok(Response::Ok)
     }
@@ -1045,9 +1013,22 @@ impl Hub {
         self.announce_server_profile()
     }
 
-    fn set_server_avatar(&mut self, user: UserId, avatar: Option<Hash>) -> Outcome {
+    fn set_server_avatar(&mut self, user: UserId, picture: Option<Vec<u8>>) -> Outcome {
         require(permissions::can_edit_server(self.role(user)?))?;
-        self.require_picture(avatar)?;
+        let avatar = match picture {
+            Some(bytes) => {
+                check_picture(&bytes)?;
+                let hash = Hash::of(&bytes);
+                if !self
+                    .keep_picture(user, hash, &bytes)
+                    .map_err(Refusal::internal)?
+                {
+                    return Err(too_many_pictures());
+                }
+                Some(hash)
+            }
+            None => None,
+        };
         self.db
             .set_server_avatar(avatar)
             .map_err(Refusal::internal)?;
@@ -1060,27 +1041,38 @@ impl Hub {
         Ok(Response::Ok)
     }
 
-    fn set_avatar(&mut self, user: UserId, bytes: Vec<u8>) -> Outcome {
-        if bytes.len() > MAX_AVATAR_BYTES {
-            return Err(Refusal::new(
-                ErrorCode::TooLarge,
-                format!("avatars are at most {} KiB", MAX_AVATAR_BYTES / 1024),
-            ));
+    /// Stores `bytes`, which hash to `hash`, unless they are past `user`'s upload allowance.
+    /// A picture the server holds already costs nothing. False when nothing is stored.
+    fn keep_picture(&mut self, user: UserId, hash: Hash, bytes: &[u8]) -> anyhow::Result<bool> {
+        if self.db.has_blob(&hash)? {
+            return Ok(true);
         }
         let cost = bytes.len().max(MIN_UPLOAD_COST) as f64;
         if !self.uploads.take(user, cost, Instant::now()) {
-            return Err(Refusal::new(
-                ErrorCode::RateLimited,
-                "too many pictures; try again in a minute",
-            ));
+            return Ok(false);
         }
         let now = unix_now();
-        delete_unused_blobs(&self.db, now).map_err(Refusal::internal)?;
-        let hash = Hash::of(&bytes);
+        delete_unused_blobs(&self.db, now)?;
+        self.db.put_blob(&hash, bytes, now)?;
+        Ok(true)
+    }
+
+    /// Stores `profile`, whose picture hashes to `avatar`, as `user`'s, unless its picture is
+    /// past their upload allowance. False when nothing is stored.
+    fn store_profile(
+        &mut self,
+        user: UserId,
+        profile: &SignedProfile,
+        avatar: Option<Hash>,
+    ) -> anyhow::Result<bool> {
+        if let (Some(hash), Some(bytes)) = (avatar, &profile.picture)
+            && !self.keep_picture(user, hash, bytes)?
+        {
+            return Ok(false);
+        }
         self.db
-            .put_blob(&hash, &bytes, now)
-            .map_err(Refusal::internal)?;
-        Ok(Response::AvatarHash(hash))
+            .set_profile(user, &profile.name, avatar, &profile.sig)?;
+        Ok(true)
     }
 
     fn get_avatar(&mut self, hash: Hash) -> Outcome {
@@ -1782,7 +1774,7 @@ fn presence(session: &Session) -> Option<Presence> {
         sharing: session.media.share.is_some(),
         role: session.row.role,
         identity_key: session.row.pubkey,
-        profile_sig: session.row.profile_sig,
+        profile_sig: session.profile_sig,
     })
 }
 
@@ -1806,13 +1798,52 @@ fn lobby() -> Placement {
     }
 }
 
+/// The hash of `profile`'s picture, once its name is valid, its picture fits and `pubkey`
+/// signed both for `user` on the server `server`.
+pub(crate) fn check_profile(
+    profile: &SignedProfile,
+    pubkey: &PublicKey,
+    server: &Fingerprint,
+    user: UserId,
+) -> Result<Option<Hash>, Refusal> {
+    if valid_name(&profile.name) != Some(profile.name.as_str()) {
+        return Err(bad_name());
+    }
+    if let Some(bytes) = &profile.picture {
+        check_picture(bytes)?;
+    }
+    let avatar = profile.picture.as_deref().map(Hash::of);
+    identity::verify_profile(pubkey, &server.0, user, &profile.name, avatar, &profile.sig)
+        .map_err(|_| Refusal::new(ErrorCode::Invalid, "the profile's signature is wrong"))?;
+    Ok(avatar)
+}
+
+fn check_picture(bytes: &[u8]) -> Result<(), Refusal> {
+    if bytes.len() > MAX_AVATAR_BYTES {
+        return Err(Refusal::new(
+            ErrorCode::TooLarge,
+            format!("pictures are at most {} KiB", MAX_AVATAR_BYTES / 1024),
+        ));
+    }
+    Ok(())
+}
+
+fn too_many_pictures() -> Refusal {
+    Refusal::new(
+        ErrorCode::RateLimited,
+        "too many pictures; try again in a minute",
+    )
+}
+
 fn checked_name(name: &str) -> Result<String, Refusal> {
-    valid_name(name).map(str::to_owned).ok_or_else(|| {
-        Refusal::new(
-            ErrorCode::Invalid,
-            format!("names are 1 to {MAX_NAME_CHARS} characters, with nothing hidden or reversed"),
-        )
-    })
+    valid_name(name).map(str::to_owned).ok_or_else(bad_name)
+}
+
+fn bad_name() -> Refusal {
+    Refusal::new(
+        ErrorCode::Invalid,
+        format!("names are 1 to {MAX_NAME_CHARS} characters, with nothing hidden or reversed"),
+    )
 }
 
 fn check_password_length(password: &str) -> Result<(), Refusal> {

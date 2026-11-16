@@ -207,7 +207,7 @@ private fun ChangedWhileOpen(person: Person, onCompareAgain: () -> Unit) {
 private fun SafetyNumber(person: Person, shown: Comparison, onMark: () -> Unit) {
     val quiet = MaterialTheme.colorScheme.onSurfaceVariant
     if (shown.groups.isEmpty()) {
-        Text("Their safety number appears once you share a room.", color = quiet)
+        Text("No safety number: the server shows no key that signed this name and picture.", color = quiet)
     } else {
         Text(
             shown.groups.chunked(4).joinToString("\n") { it.joinToString(" ") },

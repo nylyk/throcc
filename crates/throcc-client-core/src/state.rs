@@ -301,8 +301,9 @@ pub struct Person {
     pub verified: bool,
     /// The name that key was verified under, while it is verified.
     pub verified_name: Option<String>,
-    /// The identity key they presented this session, in a room with us. None until then,
-    /// even for someone verified before: nothing else ties their account here to that key.
+    /// The identity key they presented this session, by signing their presence or as a peer
+    /// in our room. None until then, even for someone verified before: nothing else ties
+    /// their account here to that key.
     pub identity_key: Option<PublicKey>,
     pub role: Role,
     /// Whether the user blocked them. A blocked person keeps their place in the room, under

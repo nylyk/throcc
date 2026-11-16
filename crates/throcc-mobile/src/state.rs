@@ -130,7 +130,8 @@ pub struct Person {
     pub trust: KeyTrust,
     /// The letter their picture stands in with.
     pub initial: String,
-    /// The identity key they presented this session, in a room with us.
+    /// The identity key they presented this session, by signing their presence or as a peer
+    /// in our room.
     pub identity_key: Option<Vec<u8>>,
     pub role: Role,
     /// Whether the user blocked them. A blocked person keeps their place in the room.

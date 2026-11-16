@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use throcc_proto::ids::Hash;
+use throcc_crypto::identity::{IdentityKey, profile_message};
+use throcc_proto::Fingerprint;
+use throcc_proto::ids::{Hash, UserId};
 use throcc_proto::messages::{
-    MAX_AVATAR_BYTES, MAX_NAME_CHARS, MAX_PASSWORD_CHARS, shows_something, valid_name,
-    valid_password,
+    MAX_AVATAR_BYTES, MAX_NAME_CHARS, MAX_PASSWORD_CHARS, SignedProfile, shows_something,
+    valid_name, valid_password,
 };
 
 /// Our name and picture, kept on this computer and given to every server we join.
@@ -18,6 +20,21 @@ pub struct Profile {
 impl Profile {
     pub fn avatar(&self) -> Option<Hash> {
         self.picture.as_deref().map(Hash::of)
+    }
+
+    /// This profile, signed by `identity` for `user` on the server `server`.
+    pub fn signed(
+        &self,
+        identity: &IdentityKey,
+        server: &Fingerprint,
+        user: UserId,
+    ) -> SignedProfile {
+        let message = profile_message(&server.0, user, &self.name, self.avatar());
+        SignedProfile {
+            name: self.name.clone(),
+            picture: self.picture.as_deref().map(<[u8]>::to_vec),
+            sig: identity.sign(&message),
+        }
     }
 }
 

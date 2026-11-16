@@ -79,7 +79,7 @@ mod tests {
     fn refuses_to_encode_oversized_frames() {
         let message = ClientMessage::Request {
             id: 1,
-            request: Request::UploadAvatar(vec![0; MAX_FRAME_BYTES]),
+            request: Request::SetServerAvatar(Some(vec![0; MAX_FRAME_BYTES])),
         };
         assert!(matches!(encode(&message), Err(FrameError::TooLarge(_))));
     }

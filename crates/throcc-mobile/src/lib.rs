@@ -32,8 +32,8 @@ use throcc_proto::ids::{Hash, UserId};
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{MAX_AVATAR_BYTES, MAX_NAME_CHARS, MAX_PASSWORD_CHARS};
 use throcc_proto::permissions;
+use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{broadcast, watch};
 
 pub use messages::{Command, Event, NameChange, PictureChange, User};
 pub use safety::SafetyCheck;
@@ -295,9 +295,6 @@ pub struct Core {
     problems: Mutex<StoreProblems>,
     /// The servers the mock has joined.
     sample_servers: Mutex<Vec<install::KnownServer>>,
-    /// Carries a profile saved from the start of a connection on to its session, which gives
-    /// it to the server.
-    profile_watch: Mutex<Option<watch::Sender<CoreProfile>>>,
     share_views: Mutex<ShareViews>,
     next_view: AtomicU64,
     listener: Arc<Mutex<Option<Arc<dyn Listener>>>>,
@@ -512,15 +509,8 @@ impl Core {
         let invite = invite.map(|code| parse_invite(&code)).transpose()?;
         let _switching = lock(&self.switching);
         self.end_connection();
-        let profile_changes = {
-            // Held while the profile is read, so one saved meanwhile reaches the watch.
-            let mut watch_slot = lock(&self.profile_watch);
-            let Some(profile) = lock(&self.settings).profile.clone() else {
-                return Err(anyhow!("set your name first").into());
-            };
-            let (kept_profile, profile_changes) = watch::channel(profile);
-            *watch_slot = Some(kept_profile);
-            profile_changes
+        let Some(profile) = lock(&self.settings).profile.clone() else {
+            return Err(anyhow!("set your name first").into());
         };
         let (verified, blocked) = (self.verified.clone(), self.blocked.clone());
         let mut audio = None;
@@ -542,7 +532,7 @@ impl Core {
                 &address,
                 keystore,
                 entry,
-                profile_changes,
+                profile.clone(),
                 Some(engine),
                 verified,
                 blocked,
@@ -568,6 +558,10 @@ impl Core {
         drop(views);
         let _ = self.told.send((connection, Told::State(Box::new(state))));
         self.forward(events, connection);
+        let saved = lock(&self.settings).profile.clone();
+        if let Some(saved_meanwhile) = saved.filter(|saved| *saved != profile) {
+            self.pass_on(saved_meanwhile);
+        }
         if let Some(audio) = self.audio() {
             audio.apply(lock(&self.settings).audio.voice);
         }
@@ -830,7 +824,6 @@ impl Core {
             } else {
                 Vec::new()
             }),
-            profile_watch: Mutex::new(None),
             share_views: Mutex::default(),
             next_view: AtomicU64::new(0),
             listener,
@@ -844,7 +837,6 @@ impl Core {
 
     /// Ends the connection there is, after which the listener hears nothing more of it.
     fn end_connection(&self) {
-        *lock(&self.profile_watch) = None;
         let Some(connected) = lock(&self.connected).take() else {
             return;
         };
@@ -853,14 +845,10 @@ impl Core {
         let _ = self.told.send((next, Told::State(Box::default())));
     }
 
-    /// Gives `profile` to the session, which gives it to the server, even while it
-    /// connects. The mock takes it as a command.
+    /// Gives `profile` to the server we are connected to.
     fn pass_on(&self, profile: CoreProfile) {
-        if let Some(watch) = &*lock(&self.profile_watch) {
-            watch.send_replace(profile.clone());
-        }
-        if self.mock {
-            self.tell_client(UiCommand::SetProfile(profile));
+        if let Some(connected) = &*lock(&self.connected) {
+            connected.client.command(UiCommand::SetProfile(profile));
         }
     }
 

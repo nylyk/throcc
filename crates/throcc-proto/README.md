@@ -5,7 +5,7 @@ The wire types that the server and clients share. It is plain data and pure func
 | Module | Holds |
 | --- | --- |
 | `lib.rs` | ALPN `throcc/1`, the default port 8476 and the SNI placeholder |
-| `messages.rs` | The control protocol: handshake, requests, responses, events, `PROTOCOL` and the oldest one a server accepts, `MIN_PROTOCOL`, and the name and password rules. Both hellos stay decodable by every version, so mismatched peers can tell which of them is outdated |
+| `messages.rs` | The control protocol: handshake, requests, responses, events, `PROTOCOL` and the oldest one a server accepts, `MIN_PROTOCOL`, and the name and password rules. Both hellos stay decodable by every version, so mismatched peers can tell which of them is outdated. A sign-in goes `ClientHello`, the PAKE for an enrollment, then the server's `AccountStep` with our user id, our `SignedProfile` for it, and the `Welcome`. `SignedProfile` carries the name, the picture's bytes and the identity key's signature over both for that server and user; `SetProfile` carries the same, and every `Presence` the signature, so other members can check it |
 | `framing.rs` | Control-stream framing: a `u32` length and a postcard body, capped at 1 MiB |
 | `frame.rs` | The 13-byte media header, its flags and the datagram size budget |
 | `ids.rs` | `UserId`, `RoomId`, `MediaId`, `Epoch`, `Hash` and `Role` |
@@ -15,4 +15,4 @@ The wire types that the server and clients share. It is plain data and pure func
 | `transport.rs` | QUIC settings both sides use, and the connection close codes |
 | `limits.rs` | The limits both sides hold to: 30 people and 5 screen shares in a room, 50 rooms and 250 people signed in on a server, with room for 10 admins past that. The server enforces them; clients refuse a server that goes past them |
 
-Any change to `messages.rs` bumps `PROTOCOL`. A server keeps speaking the protocol before, so a changed message also needs its old shape kept for those sessions; protocol 2 alone dropped protocol 1 instead. New enum variants go last, because postcard encodes a variant by its index. The media header in `frame.rs` is security-critical, and changing its layout changes the protocol.
+Any change to `messages.rs` bumps `PROTOCOL`. A server keeps speaking the protocol before, so a changed message also needs its old shape kept for those sessions; protocol 2 dropped protocol 1 instead, and protocol 3 dropped protocol 2. New enum variants go last, because postcard encodes a variant by its index. The media header in `frame.rs` is security-critical, and changing its layout changes the protocol.

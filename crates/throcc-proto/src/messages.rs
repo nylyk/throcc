@@ -4,9 +4,10 @@ use crate::framing::FrameError;
 use crate::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
 
 /// The protocol this build speaks.
-pub const PROTOCOL: u16 = 2;
-/// The oldest protocol a server of this build accepts. Protocol 2 dropped protocol 1.
-pub const MIN_PROTOCOL: u16 = 2;
+pub const PROTOCOL: u16 = 3;
+/// The oldest protocol a server of this build accepts. Protocol 3 dropped protocol 2, as 2
+/// dropped 1.
+pub const MIN_PROTOCOL: u16 = 3;
 pub const MAX_AVATAR_BYTES: usize = 64 * 1024;
 pub const MAX_NAME_CHARS: usize = 32;
 pub const MAX_PASSWORD_CHARS: usize = 128;
@@ -118,6 +119,23 @@ pub struct PakeFinish {
     pub signature: Signature,
 }
 
+/// The server's answer once it knows who signs in: the user id to sign our profile for, or a
+/// refusal.
+pub type AccountStep = Result<UserId, AuthError>;
+
+/// Our name and picture, as every sign-in gives them to the server before its [`Welcome`] and
+/// [`Request::SetProfile`] changes them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedProfile {
+    pub name: String,
+    /// At most [`MAX_AVATAR_BYTES`].
+    pub picture: Option<Vec<u8>>,
+    /// Our identity key's signature over `name` and the picture's hash for this server and
+    /// user.
+    #[serde(with = "sig")]
+    pub sig: Signature,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuthResult {
     Ok(Box<Welcome>),
@@ -132,18 +150,6 @@ pub struct Welcome {
     pub presence: Vec<Presence>,
     pub placement: Placement,
     pub server: ServerProfile,
-    pub profile: UserProfile,
-}
-
-/// Our own name and picture, as the server keeps them.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UserProfile {
-    pub name: String,
-    pub avatar: Option<Hash>,
-    /// Our identity key's signature over `name` and `avatar` for this server and user, once
-    /// we have given one.
-    #[serde(with = "optional_sig")]
-    pub sig: Option<Signature>,
 }
 
 /// The server's own name and picture, which admins set.
@@ -171,6 +177,8 @@ pub enum AuthError {
     ServerFull,
     #[error("the name is empty, too long or hides text")]
     BadName,
+    #[error("the server refused your name, picture or their signature")]
+    BadProfile,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,14 +201,7 @@ pub enum Request {
     },
     /// Moves us out of our room, into the lobby.
     LeaveRoom,
-    /// Sets our name and picture, signed by our identity key for this server and user.
-    SetProfile {
-        name: String,
-        avatar: Option<Hash>,
-        #[serde(with = "sig")]
-        sig: Signature,
-    },
-    UploadAvatar(Vec<u8>),
+    SetProfile(SignedProfile),
     FetchAvatar(Hash),
     SetEncryptionKey(SignedEncryptionKey),
     SetMedia(MediaState),
@@ -239,7 +240,8 @@ pub enum Request {
         cascade: bool,
     },
     SetServerName(Option<String>),
-    SetServerAvatar(Option<Hash>),
+    /// Sets the server's picture, at most [`MAX_AVATAR_BYTES`], or removes it with `None`.
+    SetServerAvatar(Option<Vec<u8>>),
     /// Moves `user` from `room` to the lobby. Managers and admins, on lower ranks only.
     KickFromRoom {
         user: UserId,
@@ -254,7 +256,6 @@ pub enum Response {
     Placement(Placement),
     Invite { code: String, expires: u64 },
     Users(Vec<User>),
-    AvatarHash(Hash),
     Avatar(Vec<u8>),
 }
 
@@ -433,10 +434,9 @@ pub struct Presence {
     pub role: Role,
     /// The identity key the server knows this user by, which `profile_sig` proves.
     pub identity_key: PublicKey,
-    /// The signature of `identity_key` over `name` and `avatar` for this server and user,
-    /// once they have given one.
-    #[serde(with = "optional_sig")]
-    pub profile_sig: Option<Signature>,
+    /// The signature of `identity_key` over `name` and `avatar` for this server and user.
+    #[serde(with = "sig")]
+    pub profile_sig: Signature,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -488,23 +488,6 @@ mod sig {
             }
         }
         d.deserialize_bytes(SigVisitor)
-    }
-}
-
-mod optional_sig {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    use super::Signature;
-
-    #[derive(Serialize, Deserialize)]
-    struct Sig(#[serde(with = "super::sig")] Signature);
-
-    pub fn serialize<S: Serializer>(sig: &Option<Signature>, s: S) -> Result<S::Ok, S::Error> {
-        sig.map(Sig).serialize(s)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Signature>, D::Error> {
-        Ok(Option::<Sig>::deserialize(d)?.map(|Sig(sig)| sig))
     }
 }
 
