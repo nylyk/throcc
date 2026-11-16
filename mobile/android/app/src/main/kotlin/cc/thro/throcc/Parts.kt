@@ -113,7 +113,6 @@ fun Page(
     model: AppModel,
     title: String,
     onBack: (() -> Unit)? = model::back,
-    subtitle: String? = null,
     largeTitle: Boolean = true,
     notices: Boolean = true,
     actions: @Composable RowScope.() -> Unit = {},
@@ -141,7 +140,6 @@ fun Page(
             if (tall) {
                 LargeFlexibleTopAppBar(
                     name,
-                    subtitle = subtitle?.let { { Text(it, maxLines = 1, overflow = TextOverflow.Ellipsis) } },
                     navigationIcon = back,
                     actions = actions,
                     colors = colors,

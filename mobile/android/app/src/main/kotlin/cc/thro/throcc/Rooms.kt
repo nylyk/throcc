@@ -83,7 +83,7 @@ fun Rooms(model: AppModel, state: CoreState) {
     Page(
         model,
         server,
-        subtitle = state.server?.address.takeIf { state.server?.name != null },
+        largeTitle = false,
         actions = {
             if (managesRooms) IconButton({ dialog = RoomDialog.New }) { Icon(Icons.Default.Add, "New room") }
             OverflowMenu { close ->
