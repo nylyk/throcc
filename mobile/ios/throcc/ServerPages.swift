@@ -39,11 +39,11 @@ private struct ServerOverview: View {
                     } else {
                         LabeledContent("Name") {
                             Avatar(picture: model.picture(in: picture), initial: initial(name: server.title), size: 28)
-                            Text(server.title).foregroundStyle(.muted)
+                            Text(server.title).lineLimit(1).foregroundStyle(.muted)
                         }
                         .foregroundStyle(.text)
                     }
-                    LabeledContent("Address") { Text(server.address).foregroundStyle(.muted) }
+                    LabeledContent("Address") { Text(server.address).lineLimit(1).foregroundStyle(.muted) }
                         .foregroundStyle(.text)
                 } footer: {
                     if let problem = nameProblem(typed: name) {
@@ -116,9 +116,9 @@ private struct MembersPage: View {
                             size: 28
                         )
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(user.id == state.me ? "\(user.name) (you)" : user.name).foregroundStyle(.text)
+                            Text(user.id == state.me ? "\(user.name) (you)" : user.name).lineLimit(1).foregroundStyle(.text)
                             if let inviter = model.users.first(where: { $0.id == user.invitedBy }) {
-                                Text("Invited by \(inviter.name)")
+                                Text("Invited by \(inviter.name)").lineLimit(1)
                                     .font(.caption)
                                     .foregroundStyle(.muted)
                             }
@@ -208,7 +208,7 @@ private struct KeysPage: View {
         ThemedList {
             if let server = state.server {
                 Section {
-                    Text(server.address).foregroundStyle(.text)
+                    Text(server.address).lineLimit(1).foregroundStyle(.text)
                     Text(fingerprintText(key: server.fingerprint))
                         .font(.footnote)
                         .monospaced()

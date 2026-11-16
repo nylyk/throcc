@@ -31,6 +31,7 @@ struct PersonView: View {
                 VStack(spacing: 8) {
                     PersonPicture(person: person, size: 96)
                     Text(person.name)
+                        .lineLimit(1)
                         .font(.title2.weight(.semibold))
                         .foregroundStyle(person.blocked ? ThemeColor.muted : .text)
                         .multilineTextAlignment(.center)

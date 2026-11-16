@@ -55,6 +55,7 @@ import androidx.compose.material3.LargeFlexibleTopAppBar
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuDefaults
@@ -78,12 +79,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -128,7 +131,7 @@ fun Page(
         TopAppBarDefaults.pinnedScrollBehavior()
     }
     val name = @Composable {
-        Text(title, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        OneLineText(title, fontWeight = FontWeight.Medium)
     }
     val back = @Composable {
         if (onBack != null) IconButton(onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
@@ -156,6 +159,26 @@ fun Page(
         content = content,
     )
 }
+
+/** Text on one line that ends in an ellipsis where it doesn't fit, for the names people choose. */
+@Composable
+fun OneLineText(
+    text: String,
+    modifier: Modifier = Modifier,
+    color: Color = Color.Unspecified,
+    fontWeight: FontWeight? = null,
+    textAlign: TextAlign? = null,
+    style: TextStyle = LocalTextStyle.current,
+) = Text(
+    text,
+    modifier,
+    color,
+    fontWeight = fontWeight,
+    textAlign = textAlign,
+    maxLines = 1,
+    overflow = TextOverflow.Ellipsis,
+    style = style,
+)
 
 /** These paddings above and beside only, for scrolling content that takes the bottom one inside. */
 @Composable

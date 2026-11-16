@@ -365,11 +365,11 @@ fun VerifiedPeople(model: AppModel, state: CoreState) {
                     },
                     supporting = {
                         Column {
-                            if (person.servers.isNotEmpty()) Text(person.servers.joinToString(", "))
+                            if (person.servers.isNotEmpty()) OneLineText(person.servers.joinToString(", "))
                             Text(fingerprintShort(person.key), fontFamily = FontFamily.Monospace)
                         }
                     },
-                ) { Text(person.name) }
+                ) { OneLineText(person.name) }
             }
         }
     }
@@ -401,11 +401,11 @@ fun BlockedPeople(model: AppModel, state: CoreState) {
                     trailing = { TextButton({ model.unblock(person.key) }) { Text("Unblock") } },
                     supporting = {
                         Column {
-                            person.server?.let { Text(it) }
+                            person.server?.let { OneLineText(it) }
                             Text(fingerprintShort(person.key), fontFamily = FontFamily.Monospace)
                         }
                     },
-                ) { Text(person.name) }
+                ) { OneLineText(person.name) }
             }
         }
     }

@@ -69,7 +69,6 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
@@ -183,17 +182,10 @@ private fun Sharer(model: AppModel, person: Person, details: String, modifier: M
         Alignment.CenterVertically,
     ) {
         PersonPicture(model, person, 24.dp)
-        Text(
-            person.name,
-            Modifier.weight(1f, fill = false),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            style = MaterialTheme.typography.labelLarge,
-        )
-        Text(
+        OneLineText(person.name, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.labelLarge)
+        OneLineText(
             details,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
             style = MaterialTheme.typography.labelMedium,
         )
     }

@@ -330,8 +330,9 @@ private struct VerifiedPage: View {
                 ForEach(people, id: \.key) { person in
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(blocked.contains(person.key) ? blockedName() : person.name).foregroundStyle(.text)
+                            Text(blocked.contains(person.key) ? blockedName() : person.name).lineLimit(1).foregroundStyle(.text)
                             Text(person.servers.joined(separator: ", "))
+                                .lineLimit(1)
                                 .font(.caption)
                                 .foregroundStyle(.muted)
                         }
@@ -380,9 +381,10 @@ private struct BlockedPage: View {
                     HStack(spacing: 12) {
                         Avatar(picture: model.picture(in: person.picture), initial: initial(name: person.name), size: 28)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(person.name).foregroundStyle(.text)
+                            Text(person.name).lineLimit(1).foregroundStyle(.text)
                             if let server = person.server {
                                 Text(server)
+                                    .lineLimit(1)
                                     .font(.caption)
                                     .foregroundStyle(.muted)
                             }

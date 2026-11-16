@@ -113,11 +113,11 @@ private fun ServerRow(model: AppModel, server: KnownServer, index: Int, connecte
         },
         supporting = {
             Column {
-                if (server.name != null) Text(server.address)
+                if (server.name != null) OneLineText(server.address)
                 if (connected) Connected()
             }
         },
-    ) { Text(title) }
+    ) { OneLineText(title) }
 }
 
 @Composable

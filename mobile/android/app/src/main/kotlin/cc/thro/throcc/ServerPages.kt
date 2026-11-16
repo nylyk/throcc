@@ -74,11 +74,11 @@ fun ServerOverview(model: AppModel, state: CoreState) {
                 val name = server.title
                 Row(Modifier, Arrangement.spacedBy(16.dp), Alignment.CenterVertically) {
                     Avatar(model.picture(server.avatar), initial(name), 80.dp)
-                    Text(name, style = MaterialTheme.typography.headlineSmallEmphasized)
+                    OneLineText(name, style = MaterialTheme.typography.headlineSmallEmphasized)
                 }
             }
             Column {
-                GroupRow(0, 2, supporting = { Text(server.address) }) { Text("Address") }
+                GroupRow(0, 2, supporting = { OneLineText(server.address) }) { Text("Address") }
                 GroupRow(
                     1,
                     2,
@@ -180,11 +180,11 @@ private fun Member(model: AppModel, state: CoreState, user: User, index: Int, on
         },
         supporting = {
             Column {
-                inviter?.let { Text("Invited by ${it.name}") }
+                inviter?.let { OneLineText("Invited by ${it.name}") }
                 Text(fingerprintShort(user.identityKey), fontFamily = FontFamily.Monospace)
             }
         },
-    ) { Text(if (user.id == state.me) "${user.name} (you)" else user.name) }
+    ) { OneLineText(if (user.id == state.me) "${user.name} (you)" else user.name) }
 }
 
 val Role.label
@@ -288,7 +288,7 @@ fun Keys(model: AppModel, state: CoreState) {
                         0,
                         1,
                         supporting = { Text(fingerprintText(server.fingerprint), fontFamily = FontFamily.Monospace) },
-                    ) { Text(server.address) }
+                    ) { OneLineText(server.address) }
                     GroupTitle("People Here")
                 }
             }
@@ -302,7 +302,7 @@ fun Keys(model: AppModel, state: CoreState) {
                     supporting = person.identityKey?.let { key ->
                         { Text(fingerprintShort(key), fontFamily = FontFamily.Monospace) }
                     },
-                ) { Text(person.name) }
+                ) { OneLineText(person.name) }
             }
         }
     }

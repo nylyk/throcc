@@ -52,9 +52,10 @@ struct ServersView: View {
         HStack(spacing: 12) {
             Avatar(picture: model.picture(in: server.picture), initial: initial(name: server.title), size: 40)
             VStack(alignment: .leading, spacing: 2) {
-                Text(server.title).foregroundStyle(.text)
+                Text(server.title).lineLimit(1).foregroundStyle(.text)
                 if server.name != nil {
                     Text(server.address)
+                        .lineLimit(1)
                         .font(.subheadline)
                         .foregroundStyle(.muted)
                 }

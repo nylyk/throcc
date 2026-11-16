@@ -82,7 +82,7 @@ fun PersonSheet(model: AppModel, state: CoreState, person: Person) {
                     Row(Modifier.padding(start = 8.dp), Arrangement.spacedBy(16.dp), Alignment.CenterVertically) {
                         PersonPicture(model, person, 72.dp)
                         Column(Modifier.weight(1f)) {
-                            Text(person.name, style = MaterialTheme.typography.headlineSmallEmphasized)
+                            OneLineText(person.name, style = MaterialTheme.typography.headlineSmallEmphasized)
                             if (!person.blocked) {
                                 Text(person.role.label, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }

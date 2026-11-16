@@ -38,7 +38,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cc.thro.throcc.core.Command
 import cc.thro.throcc.core.CoreState
@@ -174,12 +173,7 @@ private fun RoomCard(model: AppModel, state: CoreState, room: Room, onJoin: () -
         ) {
             Icon(if (room.locked) Icons.Default.Lock else Icons.AutoMirrored.Filled.VolumeUp, null)
             Column(Modifier.weight(1f).heightIn(min = 48.dp), Arrangement.Center) {
-                Text(
-                    room.name,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.titleMediumEmphasized,
-                )
+                OneLineText(room.name, style = MaterialTheme.typography.titleMediumEmphasized)
                 Text(
                     facts.joinToString(" · "),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -207,13 +201,7 @@ private fun PersonRow(model: AppModel, person: Person) {
         Alignment.CenterVertically,
     ) {
         PersonPicture(model, person, 32.dp)
-        Text(
-            person.name,
-            Modifier.weight(1f),
-            if (person.blocked) quiet else scheme.onSurface,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        OneLineText(person.name, Modifier.weight(1f), if (person.blocked) quiet else scheme.onSurface)
         if (!person.blocked) {
             when (person.trust) {
                 KeyTrust.KEY_CHANGED -> Icon(Icons.Default.Warning, "Key changed", small, scheme.error)

@@ -46,7 +46,6 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cc.thro.throcc.core.Command
 import cc.thro.throcc.core.CoreState
@@ -135,11 +134,9 @@ private fun PersonCard(model: AppModel, person: Person, watched: Boolean, modifi
         ) {
             PersonPicture(model, person, 88.dp, Modifier.border(3.dp, ring, CircleShape).padding(6.dp))
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(
+                OneLineText(
                     person.name,
                     Modifier.weight(1f, fill = false),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
                     textAlign = TextAlign.Center,
                     style = MaterialTheme.typography.titleMedium,
                 )
