@@ -6,9 +6,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContentTransitionScope
 import androidx.compose.animation.AnimatedContentTransitionScope.SlideDirection
 import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Easing
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
@@ -79,8 +79,9 @@ private fun Panes(model: AppModel, state: CoreState) {
                 onBack = { if (roomInFront) model.roomInFront = false else model.back() },
                 transitionSpec = { slide(SlideDirection.Start, FastOutSlowInEasing) },
                 popTransitionSpec = { slide(SlideDirection.End, FastOutSlowInEasing) },
-                // A back gesture seeks the transition by its progress, so it eases on its own.
-                predictivePopTransitionSpec = { slide(SlideDirection.End, LinearEasing) },
+                // NavDisplay seeks this by the gesture's progress, then plays the rest of it once
+                // the finger lifts, so it starts at the finger's pace and eases into place.
+                predictivePopTransitionSpec = { slide(SlideDirection.End, CubicBezierEasing(0.7f, 0.7f, 0.3f, 1f)) },
                 // NavDisplay keeps an entry until the stack changes, so an entry that captured the
                 // state would show a stale one.
                 entryProvider = { screen -> NavEntry(screen) { Shown(model, screen) } },
