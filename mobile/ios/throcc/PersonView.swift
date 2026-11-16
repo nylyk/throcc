@@ -93,6 +93,7 @@ struct PersonView: View {
                 TrustLabel(trust: person.trust)
                 if let verifiedAs = person.verifiedAs {
                     Text("Verified as \(verifiedAs)")
+                        .lineLimit(1)
                         .font(.caption)
                         .foregroundStyle(.muted)
                 }

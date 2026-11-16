@@ -90,7 +90,7 @@ fun PersonSheet(model: AppModel, state: CoreState, person: Person) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     TrustLabel(person.trust)
                                     person.verifiedAs?.let {
-                                        Text(
+                                        OneLineText(
                                             "Verified as $it",
                                             Modifier.padding(start = 8.dp),
                                             MaterialTheme.colorScheme.onSurfaceVariant,

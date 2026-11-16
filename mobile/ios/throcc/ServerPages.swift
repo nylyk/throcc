@@ -226,7 +226,7 @@ private struct KeysPage: View {
                         HStack(spacing: 12) {
                             PersonPicture(person: person, size: 28)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(person.name).foregroundStyle(person.blocked ? ThemeColor.muted : .text)
+                                Text(person.name).lineLimit(1).foregroundStyle(person.blocked ? ThemeColor.muted : .text)
                                 if let key = person.identityKey {
                                     ShortKey(key: key)
                                 }
