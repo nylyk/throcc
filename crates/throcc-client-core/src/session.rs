@@ -28,7 +28,7 @@ use crate::lock;
 use crate::media::cues::Cue;
 use crate::media::engine::Kind;
 use crate::media::share_audio::Playout;
-use crate::media::video::{Output, Picture, PreviewDemand};
+use crate::media::video::{Output, Picture, PreviewDemand, View};
 use crate::media::voice::{AudioEngine, CallAudio, CallCommand};
 use crate::playback::SavedPlayback;
 use crate::profile::Profile;
@@ -74,7 +74,7 @@ pub(crate) struct Shared {
     pub pictures: Mutex<HashMap<UserId, Picture>>,
     /// Where each share is shown on the phones, set and cleared by the app whether or not it
     /// is watched, so a share restarted or watched again shows in the same view.
-    pub outputs: Mutex<HashMap<UserId, Output>>,
+    outputs: Mutex<HashMap<UserId, Output>>,
     /// Our own user and the preview demand of our running share.
     pub preview: Mutex<Option<(UserId, Arc<PreviewDemand>)>>,
     pub avatars: Mutex<HashMap<Hash, AvatarSlot>>,
@@ -150,6 +150,17 @@ impl Shared {
     /// Where `user`'s share is shown, on the phones.
     pub fn output(&self, user: UserId) -> Output {
         lock(&self.outputs).entry(user).or_default().clone()
+    }
+
+    /// Shows `user`'s share in `view` on the phones from now on, or nowhere. An output that
+    /// shows nowhere and feeds no decoder is forgotten.
+    pub fn set_view(&self, user: UserId, view: Option<View>) {
+        let mut outputs = lock(&self.outputs);
+        if view.is_none() && outputs.get(&user).is_none_or(|output| !output.is_shared()) {
+            outputs.remove(&user);
+            return;
+        }
+        outputs.entry(user).or_default().set(view);
     }
 
     fn set_picture(&self, user: UserId, picture: Option<Picture>) {
@@ -2493,6 +2504,18 @@ fn receivers_of(audiences: &Audiences, video: MediaId) -> Option<&[UserId]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_output_without_a_view_or_a_decoder_is_forgotten() {
+        let shared = Shared::new(State::default());
+        let user = UserId(7);
+        let decoders = shared.output(user);
+        shared.set_view(user, None);
+        assert!(lock(&shared.outputs).contains_key(&user));
+        drop(decoders);
+        shared.set_view(user, None);
+        assert!(!lock(&shared.outputs).contains_key(&user));
+    }
 
     /// Whether the track counts as too slow at each health refresh, given the units each
     /// server report between refreshes dropped.

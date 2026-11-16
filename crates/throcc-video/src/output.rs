@@ -32,6 +32,11 @@ impl Output {
         self.0.changes.fetch_add(1, Ordering::Release);
     }
 
+    /// Whether a clone of this output, a decoder's, is still around.
+    pub fn is_shared(&self) -> bool {
+        Arc::strong_count(&self.0) > 1
+    }
+
     /// How many times the view changed, which a decoder compares with what it last saw.
     pub fn changes(&self) -> u64 {
         self.0.changes.load(Ordering::Acquire)

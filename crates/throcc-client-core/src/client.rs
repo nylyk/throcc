@@ -324,7 +324,7 @@ impl ClientApi for Client {
     }
 
     fn set_share_view(&self, user: UserId, view: Option<View>) {
-        self.shared.output(user).set(view);
+        self.shared.set_view(user, view);
     }
 
     fn picture_drawn(&self, user: UserId) {
@@ -696,10 +696,10 @@ impl ClientApi for MockClient {
     }
 
     fn set_share_view(&self, user: UserId, view: Option<View>) {
-        let output = self.shared.output(user);
-        output.set(view);
-        if let Some(frame) = self.picture.borrow().as_deref().and_then(Frame::planes) {
-            output.show(frame);
+        let shows = view.is_some();
+        self.shared.set_view(user, view);
+        if shows && let Some(frame) = self.picture.borrow().as_deref().and_then(Frame::planes) {
+            self.shared.output(user).show(frame);
         }
     }
 
