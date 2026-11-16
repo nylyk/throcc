@@ -176,7 +176,7 @@ private fun RoomCard(model: AppModel, state: CoreState, room: Room, onJoin: () -
             Column(Modifier.weight(1f).heightIn(min = 48.dp), Arrangement.Center) {
                 Text(
                     room.name,
-                    maxLines = 2,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.titleMediumEmphasized,
                 )

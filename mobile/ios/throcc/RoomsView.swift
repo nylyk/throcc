@@ -109,6 +109,7 @@ struct RoomsView: View {
             Text(room.name)
                 .font(.headline)
                 .foregroundStyle(.text)
+                .lineLimit(1)
             Spacer()
             if model.state.current?.room == room.id {
                 Image(systemName: "checkmark")
