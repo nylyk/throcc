@@ -2,7 +2,7 @@ use gpui::{Context, Div, IntoElement, ParentElement, Styled, div, px};
 use throcc_client_core::client::UiCommand;
 use throcc_client_core::state::NoticeAction;
 
-use super::common::{description, error_box, moves_window, primary};
+use super::common::{description, error_box, moves_window, primary, secondary};
 use super::mascot;
 use crate::app::{Dialog, ThroccApp};
 use crate::theme;
@@ -32,6 +32,12 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
     };
     frame(mascot)
         .children(hint.map(description))
+        .children(app.joining.then(|| {
+            secondary("cancel-join", "Cancel")
+                .h_10()
+                .px_4()
+                .on_click(cx.listener(|app, _, _, cx| app.cancel_join(cx)))
+        }))
         .children(error.map(|e| div().w(px(420.)).child(error_box(e))))
         .children((first_run && !app.joining).then(|| {
             primary("add-first-server", "Add Server")

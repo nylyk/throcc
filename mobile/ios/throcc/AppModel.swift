@@ -186,7 +186,7 @@ final class AppModel {
     }
 
     /// Signs in to the server at `address`, joining it first with the invite `code`, and opens
-    /// its rooms. It does nothing while another sign-in is under way. A changed server key or a
+    /// its rooms. It takes over from a sign-in under way. A changed server key or a
     /// missing identity opens its dialog in place of the sheet that asked rather than throwing,
     /// and signing in closes the add-server sheet or either dialog.
     func connect(to address: String, code: String? = nil) async throws {
@@ -194,11 +194,17 @@ final class AppModel {
             showsRooms = true
             return
         }
-        guard connecting == nil else { return }
-        connecting = address
-        defer { connecting = nil }
+        if connecting != nil {
+            cancelConnect()
+        }
         switches += 1
         let (asked, core, switching) = (switches, core, switching)
+        connecting = address
+        defer {
+            if asked == switches {
+                connecting = nil
+            }
+        }
         do {
             try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, Error>) in
                 switching.async { done.resume(with: Result { try core.connect(address: address, invite: code) }) }
@@ -249,8 +255,13 @@ final class AppModel {
         return started
     }
 
-    /// Connects to a server on the list, and says why if that fails.
+    /// Connects to a server on the list, and says why if that fails. Opening the server being
+    /// signed in to cancels that sign-in.
     func open(_ address: String) {
+        if connecting == address {
+            cancelConnect()
+            return
+        }
         Task {
             do {
                 try await connect(to: address)
@@ -260,7 +271,18 @@ final class AppModel {
         }
     }
 
+    /// Gives up the sign-in under way.
+    func cancelConnect() {
+        switches += 1
+        connecting = nil
+        // Called here, since the sign-in it cancels holds `switching` until it gives up.
+        core.cancelConnect()
+    }
+
     func disconnect() {
+        if connecting != nil {
+            cancelConnect()
+        }
         switches += 1
         connectedAddress = nil
         showsRooms = false
@@ -273,7 +295,10 @@ final class AppModel {
     }
 
     func forget(_ address: String) {
-        if address == connectedAddress || address == connecting {
+        if address == connecting {
+            cancelConnect()
+        }
+        if address == connectedAddress {
             switches += 1
             connectedAddress = nil
         }

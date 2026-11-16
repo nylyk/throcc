@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use throcc_client_core::account;
 use throcc_client_core::blocked::BlockedStore;
 use throcc_client_core::call::{Call, CallEvent};
-use throcc_client_core::client::{Client, ClientApi, UiCommand, UiEvent};
+use throcc_client_core::client::{Client, ClientApi, Entry, UiCommand, UiEvent};
 use throcc_client_core::keystore::Keystore;
 use throcc_client_core::profile::Profile;
 use throcc_client_core::state::{
@@ -318,7 +318,7 @@ fn a_profile_the_app_keeps_mid_session_reaches_the_server() {
     let alice = Client::connect(
         &address,
         keystore,
-        Some(&admin_invite),
+        Entry::Enroll(&admin_invite),
         profile,
         None,
         verified,

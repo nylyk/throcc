@@ -165,6 +165,9 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
     var connectingTo by mutableStateOf<String?>(null)
         private set
 
+    /** Counts the sign-ins asked for and cancelled, so one that was overtaken is ignored. */
+    private var connects = 0
+
     /** Why the last sign-in failed, where the user has a choice to make. */
     var signInProblem by mutableStateOf<SignInProblem?>(null)
     var startingOver by mutableStateOf<StartingOver?>(null)
@@ -247,9 +250,23 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
         if (stack.size > 1) stack.removeAt(stack.lastIndex)
     }
 
-    /** Opens the rooms of the server at `address`, signing in unless a session holds on to it. */
+    /**
+     * Opens the rooms of the server at `address`, signing in unless a session holds on to it.
+     * Opening the server being signed in to cancels that sign-in.
+     */
     fun openServer(address: String) {
-        if (state.value.holdsSessionWith(address)) open(Screen.Rooms) else connect(address)
+        when {
+            state.value.holdsSessionWith(address) -> open(Screen.Rooms)
+            connectingTo == address -> cancelConnect()
+            else -> connect(address)
+        }
+    }
+
+    /** Gives up the sign-in under way. */
+    fun cancelConnect() {
+        connects++
+        connectingTo = null
+        core.cancelConnect()
     }
 
     /** Opens the Add Server page, with `address` typed in. */
@@ -290,13 +307,15 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
         }
     }
 
-    /** Signs in at `address` and opens its rooms, or says why it couldn't. */
+    /** Signs in at `address` and opens its rooms, or says why it couldn't. It takes over from a sign-in under way. */
     fun connect(address: String, invite: String? = null) {
-        if (connectingTo != null) return
         withPermissions(networkPermissions(address)) {
+            if (connectingTo != null) cancelConnect()
+            val attempt = ++connects
             scope.launch {
                 connectingTo = address
                 val failure = signIn(address, invite)
+                if (attempt != connects) return@launch
                 connectingTo = null
                 // The dialog opens only once this sign-in is over, so its Try Again never finds it under way.
                 when (failure) {
@@ -340,6 +359,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
 
     /** Ends the connection and returns to the server list. */
     fun disconnect() {
+        if (connectingTo != null) cancelConnect()
         showPages()
         scope.launch {
             ask { core.disconnect() }

@@ -16,7 +16,7 @@ use tempfile::TempDir;
 use throcc_client_core::account::{self, SignInError};
 use throcc_client_core::blocked::BlockedStore;
 use throcc_client_core::call::{Call, CallEvent};
-use throcc_client_core::client::{Client, ClientApi};
+use throcc_client_core::client::{Client, ClientApi, Entry};
 use throcc_client_core::connection::{self, Connected};
 use throcc_client_core::control::ControlLink;
 use throcc_client_core::keystore::Keystore;
@@ -334,7 +334,13 @@ pub fn client_as(
     let verified = VerifiedStore::load(dir).unwrap();
     let blocked = BlockedStore::load(dir).unwrap();
     let profile = tokio::sync::watch::channel(profile).1;
-    Client::connect(address, keystore, invite, profile, None, verified, blocked).unwrap()
+    let entry = match invite {
+        Some(code) => Entry::Enroll(code),
+        None => Entry::SignIn {
+            cancelled: Box::pin(std::future::pending()),
+        },
+    };
+    Client::connect(address, keystore, entry, profile, None, verified, blocked).unwrap()
 }
 
 pub fn wait_for_state_within(

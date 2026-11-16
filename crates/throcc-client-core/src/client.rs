@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -148,6 +149,17 @@ const COMMANDS: usize = 64;
 /// How long dropping a client waits for its session to say goodbye to the server.
 const CLOSE_WAIT: Duration = Duration::from_secs(2);
 
+/// How [`Client::connect`] gets onto a server.
+pub enum Entry<'a> {
+    /// Signs in with a key the server knows, giving up once `cancelled` resolves.
+    SignIn {
+        cancelled: Pin<Box<dyn Future<Output = ()> + Send>>,
+    },
+    /// Joins with an invite. It runs to its end, since the server may make the account
+    /// before telling us.
+    Enroll(&'a InviteCode),
+}
+
 /// A live client: tokio runs on its own threads, and a session task keeps [`State`]
 /// current, drives media and reconnects with the room it was in.
 pub struct Client {
@@ -159,12 +171,12 @@ pub struct Client {
 }
 
 impl Client {
-    /// Signs in, or enrolls with `invite`, and blocks until the server has answered. The
-    /// server gets the newest `profile` unless it has it already, and each one sent after.
+    /// Gets onto the server through `entry` and blocks until it has answered. The server gets
+    /// the newest `profile` unless it has it already, and each one sent after.
     pub fn connect(
         address: &str,
         mut keystore: Keystore,
-        invite: Option<&InviteCode>,
+        entry: Entry<'_>,
         profile: watch::Receiver<Profile>,
         audio: Option<Arc<AudioEngine>>,
         verified: VerifiedStore,
@@ -179,9 +191,12 @@ impl Client {
         keystore.renew_encryption_key_if_due()?;
         let name = profile.borrow().name.clone();
         let link = runtime.block_on(async {
-            match invite {
-                Some(code) => account::enroll(&mut keystore, address, code, &name).await,
-                None => account::sign_in(&keystore, address, None).await,
+            match entry {
+                Entry::Enroll(code) => account::enroll(&mut keystore, address, code, &name).await,
+                Entry::SignIn { cancelled } => tokio::select! {
+                    link = account::sign_in(&keystore, address, None) => link,
+                    () = cancelled => Err(SignInError::Cancelled),
+                },
             }
         })?;
         let identity = keystore.identity().public();

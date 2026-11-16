@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result, anyhow};
 use throcc_client_core::account::SignInError;
 use throcc_client_core::blocked::BlockedStore;
-use throcc_client_core::client::{self, Client, ClientApi, MockClient, UiCommand, UiEvent};
+use throcc_client_core::client::{self, Client, ClientApi, Entry, MockClient, UiCommand, UiEvent};
 use throcc_client_core::install;
 use throcc_client_core::keystore::{self, Keystore};
 use throcc_client_core::media::video::View;
@@ -302,6 +302,8 @@ pub struct Core {
     connection: Arc<AtomicU64>,
     /// Held while the connection is made or ended, so that happens one at a time.
     switching: Mutex<()>,
+    /// Counts the cancellations; a sign-in gives up once the count passes the one it began at.
+    cancellations: watch::Sender<u64>,
     connected: Mutex<Option<Connected>>,
 }
 
@@ -501,6 +503,7 @@ impl Core {
     /// Signs in to the server at `address`, joining it first with `invite`, and waits for
     /// its answer. It takes the place of any connection there was.
     pub fn connect(&self, address: String, invite: Option<String>) -> Result<(), CoreError> {
+        let cancelled = self.next_cancellation();
         let invite = invite.map(|code| parse_invite(&code)).transpose()?;
         let _switching = lock(&self.switching);
         self.end_connection();
@@ -524,10 +527,16 @@ impl Core {
             let voice = lock(&self.settings).audio.voice;
             let engine = Arc::new(AudioEngine::start(voice).context("starting the audio")?);
             audio = Some(engine.clone());
+            let entry = match &invite {
+                Some(code) => Entry::Enroll(code),
+                None => Entry::SignIn {
+                    cancelled: Box::pin(cancelled),
+                },
+            };
             let connected = Client::connect(
                 &address,
                 keystore,
-                invite.as_ref(),
+                entry,
                 profile_changes,
                 Some(engine),
                 verified,
@@ -557,11 +566,18 @@ impl Core {
         Ok(())
     }
 
-    /// Ends the connection, staying a member of the server. It waits for a `connect` under
-    /// way, and then up to three seconds for the goodbye to the server.
+    /// Ends the connection, staying a member of the server. It cancels a `connect` signing in,
+    /// waits for one enrolling, and then up to three seconds for the goodbye to the server.
     pub fn disconnect(&self) {
+        self.cancel_connect();
         let _switching = lock(&self.switching);
         self.end_connection();
+    }
+
+    /// Cancels every `connect` that is signing in or waiting to, which then fails at once.
+    /// One enrolling with an invite runs to its end.
+    pub fn cancel_connect(&self) {
+        self.cancellations.send_modify(|count| *count += 1);
     }
 
     /// Opens the speaker, and the mic `with_mic`, for the room we are in. The app sets up
@@ -813,8 +829,18 @@ impl Core {
             told,
             connection,
             switching: Mutex::new(()),
+            cancellations: watch::Sender::new(0),
             connected: Mutex::new(None),
         })
+    }
+
+    /// Resolves once `cancel_connect` is called after this.
+    fn next_cancellation(&self) -> impl Future<Output = ()> + use<> {
+        let mut cancellations = self.cancellations.subscribe();
+        let now = *cancellations.borrow_and_update();
+        async move {
+            let _ = cancellations.wait_for(|count| *count != now).await;
+        }
     }
 
     /// Ends the connection there is, after which the listener hears nothing more of it.

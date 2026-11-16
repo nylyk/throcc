@@ -25,6 +25,8 @@ pub enum SignInError {
     EncryptionKey(String),
     #[error(transparent)]
     Store(#[from] anyhow::Error),
+    #[error("signing in was cancelled")]
+    Cancelled,
 }
 
 impl SignInError {
