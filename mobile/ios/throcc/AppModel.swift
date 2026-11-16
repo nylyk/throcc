@@ -83,7 +83,13 @@ final class AppModel {
     var sampleConnection: Connection?
     /// The share shown over the whole screen, if any.
     var fullscreenShare: UInt64?
-    @ObservationIgnored private(set) lazy var pictureInPicture = SharePictureInPicture(core: core)
+    @ObservationIgnored private(set) lazy var pictureInPicture = SharePictureInPicture(core: core) { [weak self] in
+        self?.followSight()
+    }
+    /// Whether the app is in the background, where shares go undecoded unless Picture in Picture shows one.
+    @ObservationIgnored var inBackground = false {
+        didSet { followSight() }
+    }
     @ObservationIgnored private let decoded = NSCache<NSData, UIImage>()
     /// The hashes of the pictures the core was asked for on this connection.
     @ObservationIgnored private var askedPictures: Set<Data> = []
@@ -399,6 +405,10 @@ final class AppModel {
             loadServers()
             disconnect()
         }
+    }
+
+    private func followSight() {
+        core.setViewsHidden(hidden: inBackground && pictureInPicture.showing == nil)
     }
 }
 

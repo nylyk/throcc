@@ -293,9 +293,7 @@ pub struct Core {
     /// Carries a profile saved from the start of a connection on to its session, which gives
     /// it to the server.
     profile_watch: Mutex<Option<watch::Sender<CoreProfile>>>,
-    /// The views each share is shown in, newest last: the newest shows it, and the one before
-    /// takes over when it goes.
-    share_views: Mutex<HashMap<u64, Vec<(u64, View)>>>,
+    share_views: Mutex<ShareViews>,
     next_view: AtomicU64,
     listener: Arc<Mutex<Option<Arc<dyn Listener>>>>,
     /// Queues what the listener hears, each with the number of the connection it is from.
@@ -311,6 +309,24 @@ pub struct Core {
 enum Told {
     State(Box<CoreState>),
     Event(Event),
+}
+
+#[derive(Default)]
+struct ShareViews {
+    /// The views each share is shown in, newest last: the newest shows it, and the one before
+    /// takes over when it goes.
+    shown: HashMap<u64, Vec<(u64, View)>>,
+    /// Whether the app is out of sight, which takes every share off its views.
+    hidden: bool,
+}
+
+impl ShareViews {
+    fn current(&self, user: u64) -> Option<View> {
+        if self.hidden {
+            return None;
+        }
+        self.shown.get(&user)?.last().map(|(_, view)| view.clone())
+    }
 }
 
 struct Connected {
@@ -524,9 +540,8 @@ impl Core {
         let connection = self.connection.load(Ordering::SeqCst);
         // Held until the client is in place, so a view shown or hidden meanwhile reaches it.
         let views = lock(&self.share_views);
-        for (user, shown) in views.iter() {
-            let newest = shown.last().map(|(_, view)| view.clone());
-            client.set_share_view(UserId(*user), newest);
+        for user in views.shown.keys() {
+            client.set_share_view(UserId(*user), views.current(*user));
         }
         *lock(&self.connected) = Some(Connected {
             address,
@@ -636,12 +651,13 @@ impl Core {
             return 0;
         };
         let number = self.next_view.fetch_add(1, Ordering::Relaxed) + 1;
-        lock(&self.share_views)
-            .entry(user)
-            .or_default()
-            .push((number, view.clone()));
+        let current = {
+            let mut views = lock(&self.share_views);
+            views.shown.entry(user).or_default().push((number, view));
+            views.current(user)
+        };
         if let Some(connected) = &*lock(&self.connected) {
-            connected.client.set_share_view(UserId(user), Some(view));
+            connected.client.set_share_view(UserId(user), current);
         }
         number
     }
@@ -655,7 +671,7 @@ impl Core {
     )]
     pub fn hide_share(&self, user: u64, number: u64) {
         let mut views = lock(&self.share_views);
-        let Some(shown) = views.get_mut(&user) else {
+        let Some(shown) = views.shown.get_mut(&user) else {
             return;
         };
         let Some(index) = shown.iter().position(|(n, _)| *n == number) else {
@@ -663,13 +679,30 @@ impl Core {
         };
         let was_newest = index + 1 == shown.len();
         shown.remove(index);
-        let newest = shown.last().map(|(_, view)| view.clone());
         if shown.is_empty() {
-            views.remove(&user);
+            views.shown.remove(&user);
         }
+        let current = views.current(user);
         drop(views);
         if was_newest && let Some(connected) = &*lock(&self.connected) {
-            connected.client.set_share_view(UserId(user), newest);
+            connected.client.set_share_view(UserId(user), current);
+        }
+    }
+
+    /// Takes every share off the app's views while `hidden`, so none is decoded while the app
+    /// is out of sight, and puts them back once it is not.
+    pub fn set_views_hidden(&self, hidden: bool) {
+        let mut views = lock(&self.share_views);
+        if views.hidden == hidden {
+            return;
+        }
+        views.hidden = hidden;
+        if let Some(connected) = &*lock(&self.connected) {
+            for user in views.shown.keys() {
+                connected
+                    .client
+                    .set_share_view(UserId(*user), views.current(*user));
+            }
         }
     }
 

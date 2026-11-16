@@ -15,6 +15,7 @@ Read CLAUDE.md, docs/mobile.md (Core changes 4 to 6, Codecs, macOS without ffmpe
 - **Testing switches** (`switches.rs`): `THROCC_SOFTWARE_DECODE=1` and `THROCC_CODEC=av1|hevc|h264|vp9`; on Android `--ez software_decode true`, on iOS `--software-decode`.
 - **The phones**: the room's cards sit centred both ways, a short last row too; only the watched share sits above them, as tall as 60% of the window; a sharer's card has Watch. The overlay is the same in the tile and fullscreen: who shares and what top left with a warning under it, how many watch top right, stop watching, picture in picture and fullscreen centred along the bottom; fullscreen adds the room and the call controls as a pill beside them. It hides after five seconds; a tap toggles it. Phones stay upright outside fullscreen, which turns with the phone and keeps the screen on. On the iPad the share tile is as tall as its picture, so it sits right above the cards.
 - **Phone audio**: both phones play the room as media, Bluetooth included (A2DP), so the volume goes down to silence and Bluetooth headphones stay in full quality; the phone's mic is used, never a headset's. The core's own echo canceller runs on every platform; iOS uses plain remote I/O, not the voice-processing unit. On Android, closing the app from the recent apps or the Picture in Picture window disconnects.
+- **Out of sight**: a share isn't decoded while the app is in the background, unless Picture in Picture shows it. Android's MediaCodec closes with its surface; the iOS app hides the views with `Core::set_views_hidden`, and the Apple decoder skips units without a view. Coming back asks for a keyframe.
 - **App icons**: iOS has an asset catalog with the icon as a full square, rendered from `packaging/icons/hicolor/scalable`; Android has an adaptive icon with a monochrome layer, drawn from the same SVG at 64 dp so the eyes fit a round mask.
 
 ## Verified
@@ -25,21 +26,21 @@ On an M4 Mac, a Pixel 8 (GrapheneOS), a Galaxy Tab S6 Lite (LineageOS, no AV1 ha
 - Phone audio on the Pixel and the iPhone 12 mini: the volume buttons take the room to silence, Bluetooth headphones play over A2DP in full quality and come and go mid-call, and no echo is heard on the speaker. On Android, swiping the app away leaves the room and the server.
 - On the tablet: 1080p60 AV1 smooth in dav1d, 1440p60 AV1 with some lag and the pill, 1440p60 HEVC in hardware.
 - Still screens load at once from macOS and on the desktop.
+- Picture in picture and backgrounding, the lock screen included, on the Pixel and the iPhone 12 mini. Watching AV1 on the 12 mini (dav1d) takes about 85% of a core in front and about 19% in the background, voice and the incoming stream.
 - On both phones' samples: the pin-mismatch and identity-missing dialogs, the safety-number sheets, Mark as Verified, the volume sliders, the warning pills, a room of 29 in fullscreen, the overlay under the Ink and Paper themes.
 
 ## What is left
 
-1. **The rest on a real iPhone**, by cable or through TestFlight: picture in picture (the simulator has none, so the button hides there) and backgrounding.
-2. **Backgrounding on Android**: home screen mid-share for a while, then back.
-3. **Picture preparation**: a large photo as a profile picture, on a phone.
-4. **Foldables**: on a foldable, open and closed, the window stays upright on the small screen and turns freely on the large one, and fullscreen still turns on both. Both apps draw the line at a shorter side of 600 dp or points and check it again when the screen size changes (`onConfigurationChanged` in `MainActivity`, `Turning.screenChanged` from `RootView`); the Android emulator has a foldable profile, iOS has no simulator for one.
-5. **The macOS desktop by hand**: watch a Windows share, pop out, fullscreen; `sending_1440p60_takes_under_one_core` (ignored test in `throcc-client-core`) with moving content; HEVC low latency at a height that isn't a multiple of 16.
-6. **A signed build**: `gh workflow run packaging.yml --ref feature/mobile-5`, then the dmg on a clean Mac without Homebrew ffmpeg, and the signed APK.
-7. **VP9 on the tablet**, on its `OMX.Exynos.vp9.dec`: share with `THROCC_CODEC=vp9`.
-8. **Windows still screens**: `repeat_timestamp` for the Windows capture.
-9. **Before merging**: keep or drop `ci.yml` on pushes to `feature/**`; delete this file.
+1. **Picture preparation**: a large photo as a profile picture, on a phone.
+2. **Foldables**: on a foldable, open and closed, the window stays upright on the small screen and turns freely on the large one, and fullscreen still turns on both. Both apps draw the line at a shorter side of 600 dp or points and check it again when the screen size changes (`onConfigurationChanged` in `MainActivity`, `Turning.screenChanged` from `RootView`); the Android emulator has a foldable profile, iOS has no simulator for one.
+3. **The macOS desktop by hand**: watch a Windows share, pop out, fullscreen; `sending_1440p60_takes_under_one_core` (ignored test in `throcc-client-core`) with moving content; HEVC low latency at a height that isn't a multiple of 16.
+4. **A signed build**: `gh workflow run packaging.yml --ref feature/mobile-5`, then the dmg on a clean Mac without Homebrew ffmpeg, and the signed APK.
+5. **VP9 on the tablet**, on its `OMX.Exynos.vp9.dec`: share with `THROCC_CODEC=vp9`.
+6. **Windows still screens**: `repeat_timestamp` for the Windows capture.
+7. **Before merging**: keep or drop `ci.yml` on pushes to `feature/**`; delete this file.
 
 Smaller:
+- On Android, a share in dav1d or libvpx (AV1 on the tablet, VP9 without a MediaCodec for it) keeps decoding in the background: the software path in `android/decode.rs` needs the same skip without a view as the Apple decoder.
 - `crates/throcc-cli/tests/share.rs` calls `share::receive` with too few arguments; it builds only with `--features ffmpeg`, so CI misses it.
 - `Shared.outputs` keeps a view set for a share never watched until the session ends.
 - The Android manifest still asks for `MODIFY_AUDIO_SETTINGS`, which only the audio mode and communication device needed; nothing sets them now.

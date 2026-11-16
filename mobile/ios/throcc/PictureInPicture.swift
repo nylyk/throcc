@@ -6,13 +6,16 @@ import UIKit
 @MainActor
 final class SharePictureInPicture: NSObject, AVPictureInPictureControllerDelegate {
     private let core: Core
+    private let finished: () -> Void
     private var controller: AVPictureInPictureController?
     private var possible: NSKeyValueObservation?
     /// The share in the window, with the number the core gave the window's view.
     private(set) var showing: (user: UInt64, number: UInt64)?
 
-    init(core: Core) {
+    /// Calls `finished` whenever the window closes.
+    init(core: Core, finished: @escaping () -> Void) {
         self.core = core
+        self.finished = finished
     }
 
     /// Shows `user`'s share, whose pictures are `size`, in Picture in Picture, opening from
@@ -66,6 +69,7 @@ final class SharePictureInPicture: NSObject, AVPictureInPictureControllerDelegat
         }
         showing = nil
         controller = nil
+        finished()
     }
 
     nonisolated func pictureInPictureControllerDidStopPictureInPicture(

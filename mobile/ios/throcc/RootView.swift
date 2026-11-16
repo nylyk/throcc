@@ -49,6 +49,7 @@ struct RootView: View {
             }
         }
         .onChange(of: scenePhase) {
+            model.inBackground = scenePhase == .background
             if scenePhase == .active {
                 model.core.command(command: .reconnect)
             }

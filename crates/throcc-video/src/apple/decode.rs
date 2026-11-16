@@ -46,6 +46,8 @@ pub struct Decoder {
     seen: u64,
     /// Whether reference pictures were dropped since [`Decoder::take_flushed`] last ran.
     flushed: bool,
+    /// Whether units went undecoded while iOS had no view, so the next view needs a keyframe.
+    skipped: bool,
 }
 
 enum Inner {
@@ -87,6 +89,7 @@ impl Decoder {
             seen: output.changes(),
             output,
             flushed: false,
+            skipped: false,
         };
         info!("decoding {codec:?} in {}", decoder.engine());
         Ok(decoder)
@@ -120,8 +123,14 @@ impl Decoder {
         }
     }
 
-    /// Decodes one access unit into its newest picture, if any.
+    /// Decodes one access unit into its newest picture, if any. On iOS it skips the unit while
+    /// there is no view to show the picture in.
     pub fn decode(&mut self, unit: &[u8], timestamp: u32) -> Result<Option<Frame>, DecodeError> {
+        #[cfg(target_os = "ios")]
+        if self.output.view().is_none() {
+            self.skipped = true;
+            return Ok(None);
+        }
         match &mut self.inner {
             Inner::VideoToolbox(decoder) => {
                 let decoded = decoder.decode(unit, timestamp, self.max_size);
@@ -194,7 +203,11 @@ impl Decoder {
     /// shown again in the new one. macOS has no views.
     pub fn follow_view(&mut self) -> bool {
         let changes = self.output.changes();
-        std::mem::replace(&mut self.seen, changes) != changes
+        let changed = std::mem::replace(&mut self.seen, changes) != changes;
+        if changed && self.output.view().is_some() && std::mem::take(&mut self.skipped) {
+            self.flushed = true;
+        }
+        changed
     }
 
     /// Shows `frame`, the newest picture due, in iOS's view. macOS draws pictures itself.
