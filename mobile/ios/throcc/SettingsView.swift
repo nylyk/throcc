@@ -323,6 +323,7 @@ private struct VerifiedPage: View {
     @Environment(AppModel.self) private var model
     @State private var people: [VerifiedPerson] = []
     @State private var blocked: Set<Data> = []
+    @State private var removing: VerifiedPerson?
 
     var body: some View {
         ThemedList {
@@ -339,13 +340,18 @@ private struct VerifiedPage: View {
                         }
                         Spacer()
                         ShortKey(key: person.key)
+                        Button {
+                            removing = person
+                        } label: {
+                            Label("Mark as Not Verified", systemImage: "xmark.shield")
+                                .labelStyle(.iconOnly)
+                                .touchTarget()
+                        }
+                        .buttonStyle(.borderless)
                     }
                     .swipeActions {
-                        Button("Remove", systemImage: "minus.circle") {
-                            model.attempt { try model.core.unverify(key: person.key) }
-                            load()
-                        }
-                        .tint(.red)
+                        Button("Remove", systemImage: "minus.circle") { removing = person }
+                            .tint(.red)
                     }
                 }
             } header: {
@@ -363,6 +369,17 @@ private struct VerifiedPage: View {
         }
         .navigationTitle("Verified People")
         .onAppear(perform: load)
+        .confirmationDialog(
+            "Mark “\(removing?.name ?? "")” as not verified?",
+            isPresented: $removing.isPresent(),
+            titleVisibility: .visible,
+            presenting: removing
+        ) { person in
+            Button("Mark as Not Verified", role: .destructive) {
+                model.attempt { try model.core.unverify(key: person.key) }
+                load()
+            }
+        }
     }
 
     private func load() {
