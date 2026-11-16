@@ -77,11 +77,11 @@ private fun Panes(model: AppModel, state: CoreState) {
                 backStack = if (roomInFront) model.stack + Screen.Room else model.stack,
                 modifier = if (wide) Modifier.width(360.dp).consumeWindowInsets(pagesEnd) else Modifier.weight(1f),
                 onBack = { if (roomInFront) model.roomInFront = false else model.back() },
-                transitionSpec = { slide(SlideDirection.Start, FastOutSlowInEasing) },
-                popTransitionSpec = { slide(SlideDirection.End, FastOutSlowInEasing) },
+                transitionSpec = { slide(SlideDirection.Start, FastOutSlowInEasing, 300) },
+                popTransitionSpec = { slide(SlideDirection.End, FastOutSlowInEasing, 300) },
                 // NavDisplay seeks this by the gesture's progress, then plays the rest of it once
                 // the finger lifts, so it starts at the finger's pace and eases into place.
-                predictivePopTransitionSpec = { slide(SlideDirection.End, CubicBezierEasing(0.7f, 0.7f, 0.3f, 1f)) },
+                predictivePopTransitionSpec = { slide(SlideDirection.End, CubicBezierEasing(0.7f, 0.7f, 0.3f, 1f), 150) },
                 // NavDisplay keeps an entry until the stack changes, so an entry that captured the
                 // state would show a stale one.
                 entryProvider = { screen -> NavEntry(screen) { Shown(model, screen) } },
@@ -96,8 +96,9 @@ private fun Panes(model: AppModel, state: CoreState) {
 private fun AnimatedContentTransitionScope<Scene<Screen>>.slide(
     towards: SlideDirection,
     easing: Easing,
+    millis: Int,
 ): ContentTransform {
-    val spec = tween<IntOffset>(300, easing = easing)
+    val spec = tween<IntOffset>(millis, easing = easing)
     val forward = towards == SlideDirection.Start
     return slideIntoContainer(towards, spec) { if (forward) it else it / 4 } togetherWith
         slideOutOfContainer(towards, spec) { if (forward) it / 4 else it }
