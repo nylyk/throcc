@@ -56,6 +56,7 @@ use windows::Win32::System::Com::StructuredStorage::{
     PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
 };
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
+use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use windows::Win32::System::Variant::VT_BLOB;
 use windows::Win32::System::WinRT::Direct3D11::{
@@ -189,7 +190,7 @@ fn capture(item: &GraphicsCaptureItem, config: CaptureConfig) -> windows::core::
     Ok(WinCapture {
         frames,
         audio,
-        clock: ShareClock::new(TIME_SPAN_HZ as i64),
+        clock: ShareClock::new(TIME_SPAN_HZ as i64, performance_counter_now),
         dropped,
         ended,
         converter,
@@ -274,7 +275,22 @@ impl Feed {
     }
 }
 
+/// The performance counter now, in the 100 ns units `SystemRelativeTime` counts in.
+fn performance_counter_now() -> i64 {
+    let (mut count, mut hz) = (0, 0);
+    // SAFETY: each call only writes the integer it is given.
+    unsafe {
+        let _ = QueryPerformanceCounter(&mut count);
+        let _ = QueryPerformanceFrequency(&mut hz);
+    }
+    (i128::from(count) * TIME_SPAN_HZ / i128::from(hz.max(1))) as i64
+}
+
 impl Capture for WinCapture {
+    fn repeat_timestamp(&mut self) -> Option<u32> {
+        self.clock.repeat()
+    }
+
     fn next_frame(&mut self, into: &mut VideoFrame) -> bool {
         let Ok((frame, time)) = self.frames.pop() else {
             return false;

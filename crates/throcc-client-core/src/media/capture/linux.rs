@@ -42,7 +42,7 @@ use throcc_video::frame::{VideoFrame, rgb_to_nv12};
 use throcc_video::{DmaBuf, DmaBufPlane, MAX_PLANES};
 use tracing::warn;
 
-use super::clock::ShareClock;
+use super::clock::{ShareClock, clock_nanos};
 use super::{Capture, CaptureConfig, CaptureError, copy_nv12, failed, resize};
 use crate::media::share_audio::STEREO_FRAME;
 use desktop_audio::DesktopAudio;
@@ -258,7 +258,8 @@ impl PipeWireCapture {
             current: None,
             refused: Vec::new(),
             audio,
-            clock: ShareClock::new(NANOS),
+            // CLOCK_MONOTONIC is the clock PipeWire's audio times are on.
+            clock: ShareClock::new(NANOS, || clock_nanos(libc::CLOCK_MONOTONIC)),
         })
     }
 
@@ -320,7 +321,7 @@ fn spawn_ready(
 
 impl Capture for PipeWireCapture {
     fn repeat_timestamp(&mut self) -> Option<u32> {
-        self.clock.video(monotonic_nanos())
+        self.clock.repeat()
     }
 
     fn next_dmabuf(&mut self) -> Option<&DmaBuf> {
@@ -396,17 +397,6 @@ impl Capture for PipeWireCapture {
             audio.pop(|at, samples| clock.push_audio(at, samples))
         })
     }
-}
-
-/// CLOCK_MONOTONIC in nanoseconds, the clock PipeWire's audio times are on.
-fn monotonic_nanos() -> i64 {
-    let mut now = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: clock_gettime only writes the timespec it is given.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
-    now.tv_sec * NANOS + now.tv_nsec
 }
 
 impl Drop for PipeWireCapture {
@@ -754,7 +744,7 @@ impl StreamState {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             return false;
         };
-        let at = monotonic_nanos();
+        let at = clock_nanos(libc::CLOCK_MONOTONIC);
         let in_gpu_memory = datas.first().is_some_and(|d| d.type_() == DataType::DmaBuf);
         let lent = match layout.drm {
             Some(drm) if in_gpu_memory => {

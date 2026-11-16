@@ -16,16 +16,24 @@ pub(super) struct ShareClock {
     /// The last picture's time in 90 kHz ticks from the zero, kept whole so a long pause
     /// can't look like time going back once timestamps wrap.
     last_frame: Option<i64>,
+    /// The capture's clock now, counted at the source rate.
+    now: fn() -> i64,
 }
 
 impl ShareClock {
-    /// A clock for capture times counted at `source_hz`.
-    pub(super) fn new(source_hz: i64) -> Self {
+    /// A clock for capture times counted at `source_hz`, on the clock `now` reads.
+    pub(super) fn new(source_hz: i64, now: fn() -> i64) -> Self {
         Self {
             zero: ShareZero::new(source_hz),
             chunker: AudioChunker::default(),
             last_frame: None,
+            now,
         }
+    }
+
+    /// The timestamp for sending the last picture again now, after every picture before it.
+    pub(super) fn repeat(&mut self) -> Option<u32> {
+        self.video((self.now)())
     }
 
     /// The timestamp of a picture taken at `at`, or `None` before the zero.
@@ -63,6 +71,18 @@ impl ShareClock {
             }
         }
     }
+}
+
+/// `clock` now, in nanoseconds.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn clock_nanos(clock: libc::clockid_t) -> i64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime only writes the timespec it is given.
+    unsafe { libc::clock_gettime(clock, &mut now) };
+    now.tv_sec * 1_000_000_000 + now.tv_nsec
 }
 
 /// The instant both media of a capture count from: the first frame or buffer stamped.
@@ -249,7 +269,7 @@ mod tests {
 
     #[test]
     fn frame_timestamps_only_move_forward() {
-        let mut clock = ShareClock::new(i64::from(VIDEO_CLOCK_HZ));
+        let mut clock = ShareClock::new(i64::from(VIDEO_CLOCK_HZ), || 0);
         assert_eq!(clock.video(0), Some(0));
         assert_eq!(clock.video(0), Some(1));
         assert_eq!(clock.video(10), Some(10));
@@ -262,7 +282,7 @@ mod tests {
     #[test]
     fn frame_timestamps_keep_pace_after_a_pause_long_enough_to_wrap() {
         let hz = i64::from(VIDEO_CLOCK_HZ);
-        let mut clock = ShareClock::new(hz);
+        let mut clock = ShareClock::new(hz, || 0);
         assert_eq!(clock.video(0), Some(0));
         let resumed = 8 * 3600 * hz;
         assert_eq!(clock.video(resumed), Some(resumed as u32));
@@ -271,7 +291,7 @@ mod tests {
 
     #[test]
     fn video_before_the_zero_has_no_timestamp() {
-        let mut clock = ShareClock::new(HNS);
+        let mut clock = ShareClock::new(HNS, || 0);
         clock.push_audio(1_000_000, buffer(0.0));
         assert_eq!(clock.video(1_000_000 - HNS / 100), None);
         assert_eq!(clock.video(1_000_000 + HNS / 10), Some(9000));
