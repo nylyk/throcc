@@ -312,7 +312,6 @@ pub async fn wait_for_keys(sender: &Call, viewer: &Call, track: MediaId) {
 }
 
 /// Has every keyframe request the server sends `call` recover `sender`'s share.
-#[cfg(feature = "ffmpeg")]
 pub fn forward_keyframe_requests(
     call: &mut Call,
     sender: Arc<throcc_client_core::media::share::ShareSender>,

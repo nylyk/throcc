@@ -1,5 +1,3 @@
-#![cfg(feature = "ffmpeg")]
-
 mod common;
 
 use std::sync::Arc;
