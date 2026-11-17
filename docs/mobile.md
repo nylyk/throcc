@@ -160,8 +160,8 @@ This is security-critical code. A subagent that didn't write it reviews it befor
 5. **Watching shares,** one at a time. First `throcc-video` with the ffmpeg backend moved in unchanged. Then the Apple backend, which decodes on iOS and replaces ffmpeg on macOS for decode and encode, then MediaCodec, dav1d and libvpx, fullscreen and rotation.
 6. **Invite links.** The web page with its phone fallback and verification files, links on all five platforms, the desktop's single instance and dialog change.
 7. **Identity transfer.** Export on desktop and mobile, import on mobile, security review.
-8. **Sending shares.** Android first, then the iOS broadcast extension.
-9. **Distribution.** App Store Connect upload from CI with an API key. The Android signing key in CI secrets, APK on the release. F-Droid recipe, reproducible builds, merge request to `fdroiddata`.
+8. **Distribution.** App Store Connect upload from CI with an API key. The Android signing key in CI secrets, APK on the release. F-Droid recipe, reproducible builds, merge request to `fdroiddata`.
+9. **Sending shares.** Android first, then the iOS broadcast extension.
 
 From phase 3 on, the iOS and Android work in each phase can run in parallel.
 
