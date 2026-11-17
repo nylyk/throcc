@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use throcc_crypto::identity::IdentityKey;
 use throcc_crypto::transfer::{self, TransferCode, TransferError};
@@ -11,7 +11,7 @@ use zeroize::Zeroize;
 
 use crate::avatars;
 use crate::blocked::{BlockedRecord, BlockedRecords, BlockedStore};
-use crate::fountain::Fountain;
+use crate::fountain::{self, Fountain};
 use crate::keystore::{self, IdentityInUse, Keystore};
 use crate::known_servers::KnownServers;
 use crate::picture;
@@ -21,6 +21,8 @@ use crate::servers::Hex;
 use crate::unix_now;
 use crate::verified::{KeyChange, SeenAs, VerifiedEntry, VerifiedRecords, VerifiedStore};
 
+/// The largest export, as a file or as QR codes, that an import takes.
+pub const MAX_EXPORT_BYTES: usize = fountain::MAX_BLOB_BYTES;
 /// How long the source shows each QR code.
 pub const FRAME_INTERVAL: Duration = Duration::from_millis(150);
 /// How old an export may be when it is imported.
@@ -167,7 +169,16 @@ pub fn export(
         servers: servers.collect(),
         ..people_payload(verified.records(), blocked.records())
     };
-    Ok(seal(&payload))
+    let export = seal(&payload);
+    let size = export.sealed().len();
+    if size > MAX_EXPORT_BYTES {
+        bail!(
+            "it would take {} KiB, more than the {} KiB another device takes",
+            size / 1024,
+            MAX_EXPORT_BYTES / 1024
+        );
+    }
+    Ok(export)
 }
 
 /// An export of a made-up identity, for the sample screens.
@@ -330,12 +341,12 @@ impl Opened {
         }
         verified.merge(verified_records(&payload)).map_err(failed)?;
         blocked.merge(blocked_records(&payload)).map_err(failed)?;
-        let mut known = KnownServers::load(&dir).map_err(failed)?;
-        for server in servers {
-            known
-                .trust(&server.address, Fingerprint(server.fingerprint))
-                .map_err(failed)?;
-        }
+        let pins = servers
+            .iter()
+            .map(|server| (server.address.clone(), Fingerprint(server.fingerprint)));
+        KnownServers::load(&dir)
+            .and_then(|mut known| known.trust_all(pins))
+            .map_err(failed)?;
         Ok(profile)
     }
 }

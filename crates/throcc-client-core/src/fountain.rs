@@ -10,7 +10,7 @@ const BLOCK_BYTES: usize = 480;
 /// Format, blob id, blob length and sequence number.
 const HEADER_BYTES: usize = 1 + 4 + 4 + 4;
 /// The largest blob a collector takes, which bounds what a frame can make it hold.
-const MAX_BLOB_BYTES: usize = 1 << 20;
+pub const MAX_BLOB_BYTES: usize = 1 << 20;
 /// How many frames past the block count a transfer is expected to need, for the estimate.
 const EXPECTED_OVERHEAD: f64 = 1.15;
 /// The QR code alphanumeric mode's characters, which base 45 writes in.

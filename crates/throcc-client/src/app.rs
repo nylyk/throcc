@@ -37,7 +37,7 @@ use throcc_proto::{Fingerprint, permissions};
 
 mod transfer;
 
-pub use transfer::{Exporting, Importing, QR_MODULE_PIXELS};
+pub use transfer::{Exporting, Importing};
 
 use crate::keep_display_awake::KeepDisplayAwake;
 use crate::theme;

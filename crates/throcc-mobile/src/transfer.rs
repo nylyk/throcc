@@ -119,6 +119,12 @@ pub fn is_identity_export(file: Vec<u8>) -> bool {
     transfer::is_export(&file)
 }
 
+/// The largest export file an import takes; a bigger one is no export.
+#[uniffi::export]
+pub fn max_export_bytes() -> u64 {
+    transfer::MAX_EXPORT_BYTES as u64
+}
+
 /// How long each QR code of an export is shown, in milliseconds.
 #[uniffi::export]
 pub fn qr_frame_millis() -> u32 {

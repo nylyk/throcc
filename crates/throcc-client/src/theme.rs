@@ -247,6 +247,14 @@ fn danger_hover() -> Hsla {
 pub fn player_bg() -> Hsla {
     gpui::black()
 }
+/// A QR code's dark modules, the same in every theme so any scanner reads it.
+pub fn qr_dark() -> Hsla {
+    gpui::black()
+}
+/// A QR code's light modules and quiet zone.
+pub fn qr_light() -> Hsla {
+    gpui::white()
+}
 /// Dims the window behind a dialog.
 pub fn scrim() -> Hsla {
     gpui::black().opacity(0.6)

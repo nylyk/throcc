@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, Context, Div, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, RenderImage, SharedString, StatefulInteractiveElement, Styled, div, img, px,
-    relative,
+    AnyElement, Bounds, Context, Div, FontWeight, Hsla, InteractiveElement, IntoElement,
+    MouseButton, ParentElement, RenderImage, SharedString, StatefulInteractiveElement, Styled,
+    canvas, div, fill, point, px, relative, size,
 };
 use gpui_component::Disableable;
 use gpui_component::button::Button;
@@ -15,6 +15,7 @@ use throcc_client_core::client::UiCommand;
 use throcc_client_core::keystore::StartedOver;
 use throcc_client_core::safety::SafetyCheck;
 use throcc_client_core::state::{FRAME_RATES, Resolution};
+use throcc_client_core::transfer::QrCode;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::messages::Codec;
@@ -24,10 +25,7 @@ use super::common::{
     primary, rate, secondary, title,
 };
 use super::page::{field, field_label};
-use crate::app::{
-    Dialog, QR_MODULE_PIXELS, Screen, SettingsPage, StartOver, ThroccApp, typed_name,
-    typed_password,
-};
+use crate::app::{Dialog, Screen, SettingsPage, StartOver, ThroccApp, typed_name, typed_password};
 use crate::theme;
 
 /// The modal for `dialog`, over a dimmed window.
@@ -762,12 +760,11 @@ fn export_identity(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             .child(div().flex().justify_end().child(close_button("Done", cx)))
             .into_any_element();
     };
-    let side = px(qr.size(0).width.0 as f32 / QR_MODULE_PIXELS as f32 * 4.);
     body("Scan with the New Device")
         .child(description(
             "On the new device, choose Import from Another Device and scan this code. Once it says the export is in, show the code.",
         ))
-        .child(div().flex().justify_center().child(img(qr).size(side)))
+        .child(div().flex().justify_center().child(qr_code(qr)))
         .child(
             actions("Cancel", cx).child(
                 primary("show-export-code", "Show Code")
@@ -775,6 +772,33 @@ fn export_identity(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             ),
         )
         .into_any_element()
+}
+
+/// `code` drawn four pixels a module, a quad for each run of dark modules in a row.
+fn qr_code(code: QrCode) -> impl IntoElement {
+    const MODULE: f32 = 4.;
+    let side = px(code.width as f32 * MODULE);
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            window.paint_quad(fill(bounds, theme::qr_light()));
+            let width = code.width as usize;
+            for (row, modules) in code.dark.chunks(width).enumerate() {
+                let mut column = 0;
+                while column < width {
+                    let run = modules[column..].iter().take_while(|dark| **dark).count();
+                    if run > 0 {
+                        let origin = bounds.origin
+                            + point(px(column as f32 * MODULE), px(row as f32 * MODULE));
+                        let run_size = size(px(run as f32 * MODULE), px(MODULE));
+                        window.paint_quad(fill(Bounds::new(origin, run_size), theme::qr_dark()));
+                    }
+                    column += run.max(1);
+                }
+            }
+        },
+    )
+    .size(side)
 }
 
 fn import_identity(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {

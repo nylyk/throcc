@@ -42,6 +42,22 @@ impl KnownServers {
         })
     }
 
+    /// Pins every address in `pins` to its fingerprint in one write, so none is pinned
+    /// unless all are.
+    pub fn trust_all(
+        &mut self,
+        pins: impl IntoIterator<Item = (String, Fingerprint)>,
+    ) -> Result<()> {
+        let pins: Vec<(String, Fingerprint)> = pins.into_iter().collect();
+        Servers::update(&self.dir, |s| {
+            for (address, fingerprint) in &pins {
+                s.known.insert(address.clone(), Hex(fingerprint.0));
+            }
+        })?;
+        self.pins.extend(pins);
+        Ok(())
+    }
+
     /// Takes `address` off the list, as the user chose, while they stay a member there.
     /// What is kept for its key stays, so adding it again finds it.
     pub fn forget(&mut self, address: &str) -> Result<()> {
@@ -129,6 +145,20 @@ mod tests {
             None
         );
         assert!(kept(dir.path(), server));
+    }
+
+    #[test]
+    fn pinning_several_servers_at_once_keeps_every_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut known = KnownServers::load(dir.path()).unwrap();
+        known.trust("a.example.net", Fingerprint([1; 32])).unwrap();
+        let pins = [("b.example.net", 2), ("c.example.net", 3)]
+            .map(|(address, key)| (address.to_owned(), Fingerprint([key; 32])));
+        known.trust_all(pins).unwrap();
+        assert_eq!(known.get("c.example.net"), Some(Fingerprint([3; 32])));
+        let reloaded = KnownServers::load(dir.path()).unwrap();
+        assert_eq!(reloaded.iter().count(), 3);
+        assert_eq!(reloaded.get("b.example.net"), Some(Fingerprint([2; 32])));
     }
 
     #[test]

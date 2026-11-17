@@ -1,20 +1,18 @@
 use std::sync::Arc;
 
-use gpui::{Context, PathPromptOptions, RenderImage, Task, Window};
+use gpui::{Context, PathPromptOptions, Task, Window};
 use throcc_client_core::profile::Profile;
 use throcc_client_core::transfer::{self, Export, FRAME_INTERVAL, ImportError, QrCode};
 
 use super::{Dialog, Screen, ThroccApp, set_field};
 
-/// The pixels each module of a QR code is drawn with.
-pub const QR_MODULE_PIXELS: u32 = 8;
 const EXPORT_FILE_NAME: &str = "throcc-identity.throcc";
 
 /// An export made on the Profile page, kept while its dialog is open.
 pub struct Exporting {
     pub export: Arc<Export>,
     /// The QR code on show, none once the code that opens the export shows in its place.
-    pub qr: Option<Arc<RenderImage>>,
+    pub qr: Option<QrCode>,
     frame: u32,
     _frames: Option<Task<()>>,
 }
@@ -31,15 +29,7 @@ impl ThroccApp {
     /// the user picks, refused while our screen is shared.
     pub fn export_identity(&mut self, to_file: bool, cx: &mut Context<Self>) {
         self.transfer_problem = None;
-        if self
-            .state
-            .current
-            .as_ref()
-            .is_some_and(|c| c.sharing.is_some())
-        {
-            self.transfer_problem =
-                Some("Stop sharing your screen first, so nobody watching sees the export.".into());
-            cx.notify();
+        if self.refuse_export_while_sharing(cx) {
             return;
         }
         self.preparing_export = true;
@@ -53,52 +43,51 @@ impl ThroccApp {
             transfer::export(profile.as_ref(), &verified, &blocked)
         });
         cx.spawn(async move |this, cx| {
-            let export = sealing.await.map(Arc::new);
-            let export = this.update(cx, |app, cx| {
-                app.preparing_export = false;
-                cx.notify();
-                export.map_err(|e| {
-                    tracing::warn!("exporting the identity: {e:#}");
-                    app.transfer_problem = Some(format!("Couldn’t export your identity: {e:#}"));
-                })
+            let export = sealing.await.map(Arc::new).map_err(|e| {
+                tracing::warn!("exporting the identity: {e:#}");
+                format!("Couldn’t export your identity: {e:#}")
             });
-            let Ok(Ok(export)) = export else {
-                return;
+            let shown = match export {
+                Ok(export) if to_file => save_export(&this, cx, export).await,
+                Ok(export) => Ok(Some((export, false))),
+                Err(problem) => Err(problem),
             };
-            if !to_file {
-                this.update(cx, |app, cx| app.show_export(export, false, cx))
-                    .ok();
-                return;
-            }
-            let Ok(chosen) = this.update(cx, |_, cx| {
-                let home = std::env::home_dir().unwrap_or_default();
-                cx.prompt_for_new_path(&home, Some(EXPORT_FILE_NAME))
-            }) else {
-                return;
-            };
-            let Ok(Ok(Some(path))) = chosen.await else {
-                return;
-            };
-            let sealed = export.sealed().to_vec();
-            let written = cx
-                .background_executor()
-                .spawn(async move { std::fs::write(&path, sealed) })
-                .await;
-            this.update(cx, |app, cx| match written {
-                Ok(()) => app.show_export(export, true, cx),
-                Err(e) => {
-                    app.transfer_problem = Some(format!("Couldn’t save the export: {e}"));
-                    cx.notify();
+            this.update(cx, |app, cx| {
+                app.preparing_export = false;
+                match shown {
+                    Ok(Some((export, code_shown))) => app.show_export(export, code_shown, cx),
+                    Ok(None) => {}
+                    Err(problem) => app.transfer_problem = Some(problem),
                 }
+                cx.notify();
             })
             .ok();
         })
         .detach();
     }
 
+    /// Refuses an export while our screen is shared, saying why.
+    fn refuse_export_while_sharing(&mut self, cx: &mut Context<Self>) -> bool {
+        let sharing = self
+            .state
+            .current
+            .as_ref()
+            .is_some_and(|c| c.sharing.is_some());
+        if sharing {
+            self.transfer_problem =
+                Some("Stop sharing your screen first, so nobody watching sees the export.".into());
+            cx.notify();
+        }
+        sharing
+    }
+
     /// Opens the export dialog on `export`'s QR codes, cycling through them, or on its code.
+    /// Refused once our screen is shared.
     pub fn show_export(&mut self, export: Arc<Export>, code_shown: bool, cx: &mut Context<Self>) {
-        let qr = (!code_shown).then(|| qr_image(&export.frame(0)));
+        if self.refuse_export_while_sharing(cx) {
+            return;
+        }
+        let qr = (!code_shown).then(|| export.frame(0));
         let frames = (!code_shown).then(|| self.cycle_frames(cx));
         self.exporting = Some(Exporting {
             export,
@@ -118,7 +107,7 @@ impl ThroccApp {
                         return false;
                     };
                     exporting.frame = exporting.frame.wrapping_add(1);
-                    exporting.qr = Some(qr_image(&exporting.export.frame(exporting.frame)));
+                    exporting.qr = Some(exporting.export.frame(exporting.frame));
                     cx.notify();
                     true
                 });
@@ -156,11 +145,11 @@ impl ThroccApp {
             };
             let read = cx
                 .background_executor()
-                .spawn(async move { std::fs::read(&path) })
+                .spawn(async move { read_capped(&path) })
                 .await;
             this.update_in(cx, |app, window, cx| {
                 match read {
-                    Ok(file) if transfer::is_export(&file) => {
+                    Ok(Some(file)) if transfer::is_export(&file) => {
                         app.importing = Some(Importing {
                             file: file.into(),
                             running: false,
@@ -227,15 +216,33 @@ impl ThroccApp {
     }
 }
 
-/// `code` in dark on light whatever the theme, for gpui's BGRA pixels.
-fn qr_image(code: &QrCode) -> Arc<RenderImage> {
-    let side = code.width * QR_MODULE_PIXELS;
-    let picture = image::RgbaImage::from_fn(side, side, |x, y| {
-        let (column, row) = (x / QR_MODULE_PIXELS, y / QR_MODULE_PIXELS);
-        let dark = code.dark[(row * code.width + column) as usize];
-        image::Rgba(if dark { [0, 0, 0, 255] } else { [255; 4] })
-    });
-    Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(
-        picture
-    )]))
+/// Asks where to save `export`, then writes it there. `None` when the user cancelled.
+async fn save_export(
+    this: &gpui::WeakEntity<ThroccApp>,
+    cx: &mut gpui::AsyncApp,
+    export: Arc<Export>,
+) -> Result<Option<(Arc<Export>, bool)>, String> {
+    let chosen = this
+        .update(cx, |_, cx| {
+            let home = std::env::home_dir().unwrap_or_default();
+            cx.prompt_for_new_path(&home, Some(EXPORT_FILE_NAME))
+        })
+        .map_err(|e| e.to_string())?;
+    let Ok(Ok(Some(path))) = chosen.await else {
+        return Ok(None);
+    };
+    let sealed = export.sealed().to_vec();
+    cx.background_executor()
+        .spawn(async move { std::fs::write(&path, sealed) })
+        .await
+        .map_err(|e| format!("Couldn’t save the export: {e}"))?;
+    Ok(Some((export, true)))
+}
+
+/// The file at `path`, or `None` when it is larger than any export.
+fn read_capped(path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
+    if std::fs::metadata(path)?.len() > transfer::MAX_EXPORT_BYTES as u64 {
+        return Ok(None);
+    }
+    std::fs::read(path).map(Some)
 }
