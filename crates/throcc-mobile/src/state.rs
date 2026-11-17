@@ -210,18 +210,10 @@ impl From<&core::State> for CoreState {
             rooms: state
                 .rooms
                 .iter()
-                .map(|room| Room {
-                    join: state.join_action(room.id).into(),
-                    ..Room::from(room)
-                })
+                .map(|room| Room::of(state, room))
                 .collect(),
-            people: state
-                .people
-                .iter()
-                .map(|(user, person)| Person {
-                    trust: state.trust(*user).into(),
-                    ..Person::from((user, person))
-                })
+            people: (state.people.iter())
+                .map(|(user, person)| Person::of(state, *user, person))
                 .collect(),
             current: state.current.as_ref().map(|current| CurrentRoom {
                 room: current.room.0,
@@ -286,19 +278,19 @@ impl From<Role> for ids::Role {
     }
 }
 
-impl From<&core::RoomView> for Room {
-    fn from(room: &core::RoomView) -> Self {
+impl Room {
+    fn of(state: &core::State, room: &core::RoomView) -> Self {
         Self {
             id: room.id.0,
             name: room.name.clone(),
             locked: room.locked,
-            join: JoinAction::Join,
+            join: state.join_action(room.id).into(),
         }
     }
 }
 
-impl From<(&ids::UserId, &core::Person)> for Person {
-    fn from((user, person): (&ids::UserId, &core::Person)) -> Self {
+impl Person {
+    fn of(state: &core::State, user: ids::UserId, person: &core::Person) -> Self {
         Self {
             user: user.0,
             name: person.name.clone(),
@@ -320,11 +312,7 @@ impl From<(&ids::UserId, &core::Person)> for Person {
             share_audio: person.playback.share.into(),
             verified: person.verified,
             verified_as: person.verified_as().map(str::to_owned),
-            trust: if person.verified {
-                KeyTrust::Verified
-            } else {
-                KeyTrust::Unverified
-            },
+            trust: state.trust(user).into(),
             initial: core::initial(&person.name),
             identity_key: person.identity_key.map(|key| key.to_vec()),
             role: person.role.into(),

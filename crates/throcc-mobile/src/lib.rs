@@ -3,11 +3,10 @@ mod safety;
 mod state;
 mod voice;
 
+use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
-
-use std::collections::HashMap;
 
 use anyhow::{Context, Result, anyhow};
 use throcc_client_core::account::SignInError;
@@ -44,7 +43,7 @@ pub use state::{
 pub use voice::{MicLevel, NoiseSuppression, Voice};
 
 /// `ShareView.nativeWindow` in the Android app: the `ANativeWindow` behind a `Surface`, with a
-/// reference the caller hands on to `Core::set_share_view`. 0 if it has none.
+/// reference the caller hands on to `Core::show_share`. 0 if it has none.
 ///
 /// # Safety
 /// Only the JVM calls this, with its environment and a `Surface`.
@@ -331,6 +330,13 @@ impl ShareViews {
         }
         self.shown.get(&user)?.last().map(|(_, view)| view.clone())
     }
+
+    /// Gives `client` the view each share shows in now.
+    fn show_all(&self, client: &dyn ClientApi) {
+        for &user in self.shown.keys() {
+            client.set_share_view(UserId(user), self.current(user));
+        }
+    }
 }
 
 struct Connected {
@@ -394,13 +400,10 @@ impl Core {
     /// Keeps our name and picture, and gives them to the server we are connected to. The
     /// picture is one `prepare_picture` made.
     pub fn set_profile(&self, profile: Profile) -> Result<(), CoreError> {
-        let name = match core_profile::check_name(&profile.name) {
-            NameCheckCore::Fine(name) => name,
-            NameCheckCore::Empty => {
-                return Err(anyhow!("Names need at least one visible character.").into());
-            }
-            refused => return Err(anyhow!(refused.problem().unwrap_or_default()).into()),
-        };
+        let name = core_profile::check_name(&profile.name)
+            .into_result()
+            .map_err(anyhow::Error::msg)?
+            .context("Names need at least one visible character.")?;
         if let Some(problem) = profile
             .picture
             .as_deref()
@@ -413,7 +416,7 @@ impl Core {
             picture: profile.picture.map(Arc::from),
         };
         self.change_settings(|settings| settings.profile = Some(profile.clone()));
-        self.pass_on(profile);
+        self.tell_client(UiCommand::SetProfile(profile));
         Ok(())
     }
 
@@ -548,9 +551,7 @@ impl Core {
         let connection = self.connection.load(Ordering::SeqCst);
         // Held until the client is in place, so a view shown or hidden meanwhile reaches it.
         let views = lock(&self.share_views);
-        for user in views.shown.keys() {
-            client.set_share_view(UserId(*user), views.current(*user));
-        }
+        views.show_all(&*client);
         *lock(&self.connected) = Some(Connected {
             address,
             client,
@@ -561,7 +562,7 @@ impl Core {
         self.forward(events, connection);
         let saved = lock(&self.settings).profile.clone();
         if let Some(saved_meanwhile) = saved.filter(|saved| *saved != profile) {
-            self.pass_on(saved_meanwhile);
+            self.tell_client(UiCommand::SetProfile(saved_meanwhile));
         }
         if let Some(audio) = self.audio() {
             audio.apply(lock(&self.settings).audio.voice);
@@ -645,11 +646,9 @@ impl Core {
         let Some(state) = self.client_state() else {
             return;
         };
-        let watching = state.current.as_ref().map(|c| c.watching.clone());
-        for watched in watching.unwrap_or_default() {
-            if watched.0 != user {
-                self.tell_client(UiCommand::Unwatch(watched));
-            }
+        let watching = state.current.iter().flat_map(|c| &c.watching);
+        for &watched in watching.filter(|watched| watched.0 != user) {
+            self.tell_client(UiCommand::Unwatch(watched));
         }
         self.tell_client(UiCommand::Watch(UserId(user)));
     }
@@ -675,9 +674,7 @@ impl Core {
             views.shown.entry(user).or_default().push((number, view));
             views.current(user)
         };
-        if let Some(connected) = &*lock(&self.connected) {
-            connected.client.set_share_view(UserId(user), current);
-        }
+        self.with_client(|client| client.set_share_view(UserId(user), current));
         number
     }
 
@@ -703,8 +700,8 @@ impl Core {
         }
         let current = views.current(user);
         drop(views);
-        if was_newest && let Some(connected) = &*lock(&self.connected) {
-            connected.client.set_share_view(UserId(user), current);
+        if was_newest {
+            self.with_client(|client| client.set_share_view(UserId(user), current));
         }
     }
 
@@ -716,13 +713,7 @@ impl Core {
             return;
         }
         views.hidden = hidden;
-        if let Some(connected) = &*lock(&self.connected) {
-            for user in views.shown.keys() {
-                connected
-                    .client
-                    .set_share_view(UserId(*user), views.current(*user));
-            }
-        }
+        self.with_client(|client| views.show_all(client));
     }
 
     /// The safety-number comparison with `user`, as their profile shows it.
@@ -734,26 +725,21 @@ impl Core {
     }
 
     pub fn state(&self) -> CoreState {
-        match &*lock(&self.connected) {
-            Some(connected) => CoreState::from(&*connected.client.state()),
-            None => CoreState::default(),
-        }
+        self.client_state()
+            .map_or_else(CoreState::default, |state| CoreState::from(&*state))
     }
 
     /// The 60-digit safety number with whoever holds the identity key `key`.
     pub fn safety_number(&self, key: Vec<u8>) -> Option<String> {
         let key = key.as_slice().try_into().ok()?;
-        let connected = lock(&self.connected);
-        Some(connected.as_ref()?.client.safety_number(&key))
+        self.with_client(|client| client.safety_number(&key))
     }
 
     /// The picture behind `hash`, if it is one a phone may show. One the core lacks is
     /// fetched, and `Event::AvatarReady` says when it has arrived.
     pub fn avatar(&self, hash: Vec<u8>) -> Option<Vec<u8>> {
         let hash = Hash(hash.as_slice().try_into().ok()?);
-        let connected = lock(&self.connected);
-        let picture = connected.as_ref()?.client.avatar(hash);
-        showable(picture)
+        showable(self.with_client(|client| client.avatar(hash))?)
     }
 
     /// Everyone verified on this install.
@@ -849,14 +835,6 @@ impl Core {
         let _ = self.told.send((next, Told::State(Box::default())));
     }
 
-    /// Gives `profile` to the server we are connected to.
-    fn pass_on(&self, profile: CoreProfile) {
-        if let Some(connected) = &*lock(&self.connected) {
-            connected.client.command(UiCommand::SetProfile(profile));
-        }
-    }
-
-    /// Changes the settings and keeps them, in memory only for the mock.
     /// Changes the settings and keeps them, in memory only for the mock. A change that
     /// can't be kept still holds until the app ends, and `store_problems` says why.
     fn change_settings(&self, change: impl FnOnce(&mut Settings)) {
@@ -881,9 +859,7 @@ impl Core {
     }
 
     fn tell_client(&self, command: UiCommand) {
-        if let Some(connected) = &*lock(&self.connected) {
-            connected.client.command(command);
-        }
+        self.with_client(|client| client.command(command));
     }
 
     /// The servers this install has joined, or the sample ones.
@@ -895,8 +871,13 @@ impl Core {
         }
     }
 
+    /// Runs `f` on the client of the connection there is, under the lock on it.
+    fn with_client<T>(&self, f: impl FnOnce(&dyn ClientApi) -> T) -> Option<T> {
+        Some(f(&*lock(&self.connected).as_ref()?.client))
+    }
+
     fn client_state(&self) -> Option<Arc<CoreStateInner>> {
-        Some(lock(&self.connected).as_ref()?.client.state())
+        self.with_client(|client| client.state())
     }
 
     /// Queues what the client behind `events` says, as news of `connection`, until that
