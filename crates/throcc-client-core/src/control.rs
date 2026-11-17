@@ -12,7 +12,8 @@ use throcc_proto::ids::RoomId;
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
     Account, AccountStep, AuthError, AuthResult, ClientHello, ClientMessage, Event, PROTOCOL,
-    PakeFinish, PakeStep, Request, Response, ServerHello, ServerMessage, SignIn, Welcome,
+    PakeFinish, PakeStep, ProfileStep, Request, Response, ServerHello, ServerMessage, SignIn,
+    SignedAddress, Welcome,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{mpsc, oneshot};
@@ -194,8 +195,9 @@ fn outdated(hello: &ServerHello) -> Option<LoginError> {
     }
 }
 
-/// Signs `profile` for the user id the server gives, then takes its welcome. When
-/// `needs_proof`, the server must first show a profile we signed for its key and that user id.
+/// Signs `profile` and the address we reached the server at for the user id it gives, then
+/// takes its welcome. When `needs_proof`, the server must first show that address signed by
+/// `identity` for its key and that user id.
 async fn finish_login(
     connected: Connected,
     identity: &IdentityKey,
@@ -212,18 +214,23 @@ async fn finish_login(
             return Err(e.into());
         }
     };
-    if needs_proof && !proves_account(&account, identity, &connected.fingerprint) {
+    let (server, address) = (&connected.fingerprint, connected.address.as_str());
+    if needs_proof && !proves_account(&account, identity, server, address) {
         connected
             .connection
             .close(close::AUTH_FAILED.into(), b"no proof of the account");
         return Err(LoginError::Unproven);
     }
     let me = account.user;
-    write(
-        &mut send,
-        &profile.signed(identity, &connected.fingerprint, me),
-    )
-    .await?;
+    let signed_address = SignedAddress {
+        address: address.to_owned(),
+        sig: identity.sign(&identity::address_message(&server.0, me, address)),
+    };
+    let step = ProfileStep {
+        profile: profile.signed(identity, server, me),
+        address: signed_address,
+    };
+    write(&mut send, &step).await?;
     let result: AuthResult = read(&mut recv).await?;
     let welcome = match result {
         AuthResult::Ok(welcome) => *welcome,
@@ -241,18 +248,23 @@ async fn finish_login(
     })
 }
 
-/// Whether `account` shows a profile `identity` signed for the server `server` and its user.
-fn proves_account(account: &Account, identity: &IdentityKey, server: &Fingerprint) -> bool {
-    account.last_profile.as_ref().is_some_and(|last| {
-        identity::verify_profile(
-            &identity.public(),
-            &server.0,
-            account.user,
-            &last.name,
-            last.avatar,
-            &last.sig,
-        )
-        .is_ok()
+/// Whether `account` shows `address` signed by `identity` for the server `server` and its user.
+fn proves_account(
+    account: &Account,
+    identity: &IdentityKey,
+    server: &Fingerprint,
+    address: &str,
+) -> bool {
+    account.addresses.iter().any(|signed| {
+        signed.address == address
+            && identity::verify_address(
+                &identity.public(),
+                &server.0,
+                account.user,
+                address,
+                &signed.sig,
+            )
+            .is_ok()
     })
 }
 
@@ -457,48 +469,37 @@ fn spawn_link(
 #[cfg(test)]
 mod tests {
     use throcc_proto::ids::UserId;
-    use throcc_proto::messages::LastProfile;
 
     use super::*;
 
-    fn proves(
-        user: u64,
-        last: Option<&LastProfile>,
-        identity: &IdentityKey,
-        server: &Fingerprint,
-    ) -> bool {
+    fn proves(user: u64, signed: &[SignedAddress], identity: &IdentityKey, server: u8) -> bool {
         let account = Account {
             user: UserId(user),
-            last_profile: last.cloned(),
+            addresses: signed.to_vec(),
         };
-        proves_account(&account, identity, server)
+        proves_account(&account, identity, &Fingerprint([server; 32]), "a.example")
     }
 
     #[test]
-    fn only_a_profile_we_signed_for_this_server_and_user_proves_the_account() {
+    fn only_the_address_typed_signed_for_this_server_and_user_proves_the_account() {
         let identity = IdentityKey::generate();
-        let server = Fingerprint([1; 32]);
-        let profile = Profile {
-            name: "Ilse".into(),
-            picture: None,
+        let signed = |address: &str| SignedAddress {
+            address: address.into(),
+            sig: identity.sign(&identity::address_message(&[1; 32], UserId(4), address)),
         };
-        let signed = profile.signed(&identity, &server, UserId(4));
-        let last = LastProfile {
-            name: signed.name,
-            avatar: None,
-            sig: signed.sig,
-        };
-        let renamed = LastProfile {
-            name: "Mallory".into(),
-            ..last.clone()
+        let (here, elsewhere) = (signed("a.example"), signed("b.example"));
+        let forged = SignedAddress {
+            address: "a.example".into(),
+            ..elsewhere.clone()
         };
         let other = IdentityKey::generate();
-        assert!(proves(4, Some(&last), &identity, &server));
-        assert!(!proves(5, Some(&last), &identity, &server));
-        assert!(!proves(4, Some(&last), &identity, &Fingerprint([2; 32])));
-        assert!(!proves(4, Some(&last), &other, &server));
-        assert!(!proves(4, Some(&renamed), &identity, &server));
-        assert!(!proves(4, None, &identity, &server));
+        assert!(proves(4, &[elsewhere.clone(), here.clone()], &identity, 1));
+        assert!(!proves(4, std::slice::from_ref(&elsewhere), &identity, 1));
+        assert!(!proves(4, &[forged], &identity, 1));
+        assert!(!proves(5, std::slice::from_ref(&here), &identity, 1));
+        assert!(!proves(4, std::slice::from_ref(&here), &identity, 2));
+        assert!(!proves(4, std::slice::from_ref(&here), &other, 1));
+        assert!(!proves(4, &[], &identity, 1));
     }
 
     #[test]

@@ -5,8 +5,9 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
 use throcc_proto::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
+use throcc_proto::limits::MAX_SIGNED_ADDRESSES;
 use throcc_proto::messages::{
-    LastProfile, PublicKey, ServerProfile, Signature, SignedEncryptionKey, User,
+    PublicKey, ServerProfile, Signature, SignedAddress, SignedEncryptionKey, User,
 };
 
 use crate::files;
@@ -47,7 +48,7 @@ type Migration = fn(&Transaction) -> rusqlite::Result<()>;
 
 /// Migration `i` moves the schema from version `i` to `i + 1`, kept in `PRAGMA user_version`.
 /// Version 1 is the schema throcc 0.1 shipped; changing the schema means adding a migration.
-const MIGRATIONS: [Migration; 2] = [to_v1, to_v2];
+const MIGRATIONS: [Migration; 3] = [to_v1, to_v2, to_v3];
 
 /// Creates the first schema in an empty database.
 fn to_v1(tx: &Transaction) -> rusqlite::Result<()> {
@@ -57,6 +58,19 @@ fn to_v1(tx: &Transaction) -> rusqlite::Result<()> {
 /// Keeps each user's signature over their name and picture.
 fn to_v2(tx: &Transaction) -> rusqlite::Result<()> {
     tx.execute_batch("ALTER TABLE users ADD COLUMN profile_sig BLOB")
+}
+
+/// Keeps the addresses each user's devices signed for this server.
+fn to_v3(tx: &Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE addresses (
+            user INTEGER NOT NULL,
+            address TEXT NOT NULL,
+            sig BLOB NOT NULL,
+            signed_at INTEGER NOT NULL,
+            PRIMARY KEY (user, address)
+        )",
+    )
 }
 
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
@@ -355,23 +369,34 @@ impl Database {
         Ok(())
     }
 
-    /// The profile `user` last signed, as its signature covers it, once they signed one.
-    pub fn last_profile(&self, user: UserId) -> Result<Option<LastProfile>> {
-        let row = self
-            .conn
-            .query_row(
-                "SELECT name, avatar_hash, profile_sig FROM users WHERE id = ?1",
-                [user.0 as i64],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, Option<Vec<u8>>>(2)?)),
-            )
-            .optional()?;
-        Ok(row.and_then(|(name, avatar, sig)| {
-            Some(LastProfile {
-                name,
-                avatar: hash_column(avatar),
-                sig: sig?.try_into().ok()?,
+    /// Keeps `address`, signed by `user`'s identity, as one they reach this server at, and
+    /// only the newest [`MAX_SIGNED_ADDRESSES`] of theirs.
+    pub fn keep_address(&self, user: UserId, address: &SignedAddress, now: u64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO addresses (user, address, sig, signed_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (user, address) DO UPDATE SET sig = excluded.sig, signed_at = excluded.signed_at",
+            params![user.0 as i64, address.address, address.sig.as_slice(), now as i64],
+        )?;
+        self.conn.execute(
+            "DELETE FROM addresses WHERE user = ?1 AND rowid NOT IN
+             (SELECT rowid FROM addresses WHERE user = ?1 ORDER BY signed_at DESC, rowid DESC LIMIT ?2)",
+            params![user.0 as i64, MAX_SIGNED_ADDRESSES as i64],
+        )?;
+        Ok(())
+    }
+
+    /// The addresses `user`'s identity signed for this server, newest first.
+    pub fn signed_addresses(&self, user: UserId) -> Result<Vec<SignedAddress>> {
+        let mut statement = self.conn.prepare(
+            "SELECT address, sig FROM addresses WHERE user = ?1 ORDER BY signed_at DESC, rowid DESC",
+        )?;
+        let rows = statement.query_map([user.0 as i64], |r| {
+            Ok(SignedAddress {
+                address: r.get(0)?,
+                sig: fixed(r.get(1)?)?,
             })
-        }))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn set_role(&self, user: UserId, role: Role) -> Result<()> {
@@ -728,6 +753,7 @@ fn remove_one(tx: &Transaction, id: i64) -> rusqlite::Result<()> {
         [id],
     )?;
     tx.execute("DELETE FROM invites WHERE minted_by = ?1", [id])?;
+    tx.execute("DELETE FROM addresses WHERE user = ?1", [id])?;
     tx.execute("DELETE FROM users WHERE id = ?1", [id])?;
     Ok(())
 }
@@ -757,19 +783,49 @@ mod tests {
     }
 
     #[test]
-    fn the_last_profile_is_there_once_a_user_signed_one() {
-        let mut db = Database::open_in_memory().unwrap();
-        let user = enroll(&mut db, 1, None);
-        assert_eq!(db.last_profile(user).unwrap(), None);
-        db.set_profile(user, "Mara", Some(Hash([2; 32])), &[7; 64])
+    fn a_version_2_database_gains_signed_addresses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        drop(Database::open(&path).unwrap());
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("DROP TABLE addresses; PRAGMA user_version = 2")
             .unwrap();
-        let profile = LastProfile {
-            name: "Mara".into(),
-            avatar: Some(Hash([2; 32])),
-            sig: [7; 64],
+        let mut db = Database::open(&path).unwrap();
+        let user = enroll(&mut db, 1, None);
+        let signed = SignedAddress {
+            address: "a".into(),
+            sig: [1; 64],
         };
-        assert_eq!(db.last_profile(user).unwrap(), Some(profile));
-        assert_eq!(db.last_profile(UserId(99)).unwrap(), None);
+        db.keep_address(user, &signed, 100).unwrap();
+        assert_eq!(db.signed_addresses(user).unwrap(), [signed]);
+    }
+
+    #[test]
+    fn a_user_keeps_their_newest_signed_addresses() {
+        let mut db = Database::open_in_memory().unwrap();
+        let (mara, teo) = (enroll(&mut db, 1, None), enroll(&mut db, 2, None));
+        assert!(db.signed_addresses(mara).unwrap().is_empty());
+        let signed = |address: &str, sig: u8| SignedAddress {
+            address: address.into(),
+            sig: [sig; 64],
+        };
+        for i in 0..MAX_SIGNED_ADDRESSES as u8 + 2 {
+            db.keep_address(mara, &signed(&format!("a{i}"), i), 100 + u64::from(i))
+                .unwrap();
+        }
+        db.keep_address(mara, &signed("a3", 9), 500).unwrap();
+        db.keep_address(teo, &signed("t", 1), 100).unwrap();
+        let kept = db.signed_addresses(mara).unwrap();
+        assert_eq!(kept.len(), MAX_SIGNED_ADDRESSES);
+        assert_eq!(kept[0], signed("a3", 9));
+        assert_eq!(kept[1].address, "a9");
+        assert!(!kept.iter().any(|a| a.address == "a1"));
+        assert!(kept.iter().any(|a| a.address == "a2"));
+        assert_eq!(db.signed_addresses(teo).unwrap(), [signed("t", 1)]);
+
+        db.remove_users(&[mara]).unwrap();
+        assert!(db.signed_addresses(mara).unwrap().is_empty());
     }
 
     #[test]
@@ -945,8 +1001,11 @@ mod tests {
         let path = dir.path().join("db");
         drop(Database::open(&path).unwrap());
         let v1 = Connection::open(&path).unwrap();
-        v1.execute_batch("ALTER TABLE users DROP COLUMN profile_sig; PRAGMA user_version = 1")
-            .unwrap();
+        v1.execute_batch(
+            "DROP TABLE addresses; ALTER TABLE users DROP COLUMN profile_sig;
+             PRAGMA user_version = 1",
+        )
+        .unwrap();
         v1.execute(
             "INSERT INTO users (pubkey, name, role, created_at, last_seen) VALUES (?1, 'Ilse', 0, 1, 1)",
             [[1u8; 32].as_slice()],

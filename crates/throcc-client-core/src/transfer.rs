@@ -6,7 +6,7 @@ use throcc_crypto::identity::IdentityKey;
 use throcc_crypto::transfer::{self, TransferCode, TransferError};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, UserId};
-use throcc_proto::messages::{MAX_AVATAR_BYTES, valid_name};
+use throcc_proto::messages::{MAX_AVATAR_BYTES, valid_address, valid_name};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::avatars;
@@ -29,7 +29,6 @@ pub const FRAME_INTERVAL: Duration = Duration::from_millis(150);
 const MAX_AGE: Duration = Duration::from_secs(60 * 60);
 /// How far ahead of this device's clock an export's creation time may be.
 const MAX_AHEAD: Duration = Duration::from_secs(5 * 60);
-const MAX_ADDRESS_BYTES: usize = 255;
 /// The light modules on every side of a QR code, which scanners need to find it.
 const QUIET_ZONE: usize = 4;
 
@@ -430,12 +429,6 @@ fn fits_and_shows(picture: &[u8]) -> bool {
     picture.len() <= MAX_AVATAR_BYTES && picture::showable(picture)
 }
 
-fn valid_address(address: &str) -> bool {
-    !address.is_empty()
-        && address.len() <= MAX_ADDRESS_BYTES
-        && !address.chars().any(|c| c.is_control() || c.is_whitespace())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,14 +643,5 @@ mod tests {
         }
         let opened = open(collector.blob().unwrap(), &export.code()).unwrap();
         assert_eq!(opened.profile().unwrap().name, "Ilse");
-    }
-
-    #[test]
-    fn addresses_with_spaces_or_controls_are_dropped() {
-        assert!(valid_address("voice.example.net:8476"));
-        assert!(!valid_address(""));
-        assert!(!valid_address("voice example"));
-        assert!(!valid_address("voice\u{7}.example"));
-        assert!(!valid_address(&"a".repeat(MAX_ADDRESS_BYTES + 1)));
     }
 }

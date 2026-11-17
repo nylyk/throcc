@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::framing::FrameError;
 use crate::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
+use crate::limits::MAX_ADDRESS_BYTES;
 
 /// The protocol this build speaks.
 pub const PROTOCOL: u16 = 3;
@@ -11,6 +12,14 @@ pub const MIN_PROTOCOL: u16 = 3;
 pub const MAX_AVATAR_BYTES: usize = 64 * 1024;
 pub const MAX_NAME_CHARS: usize = 32;
 pub const MAX_PASSWORD_CHARS: usize = 128;
+
+/// Whether `address` could name a server: 1 to [`MAX_ADDRESS_BYTES`] bytes without
+/// whitespace or control characters.
+pub fn valid_address(address: &str) -> bool {
+    !address.is_empty()
+        && address.len() <= MAX_ADDRESS_BYTES
+        && !address.chars().any(|c| c.is_control() || c.is_whitespace())
+}
 
 /// `name` without surrounding whitespace, if that is 1 to [`MAX_NAME_CHARS`] characters,
 /// has nothing that hides or reorders text and shows at least one visible character.
@@ -126,18 +135,28 @@ pub type AccountStep = Result<Account, AuthError>;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Account {
     pub user: UserId,
-    /// The profile this account last signed for this server, none for an account just made.
-    /// It proves to a device that hasn't pinned the server that the identity joined it.
-    pub last_profile: Option<LastProfile>,
+    /// The addresses this account's devices reached this server at, newest first, at most
+    /// [`MAX_SIGNED_ADDRESSES`](crate::limits::MAX_SIGNED_ADDRESSES). One for the address
+    /// typed proves to a device that hasn't pinned the server that the identity joined the
+    /// server at that address.
+    pub addresses: Vec<SignedAddress>,
 }
 
-/// A profile as its signature covers it, without the picture's bytes.
+/// An address a device reached a server at, signed by the identity for that server and user.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LastProfile {
-    pub name: String,
-    pub avatar: Option<Hash>,
+pub struct SignedAddress {
+    /// At most [`MAX_ADDRESS_BYTES`].
+    pub address: String,
     #[serde(with = "sig")]
     pub sig: Signature,
+}
+
+/// What a sign-in gives the server for the user id in its [`AccountStep`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileStep {
+    pub profile: SignedProfile,
+    /// The address this device reached the server at.
+    pub address: SignedAddress,
 }
 
 /// Our name and picture, as every sign-in gives them to the server before its [`Welcome`] and
@@ -511,6 +530,17 @@ mod sig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_address_is_bounded_and_has_no_spaces_or_controls() {
+        assert!(valid_address("voice.example.net:8476"));
+        assert!(valid_address("[2001:db8::1]:8476"));
+        assert!(!valid_address(""));
+        assert!(!valid_address("voice example"));
+        assert!(!valid_address("voice\u{7}.example"));
+        assert!(valid_address(&"a".repeat(MAX_ADDRESS_BYTES)));
+        assert!(!valid_address(&"a".repeat(MAX_ADDRESS_BYTES + 1)));
+    }
 
     #[test]
     fn names_are_trimmed_and_bounded_in_characters() {

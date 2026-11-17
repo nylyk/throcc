@@ -6,8 +6,8 @@ use throcc_crypto::pake::{ServerPake, Transcript};
 use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::invite::{self, ID_CHARS, SECRET_CHARS};
 use throcc_proto::messages::{
-    Account, AccountStep, AuthError, Event, PakeFinish, PakeReply, PakeStep, PublicKey, SignIn,
-    SignedProfile,
+    Account, AccountStep, AuthError, Event, PakeFinish, PakeReply, PakeStep, ProfileStep,
+    PublicKey, SignIn, SignedProfile, valid_address,
 };
 use tracing::{debug, info, warn};
 
@@ -103,22 +103,22 @@ pub async fn authenticate(
     })
 }
 
-/// Tells the client its user id and the profile it last signed here, then takes a fresh one. A
-/// profile that fails to arrive, or whose name, picture or signature is wrong, is refused.
+/// Tells the client its user id and the addresses its identity signed here, then takes its
+/// profile and the address it signs now, keeping the address. Either wrong is refused.
 async fn take_profile(
     shared: &ServerState,
     stream: &mut FrameStream,
     row: &UserRow,
 ) -> Result<SignedProfile, AuthRefusal> {
-    let last_profile = shared.hub().db.last_profile(row.id).map_err(internal)?;
+    let addresses = shared.hub().db.signed_addresses(row.id).map_err(internal)?;
     let step: AccountStep = Ok(Account {
         user: row.id,
-        last_profile,
+        addresses,
     });
     write_frame(&mut stream.send, &step)
         .await
         .map_err(|_| BAD_PROFILE)?;
-    let profile = read_profile(&mut stream.recv)
+    let ProfileStep { profile, address } = read_profile(&mut stream.recv)
         .await
         .map_err(|_| BAD_PROFILE)?;
     if let Err(Refusal(_, reason)) =
@@ -127,6 +127,22 @@ async fn take_profile(
         debug!(user = row.id.0, "refusing a sign-in's profile: {reason}");
         return Err(BAD_PROFILE);
     }
+    let signed = identity::verify_address(
+        &row.pubkey,
+        &shared.fingerprint.0,
+        row.id,
+        &address.address,
+        &address.sig,
+    );
+    if !valid_address(&address.address) || signed.is_err() {
+        debug!(user = row.id.0, "refusing a sign-in's address");
+        return Err(BAD_PROFILE);
+    }
+    shared
+        .hub()
+        .db
+        .keep_address(row.id, &address, unix_now())
+        .map_err(internal)?;
     Ok(profile)
 }
 

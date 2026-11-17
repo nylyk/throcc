@@ -21,6 +21,8 @@ const DATAGRAM_SEND_BUFFER: usize = 64 * 1024;
 const CONTROL_WINDOW: u32 = 2 * throcc_proto::framing::MAX_FRAME_BYTES as u32;
 
 pub struct Connected {
+    /// The address connected to, as the user gave it.
+    pub address: String,
     pub connection: quinn::Connection,
     pub fingerprint: Fingerprint,
     /// TLS exporter value for label `throcc/exporter/1`, used for channel binding.
@@ -103,6 +105,7 @@ pub async fn connect_with(
         .export_keying_material(&mut exporter, EXPORTER_LABEL, b"")
         .map_err(|_| ConnectError::Setup("TLS exporter unavailable".into()))?;
     Ok(Connected {
+        address: address.to_owned(),
         connection,
         fingerprint,
         exporter,

@@ -7,7 +7,7 @@ use throcc_crypto::identity::random;
 use throcc_proto::framing::{self, FrameError, LEN_BYTES};
 use throcc_proto::messages::{
     AccountStep, AuthResult, ClientHello, ClientMessage, ErrorCode, MAX_AVATAR_BYTES, MIN_PROTOCOL,
-    PROTOCOL, PakeStep, Request, Response, ServerHello, ServerMessage, SignedProfile,
+    PROTOCOL, PakeStep, ProfileStep, Request, Response, ServerHello, ServerMessage,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{Semaphore, mpsc};
@@ -58,7 +58,7 @@ pub async fn read_handshake<T: DeserializeOwned>(
 }
 
 /// Reads a sign-in's profile, which is never larger than [`PROFILE_FRAME_BYTES`].
-pub async fn read_profile(recv: &mut quinn::RecvStream) -> Result<SignedProfile, ReadError> {
+pub async fn read_profile(recv: &mut quinn::RecvStream) -> Result<ProfileStep, ReadError> {
     read_within(recv, PROFILE_FRAME_BYTES).await
 }
 

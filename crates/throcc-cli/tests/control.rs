@@ -9,8 +9,8 @@ use throcc_proto::framing;
 use throcc_proto::ids::{Epoch, Hash, Role, UserId};
 use throcc_proto::messages::{
     Account, AccountStep, AuthError, AuthResult, ClientHello, MAX_AVATAR_BYTES, MIN_PROTOCOL,
-    PROTOCOL, Placement, Request, Response, ServerHello, ServerMessage, ServerProfile, SignIn,
-    SignedProfile, Welcome,
+    PROTOCOL, Placement, ProfileStep, Request, Response, ServerHello, ServerMessage, ServerProfile,
+    SignIn, SignedAddress, SignedProfile, Welcome,
 };
 use throcc_proto::transport::{IDLE_TIMEOUT, close};
 use throcc_server::{Congestion, tls};
@@ -114,12 +114,12 @@ async fn unknown_reply_id_closes_the_connection() {
         let _: ClientHello = read_message(&mut recv).await;
         let step: AccountStep = Ok(Account {
             user: UserId(1),
-            last_profile: None,
+            addresses: Vec::new(),
         });
         send.write_all(&framing::encode(&step).unwrap())
             .await
             .unwrap();
-        let _: SignedProfile = read_message(&mut recv).await;
+        let _: ProfileStep = read_message(&mut recv).await;
         let welcome = Welcome {
             me: UserId(1),
             role: Role::User,
@@ -169,6 +169,10 @@ async fn a_sign_in_is_refused_unless_its_key_signed_its_valid_profile_for_it() {
     let me = alice.link.welcome.me;
     let stranger = IdentityKey::generate();
     let fingerprint = alice.link.connected.fingerprint;
+    let address = |signer: &IdentityKey, user: UserId, address: &str| SignedAddress {
+        address: address.into(),
+        sig: signer.sign(&identity::address_message(&fingerprint.0, user, address)),
+    };
     let signed = |signer: &IdentityKey, user: UserId, name: &str, picture: Option<Vec<u8>>| {
         let avatar = picture.as_deref().map(Hash::of);
         SignedProfile {
@@ -187,11 +191,43 @@ async fn a_sign_in_is_refused_unless_its_key_signed_its_valid_profile_for_it() {
             ..signed(identity, me, "Ilse", None)
         },
     ] {
-        let answer = sign_in_giving(&server.addr, identity, me, &bad).await;
-        assert_eq!(answer, Some(AuthError::BadProfile), "{:?}", bad.name);
+        let step = ProfileStep {
+            address: address(identity, me, &server.addr),
+            profile: bad,
+        };
+        let answer = sign_in_giving(&server.addr, identity, me, &step).await;
+        assert_eq!(
+            answer,
+            Some(AuthError::BadProfile),
+            "{:?}",
+            step.profile.name
+        );
+    }
+    for bad in [
+        address(&stranger, me, &server.addr),
+        SignedAddress {
+            address: "elsewhere.example.net".into(),
+            ..address(identity, me, &server.addr)
+        },
+        address(identity, me, "spaced address"),
+    ] {
+        let step = ProfileStep {
+            profile: signed(identity, me, "Ilse", None),
+            address: bad,
+        };
+        let answer = sign_in_giving(&server.addr, identity, me, &step).await;
+        assert_eq!(
+            answer,
+            Some(AuthError::BadProfile),
+            "{:?}",
+            step.address.address
+        );
     }
     let picture = vec![2; MAX_AVATAR_BYTES];
-    let good = signed(identity, me, "Ilse", Some(picture.clone()));
+    let good = ProfileStep {
+        profile: signed(identity, me, "Ilse", Some(picture.clone())),
+        address: address(identity, me, &server.addr),
+    };
     assert_eq!(
         sign_in_giving(&server.addr, identity, me, &good).await,
         None
@@ -200,13 +236,13 @@ async fn a_sign_in_is_refused_unless_its_key_signed_its_valid_profile_for_it() {
     assert_eq!(fetched, Response::Avatar(picture));
 }
 
-/// Signs in to `addr` as `identity` over a bare connection, giving `profile` once the server
+/// Signs in to `addr` as `identity` over a bare connection, giving `step` once the server
 /// names the user `me`, and returns the server's refusal, if any.
 async fn sign_in_giving(
     addr: &str,
     identity: &IdentityKey,
     me: UserId,
-    profile: &SignedProfile,
+    step: &ProfileStep,
 ) -> Option<AuthError> {
     let connected = connection::connect(addr, None).await.unwrap();
     let (mut send, mut recv) = connected.connection.accept_bi().await.unwrap();
@@ -225,9 +261,9 @@ async fn sign_in_giving(
     send.write_all(&framing::encode(&sign_in).unwrap())
         .await
         .unwrap();
-    let step: AccountStep = read_message(&mut recv).await;
-    assert_eq!(step.map(|account| account.user), Ok(me));
-    send.write_all(&framing::encode(profile).unwrap())
+    let account: AccountStep = read_message(&mut recv).await;
+    assert_eq!(account.map(|account| account.user), Ok(me));
+    send.write_all(&framing::encode(step).unwrap())
         .await
         .unwrap();
     let answer = match read_message::<AuthResult>(&mut recv).await {

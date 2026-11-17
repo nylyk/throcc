@@ -153,26 +153,36 @@ fn control_messages_encode_to_pinned_bytes() {
     pinned::<AccountStep>(
         Ok(Account {
             user: UserId(7),
-            last_profile: None,
-        }),
-        "000700",
-    );
-    pinned::<AccountStep>(
-        Ok(Account {
-            user: UserId(7),
-            last_profile: Some(LastProfile {
-                name: "a".into(),
-                avatar: Some(Hash([2; 32])),
+            addresses: vec![SignedAddress {
+                address: "a".into(),
                 sig: [3; 64],
-            }),
+            }],
         }),
         concat!(
-            "000701016101020202020202020202020202020202020202020202020202020202020202020240030303",
-            "030303030303030303030303030303030303030303030303030303030303030303030303030303030303",
-            "03030303030303030303030303030303030303",
+            "000701016140030303030303030303030303030303030303030303030303030303030303030303030303",
+            "03030303030303030303030303030303030303030303030303030303",
         ),
     );
     pinned::<AccountStep>(Err(AuthError::BadProfile), "0108");
+    pinned(
+        ProfileStep {
+            profile: SignedProfile {
+                name: "a".into(),
+                picture: Some(vec![1, 2]),
+                sig: [3; 64],
+            },
+            address: SignedAddress {
+                address: "b".into(),
+                sig: [4; 64],
+            },
+        },
+        concat!(
+            "016101020102400303030303030303030303030303030303030303030303030303030303030303030303",
+            "030303030303030303030303030303030303030303030303030303030301624004040404040404040404",
+            "040404040404040404040404040404040404040404040404040404040404040404040404040404040404",
+            "040404040404040404040404",
+        ),
+    );
     pinned(
         SignedProfile {
             name: "a".into(),

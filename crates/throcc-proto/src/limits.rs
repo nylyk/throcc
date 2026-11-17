@@ -1,3 +1,7 @@
+/// The longest server address, in bytes.
+pub const MAX_ADDRESS_BYTES: usize = 255;
+/// How many signed addresses a server keeps per account, the newest ones.
+pub const MAX_SIGNED_ADDRESSES: usize = 8;
 /// The most people in one room.
 pub const MAX_ROOM_MEMBERS: usize = 30;
 /// The most screen shares running in one room at once.

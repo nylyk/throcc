@@ -117,6 +117,36 @@ pub fn verify_profile(
     )
 }
 
+/// What an identity key signs to say it reaches the server with the SPKI hash `server`, as
+/// `user`, at `address`.
+pub fn address_message(server: &[u8; 32], user: UserId, address: &str) -> Vec<u8> {
+    // The address is the only part of varying length, so it stays last to keep the message
+    // unambiguous.
+    [
+        b"throcc/address/1".as_slice(),
+        server,
+        &user.0.to_be_bytes(),
+        address.as_bytes(),
+    ]
+    .concat()
+}
+
+/// Checks that `identity_key` signed `address` for `user` on the server with the SPKI hash
+/// `server`.
+pub fn verify_address(
+    identity_key: &PublicKey,
+    server: &[u8; 32],
+    user: UserId,
+    address: &str,
+    signature: &Signature,
+) -> Result<(), BadSignature> {
+    verify(
+        identity_key,
+        &address_message(server, user, address),
+        signature,
+    )
+}
+
 /// Bytes from the operating system's CSPRNG.
 pub fn random<const N: usize>() -> [u8; N] {
     let mut out = [0u8; N];
@@ -158,6 +188,29 @@ mod tests {
                 "c7fbab7ff0174574efe9e9d2bce68d02b9a3494209538356a9996de007a4e900",
             )
         );
+    }
+
+    #[test]
+    fn address_message_is_pinned_and_its_signature_binds_every_part() {
+        let message = address_message(&[1; 32], UserId(0x0102_0304_0506_0708), "a.example");
+        assert_eq!(
+            hex(&message),
+            concat!(
+                "7468726f63632f616464726573732f31",
+                "0101010101010101010101010101010101010101010101010101010101010101",
+                "0102030405060708",
+                "612e6578616d706c65",
+            )
+        );
+        let key = IdentityKey::from_seed(&[3; 32]);
+        let sig = key.sign(&message);
+        let check = |server: &[u8; 32], user: u64, address: &str| {
+            verify_address(&key.public(), server, UserId(user), address, &sig).is_ok()
+        };
+        assert!(check(&[1; 32], 0x0102_0304_0506_0708, "a.example"));
+        assert!(!check(&[2; 32], 0x0102_0304_0506_0708, "a.example"));
+        assert!(!check(&[1; 32], 7, "a.example"));
+        assert!(!check(&[1; 32], 0x0102_0304_0506_0708, "b.example"));
     }
 
     /// The signed encryption key is part of the protocol: peers and the server verify these exact bytes.
