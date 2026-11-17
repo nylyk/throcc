@@ -855,6 +855,7 @@ impl Session {
         self.audio(CallCommand::ForgetAll);
         self.audio(CallCommand::SendOn(None));
         self.shared.update(|s| s.current = None);
+        self.follow_presence_keys(&BTreeMap::new());
     }
 
     fn reset_room(&mut self) {
@@ -986,8 +987,9 @@ impl Session {
         let current: BTreeMap<UserId, Peer> = trusted.into_iter().map(|p| (p.user, p)).collect();
         let changed = current != self.peers;
         self.note_trusted(earlier);
+        // Peers are noted last, so they are kept should noting go past `MAX_SIGNED_IN`.
+        self.follow_presence_keys(&current);
         self.note_identities(&presented_by(&current));
-        self.forget_presences_in_our_room(&current);
         let arrived: Vec<UserId> = current
             .iter()
             .filter(|(user, peer)| {
@@ -1036,25 +1038,31 @@ impl Session {
         changed
     }
 
-    /// Forgets the keys that presences elsewhere proved for people now shown in our room who
-    /// are not room peers, so the badge there stays with who hears us.
-    fn forget_presences_in_our_room(&mut self, peers: &BTreeMap<UserId, Peer>) {
+    /// Brings the keys signed presences present in line with where we are: forgotten for
+    /// people shown in our room who are not among `peers`, so the badge there stays with who
+    /// hears us, and noted again for those shown elsewhere once we left the room they were in.
+    fn follow_presence_keys(&mut self, peers: &BTreeMap<UserId, Peer>) {
         let me = self.call.me();
         let state = self.shared.state();
-        let unkeyed: Vec<UserId> = state
-            .people
-            .iter()
-            .filter(|(user, _)| **user != me && !peers.contains_key(user))
-            .filter(|(_, p)| !presents_by_presence(p.room, self.room))
-            .map(|(user, _)| *user)
-            .collect();
+        let mut presented = Vec::new();
         let mut forgot = false;
-        for user in unkeyed {
-            forgot |= self.trust.forget(user);
+        for (user, shown) in &self.shown {
+            let Some(person) = state.person(*user) else {
+                continue;
+            };
+            if *user == me || peers.contains_key(user) {
+                continue;
+            }
+            if !presents_by_presence(person.room, self.room) {
+                forgot |= self.trust.forget(*user);
+            } else if shown.proven {
+                presented.push((*user, shown.key));
+            }
         }
         if forgot {
             self.refresh_trust();
         }
+        self.note_identities(&presented);
     }
 
     /// Notes every identity key our secret was wrapped to, oldest first, including one the

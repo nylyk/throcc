@@ -700,14 +700,11 @@ pub fn receive(
                         match (&waiter, held.is_empty()) {
                             // The next unit wakes us at once, and the view is followed at
                             // least every `WAITING`.
-                            (Some(waiter), true) => {
-                                let next = tokio::time::timeout(WAITING, units.recv());
-                                match waiter.block_on(next) {
-                                    Ok(Some(unit)) => queued.push_back(unit),
-                                    Ok(None) => return,
-                                    Err(_) => {}
-                                }
-                            }
+                            (Some(waiter), true) => match next_unit(waiter, &mut units) {
+                                Ok(Some(unit)) => queued.push_back(unit),
+                                Ok(None) => return,
+                                Err(_) => {}
+                            },
                             (None, true) => std::thread::sleep(WAITING),
                             (_, false) => std::thread::sleep(IDLE),
                         }
@@ -795,6 +792,16 @@ pub fn receive(
     })
 }
 
+/// Waits on `waiter`, a decode thread's own runtime, up to [`WAITING`] for the next unit.
+/// `Ok(None)` once the sender is gone.
+fn next_unit(
+    waiter: &tokio::runtime::Runtime,
+    units: &mut mpsc::Receiver<Received>,
+) -> Result<Option<Received>, tokio::time::error::Elapsed> {
+    // Made inside the runtime: a timeout made outside one panics.
+    waiter.block_on(async { tokio::time::timeout(WAITING, units.recv()).await })
+}
+
 #[cfg(test)]
 mod pacer_tests {
     use super::*;
@@ -819,6 +826,30 @@ mod receive_tests {
     use throcc_proto::messages::Codec;
 
     use super::*;
+
+    #[test]
+    fn a_decode_thread_waits_for_units_without_a_runtime_of_its_own() {
+        std::thread::spawn(|| {
+            let waiter = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap();
+            let (tx, mut units) = mpsc::channel(4);
+            assert!(next_unit(&waiter, &mut units).is_err());
+            let unit = Received {
+                timestamp: 7,
+                flags: Flags::KEYFRAME,
+                data: vec![1],
+            };
+            tx.try_send(unit).unwrap();
+            let got = next_unit(&waiter, &mut units).unwrap().unwrap();
+            assert_eq!(got.timestamp, 7);
+            drop(tx);
+            assert!(next_unit(&waiter, &mut units).unwrap().is_none());
+        })
+        .join()
+        .unwrap();
+    }
 
     #[test]
     fn failures_ask_again_only_once_a_keyframe_is_overdue() {

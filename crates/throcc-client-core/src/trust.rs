@@ -15,9 +15,9 @@ use crate::verified::VerifiedStore;
 /// else ties the account now behind their user id to it.
 pub(crate) struct Trust {
     server: Fingerprint,
-    /// The identity key each user last presented this session: by a presence whose name and
-    /// picture it signed for them here, or as a room peer with an encryption key it signed
-    /// for them here.
+    /// The identity key each user last presented this session: by a presence outside our room
+    /// whose name and picture it signed for them here, or as a room peer with an encryption
+    /// key it signed for them here.
     presented: HashMap<UserId, PublicKey>,
     verified: VerifiedStore,
 }
@@ -36,7 +36,8 @@ impl Trust {
         self.presented.clear();
     }
 
-    /// Forgets the key `user` presented, once they are no longer shown. True if there was one.
+    /// Forgets the key `user` presented, once they are no longer shown or no longer present it.
+    /// True if there was one.
     pub fn forget(&mut self, user: UserId) -> bool {
         self.presented.remove(&user).is_some()
     }
