@@ -266,7 +266,10 @@ fun ShareFullscreen(model: AppModel, state: CoreState) {
     LaunchedEffect(share == null || !watching) {
         if (share == null || !watching) model.fullscreenShare = null
     }
-    if (share == null) return
+    if (share == null) {
+        if (model.pictureInPicture) Box(Modifier.fillMaxSize().background(Color.Black))
+        return
+    }
     if (model.pictureInPicture) {
         Box(Modifier.fillMaxSize().background(Color.Black), Alignment.Center) {
             ShareSurface(model, user, Modifier.aspectRatio(share.aspect), onTop = true)
