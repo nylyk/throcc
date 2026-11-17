@@ -841,6 +841,10 @@ impl ThroccApp {
                 self.end_session(window, cx);
                 self.join_error = Some(reason);
             }
+            // The verified list is a snapshot, so a picture fetched for it needs a relist.
+            UiEvent::AvatarReady(_) if self.screen == Screen::Settings(SettingsPage::Verified) => {
+                self.list_verified()
+            }
             UiEvent::AvatarReady(_) => {}
             UiEvent::ProfileSaved => {}
             UiEvent::ProfileRefused(notice) => {
@@ -1819,7 +1823,9 @@ impl ThroccApp {
             cx.update_window(window_handle, |_, window, cx| {
                 this.update(cx, |app, cx| {
                     if result.is_ok() {
+                        // A cancelled enrollment still finishes and adds the server.
                         app.reload_known_servers();
+                        cx.notify();
                     }
                     if !attempt.is_newest() {
                         return;
@@ -1989,7 +1995,7 @@ impl ThroccApp {
     /// Opens a screen of the mock client by name, for screenshots: onboarding, onboardingerror,
     /// welcome, join, joinfailed, lost, personmenu, addserver, removeserver, room, testpattern,
     /// unwatched, alone, emptylobby, focus, fullscreen, popout, slow, slowpopout, slowfullscreen,
-    /// share, connection, person, personverified, personchanged, keychange, ownprofile,
+    /// lagging, share, connection, person, personverified, personchanged, keychange, ownprofile,
     /// pinmismatch, settings, appearance, verified, blocked, blockedmenu, blockedpeople, about,
     /// update, reconnect, elsewhere, newroom, editroom, roompassword, deleteroom, profile,
     /// profileerror, server, keys, members, invites, removeuser, leaveserver, identitymissing,
