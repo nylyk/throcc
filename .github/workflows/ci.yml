@@ -67,6 +67,9 @@ jobs:
             libvulkan-dev libfontconfig-dev libfreetype-dev libx11-xcb-dev libxcb1-dev libxcb-randr0-dev \
             libxcb-shm0-dev libxcb-xfixes0-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev libgbm-dev \
             libegl-dev libssl-dev libzstd-dev pkg-config mesa-vulkan-drivers
+      # The test relays ask for 4 MiB receive buffers, which Linux caps at rmem_max.
+      - if: runner.os == 'Linux'
+        run: sudo sysctl -w net.core.rmem_max=4194304
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:

@@ -8005,6 +8005,7 @@ dependencies = [
  "clap",
  "quinn",
  "serde",
+ "socket2",
  "tempfile",
  "throcc-client-core",
  "throcc-crypto",

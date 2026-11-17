@@ -482,12 +482,21 @@ pub enum Toward {
 
 /// A UDP relay in front of `server` for one client. Returns its address; it passes on each
 /// packet that `forward` accepts.
+/// Room for bursts such as a keyframe and its copy back to back: with the default buffer the
+/// kernel drops what the relay can't read in time, on top of any loss a test asks for.
+const RELAY_BUFFER: usize = 4 * 1024 * 1024;
+
 pub async fn relay(
     server: &str,
     mut forward: impl FnMut(Toward, &[u8]) -> bool + Send + 'static,
 ) -> String {
     let front = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let back = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    for socket in [&front, &back] {
+        if let Err(e) = socket2::SockRef::from(socket).set_recv_buffer_size(RELAY_BUFFER) {
+            eprintln!("the relay keeps its default receive buffer: {e}");
+        }
+    }
     back.connect(server).await.unwrap();
     let addr = front.local_addr().unwrap().to_string();
     tokio::spawn(async move {
