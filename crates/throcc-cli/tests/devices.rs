@@ -2,7 +2,8 @@ mod common;
 
 use std::time::Duration;
 
-use throcc_client_core::account;
+use throcc_client_core::account::{self, SignInError};
+use throcc_client_core::keystore::Keystore;
 use throcc_proto::messages::Event;
 use throcc_proto::transport::close;
 
@@ -15,6 +16,34 @@ fn closed_with(connection: &quinn::Connection) -> Option<u32> {
         }
         other => panic!("closed without an application code: {other}"),
     }
+}
+
+#[tokio::test]
+async fn another_device_of_a_member_signs_in_without_an_invite_and_pins_the_server() {
+    let server = start_server();
+    let alice = admin(&server).await;
+    let bob = invited(&server, &alice).await;
+    let fingerprint = bob.link.connected.fingerprint;
+
+    let phone = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        bob.keystore.dir().join("identity_key"),
+        phone.path().join("identity_key"),
+    )
+    .unwrap();
+    let mut keystore = Keystore::open_in(phone.path()).unwrap();
+    assert_eq!(keystore.known_servers.get(&server.addr), None);
+    let link = account::sign_in_unpinned(&mut keystore, &server.addr, &ilse())
+        .await
+        .unwrap();
+    assert_eq!(link.welcome.me, bob.link.welcome.me);
+    assert_eq!(keystore.known_servers.get(&server.addr), Some(fingerprint));
+
+    let stranger = tempfile::tempdir().unwrap();
+    let mut keystore = Keystore::open_in(stranger.path()).unwrap();
+    let refused = account::sign_in_unpinned(&mut keystore, &server.addr, &ilse()).await;
+    assert!(matches!(refused, Err(SignInError::NotEnrolled(_))));
+    assert_eq!(keystore.known_servers.get(&server.addr), None);
 }
 
 #[tokio::test]

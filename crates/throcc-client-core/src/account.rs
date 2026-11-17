@@ -61,6 +61,9 @@ impl SignInError {
             Self::Login(LoginError::Refused(AuthError::ServerFull)) => {
                 "The server is full right now. Try again in a while.".into()
             }
+            Self::Login(LoginError::Unproven) => {
+                "Couldn’t confirm this is a server you joined, so it may not be the real one. Join with an invite code instead.".into()
+            }
             Self::Login(LoginError::Refused(AuthError::UnknownKey)) => {
                 "This server doesn’t know you anymore. Join again with a fresh invite code.".into()
             }
@@ -122,6 +125,29 @@ pub async fn sign_in_over(
     let link = control::login(connected, keystore.identity(), profile, want_room).await?;
     let server = &link.connected.fingerprint;
     publish_encryption_key(keystore, &link.requester, server, link.welcome.me).await?;
+    Ok(link)
+}
+
+/// Signs in to a server the identity joined that this install hasn't pinned, as one joined on
+/// another device. The server proves it holds our account before our profile is signed for
+/// it, and is pinned once it has. One that doesn't know us needs an invite.
+pub async fn sign_in_unpinned(
+    keystore: &mut Keystore,
+    address: &str,
+    profile: &Profile,
+) -> Result<ControlLink, SignInError> {
+    let connected = connection::connect(address, None).await?;
+    let link = control::login_proven(connected, keystore.identity(), profile)
+        .await
+        .map_err(|e| match e {
+            LoginError::Refused(AuthError::UnknownKey) => {
+                SignInError::NotEnrolled(address.to_owned())
+            }
+            e => e.into(),
+        })?;
+    let server = link.connected.fingerprint;
+    keystore.known_servers.trust(address, server)?;
+    publish_encryption_key(keystore, &link.requester, &server, link.welcome.me).await?;
     Ok(link)
 }
 

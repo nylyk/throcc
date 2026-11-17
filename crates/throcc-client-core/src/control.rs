@@ -6,12 +6,13 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use throcc_crypto::identity::{self, IdentityKey, random};
 use throcc_crypto::pake::{ClientPake, PakeError, Transcript};
+use throcc_proto::Fingerprint;
 use throcc_proto::framing::{self, FrameError, LEN_BYTES};
 use throcc_proto::ids::RoomId;
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
-    AccountStep, AuthError, AuthResult, ClientHello, ClientMessage, Event, PROTOCOL, PakeFinish,
-    PakeStep, Request, Response, ServerHello, ServerMessage, SignIn, Welcome,
+    Account, AccountStep, AuthError, AuthResult, ClientHello, ClientMessage, Event, PROTOCOL,
+    PakeFinish, PakeStep, Request, Response, ServerHello, ServerMessage, SignIn, Welcome,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{mpsc, oneshot};
@@ -38,6 +39,8 @@ pub enum LoginError {
     ClientOutdated,
     #[error("this server runs an older throcc; ask its host to update")]
     ServerOutdated,
+    #[error("the server couldn't prove it holds your account")]
+    Unproven,
     #[error("the server closed the connection during login")]
     Closed,
     #[error("the server sent a malformed message: {0}")]
@@ -64,12 +67,32 @@ pub struct ControlLink {
     pub events: mpsc::Receiver<Event>,
 }
 
-/// Logs in with a key this server already knows, giving it `profile`.
+/// Logs in to a pinned server with a key it already knows, giving it `profile`.
 pub async fn login(
     connected: Connected,
     identity: &IdentityKey,
     profile: &Profile,
     want_room: Option<RoomId>,
+) -> Result<ControlLink, LoginError> {
+    auth(connected, identity, profile, want_room, false).await
+}
+
+/// Logs in to a server we haven't pinned, which must first prove it holds our account by the
+/// profile we last signed for its key, then gives it `profile`.
+pub async fn login_proven(
+    connected: Connected,
+    identity: &IdentityKey,
+    profile: &Profile,
+) -> Result<ControlLink, LoginError> {
+    auth(connected, identity, profile, None, true).await
+}
+
+async fn auth(
+    connected: Connected,
+    identity: &IdentityKey,
+    profile: &Profile,
+    want_room: Option<RoomId>,
+    needs_proof: bool,
 ) -> Result<ControlLink, LoginError> {
     let (mut send, recv, hello) = greet(&connected).await?;
     let client_nonce: [u8; 32] = random();
@@ -84,7 +107,7 @@ pub async fn login(
         },
     };
     write(&mut send, &auth).await?;
-    finish_login(connected, identity, profile, send, recv).await
+    finish_login(connected, identity, profile, send, recv, needs_proof).await
 }
 
 /// Enrolls with an invite code, giving the server `profile`. A server that can't prove it
@@ -137,7 +160,7 @@ pub async fn enroll(
         signature: identity.sign(&transcript.to_bytes()),
     };
     write(&mut send, &finish).await?;
-    finish_login(connected, identity, profile, send, recv).await
+    finish_login(connected, identity, profile, send, recv, false).await
 }
 
 /// Accepts the control stream the server opens and reads its hello, whose protocol range must
@@ -171,22 +194,31 @@ fn outdated(hello: &ServerHello) -> Option<LoginError> {
     }
 }
 
-/// Signs `profile` for the user id the server gives, then takes its welcome.
+/// Signs `profile` for the user id the server gives, then takes its welcome. When
+/// `needs_proof`, the server must first show a profile we signed for its key and that user id.
 async fn finish_login(
     connected: Connected,
     identity: &IdentityKey,
     profile: &Profile,
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
+    needs_proof: bool,
 ) -> Result<ControlLink, LoginError> {
     let step: AccountStep = read(&mut recv).await?;
-    let me = match step {
-        Ok(me) => me,
+    let account = match step {
+        Ok(account) => account,
         Err(e) => {
             connected.connection.close(close::NORMAL.into(), b"");
             return Err(e.into());
         }
     };
+    if needs_proof && !proves_account(&account, identity, &connected.fingerprint) {
+        connected
+            .connection
+            .close(close::AUTH_FAILED.into(), b"no proof of the account");
+        return Err(LoginError::Unproven);
+    }
+    let me = account.user;
     write(
         &mut send,
         &profile.signed(identity, &connected.fingerprint, me),
@@ -206,6 +238,21 @@ async fn finish_login(
         connected,
         requester,
         events,
+    })
+}
+
+/// Whether `account` shows a profile `identity` signed for the server `server` and its user.
+fn proves_account(account: &Account, identity: &IdentityKey, server: &Fingerprint) -> bool {
+    account.last_profile.as_ref().is_some_and(|last| {
+        identity::verify_profile(
+            &identity.public(),
+            &server.0,
+            account.user,
+            &last.name,
+            last.avatar,
+            &last.sig,
+        )
+        .is_ok()
     })
 }
 
@@ -409,7 +456,64 @@ fn spawn_link(
 
 #[cfg(test)]
 mod tests {
+    use throcc_proto::ids::UserId;
+    use throcc_proto::messages::LastProfile;
+
     use super::*;
+
+    fn account(user: u64, profile: Option<LastProfile>) -> Account {
+        Account {
+            user: UserId(user),
+            last_profile: profile,
+        }
+    }
+
+    #[test]
+    fn only_a_profile_we_signed_for_this_server_and_user_proves_the_account() {
+        let identity = IdentityKey::generate();
+        let server = Fingerprint([1; 32]);
+        let profile = Profile {
+            name: "Ilse".into(),
+            picture: None,
+        };
+        let signed = profile.signed(&identity, &server, UserId(4));
+        let last = LastProfile {
+            name: signed.name,
+            avatar: None,
+            sig: signed.sig,
+        };
+        assert!(proves_account(
+            &account(4, Some(last.clone())),
+            &identity,
+            &server
+        ));
+        assert!(!proves_account(
+            &account(5, Some(last.clone())),
+            &identity,
+            &server
+        ));
+        assert!(!proves_account(
+            &account(4, Some(last.clone())),
+            &identity,
+            &Fingerprint([2; 32])
+        ));
+        let other = IdentityKey::generate();
+        assert!(!proves_account(
+            &account(4, Some(last.clone())),
+            &other,
+            &server
+        ));
+        let renamed = LastProfile {
+            name: "Mallory".into(),
+            ..last
+        };
+        assert!(!proves_account(
+            &account(4, Some(renamed)),
+            &identity,
+            &server
+        ));
+        assert!(!proves_account(&account(4, None), &identity, &server));
+    }
 
     #[test]
     fn a_protocol_outside_the_servers_range_names_the_outdated_side() {

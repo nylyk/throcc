@@ -119,9 +119,27 @@ pub struct PakeFinish {
     pub signature: Signature,
 }
 
-/// The server's answer once it knows who signs in: the user id to sign our profile for, or a
+/// The server's answer once it knows who signs in: the account to sign our profile for, or a
 /// refusal.
-pub type AccountStep = Result<UserId, AuthError>;
+pub type AccountStep = Result<Account, AuthError>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Account {
+    pub user: UserId,
+    /// The profile this account last signed for this server, none for an account just made.
+    /// A device that hasn't pinned the server takes it as proof that the server is one the
+    /// identity joined, since only that server's key can show a signature bound to it.
+    pub last_profile: Option<LastProfile>,
+}
+
+/// A profile as its signature covers it, without the picture's bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastProfile {
+    pub name: String,
+    pub avatar: Option<Hash>,
+    #[serde(with = "sig")]
+    pub sig: Signature,
+}
 
 /// Our name and picture, as every sign-in gives them to the server before its [`Welcome`] and
 /// [`Request::SetProfile`] changes them.

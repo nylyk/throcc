@@ -697,7 +697,7 @@ fn add_server(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 "Invite code",
                 Input::new(&app.code).font_family(theme::mono_font()),
             )
-            .child(caption("The code also proves you reached the real server. Leave it empty for a server you’ve joined before.")),
+            .child(caption("The code also proves you reached the real server. Leave it empty for a server you joined on any of your devices.")),
         )
         .children(app.join_error.clone().map(error_box))
         .child(

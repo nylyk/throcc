@@ -6,7 +6,7 @@ use throcc_crypto::pake::{ServerPake, Transcript};
 use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::invite::{self, ID_CHARS, SECRET_CHARS};
 use throcc_proto::messages::{
-    AccountStep, AuthError, Event, PakeFinish, PakeReply, PakeStep, PublicKey, SignIn,
+    Account, AccountStep, AuthError, Event, PakeFinish, PakeReply, PakeStep, PublicKey, SignIn,
     SignedProfile,
 };
 use tracing::{debug, info, warn};
@@ -103,14 +103,19 @@ pub async fn authenticate(
     })
 }
 
-/// Tells the client its user id and takes the profile it signs for it. A profile that fails
-/// to arrive, or whose name, picture or signature is wrong, is refused.
+/// Tells the client its user id, with the profile it last signed here, and takes the profile it
+/// signs for it now. A profile that fails to arrive, or whose name, picture or signature is
+/// wrong, is refused.
 async fn take_profile(
     shared: &ServerState,
     stream: &mut FrameStream,
     row: &UserRow,
 ) -> Result<SignedProfile, AuthRefusal> {
-    let step: AccountStep = Ok(row.id);
+    let last_profile = shared.hub().db.last_profile(row.id).map_err(internal)?;
+    let step: AccountStep = Ok(Account {
+        user: row.id,
+        last_profile,
+    });
     write_frame(&mut stream.send, &step)
         .await
         .map_err(|_| BAD_PROFILE)?;

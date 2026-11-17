@@ -98,7 +98,7 @@ struct AddServerView: View {
                         .monospaced()
                         .textInputAutocapitalization(.characters)
                 } footer: {
-                    Text("The code also proves you reached the real server. Leave it empty for a server you’ve joined before.")
+                    Text("The code also proves you reached the real server. Leave it empty for a server you joined on any of your devices.")
                         .foregroundStyle(.muted)
                 }
                 .autocorrectionDisabled()

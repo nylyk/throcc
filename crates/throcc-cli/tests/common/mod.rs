@@ -747,7 +747,10 @@ impl PendingEnroll {
             .write_all(&framing::encode(&finish).unwrap())
             .await
             .unwrap();
-        let me = read_message::<AccountStep>(&mut self.recv).await.unwrap();
+        let me = read_message::<AccountStep>(&mut self.recv)
+            .await
+            .unwrap()
+            .user;
         let profile = ilse().signed(&self.identity, &self.connected.fingerprint, me);
         self.send
             .write_all(&framing::encode(&profile).unwrap())

@@ -8,9 +8,9 @@ use throcc_crypto::identity::{self, IdentityKey, profile_message};
 use throcc_proto::framing;
 use throcc_proto::ids::{Epoch, Hash, Role, UserId};
 use throcc_proto::messages::{
-    AccountStep, AuthError, AuthResult, ClientHello, MAX_AVATAR_BYTES, MIN_PROTOCOL, PROTOCOL,
-    Placement, Request, Response, ServerHello, ServerMessage, ServerProfile, SignIn, SignedProfile,
-    Welcome,
+    Account, AccountStep, AuthError, AuthResult, ClientHello, MAX_AVATAR_BYTES, MIN_PROTOCOL,
+    PROTOCOL, Placement, Request, Response, ServerHello, ServerMessage, ServerProfile, SignIn,
+    SignedProfile, Welcome,
 };
 use throcc_proto::transport::{IDLE_TIMEOUT, close};
 use throcc_server::{Congestion, tls};
@@ -112,7 +112,10 @@ async fn unknown_reply_id_closes_the_connection() {
             .await
             .unwrap();
         let _: ClientHello = read_message(&mut recv).await;
-        let step: AccountStep = Ok(UserId(1));
+        let step: AccountStep = Ok(Account {
+            user: UserId(1),
+            last_profile: None,
+        });
         send.write_all(&framing::encode(&step).unwrap())
             .await
             .unwrap();
@@ -223,7 +226,7 @@ async fn sign_in_giving(
         .await
         .unwrap();
     let step: AccountStep = read_message(&mut recv).await;
-    assert_eq!(step, Ok(me));
+    assert_eq!(step.map(|account| account.user), Ok(me));
     send.write_all(&framing::encode(profile).unwrap())
         .await
         .unwrap();

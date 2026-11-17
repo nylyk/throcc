@@ -150,7 +150,28 @@ fn control_messages_encode_to_pinned_bytes() {
         "01100102",
     );
     pinned(AuthResult::Err(AuthError::RateLimited), "0105");
-    pinned::<AccountStep>(Ok(UserId(7)), "0007");
+    pinned::<AccountStep>(
+        Ok(Account {
+            user: UserId(7),
+            last_profile: None,
+        }),
+        "000700",
+    );
+    pinned::<AccountStep>(
+        Ok(Account {
+            user: UserId(7),
+            last_profile: Some(LastProfile {
+                name: "a".into(),
+                avatar: Some(Hash([2; 32])),
+                sig: [3; 64],
+            }),
+        }),
+        concat!(
+            "000701016101020202020202020202020202020202020202020202020202020202020202020240030303",
+            "030303030303030303030303030303030303030303030303030303030303030303030303030303030303",
+            "03030303030303030303030303030303030303",
+        ),
+    );
     pinned::<AccountStep>(Err(AuthError::BadProfile), "0108");
     pinned(
         SignedProfile {

@@ -5,7 +5,9 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
 use throcc_proto::ids::{Epoch, Hash, MediaId, Role, RoomId, UserId};
-use throcc_proto::messages::{PublicKey, ServerProfile, Signature, SignedEncryptionKey, User};
+use throcc_proto::messages::{
+    LastProfile, PublicKey, ServerProfile, Signature, SignedEncryptionKey, User,
+};
 
 use crate::files;
 
@@ -351,6 +353,31 @@ impl Database {
             params![name, hash_param(&avatar), sig.as_slice(), user.0 as i64],
         )?;
         Ok(())
+    }
+
+    /// The profile `user` last signed, as its signature covers it, once they signed one.
+    pub fn last_profile(&self, user: UserId) -> Result<Option<LastProfile>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT name, avatar_hash, profile_sig FROM users WHERE id = ?1",
+                [user.0 as i64],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<Vec<u8>>>(1)?,
+                        r.get::<_, Option<Vec<u8>>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(row.and_then(|(name, avatar, sig)| {
+            Some(LastProfile {
+                name,
+                avatar: hash_column(avatar),
+                sig: sig?.try_into().ok()?,
+            })
+        }))
     }
 
     pub fn set_role(&self, user: UserId, role: Role) -> Result<()> {
@@ -733,6 +760,22 @@ mod tests {
             .unwrap()
             .into_row()
             .id
+    }
+
+    #[test]
+    fn the_last_profile_is_there_once_a_user_signed_one() {
+        let mut db = Database::open_in_memory().unwrap();
+        let user = enroll(&mut db, 1, None);
+        assert_eq!(db.last_profile(user).unwrap(), None);
+        db.set_profile(user, "Mara", Some(Hash([2; 32])), &[7; 64])
+            .unwrap();
+        let profile = LastProfile {
+            name: "Mara".into(),
+            avatar: Some(Hash([2; 32])),
+            sig: [7; 64],
+        };
+        assert_eq!(db.last_profile(user).unwrap(), Some(profile));
+        assert_eq!(db.last_profile(UserId(99)).unwrap(), None);
     }
 
     #[test]

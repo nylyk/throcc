@@ -157,7 +157,7 @@ fun AddServer(model: AppModel) {
                                 "An invite code looks like K7Q-M2XPD."
                             } else {
                                 "The code also proves you reached the real server. " +
-                                    "Leave it empty for a server you’ve joined before."
+                                    "Leave it empty for a server you joined on any of your devices."
                             },
                         )
                     },
