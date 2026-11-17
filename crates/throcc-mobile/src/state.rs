@@ -125,8 +125,8 @@ pub struct Person {
     pub voice: SoundLevel,
     pub share_audio: SoundLevel,
     pub verified: bool,
-    /// What follows the Verified label on their profile.
-    pub verified_note: Option<String>,
+    /// The name they were verified under, where the server now shows another.
+    pub verified_as: Option<String>,
     pub trust: KeyTrust,
     /// The letter their picture stands in with.
     pub initial: String,
@@ -311,7 +311,7 @@ impl Person {
             voice: person.playback.voice.into(),
             share_audio: person.playback.share.into(),
             verified: person.verified,
-            verified_note: person.verified_note(),
+            verified_as: person.verified_as().map(str::to_owned),
             trust: state.trust(user).into(),
             initial: core::initial(&person.name),
             identity_key: person.identity_key.map(|key| key.to_vec()),

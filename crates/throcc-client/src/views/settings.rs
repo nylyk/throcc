@@ -120,6 +120,7 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .gap_4()
                 .child(picture)
                 .child(field("Name", Input::new(&app.name)).children(name_error.map(field_error)))
+                .child(caption("Kept on this device. Each server shows the name and picture from the device that last signed in there."))
                 .child(save),
         )
         .child(export_card(app, cx))

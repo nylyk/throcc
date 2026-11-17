@@ -115,6 +115,12 @@ fun Profile(model: AppModel) {
                 PictureField(model, picture, name) { picture = it }
                 NameField(name) { name = it }
             }
+            Text(
+                "Kept on this device. Each server shows the name and picture from the device that last signed in there.",
+                Modifier.padding(horizontal = 16.dp),
+                MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
+            )
             MainButton("Save", changed && validName(name) != null) { model.saveProfile(name, picture) }
             ExportSection(model)
         }

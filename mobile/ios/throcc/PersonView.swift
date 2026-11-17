@@ -90,9 +90,9 @@ struct PersonView: View {
     private func safetyNumber(of person: Person) -> some View {
         Section {
             HStack(spacing: 8) {
-                TrustLabel(trust: person.trust)
-                if let note = person.verifiedNote {
-                    Text(note)
+                TrustLabel(trust: person.trust, onThisDevice: true)
+                if let verifiedAs = person.verifiedAs {
+                    Text("Verified as \(verifiedAs)")
                         .lineLimit(1)
                         .font(.caption)
                         .foregroundStyle(.muted)

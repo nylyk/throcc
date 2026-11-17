@@ -318,15 +318,6 @@ impl Person {
         let name = self.verified_name.as_deref().filter(|_| self.verified)?;
         (!self.blocked && name != self.name).then_some(name)
     }
-
-    /// What follows the Verified label on their profile: the name they were verified under
-    /// where it differs, and that verification holds on this device only.
-    pub fn verified_note(&self) -> Option<String> {
-        self.verified.then(|| match self.verified_as() {
-            Some(name) => format!("as {name} on this device"),
-            None => "on this device".to_owned(),
-        })
-    }
 }
 
 /// The name a blocked person is shown under.
@@ -663,20 +654,6 @@ mod tests {
             role: Role::User,
             blocked: false,
         }
-    }
-
-    #[test]
-    fn the_verified_note_says_the_verification_is_this_devices() {
-        let mut kiwi = named("Kiwi");
-        assert_eq!(kiwi.verified_note(), None);
-        kiwi.verified = true;
-        kiwi.verified_name = Some("Kiwi".into());
-        assert_eq!(kiwi.verified_note().as_deref(), Some("on this device"));
-        kiwi.verified_name = Some("Kiwi2".into());
-        assert_eq!(
-            kiwi.verified_note().as_deref(),
-            Some("as Kiwi2 on this device")
-        );
     }
 
     #[test]

@@ -342,11 +342,12 @@ fun MutedIcon(person: Person) {
 }
 
 @Composable
-fun TrustLabel(trust: KeyTrust) {
+fun TrustLabel(trust: KeyTrust, onThisDevice: Boolean = false) {
     val scheme = MaterialTheme.colorScheme
+    val verified = if (onThisDevice) "Verified on this device" else "Verified"
     val (icon, text, color) = when (trust) {
         KeyTrust.KEY_CHANGED -> Triple(Icons.Default.Warning, "Key changed", scheme.error)
-        KeyTrust.VERIFIED -> Triple(Icons.Default.VerifiedUser, "Verified", scheme.primary)
+        KeyTrust.VERIFIED -> Triple(Icons.Default.VerifiedUser, verified, scheme.primary)
         KeyTrust.UNVERIFIED -> Triple(Icons.Outlined.GppMaybe, "Not verified", scheme.onSurfaceVariant)
     }
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {

@@ -88,10 +88,10 @@ fun PersonSheet(model: AppModel, state: CoreState, person: Person) {
                             }
                             if (!person.blocked && person.user != state.me) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    TrustLabel(person.trust)
-                                    person.verifiedNote?.let {
+                                    TrustLabel(person.trust, onThisDevice = true)
+                                    person.verifiedAs?.let {
                                         OneLineText(
-                                            it,
+                                            "Verified as $it",
                                             Modifier.padding(start = 8.dp),
                                             MaterialTheme.colorScheme.onSurfaceVariant,
                                             style = MaterialTheme.typography.labelLarge,
