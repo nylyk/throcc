@@ -636,9 +636,7 @@ impl Core {
     }
 
     pub fn command(&self, command: Command) {
-        if let Some(command) = command.into_core() {
-            self.tell_client(command);
-        }
+        self.tell_client(command.into_core());
     }
 
     /// Watches `user`'s share in place of any other: a phone shows one share at a time.

@@ -102,9 +102,8 @@ pub enum PictureChange {
 }
 
 impl Command {
-    /// The core's command, or `None` where a key isn't 32 bytes.
-    pub(crate) fn into_core(self) -> Option<UiCommand> {
-        Some(match self {
+    pub(crate) fn into_core(self) -> UiCommand {
+        match self {
             Self::Join { room } => UiCommand::Join(room.map(RoomId)),
             Self::JoinWithPassword { room, password } => {
                 UiCommand::JoinWithPassword(RoomId(room), password)
@@ -147,7 +146,7 @@ impl Command {
             Self::Unblock { user } => UiCommand::Unblock(UserId(user)),
             Self::LeaveServer => UiCommand::LeaveServer,
             Self::Reconnect => UiCommand::Reconnect,
-        })
+        }
     }
 }
 
