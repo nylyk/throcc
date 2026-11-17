@@ -50,6 +50,7 @@ dependencies {
     implementation(libs.navigation3.runtime)
     implementation(libs.navigation3.ui)
     implementation(libs.activity.compose)
+    implementation(libs.zxing.android.embedded)
     implementation(libs.jna) {
         artifact { type = "aar" }
     }

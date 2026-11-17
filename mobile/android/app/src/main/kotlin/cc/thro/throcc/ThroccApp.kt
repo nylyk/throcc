@@ -34,7 +34,7 @@ class ThroccApp : Application() {
         }
         val mock = debuggable && launch.getBooleanExtra("mock", false)
         val sample = launch.getStringExtra("screen").takeIf { mock }
-        val opened = AppModel(if (mock) Core.mock(onboarded = sample != "onboarding") else Core(), mock, sample)
+        val opened = AppModel(if (mock) Core.mock(onboarded = sample !in ONBOARDING_SAMPLES) else Core(), mock, sample)
         model = opened
         MainScope().launch {
             opened.state.map { it.liveRoom != null }.distinctUntilChanged().collect { startVoice() }

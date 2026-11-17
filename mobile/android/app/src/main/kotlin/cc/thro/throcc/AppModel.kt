@@ -16,6 +16,7 @@ import cc.thro.throcc.core.Core
 import cc.thro.throcc.core.CoreException
 import cc.thro.throcc.core.CoreState
 import cc.thro.throcc.core.Event
+import cc.thro.throcc.core.IdentityExport
 import cc.thro.throcc.core.KnownServer
 import cc.thro.throcc.core.Listener
 import cc.thro.throcc.core.Palette
@@ -26,6 +27,7 @@ import cc.thro.throcc.core.VerifiedPerson
 import cc.thro.throcc.core.Voice
 import cc.thro.throcc.core.connectionNotice
 import cc.thro.throcc.core.customThemeName
+import cc.thro.throcc.core.isIdentityExport
 import cc.thro.throcc.core.permissionsOf
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
@@ -38,6 +40,7 @@ import kotlinx.coroutines.withContext
 
 enum class Screen {
     Servers, AddServer, Rooms, Settings, Profile, Voice, Appearance, Verified, Blocked, About, Server, Members, Invites, Keys,
+    ExportQr, ExportCode,
 
     /** Our room, which a narrow window shows in front of the pages. It is never on the model's stack. */
     Room,
@@ -71,6 +74,16 @@ sealed interface StartingOver {
     data class Done(val started: StartedOver) : StartingOver
     data class Failed(val reason: String) : StartingOver
 }
+
+/** Where bringing in an identity from another device has got to, at onboarding. */
+sealed interface Importing {
+    data class Choosing(val problem: String? = null) : Importing
+    data object Scanning : Importing
+    data class EnteringCode(val file: ByteArray, val busy: Boolean = false, val failure: String? = null) : Importing
+}
+
+/** The samples that show onboarding, so the mock starts without a profile. */
+val ONBOARDING_SAMPLES = setOf("onboarding", "import", "importcode")
 
 /** The name of the theme made of the user's own colours. */
 val CUSTOM = customThemeName()
@@ -175,6 +188,13 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
     var addingAddress by mutableStateOf("")
         private set
 
+    /** The identity export the export pages show, while they are open. */
+    var export by mutableStateOf<IdentityExport?>(null)
+        private set
+
+    var importing by mutableStateOf<Importing?>(null)
+        private set
+
     /** Why what this install keeps couldn't be read, so the app started without it. */
     val storeProblems = core.storeProblems()
 
@@ -247,6 +267,75 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
 
     fun back() {
         if (stack.size > 1) stack.removeAt(stack.lastIndex)
+        if (Screen.ExportQr !in stack && Screen.ExportCode !in stack) export = null
+    }
+
+    /** Seals the identity under a new code for the export pages, and returns it, or null where that failed. */
+    suspend fun startExport(): IdentityExport? {
+        export = ask { core.exportIdentity() }
+        return export
+    }
+
+    /** Hides the QR codes of the export and shows its code. */
+    fun showExportCode() {
+        stack.remove(Screen.ExportQr)
+        open(Screen.ExportCode)
+    }
+
+    fun finishExport() {
+        stack.removeAll { it == Screen.ExportQr || it == Screen.ExportCode }
+        export = null
+    }
+
+    fun startImport() {
+        importing = Importing.Choosing()
+    }
+
+    fun scanImport() {
+        importing = Importing.Scanning
+    }
+
+    /** Goes one step back in bringing in an identity, or out of it from the first. */
+    fun importBack() {
+        importing = when (val step = importing) {
+            null, is Importing.Choosing -> null
+            Importing.Scanning -> Importing.Choosing()
+            is Importing.EnteringCode -> if (step.busy) step else Importing.Choosing()
+        }
+    }
+
+    /** Asks for the code of `file`, the export scanned or picked, or says why it can't be one; null for unreadable. */
+    fun openImport(file: ByteArray?) {
+        importing = when {
+            file == null -> Importing.Choosing("Couldn’t read that file.")
+            file.size > MAX_EXPORT_BYTES || !isIdentityExport(file) ->
+                Importing.Choosing("That isn’t an identity exported from throcc.")
+            else -> Importing.EnteringCode(file)
+        }
+    }
+
+    /** Opens the export being imported with `code` and makes its identity this install's, or says why not. */
+    fun importIdentity(code: String) {
+        val entering = importing as? Importing.EnteringCode ?: return
+        if (entering.busy) return
+        importing = entering.copy(busy = true, failure = null)
+        scope.launch {
+            val failure = withContext(Dispatchers.IO) {
+                try {
+                    core.importIdentity(entering.file, code)
+                    null
+                } catch (failure: CoreException) {
+                    failure.explained
+                }
+            }
+            if (failure != null) {
+                importing = entering.copy(failure = failure)
+                return@launch
+            }
+            importing = null
+            profile = ask { core.profile() }
+            loadServers()
+        }
     }
 
     /**
@@ -567,8 +656,15 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
             "pinmismatch" -> signInProblem =
                 SignInProblem.KeyChanged("owls.thro.cc", null, ByteArray(32) { 0x2c }, ByteArray(32) { 0xb8.toByte() })
             "identitymissing" -> signInProblem = SignInProblem.IdentityMissing("owls.thro.cc", null)
+            "import" -> startImport()
+            "importcode" -> scope.launch { ask { core.exportIdentity().file() }?.let(::openImport) }
+            "exportqr", "exportcode" -> scope.launch {
+                startExport()
+                val shown = if (name == "exportqr") Screen.ExportQr else Screen.ExportCode
+                stack += listOf(Screen.Settings, Screen.Profile, shown)
+            }
         }
-        if (name in listOf("onboarding", "servers", "addserver", "pinmismatch", "identitymissing")) return
+        if (name in ONBOARDING_SAMPLES + listOf("servers", "addserver", "pinmismatch", "identitymissing")) return
         scope.launch {
             signIn("owls.thro.cc", null)
             if (name in listOf("room", "blocked", "person", "personblocked", "share", "sharefull")) {

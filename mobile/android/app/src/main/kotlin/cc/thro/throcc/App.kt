@@ -123,5 +123,7 @@ private fun Shown(model: AppModel, screen: Screen) {
         Screen.Members -> Members(model, state)
         Screen.Invites -> Invites(model, state)
         Screen.Keys -> Keys(model, state)
+        Screen.ExportQr -> ExportQr(model)
+        Screen.ExportCode -> ExportCode(model)
     }
 }

@@ -116,6 +116,7 @@ fun Profile(model: AppModel) {
                 NameField(name) { name = it }
             }
             MainButton("Save", changed && validName(name) != null) { model.saveProfile(name, picture) }
+            ExportSection(model)
         }
     }
 }
