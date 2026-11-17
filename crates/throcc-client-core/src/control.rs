@@ -8,7 +8,7 @@ use throcc_crypto::identity::{self, IdentityKey, random};
 use throcc_crypto::pake::{ClientPake, PakeError, Transcript};
 use throcc_proto::Fingerprint;
 use throcc_proto::framing::{self, FrameError, LEN_BYTES};
-use throcc_proto::ids::RoomId;
+use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
     Account, AccountStep, AuthError, AuthResult, ClientHello, ClientMessage, Event, PROTOCOL,
@@ -78,8 +78,8 @@ pub async fn login(
     auth(connected, identity, profile, want_room, false).await
 }
 
-/// Logs in to a server we haven't pinned, which must first prove it holds our account by the
-/// profile we last signed for its key, then gives it `profile`.
+/// Logs in to a server we haven't pinned, which must first prove it holds our account by its
+/// address signed by `identity` for its key, then gives it `profile`.
 pub async fn login_proven(
     connected: Connected,
     identity: &IdentityKey,
@@ -222,13 +222,9 @@ async fn finish_login(
         return Err(LoginError::Unproven);
     }
     let me = account.user;
-    let signed_address = SignedAddress {
-        address: address.to_owned(),
-        sig: identity.sign(&identity::address_message(&server.0, me, address)),
-    };
     let step = ProfileStep {
         profile: profile.signed(identity, server, me),
-        address: signed_address,
+        address: signed_address(identity, server, me, address),
     };
     write(&mut send, &step).await?;
     let result: AuthResult = read(&mut recv).await?;
@@ -246,6 +242,19 @@ async fn finish_login(
         requester,
         events,
     })
+}
+
+/// `address`, signed by `identity` for `user` on the server `server`.
+pub fn signed_address(
+    identity: &IdentityKey,
+    server: &Fingerprint,
+    user: UserId,
+    address: &str,
+) -> SignedAddress {
+    SignedAddress {
+        address: address.to_owned(),
+        sig: identity.sign(&identity::address_message(&server.0, user, address)),
+    }
 }
 
 /// Whether `account` shows `address` signed by `identity` for the server `server` and its user.
@@ -468,14 +477,12 @@ fn spawn_link(
 
 #[cfg(test)]
 mod tests {
-    use throcc_proto::ids::UserId;
-
     use super::*;
 
-    fn proves(user: u64, signed: &[SignedAddress], identity: &IdentityKey, server: u8) -> bool {
+    fn proves(user: u64, signed: &[&SignedAddress], identity: &IdentityKey, server: u8) -> bool {
         let account = Account {
             user: UserId(user),
-            addresses: signed.to_vec(),
+            addresses: signed.iter().copied().cloned().collect(),
         };
         proves_account(&account, identity, &Fingerprint([server; 32]), "a.example")
     }
@@ -483,22 +490,19 @@ mod tests {
     #[test]
     fn only_the_address_typed_signed_for_this_server_and_user_proves_the_account() {
         let identity = IdentityKey::generate();
-        let signed = |address: &str| SignedAddress {
-            address: address.into(),
-            sig: identity.sign(&identity::address_message(&[1; 32], UserId(4), address)),
-        };
+        let signed = |address| signed_address(&identity, &Fingerprint([1; 32]), UserId(4), address);
         let (here, elsewhere) = (signed("a.example"), signed("b.example"));
         let forged = SignedAddress {
             address: "a.example".into(),
             ..elsewhere.clone()
         };
         let other = IdentityKey::generate();
-        assert!(proves(4, &[elsewhere.clone(), here.clone()], &identity, 1));
-        assert!(!proves(4, std::slice::from_ref(&elsewhere), &identity, 1));
-        assert!(!proves(4, &[forged], &identity, 1));
-        assert!(!proves(5, std::slice::from_ref(&here), &identity, 1));
-        assert!(!proves(4, std::slice::from_ref(&here), &identity, 2));
-        assert!(!proves(4, std::slice::from_ref(&here), &other, 1));
+        assert!(proves(4, &[&elsewhere, &here], &identity, 1));
+        assert!(!proves(4, &[&elsewhere], &identity, 1));
+        assert!(!proves(4, &[&forged], &identity, 1));
+        assert!(!proves(5, &[&here], &identity, 1));
+        assert!(!proves(4, &[&here], &identity, 2));
+        assert!(!proves(4, &[&here], &other, 1));
         assert!(!proves(4, &[], &identity, 1));
     }
 

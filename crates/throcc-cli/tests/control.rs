@@ -169,9 +169,8 @@ async fn a_sign_in_is_refused_unless_its_key_signed_its_valid_profile_for_it() {
     let me = alice.link.welcome.me;
     let stranger = IdentityKey::generate();
     let fingerprint = alice.link.connected.fingerprint;
-    let address = |signer: &IdentityKey, user: UserId, address: &str| SignedAddress {
-        address: address.into(),
-        sig: signer.sign(&identity::address_message(&fingerprint.0, user, address)),
+    let address = |signer: &IdentityKey, user: UserId, address: &str| {
+        control::signed_address(signer, &fingerprint, user, address)
     };
     let signed = |signer: &IdentityKey, user: UserId, name: &str, picture: Option<Vec<u8>>| {
         let avatar = picture.as_deref().map(Hash::of);

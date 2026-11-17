@@ -120,8 +120,7 @@ pub fn verify_profile(
 /// What an identity key signs to say it reaches the server with the SPKI hash `server`, as
 /// `user`, at `address`.
 pub fn address_message(server: &[u8; 32], user: UserId, address: &str) -> Vec<u8> {
-    // The address is the only part of varying length, so it stays last to keep the message
-    // unambiguous.
+    // The address is the only part of varying length and must stay last.
     [
         b"throcc/address/1".as_slice(),
         server,

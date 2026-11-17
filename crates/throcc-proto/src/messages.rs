@@ -135,10 +135,8 @@ pub type AccountStep = Result<Account, AuthError>;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Account {
     pub user: UserId,
-    /// The addresses this account's devices reached this server at, newest first, at most
-    /// [`MAX_SIGNED_ADDRESSES`](crate::limits::MAX_SIGNED_ADDRESSES). One for the address
-    /// typed proves to a device that hasn't pinned the server that the identity joined the
-    /// server at that address.
+    /// The addresses this account's devices signed for this server, newest first, at most
+    /// [`MAX_SIGNED_ADDRESSES`](crate::limits::MAX_SIGNED_ADDRESSES).
     pub addresses: Vec<SignedAddress>,
 }
 

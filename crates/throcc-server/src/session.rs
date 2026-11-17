@@ -25,7 +25,7 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 /// Longest a sign-in or enrollment may take after `ClientHello`, PAKE included.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(40);
 pub const HANDSHAKE_FRAME_BYTES: usize = 4096;
-/// A sign-in's profile: its picture, and as much again as any other handshake frame.
+/// A sign-in's profile and address: the picture, and as much again as any other handshake frame.
 const PROFILE_FRAME_BYTES: usize = MAX_AVATAR_BYTES + HANDSHAKE_FRAME_BYTES;
 const EVENT_QUEUE: usize = 1024;
 /// Picture bytes a connection may have waiting for its client to read.
@@ -57,7 +57,7 @@ pub async fn read_handshake<T: DeserializeOwned>(
     read_within(recv, HANDSHAKE_FRAME_BYTES).await
 }
 
-/// Reads a sign-in's profile, which is never larger than [`PROFILE_FRAME_BYTES`].
+/// Reads a sign-in's profile and address, which are never larger than [`PROFILE_FRAME_BYTES`].
 pub async fn read_profile(recv: &mut quinn::RecvStream) -> Result<ProfileStep, ReadError> {
     read_within(recv, PROFILE_FRAME_BYTES).await
 }

@@ -18,13 +18,13 @@ use throcc_client_core::blocked::BlockedStore;
 use throcc_client_core::call::{Call, CallEvent};
 use throcc_client_core::client::{Client, ClientApi, Entry};
 use throcc_client_core::connection::{self, Connected};
-use throcc_client_core::control::ControlLink;
+use throcc_client_core::control::{self, ControlLink};
 use throcc_client_core::keystore::Keystore;
 use throcc_client_core::media::engine::{Kind, Received};
 use throcc_client_core::profile::Profile;
 use throcc_client_core::state::State;
 use throcc_client_core::verified::VerifiedStore;
-use throcc_crypto::identity::{self, IdentityKey};
+use throcc_crypto::identity::IdentityKey;
 use throcc_crypto::pake::{ClientPake, Transcript};
 use throcc_proto::framing;
 use throcc_proto::ids::{MediaId, RoomId};
@@ -32,7 +32,7 @@ use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
     AccountStep, AuthResult, ClientHello, Codec, ErrorCode, Event, MediaState, PROTOCOL,
     PakeFinish, PakeReply, PakeStep, Placement, ProfileStep, Recovery, Request, Response,
-    ServerHello, ShareConfig, ShareTracks, SignIn, SignedAddress, Tracks, Welcome,
+    ServerHello, ShareConfig, ShareTracks, SignIn, Tracks, Welcome,
 };
 use throcc_server::database::Database;
 use throcc_server::identity::ServerIdentity;
@@ -754,12 +754,7 @@ impl PendingEnroll {
         let (server, address) = (&self.connected.fingerprint, &self.connected.address);
         let step = ProfileStep {
             profile: ilse().signed(&self.identity, server, me),
-            address: SignedAddress {
-                address: address.clone(),
-                sig: self
-                    .identity
-                    .sign(&identity::address_message(&server.0, me, address)),
-            },
+            address: control::signed_address(&self.identity, server, me, address),
         };
         self.send
             .write_all(&framing::encode(&step).unwrap())

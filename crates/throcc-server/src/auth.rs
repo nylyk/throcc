@@ -104,7 +104,7 @@ pub async fn authenticate(
 }
 
 /// Tells the client its user id and the addresses its identity signed here, then takes its
-/// profile and the address it signs now, keeping the address. Either wrong is refused.
+/// profile and the address it reached us at, and keeps that address. Either wrong is refused.
 async fn take_profile(
     shared: &ServerState,
     stream: &mut FrameStream,
