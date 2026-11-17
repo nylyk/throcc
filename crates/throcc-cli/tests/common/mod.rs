@@ -24,7 +24,7 @@ use throcc_client_core::media::engine::{Kind, Received};
 use throcc_client_core::profile::Profile;
 use throcc_client_core::state::State;
 use throcc_client_core::verified::VerifiedStore;
-use throcc_crypto::identity::{IdentityKey, profile_message};
+use throcc_crypto::identity::IdentityKey;
 use throcc_crypto::pake::{ClientPake, Transcript};
 use throcc_proto::framing;
 use throcc_proto::ids::{MediaId, RoomId};
@@ -32,7 +32,7 @@ use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
     AccountStep, AuthResult, ClientHello, Codec, ErrorCode, Event, MediaState, PROTOCOL,
     PakeFinish, PakeReply, PakeStep, Placement, Recovery, Request, Response, ServerHello,
-    ShareConfig, ShareTracks, SignIn, SignedProfile, Tracks, Welcome,
+    ShareConfig, ShareTracks, SignIn, Tracks, Welcome,
 };
 use throcc_server::database::Database;
 use throcc_server::identity::ServerIdentity;
@@ -739,12 +739,7 @@ impl PendingEnroll {
             .await
             .unwrap();
         let me = read_message::<AccountStep>(&mut self.recv).await.unwrap();
-        let message = profile_message(&self.connected.fingerprint.0, me, "Ilse", None);
-        let profile = SignedProfile {
-            name: "Ilse".into(),
-            picture: None,
-            sig: self.identity.sign(&message),
-        };
+        let profile = ilse().signed(&self.identity, &self.connected.fingerprint, me);
         self.send
             .write_all(&framing::encode(&profile).unwrap())
             .await
