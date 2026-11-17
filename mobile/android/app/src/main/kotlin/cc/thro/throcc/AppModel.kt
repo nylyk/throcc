@@ -28,6 +28,7 @@ import cc.thro.throcc.core.Voice
 import cc.thro.throcc.core.connectionNotice
 import cc.thro.throcc.core.customThemeName
 import cc.thro.throcc.core.isIdentityExport
+import cc.thro.throcc.core.maxExportBytes
 import cc.thro.throcc.core.permissionsOf
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
@@ -83,7 +84,7 @@ sealed interface Importing {
 }
 
 /** The samples that show onboarding, so the mock starts without a profile. */
-val ONBOARDING_SAMPLES = setOf("onboarding", "import", "importcode")
+val ONBOARDING_SAMPLES = setOf("onboarding", "import", "importscan", "importcode")
 
 /** The name of the theme made of the user's own colours. */
 val CUSTOM = customThemeName()
@@ -308,7 +309,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
     fun openImport(file: ByteArray?) {
         importing = when {
             file == null -> Importing.Choosing("Couldn’t read that file.")
-            file.size > MAX_EXPORT_BYTES || !isIdentityExport(file) ->
+            file.size.toULong() > maxExportBytes() || !isIdentityExport(file) ->
                 Importing.Choosing("That isn’t an identity exported from throcc.")
             else -> Importing.EnteringCode(file)
         }
@@ -592,6 +593,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
     private fun showPages(vararg pages: Screen) {
         stack.removeRange(1, stack.size)
         stack += pages
+        if (Screen.ExportQr !in stack && Screen.ExportCode !in stack) export = null
     }
 
     /** Signs in at `address`, and returns why that failed, if it did. */
@@ -657,6 +659,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
                 SignInProblem.KeyChanged("owls.thro.cc", null, ByteArray(32) { 0x2c }, ByteArray(32) { 0xb8.toByte() })
             "identitymissing" -> signInProblem = SignInProblem.IdentityMissing("owls.thro.cc", null)
             "import" -> startImport()
+            "importscan" -> scanImport()
             "importcode" -> scope.launch { ask { core.exportIdentity().file() }?.let(::openImport) }
             "exportqr", "exportcode" -> scope.launch {
                 startExport()

@@ -55,7 +55,7 @@ private struct OpenFileButton: View {
             }
         }
         let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-        guard size <= maxExportBytes else {
+        guard UInt64(size) <= maxExportBytes() else {
             return Data()
         }
         return try Data(contentsOf: url)
@@ -107,6 +107,8 @@ struct ScanPage: View {
         }
         .navigationTitle("Scan QR Code")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
+        .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
         .task { await scan() }
     }
 
@@ -267,6 +269,3 @@ struct EnterCodePage: View {
         }
     }
 }
-
-/// The largest file read as an export; anything bigger is none.
-private let maxExportBytes = 4 << 20

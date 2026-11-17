@@ -6,6 +6,7 @@ struct ExportIdentitySection: View {
     @State private var exporting = false
     @State private var sharedCode: String?
     @State private var problem: String?
+    @State private var sealing: Task<Void, Never>?
 
     var body: some View {
         Section {
@@ -40,14 +41,16 @@ struct ExportIdentitySection: View {
         } header: {
             Text("Use on Another Device").foregroundStyle(.muted)
         }
+        .onDisappear { sealing?.cancel() }
     }
 
     private func shareFile() {
-        Task {
+        sealing = Task {
             exporting = true
             defer { exporting = false }
             do {
                 let export = try await model.exportIdentity()
+                guard !Task.isCancelled else { return }
                 try export.file().write(to: exportFile, options: [.atomic, .completeFileProtection])
                 problem = nil
                 sharedCode = export.code()
@@ -128,7 +131,7 @@ private struct AnimatedQR: View {
     var body: some View {
         let interval = Double(qrFrameMillis()) / 1000
         TimelineView(.periodic(from: start, by: interval)) { timeline in
-            let seq = UInt32((timeline.date.timeIntervalSince(start) / interval).rounded())
+            let seq = UInt32(max(0, (timeline.date.timeIntervalSince(start) / interval).rounded()))
             QRCode(frame: export.frame(seq: seq))
         }
         .accessibilityElement()

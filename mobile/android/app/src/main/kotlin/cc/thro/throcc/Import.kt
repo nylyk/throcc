@@ -48,6 +48,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import cc.thro.throcc.core.IdentityScanner
 import cc.thro.throcc.core.ScanProgress
+import cc.thro.throcc.core.maxExportBytes
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.ResultPoint
 import com.journeyapps.barcodescanner.BarcodeCallback
@@ -59,9 +60,6 @@ import kotlin.math.ceil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-
-/** The most bytes an export file can hold, far more than any does. */
-const val MAX_EXPORT_BYTES = 4 shl 20
 
 @Composable
 fun ImportChoice(model: AppModel, problem: String?) {
@@ -89,6 +87,7 @@ fun ImportChoice(model: AppModel, problem: String?) {
 
 @Composable
 fun ImportScan(model: AppModel) {
+    KeepScreenOn()
     val context = LocalContext.current
     var allowed by remember { mutableStateOf(context.allows(Manifest.permission.CAMERA)) }
     var refused by rememberSaveable { mutableStateOf(false) }
@@ -224,11 +223,11 @@ private fun rememberExportPicker(model: AppModel): () -> Unit {
     return { picker.launch(arrayOf("*/*")) }
 }
 
-/** The file at `uri`, cut off past `MAX_EXPORT_BYTES`, or null where it can't be read. */
+/** The file at `uri`, cut off past `maxExportBytes`, or null where it can't be read. */
 private suspend fun readExport(context: Context, uri: Uri): ByteArray? = withContext(Dispatchers.IO) {
     try {
         context.contentResolver.openInputStream(uri)?.use { input ->
-            val bytes = ByteArray(MAX_EXPORT_BYTES + 1)
+            val bytes = ByteArray(maxExportBytes().toInt() + 1)
             var read = 0
             while (read < bytes.size) {
                 val count = input.read(bytes, read, bytes.size - read)
