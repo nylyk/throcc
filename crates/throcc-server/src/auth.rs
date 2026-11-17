@@ -103,9 +103,8 @@ pub async fn authenticate(
     })
 }
 
-/// Tells the client its user id, with the profile it last signed here, and takes the profile it
-/// signs for it now. A profile that fails to arrive, or whose name, picture or signature is
-/// wrong, is refused.
+/// Tells the client its user id and the profile it last signed here, then takes a fresh one. A
+/// profile that fails to arrive, or whose name, picture or signature is wrong, is refused.
 async fn take_profile(
     shared: &ServerState,
     stream: &mut FrameStream,

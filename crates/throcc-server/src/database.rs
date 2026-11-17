@@ -362,13 +362,7 @@ impl Database {
             .query_row(
                 "SELECT name, avatar_hash, profile_sig FROM users WHERE id = ?1",
                 [user.0 as i64],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, Option<Vec<u8>>>(1)?,
-                        r.get::<_, Option<Vec<u8>>>(2)?,
-                    ))
-                },
+                |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, Option<Vec<u8>>>(2)?)),
             )
             .optional()?;
         Ok(row.and_then(|(name, avatar, sig)| {

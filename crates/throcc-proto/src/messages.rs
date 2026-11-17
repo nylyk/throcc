@@ -127,8 +127,7 @@ pub type AccountStep = Result<Account, AuthError>;
 pub struct Account {
     pub user: UserId,
     /// The profile this account last signed for this server, none for an account just made.
-    /// A device that hasn't pinned the server takes it as proof that the server is one the
-    /// identity joined, since only that server's key can show a signature bound to it.
+    /// It proves to a device that hasn't pinned the server that the identity joined it.
     pub last_profile: Option<LastProfile>,
 }
 

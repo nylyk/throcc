@@ -461,11 +461,17 @@ mod tests {
 
     use super::*;
 
-    fn account(user: u64, profile: Option<LastProfile>) -> Account {
-        Account {
+    fn proves(
+        user: u64,
+        last: Option<&LastProfile>,
+        identity: &IdentityKey,
+        server: &Fingerprint,
+    ) -> bool {
+        let account = Account {
             user: UserId(user),
-            last_profile: profile,
-        }
+            last_profile: last.cloned(),
+        };
+        proves_account(&account, identity, server)
     }
 
     #[test]
@@ -482,37 +488,17 @@ mod tests {
             avatar: None,
             sig: signed.sig,
         };
-        assert!(proves_account(
-            &account(4, Some(last.clone())),
-            &identity,
-            &server
-        ));
-        assert!(!proves_account(
-            &account(5, Some(last.clone())),
-            &identity,
-            &server
-        ));
-        assert!(!proves_account(
-            &account(4, Some(last.clone())),
-            &identity,
-            &Fingerprint([2; 32])
-        ));
-        let other = IdentityKey::generate();
-        assert!(!proves_account(
-            &account(4, Some(last.clone())),
-            &other,
-            &server
-        ));
         let renamed = LastProfile {
             name: "Mallory".into(),
-            ..last
+            ..last.clone()
         };
-        assert!(!proves_account(
-            &account(4, Some(renamed)),
-            &identity,
-            &server
-        ));
-        assert!(!proves_account(&account(4, None), &identity, &server));
+        let other = IdentityKey::generate();
+        assert!(proves(4, Some(&last), &identity, &server));
+        assert!(!proves(5, Some(&last), &identity, &server));
+        assert!(!proves(4, Some(&last), &identity, &Fingerprint([2; 32])));
+        assert!(!proves(4, Some(&last), &other, &server));
+        assert!(!proves(4, Some(&renamed), &identity, &server));
+        assert!(!proves(4, None, &identity, &server));
     }
 
     #[test]

@@ -125,7 +125,7 @@ pub struct Person {
     pub voice: SoundLevel,
     pub share_audio: SoundLevel,
     pub verified: bool,
-    /// The name they were verified under, where the server now shows another.
+    /// The name they were verified under, where the server shows another.
     pub verified_as: Option<String>,
     pub trust: KeyTrust,
     /// The letter their picture stands in with.

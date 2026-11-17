@@ -128,9 +128,8 @@ pub async fn sign_in_over(
     Ok(link)
 }
 
-/// Signs in to a server the identity joined that this install hasn't pinned, as one joined on
-/// another device. The server proves it holds our account before our profile is signed for
-/// it, and is pinned once it has. One that doesn't know us needs an invite.
+/// Signs in to a server the identity joined on another device, which this install hasn't
+/// pinned. The server is pinned once it proves it holds our account.
 pub async fn sign_in_unpinned(
     keystore: &mut Keystore,
     address: &str,

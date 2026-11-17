@@ -33,8 +33,8 @@ impl KnownServers {
         self.pins.iter().map(|(a, f)| (a.as_str(), *f))
     }
 
-    /// Pins `fingerprint` for `address`, after enrolling there or when the user trusts the
-    /// new key it presents.
+    /// Pins `fingerprint` for `address`, after enrolling there, after the server proved it holds
+    /// our account, or when the user trusts the new key it presents.
     pub fn trust(&mut self, address: &str, fingerprint: Fingerprint) -> Result<()> {
         self.pins.insert(address.to_owned(), fingerprint);
         Servers::update(&self.dir, |s| {
