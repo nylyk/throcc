@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{AuthError, Request};
+use throcc_proto::transport::close;
 use throcc_proto::{DEFAULT_PORT, Fingerprint};
 use tracing::warn;
 
@@ -16,6 +17,9 @@ use crate::profile::Profile;
 pub enum SignInError {
     #[error("you haven't joined {0} yet; you need an invite code")]
     NotEnrolled(String),
+    /// The address answered with the key of a server pinned under another address.
+    #[error("this address answered as {0}, which you already have")]
+    KnownAs(String),
     #[error(transparent)]
     Connect(#[from] ConnectError),
     #[error(transparent)]
@@ -69,6 +73,9 @@ impl SignInError {
             }
             Self::Login(LoginError::Refused(AuthError::ServerFull)) => {
                 "The server is full right now. Try again in a while.".into()
+            }
+            Self::KnownAs(known) => {
+                format!("{address} answered as {known}, which you already have. If they aren’t the same server, something between you and {address} is pretending to be it.")
             }
             Self::Login(LoginError::Unproven) => {
                 "Couldn’t confirm this is a server you joined, so it may not be the real one. Join with an invite code instead.".into()
@@ -145,6 +152,15 @@ pub async fn sign_in_unpinned(
     profile: &Profile,
 ) -> Result<ControlLink, SignInError> {
     let connected = connection::connect(address, None).await?;
+    let known_as = keystore
+        .known_servers
+        .iter()
+        .find(|(_, pinned)| *pinned == connected.fingerprint)
+        .map(|(known, _)| known.to_owned());
+    if let Some(known) = known_as {
+        connected.connection.close(close::NORMAL.into(), b"");
+        return Err(SignInError::KnownAs(known));
+    }
     let link = control::login_proven(connected, keystore.identity(), profile)
         .await
         .map_err(|e| match e {

@@ -39,6 +39,15 @@ async fn another_device_of_a_member_signs_in_without_an_invite_and_pins_the_serv
     assert_eq!(link.welcome.me, bob.link.welcome.me);
     assert_eq!(keystore.known_servers.get(&server.addr), Some(fingerprint));
 
+    keystore.known_servers.forget(&server.addr).unwrap();
+    keystore
+        .known_servers
+        .trust("old.example.net", fingerprint)
+        .unwrap();
+    let refused = account::sign_in_unpinned(&mut keystore, &server.addr, &ilse()).await;
+    assert!(matches!(refused, Err(SignInError::KnownAs(known)) if known == "old.example.net"));
+    assert_eq!(keystore.known_servers.get(&server.addr), None);
+
     let stranger = tempfile::tempdir().unwrap();
     let mut keystore = Keystore::open_in(stranger.path()).unwrap();
     let refused = account::sign_in_unpinned(&mut keystore, &server.addr, &ilse()).await;
