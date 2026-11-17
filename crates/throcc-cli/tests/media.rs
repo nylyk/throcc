@@ -320,8 +320,11 @@ async fn keyframes_arrive_whole_through_two_percent_loss() {
         bob.engine.arrived(video_id).lost,
     );
     assert!(dropped >= 30, "the relay dropped only {dropped} packets");
+    // Two copies lose a keyframe only where both copies of one of its ~60 packets drop, about
+    // 1.2 of 50 at 2 % loss; six or more lost happens about once in 800 runs, and one copy
+    // alone would leave about 15 whole.
     assert!(
-        whole >= KEYFRAMES * 8 / 10,
+        whole >= KEYFRAMES * 9 / 10,
         "only {whole} of {KEYFRAMES} keyframes whole"
     );
 }
