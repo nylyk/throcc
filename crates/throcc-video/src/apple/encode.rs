@@ -206,10 +206,10 @@ impl Encoder {
 }
 
 fn fitter(slot: &mut Option<Fitter>, size: (usize, usize)) -> Result<&mut Fitter, EncodeError> {
-    if slot.is_none() {
-        *slot = Some(Fitter::new(size).ok_or(EncodeError::Scaler)?);
+    match slot {
+        Some(fitter) => Ok(fitter),
+        slot => Ok(slot.insert(Fitter::new(size).ok_or(EncodeError::Scaler)?)),
     }
-    slot.as_mut().ok_or(EncodeError::Scaler)
 }
 
 /// What the output callback left: each encoded unit, or the status it failed with.
@@ -445,12 +445,14 @@ fn unit(sample: &CMSampleBuffer, timestamp: u32) -> Option<EncodedUnit> {
     };
     // SAFETY: as above.
     let format = unsafe { sample.format_description() }?;
-    let codec = match () {
-        // SAFETY: reading the description's type.
-        () if unsafe { format.media_sub_type() } == kCMVideoCodecType_H264 => Codec::H264,
-        () => Codec::Hevc,
+    // SAFETY: reading the description's type.
+    let codec = if unsafe { format.media_sub_type() } == kCMVideoCodecType_H264 {
+        Codec::H264
+    } else {
+        Codec::Hevc
     };
-    let keyframe = length_prefixed_keyframe(codec, &data);
+    let keyframe =
+        nal::length_prefixed_units(&data).any(|unit| nal::kind(codec, unit) == nal::Kind::Keyframe);
     let sets = if keyframe {
         parameter_sets(codec, &format)
     } else {
@@ -463,11 +465,6 @@ fn unit(sample: &CMSampleBuffer, timestamp: u32) -> Option<EncodedUnit> {
         keyframe,
         timestamp,
     })
-}
-
-/// Whether length-prefixed NAL units hold a keyframe slice.
-fn length_prefixed_keyframe(codec: Codec, data: &[u8]) -> bool {
-    nal::is_keyframe(codec, &nal::to_annex_b(&[], data))
 }
 
 /// The parameter sets of an H.264 or HEVC format description, in order.

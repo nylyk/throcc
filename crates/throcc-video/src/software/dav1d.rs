@@ -33,8 +33,7 @@ impl Decoder {
             dav1d::dav1d_default_settings(settings.as_mut_ptr());
             settings.assume_init()
         };
-        settings.n_threads =
-            std::thread::available_parallelism().map_or(1, |n| n.get().min(8)) as i32;
+        settings.n_threads = super::threads(8) as i32;
         settings.frame_size_limit = u32::try_from(max_size.pixels()).unwrap_or(u32::MAX);
         let mut ctx = std::ptr::null_mut();
         // SAFETY: both pointers are to live locals.

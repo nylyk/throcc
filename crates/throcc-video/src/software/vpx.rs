@@ -55,7 +55,6 @@ unsafe impl Send for Encoder {}
 
 impl Encoder {
     pub fn open(config: EncoderConfig) -> Result<Self, EncodeError> {
-        let failed = |e: String| EncodeError::Vpx(e);
         let (width, height) = (config.width, config.height);
         let fps = config.fps.max(1);
         let mut cfg = std::mem::MaybeUninit::<vpx::vpx_codec_enc_cfg_t>::uninit();
@@ -64,7 +63,7 @@ impl Encoder {
             let iface = vpx::vpx_codec_vp9_cx();
             let status = vpx::vpx_codec_enc_config_default(iface, cfg.as_mut_ptr(), 0);
             if status != vpx::vpx_codec_err_t::VPX_CODEC_OK {
-                return Err(failed(format!("no default config: {status:?}")));
+                return Err(EncodeError::Vpx(format!("no default config: {status:?}")));
             }
             cfg.assume_init()
         };
@@ -74,8 +73,7 @@ impl Encoder {
             num: 1,
             den: throcc_proto::frame::VIDEO_CLOCK_HZ as c_int,
         };
-        cfg.g_threads =
-            std::thread::available_parallelism().map_or(1, |n| n.get().min(8)) as c_uint;
+        cfg.g_threads = super::threads(8) as c_uint;
         cfg.g_lag_in_frames = 0;
         cfg.g_error_resilient = 1;
         cfg.rc_end_usage = vpx::vpx_rc_mode::VPX_CBR;
@@ -101,7 +99,7 @@ impl Encoder {
             )
         };
         if status != vpx::vpx_codec_err_t::VPX_CODEC_OK {
-            return Err(failed(format!("opening the encoder: {status:?}")));
+            return Err(EncodeError::Vpx(format!("opening the encoder: {status:?}")));
         }
         let mut encoder = Self {
             ctx,
@@ -127,7 +125,7 @@ impl Encoder {
             // SAFETY: each control takes one int.
             let status =
                 unsafe { vpx::vpx_codec_control_(&mut *encoder.ctx, control as c_int, value) };
-            check(&mut encoder.ctx, status).map_err(failed)?;
+            check(&mut encoder.ctx, status).map_err(EncodeError::Vpx)?;
         }
         Ok(encoder)
     }
@@ -227,7 +225,7 @@ impl Decoder {
     pub fn new(max_size: MaxSize) -> Result<Self, DecodeError> {
         let mut ctx: Box<vpx::vpx_codec_ctx_t> = Box::new(unsafe { std::mem::zeroed() });
         let cfg = vpx::vpx_codec_dec_cfg_t {
-            threads: std::thread::available_parallelism().map_or(1, |n| n.get().min(4)) as c_uint,
+            threads: super::threads(4) as c_uint,
             w: 0,
             h: 0,
         };
@@ -299,9 +297,7 @@ impl Decoder {
         };
         Ok(Some(frame))
     }
-}
 
-impl Decoder {
     /// Refuses a keyframe larger than allowed before libvpx allocates for it. libvpx is built
     /// to refuse anything past [`crate::MAX_SIDE`] itself, which covers the size changes
     /// predicted frames can make.

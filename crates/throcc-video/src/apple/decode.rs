@@ -22,7 +22,7 @@ use super::transfer::Pool;
 use super::{NO_ERR, PixelBuffer, TIMESCALE, attributes};
 use crate::frame::VideoFrame;
 use crate::nal::{self, LENGTH_SIZE};
-use crate::software::{dav1d, vpx};
+use crate::software;
 use crate::{DecodeError, Frame, MaxSize, Output, switches};
 
 /// VideoToolbox's `kVTInvalidSessionErr` and `kVTVideoDecoderMalfunctionErr`: the session
@@ -53,7 +53,7 @@ pub struct Decoder {
 enum Inner {
     VideoToolbox(VideoToolbox),
     Software {
-        decoder: Software,
+        decoder: software::Decoder,
         /// Buffers software pictures are uploaded into, of the size of the last one.
         pool: Option<Pool>,
         /// A spent picture in memory, whose planes the next one is written into.
@@ -61,27 +61,26 @@ enum Inner {
     },
 }
 
-enum Software {
-    Dav1d(dav1d::Decoder),
-    Vpx(vpx::Decoder),
+impl Inner {
+    fn software(decoder: software::Decoder) -> Self {
+        Inner::Software {
+            decoder,
+            pool: None,
+            spare: None,
+        }
+    }
 }
 
 impl Decoder {
     /// Opens a decoder that refuses pictures larger than `max_size`. On iOS it shows its
     /// pictures in the view `output` holds.
     pub fn new(codec: Codec, max_size: MaxSize, output: Output) -> Result<Self, DecodeError> {
-        let software = |decoder| Inner::Software {
-            decoder,
-            pool: None,
-            spare: None,
-        };
         let inner = match codec {
             Codec::H264 | Codec::Hevc => Inner::VideoToolbox(VideoToolbox::new(codec)),
             Codec::Av1 if !switches::software_decoding() && av1::decodes_in_hardware() => {
                 Inner::VideoToolbox(VideoToolbox::new(codec))
             }
-            Codec::Av1 => software(Software::Dav1d(dav1d::Decoder::new(max_size)?)),
-            Codec::Vp9 => software(Software::Vpx(vpx::Decoder::new(max_size)?)),
+            Codec::Av1 | Codec::Vp9 => Inner::software(software::Decoder::new(codec, max_size)?),
         };
         let decoder = Self {
             inner,
@@ -112,14 +111,7 @@ impl Decoder {
     pub fn engine(&self) -> &'static str {
         match &self.inner {
             Inner::VideoToolbox(_) => "VideoToolbox",
-            Inner::Software {
-                decoder: Software::Dav1d(_),
-                ..
-            } => "dav1d (software)",
-            Inner::Software {
-                decoder: Software::Vpx(_),
-                ..
-            } => "libvpx (software)",
+            Inner::Software { decoder, .. } => decoder.engine(),
         }
     }
 
@@ -154,11 +146,7 @@ impl Decoder {
                 pool,
                 spare,
             } => {
-                let decoded = match decoder {
-                    Software::Dav1d(d) => d.decode(unit, timestamp, spare.take())?,
-                    Software::Vpx(d) => d.decode(unit, timestamp, spare.take())?,
-                };
-                let Some(frame) = decoded else {
+                let Some(frame) = decoder.decode(unit, timestamp, spare.take())? else {
                     return Ok(None);
                 };
                 Ok(Some(upload(pool, frame, spare)))
@@ -174,11 +162,7 @@ impl Decoder {
         timestamp: u32,
     ) -> Result<Option<Frame>, DecodeError> {
         warn!("VideoToolbox can't decode this AV1 share; decoding it in dav1d");
-        self.inner = Inner::Software {
-            decoder: Software::Dav1d(dav1d::Decoder::new(self.max_size)?),
-            pool: None,
-            spare: None,
-        };
+        self.inner = Inner::software(software::Decoder::new(Codec::Av1, self.max_size)?);
         self.decode(unit, timestamp)
     }
 
@@ -186,14 +170,14 @@ impl Decoder {
     /// stopped coming.
     pub fn drain(&mut self) -> Result<Option<Frame>, DecodeError> {
         let Inner::Software {
-            decoder: Software::Dav1d(decoder),
+            decoder,
             pool,
             spare,
         } = &mut self.inner
         else {
             return Ok(None);
         };
-        let Some(frame) = decoder.drain(spare.take())? else {
+        let Some(frame) = decoder.drain(spare)? else {
             return Ok(None);
         };
         Ok(Some(upload(pool, frame, spare)))

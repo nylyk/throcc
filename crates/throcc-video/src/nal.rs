@@ -104,20 +104,28 @@ pub fn to_annex_b(parameter_sets: &[&[u8]], length_prefixed: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&START_CODE);
         out.extend_from_slice(set);
     }
-    let mut rest = length_prefixed;
-    while let Some((len, body)) = rest.split_first_chunk::<LENGTH_SIZE>() {
-        let len = u32::from_be_bytes(*len) as usize;
-        let Some(unit) = body.get(..len) else {
-            break;
-        };
+    for unit in length_prefixed_units(length_prefixed) {
         out.extend_from_slice(&START_CODE);
         out.extend_from_slice(unit);
-        rest = &body[len..];
     }
     out
 }
 
+/// The NAL units of an access unit of 4-byte length-prefixed NAL units. A length that runs
+/// past the end ends the unit there.
+pub fn length_prefixed_units(data: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let mut rest = data;
+    std::iter::from_fn(move || {
+        let (len, body) = rest.split_first_chunk::<LENGTH_SIZE>()?;
+        let len = u32::from_be_bytes(*len) as usize;
+        let unit = body.get(..len)?;
+        rest = &body[len..];
+        Some(unit)
+    })
+}
+
 /// Whether an Annex B access unit holds a keyframe.
+#[cfg(test)]
 pub fn is_keyframe(codec: Codec, annex_b: &[u8]) -> bool {
     units(annex_b).any(|unit| kind(codec, unit) == Kind::Keyframe)
 }

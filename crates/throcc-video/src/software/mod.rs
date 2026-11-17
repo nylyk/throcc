@@ -4,7 +4,67 @@
 pub mod dav1d;
 pub mod vpx;
 
+#[cfg(any(target_vendor = "apple", target_os = "android"))]
+use throcc_proto::messages::Codec;
+
 use crate::frame::VideoFrame;
+#[cfg(any(target_vendor = "apple", target_os = "android"))]
+use crate::{DecodeError, MaxSize};
+
+/// Threads for a software codec: one a core, at most `most`.
+fn threads(most: usize) -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get().min(most))
+}
+
+/// AV1 in dav1d or VP9 in libvpx, for a share the platform's own decoders can't take.
+#[cfg(any(target_vendor = "apple", target_os = "android"))]
+pub(crate) enum Decoder {
+    Dav1d(dav1d::Decoder),
+    Vpx(vpx::Decoder),
+}
+
+#[cfg(any(target_vendor = "apple", target_os = "android"))]
+impl Decoder {
+    pub fn new(codec: Codec, max_size: MaxSize) -> Result<Self, DecodeError> {
+        match codec {
+            Codec::Av1 => Ok(Self::Dav1d(dav1d::Decoder::new(max_size)?)),
+            Codec::Vp9 => Ok(Self::Vpx(vpx::Decoder::new(max_size)?)),
+            codec => Err(DecodeError::NoDecoder(codec)),
+        }
+    }
+
+    /// The software decoder doing the work, as people see it named.
+    pub fn engine(&self) -> &'static str {
+        match self {
+            Self::Dav1d(_) => "dav1d (software)",
+            Self::Vpx(_) => "libvpx (software)",
+        }
+    }
+
+    pub fn decode(
+        &mut self,
+        unit: &[u8],
+        timestamp: u32,
+        spare: Option<VideoFrame>,
+    ) -> Result<Option<VideoFrame>, DecodeError> {
+        match self {
+            Self::Dav1d(decoder) => decoder.decode(unit, timestamp, spare),
+            Self::Vpx(decoder) => decoder.decode(unit, timestamp, spare),
+        }
+    }
+
+    /// The next picture still in flight, for when units have stopped coming. Only dav1d
+    /// holds any back, and only it takes `spare`.
+    pub fn drain(
+        &mut self,
+        spare: &mut Option<VideoFrame>,
+    ) -> Result<Option<VideoFrame>, DecodeError> {
+        match self {
+            Self::Dav1d(decoder) => decoder.drain(spare.take()),
+            Self::Vpx(_) => Ok(None),
+        }
+    }
+}
 
 /// One plane of a 4:2:0 picture: where it starts and how far apart its rows are.
 #[derive(Clone, Copy)]

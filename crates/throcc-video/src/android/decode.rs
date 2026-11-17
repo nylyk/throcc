@@ -5,7 +5,7 @@ use tracing::{info, warn};
 
 use super::codec::{self, MediaCodec};
 use crate::frame::VideoFrame;
-use crate::software::{dav1d, vpx};
+use crate::software;
 use crate::{DecodeError, Frame, MaxSize, Output, switches};
 
 /// How long, in 90 kHz media time, MediaCodec may keep failing before it is given up: AV1
@@ -45,14 +45,9 @@ enum Engine {
     /// MediaCodec, while there is a view to render into.
     MediaCodec(Option<MediaCodec>),
     Software {
-        decoder: Software,
+        decoder: software::Decoder,
         spare: Option<VideoFrame>,
     },
-}
-
-enum Software {
-    Dav1d(dav1d::Decoder),
-    Vpx(vpx::Decoder),
 }
 
 impl Decoder {
@@ -89,14 +84,7 @@ impl Decoder {
     pub fn engine(&self) -> &'static str {
         match &self.engine {
             Engine::MediaCodec(_) => "MediaCodec",
-            Engine::Software {
-                decoder: Software::Dav1d(_),
-                ..
-            } => "dav1d (software)",
-            Engine::Software {
-                decoder: Software::Vpx(_),
-                ..
-            } => "libvpx (software)",
+            Engine::Software { decoder, .. } => decoder.engine(),
         }
     }
 
@@ -162,11 +150,7 @@ impl Decoder {
         match &mut self.engine {
             Engine::MediaCodec(_) => Ok(None),
             Engine::Software { decoder, spare } => {
-                let spare = spare.take();
-                let decoded = match decoder {
-                    Software::Dav1d(d) => d.decode(unit, timestamp, spare)?,
-                    Software::Vpx(d) => d.decode(unit, timestamp, spare)?,
-                };
+                let decoded = decoder.decode(unit, timestamp, spare.take())?;
                 Ok(decoded.map(Frame::Planes))
             }
         }
@@ -175,14 +159,10 @@ impl Decoder {
     /// Waits for pictures still being decoded and returns the newest, for when units have
     /// stopped coming.
     pub fn drain(&mut self) -> Result<Option<Frame>, DecodeError> {
-        let Engine::Software {
-            decoder: Software::Dav1d(decoder),
-            spare,
-        } = &mut self.engine
-        else {
+        let Engine::Software { decoder, spare } = &mut self.engine else {
             return Ok(None);
         };
-        Ok(decoder.drain(spare.take())?.map(Frame::Planes))
+        Ok(decoder.drain(spare)?.map(Frame::Planes))
     }
 
     /// Starts, moves or stops the codec when the app changed the view. True if it did, so
@@ -331,11 +311,7 @@ impl Decoder {
 
     /// Hands AV1 or VP9 to dav1d or libvpx for good.
     fn switch_to_software(&mut self) -> Result<(), DecodeError> {
-        let decoder = match self.codec {
-            Codec::Av1 => Software::Dav1d(dav1d::Decoder::new(self.max_size)?),
-            Codec::Vp9 => Software::Vpx(vpx::Decoder::new(self.max_size)?),
-            codec => return Err(DecodeError::NoDecoder(codec)),
-        };
+        let decoder = software::Decoder::new(self.codec, self.max_size)?;
         warn!("decoding {:?} in software", self.codec);
         self.engine = Engine::Software {
             decoder,
