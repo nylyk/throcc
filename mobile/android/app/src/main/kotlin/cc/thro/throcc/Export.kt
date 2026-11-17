@@ -2,6 +2,8 @@ package cc.thro.throcc
 
 import android.content.Context
 import android.content.Intent
+import android.view.WindowManager
+import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult
 import androidx.compose.foundation.Canvas
@@ -104,6 +106,7 @@ fun ExportSection(model: AppModel) {
 /** The export's QR codes, one after the other, until the user asks for its code. */
 @Composable
 fun ExportQr(model: AppModel) {
+    SecureScreen()
     val export = remember { model.export } ?: return
     var frame by remember { mutableStateOf<QrFrame?>(null) }
     LaunchedEffect(export) {
@@ -133,6 +136,7 @@ fun ExportQr(model: AppModel) {
 /** The code that opens the export, which the QR codes never show beside. */
 @Composable
 fun ExportCode(model: AppModel) {
+    SecureScreen()
     val export = remember { model.export } ?: return
     val code = remember(export) { export.code() }
     val context = LocalContext.current
@@ -179,7 +183,22 @@ private fun QrCode(frame: QrFrame, modifier: Modifier) {
 private fun exportFile(context: Context) =
     File(context.cacheDir, "export").apply { mkdirs() }.resolve("throcc-identity.throcc")
 
+/** Removes an export file a share left behind when the process last ended. */
+fun removeLeftoverExport(context: Context) {
+    exportFile(context).delete()
+}
+
 private fun sendIntent(context: Context, file: File) = Intent(Intent.ACTION_SEND)
     .setType("application/octet-stream")
     .putExtra(Intent.EXTRA_STREAM, FileProvider.getUriForFile(context, "${context.packageName}.files", file))
     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+
+/** Keeps the window out of screenshots, recordings, casts and the recents thumbnail while shown. */
+@Composable
+private fun SecureScreen() {
+    val window = LocalActivity.current?.window ?: return
+    DisposableEffect(window) {
+        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        onDispose { window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
+    }
+}

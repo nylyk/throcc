@@ -20,6 +20,7 @@ use zeroize::Zeroizing;
 
 use crate::files::{read_if_exists, replace_file};
 use crate::known_servers::KnownServers;
+use crate::servers::Servers;
 use crate::unix_now;
 
 const IDENTITY_FILE: &str = "identity_key";
@@ -199,7 +200,7 @@ fn import_into<E: SeedEntry>(
     dir: &Path,
     identity: &IdentityKey,
 ) -> Result<()> {
-    if knows_servers(dir)? {
+    if in_use(dir)? {
         return Err(IdentityInUse.into());
     }
     new_encryption_key(&dir.join(ENCRYPTION_KEY_FILE), unix_now()?)?;
@@ -212,6 +213,16 @@ fn import_into<E: SeedEntry>(
         }
     }
     replace_file(&file, seed.as_slice())
+}
+
+/// Whether a server may know this install's identity, so it must never be replaced: one is
+/// on the list, or was taken off it while we stay a member there.
+pub fn identity_in_use() -> Result<bool> {
+    in_use(&config_dir()?)
+}
+
+fn in_use(dir: &Path) -> Result<bool> {
+    Ok(knows_servers(dir)? || !Servers::load(dir)?.servers.is_empty())
 }
 
 /// Where throcc keeps its keys, pins and settings on this machine.
@@ -641,6 +652,23 @@ mod tests {
 
         import_into(None::<&FakeEntry>, dir.path(), &kept).unwrap();
         assert_eq!(file_identity(dir.path()).unwrap().public(), kept.public());
+    }
+
+    #[test]
+    fn an_identity_a_server_kept_after_it_left_the_list_is_never_replaced_by_an_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut known = knowing_a_server(dir.path());
+        crate::server_look::ServerLook::default()
+            .save(dir.path(), &Fingerprint([3; 32]))
+            .unwrap();
+        known.forget("voice.example.net:8476").unwrap();
+        let entry = FakeEntry::default();
+        let refused = import_into(Some(&entry), dir.path(), &IdentityKey::generate()).unwrap_err();
+        assert!(refused.downcast_ref::<IdentityInUse>().is_some());
+        assert_eq!(entry.writes.get(), 0);
+
+        known.forget_all().unwrap();
+        import_into(Some(&entry), dir.path(), &IdentityKey::generate()).unwrap();
     }
 
     #[test]

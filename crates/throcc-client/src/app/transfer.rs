@@ -66,19 +66,17 @@ impl ThroccApp {
         .detach();
     }
 
-    /// Refuses an export while our screen is shared, saying why.
-    fn refuse_export_while_sharing(&mut self, cx: &mut Context<Self>) -> bool {
-        let sharing = self
-            .state
-            .current
-            .as_ref()
-            .is_some_and(|c| c.sharing.is_some());
-        if sharing {
-            self.transfer_problem =
-                Some("Stop sharing your screen first, so nobody watching sees the export.".into());
-            cx.notify();
+    /// Refuses an export while our screen is shared, closing one on screen and saying why.
+    pub(super) fn refuse_export_while_sharing(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(refusal) = transfer::sharing_refusal(&self.state) else {
+            return false;
+        };
+        self.transfer_problem = Some(refusal.into());
+        if self.exporting.is_some() {
+            self.set_dialog(None, cx);
         }
-        sharing
+        cx.notify();
+        true
     }
 
     /// Opens the export dialog on `export`'s QR codes, cycling through them, or on its code.
@@ -118,8 +116,12 @@ impl ThroccApp {
         })
     }
 
-    /// Hides the QR codes for good and shows the code that opens them.
+    /// Hides the QR codes for good and shows the code that opens them, refused once our
+    /// screen is shared.
     pub fn show_export_code(&mut self, cx: &mut Context<Self>) {
+        if self.refuse_export_while_sharing(cx) {
+            return;
+        }
         if let Some(exporting) = &mut self.exporting {
             exporting.qr = None;
             exporting._frames = None;

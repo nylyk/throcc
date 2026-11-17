@@ -13,6 +13,8 @@ const SALT_BYTES: usize = 16;
 const NONCE_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
 const HEADER_BYTES: usize = MAGIC.len() + SALT_BYTES + NONCE_BYTES;
+/// How many bytes [`seal`] adds to its plaintext.
+pub const OVERHEAD_BYTES: usize = HEADER_BYTES + TAG_BYTES;
 const KDF_MEMORY_KIB: u32 = 128 * 1024;
 const KDF_PASSES: u32 = 3;
 const KDF_LANES: u32 = 1;

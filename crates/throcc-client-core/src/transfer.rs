@@ -7,17 +7,17 @@ use throcc_crypto::transfer::{self, TransferCode, TransferError};
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, UserId};
 use throcc_proto::messages::{MAX_AVATAR_BYTES, valid_name};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::avatars;
 use crate::blocked::{BlockedRecord, BlockedRecords, BlockedStore};
 use crate::fountain::{self, Fountain};
 use crate::keystore::{self, IdentityInUse, Keystore};
-use crate::known_servers::KnownServers;
 use crate::picture;
 use crate::profile::Profile;
 use crate::server_look::ServerLook;
-use crate::servers::Hex;
+use crate::servers::{Hex, Servers};
+use crate::state::State;
 use crate::unix_now;
 use crate::verified::{KeyChange, SeenAs, VerifiedEntry, VerifiedRecords, VerifiedStore};
 
@@ -105,6 +105,8 @@ pub struct QrCode {
 pub struct Export {
     code: TransferCode,
     fountain: Fountain,
+    /// The one QR version every frame is drawn at, so the code never changes size.
+    version: qrcode::Version,
 }
 
 impl Export {
@@ -121,8 +123,8 @@ impl Export {
     /// QR code `seq` of the endless run that carries [`Self::sealed`].
     pub fn frame(&self, seq: u32) -> QrCode {
         let text = self.fountain.frame(seq);
-        let code = qrcode::QrCode::with_error_correction_level(text, qrcode::EcLevel::L)
-            .expect("a frame fits a QR code");
+        let code = qrcode::QrCode::with_version(text, self.version, qrcode::EcLevel::L)
+            .expect("a frame fits the version its length needs");
         let width = code.width() + 2 * QUIET_ZONE;
         let mut dark = vec![false; width * width];
         for (row, colors) in code.to_colors().chunks(code.width()).enumerate() {
@@ -159,7 +161,7 @@ pub fn export(
             picture: picture.map(|bytes| bytes.to_vec()),
         }
     });
-    let payload = Payload {
+    let mut payload = Payload {
         created: unix_now()?,
         identity: Seed(*keystore.identity().seed()),
         profile: profile.map(|profile| SentProfile {
@@ -169,21 +171,40 @@ pub fn export(
         servers: servers.collect(),
         ..people_payload(verified.records(), blocked.records())
     };
-    let export = seal(&payload);
-    let size = export.sealed().len();
-    if size > MAX_EXPORT_BYTES {
-        bail!(
-            "it would take {} KiB, more than the {} KiB another device takes",
-            size / 1024,
-            MAX_EXPORT_BYTES / 1024
-        );
+    seal_dropping_server_pictures(&mut payload)
+}
+
+/// `payload` sealed, after dropping server pictures, the largest first, until the export
+/// fits in [`MAX_EXPORT_BYTES`].
+fn seal_dropping_server_pictures(payload: &mut Payload) -> Result<Export> {
+    loop {
+        if let Some(export) = seal(payload) {
+            return Ok(export);
+        }
+        let largest = payload
+            .servers
+            .iter_mut()
+            .filter(|server| server.picture.is_some())
+            .max_by_key(|server| server.picture.as_ref().map_or(0, Vec::len));
+        match largest {
+            Some(server) => server.picture = None,
+            None => bail!(
+                "it would take more than the {} KiB another device takes",
+                MAX_EXPORT_BYTES / 1024
+            ),
+        }
     }
-    Ok(export)
+}
+
+/// Why an export is refused while `state` shows our screen shared, if it is.
+pub fn sharing_refusal(state: &State) -> Option<&'static str> {
+    let sharing = state.current.as_ref()?.sharing.is_some();
+    sharing.then_some("Stop sharing your screen first, so nobody watching sees the export.")
 }
 
 /// An export of a made-up identity, for the sample screens.
 pub fn sample_export() -> Export {
-    seal(&Payload {
+    let payload = Payload {
         created: unix_now().unwrap_or_default(),
         identity: Seed(*IdentityKey::generate().seed()),
         profile: Some(SentProfile {
@@ -191,17 +212,30 @@ pub fn sample_export() -> Export {
             picture: Some(include_bytes!("../assets/mock/sleepyfox.jpg").to_vec()),
         }),
         ..Payload::default()
+    };
+    seal(&payload).expect("the sample fits an export")
+}
+
+/// `payload` sealed under a new code, or `None` when the export would be larger than
+/// [`MAX_EXPORT_BYTES`]. The plaintext is written once into a buffer wiped afterwards.
+fn seal(payload: &Payload) -> Option<Export> {
+    let mut buffer = Zeroizing::new(vec![0; MAX_EXPORT_BYTES - transfer::OVERHEAD_BYTES]);
+    let plaintext = postcard::to_slice(payload, &mut buffer).ok()?;
+    let code = TransferCode::generate();
+    let fountain = Fountain::new(transfer::seal(&code, plaintext));
+    Some(Export {
+        version: frame_version(fountain.frame(0).len()),
+        fountain,
+        code,
     })
 }
 
-fn seal(payload: &Payload) -> Export {
-    let code = TransferCode::generate();
-    let plaintext =
-        zeroize::Zeroizing::new(postcard::to_stdvec(payload).expect("the payload serializes"));
-    Export {
-        fountain: Fountain::new(transfer::seal(&code, &plaintext)),
-        code,
-    }
+/// The smallest QR version that holds any frame of `chars` base 45 characters. Frames with
+/// long runs of digits would fit a smaller one.
+fn frame_version(chars: usize) -> qrcode::Version {
+    qrcode::QrCode::with_error_correction_level("A".repeat(chars), qrcode::EcLevel::L)
+        .expect("a frame fits a QR code")
+        .version()
 }
 
 fn people_payload(verified: VerifiedRecords, blocked: BlockedRecords) -> Payload {
@@ -300,53 +334,52 @@ impl Opened {
     }
 
     /// Makes the identity this install's, with the servers it joined and the people it
-    /// verified and blocked, and returns the profile to keep. Refused once this install's
-    /// own identity is known to a server. The servers are pinned last, so an import cut
-    /// short can be tried again.
+    /// verified and blocked, and returns the profile to keep. Refused, before anything is
+    /// written, while a server may know this install's own identity. The servers and their
+    /// looks are kept last, in one write, so an import cut short can be tried again.
     pub fn apply(
         self,
         verified: &VerifiedStore,
         blocked: &BlockedStore,
     ) -> Result<Option<Profile>, ImportError> {
+        let failed = ImportError::Failed;
+        if keystore::identity_in_use().map_err(failed)? {
+            return Err(ImportError::InUse);
+        }
         let profile = self.profile();
         let payload = self.0;
+        let dir = keystore::config_dir().map_err(failed)?;
+        let cache = keystore::cache_dir().map_err(failed)?;
+        let servers: Vec<(&SentServer, Option<&[u8]>)> = payload
+            .servers
+            .iter()
+            .filter(|server| valid_address(&server.address))
+            .map(|server| {
+                let picture = server.picture.as_deref().filter(|b| fits_and_shows(b));
+                (server, picture)
+            })
+            .collect();
+        for picture in servers.iter().filter_map(|(_, picture)| *picture) {
+            avatars::save(&cache, Hash::of(picture), picture).map_err(failed)?;
+        }
+        verified.merge(verified_records(&payload)).map_err(failed)?;
+        blocked.merge(blocked_records(&payload)).map_err(failed)?;
         keystore::import_identity(&IdentityKey::from_seed(&payload.identity.0)).map_err(
             |e| match e.downcast_ref::<IdentityInUse>() {
                 Some(_) => ImportError::InUse,
                 None => ImportError::Failed(e),
             },
         )?;
-        let failed = ImportError::Failed;
-        let dir = keystore::config_dir().map_err(failed)?;
-        let cache = keystore::cache_dir().map_err(failed)?;
-        let servers: Vec<&SentServer> = payload
-            .servers
-            .iter()
-            .filter(|server| valid_address(&server.address))
-            .collect();
-        for server in &servers {
-            let picture = server
-                .picture
-                .as_deref()
-                .filter(|bytes| fits_and_shows(bytes));
-            if let Some(bytes) = picture {
-                avatars::save(&cache, Hash::of(bytes), bytes).map_err(failed)?;
+        Servers::update(&dir, |kept| {
+            for (server, picture) in &servers {
+                let look = kept.server_mut(&Fingerprint(server.fingerprint));
+                look.name = server.name.as_deref().and_then(valid_name).map(Into::into);
+                look.avatar = picture.map(|bytes| Hex(Hash::of(bytes).0));
+                kept.known
+                    .insert(server.address.clone(), Hex(server.fingerprint));
             }
-            let look = ServerLook {
-                name: server.name.as_deref().and_then(valid_name).map(Into::into),
-                avatar: picture.map(Hash::of),
-            };
-            look.save(&dir, &Fingerprint(server.fingerprint))
-                .map_err(failed)?;
-        }
-        verified.merge(verified_records(&payload)).map_err(failed)?;
-        blocked.merge(blocked_records(&payload)).map_err(failed)?;
-        let pins = servers
-            .iter()
-            .map(|server| (server.address.clone(), Fingerprint(server.fingerprint)));
-        KnownServers::load(&dir)
-            .and_then(|mut known| known.trust_all(pins))
-            .map_err(failed)?;
+        })
+        .map_err(failed)?;
         Ok(profile)
     }
 }
@@ -428,7 +461,7 @@ mod tests {
     }
 
     fn sealed_with_code(payload: &Payload) -> (String, Vec<u8>) {
-        let export = seal(payload);
+        let export = seal(payload).unwrap();
         (export.code(), export.sealed().to_vec())
     }
 
@@ -545,12 +578,46 @@ mod tests {
     }
 
     #[test]
+    fn server_pictures_go_largest_first_until_the_export_fits() {
+        let server = |name: &str, picture: usize| SentServer {
+            address: format!("{name}.example.net"),
+            fingerprint: [1; 32],
+            name: None,
+            picture: Some(vec![7; picture]),
+        };
+        let mut payload = payload(unix_now().unwrap());
+        payload.servers = vec![
+            server("small", 1000),
+            server("huge", MAX_EXPORT_BYTES - 10_000),
+            server("big", 20_000),
+        ];
+        let export = seal_dropping_server_pictures(&mut payload).unwrap();
+        assert!(export.sealed().len() <= MAX_EXPORT_BYTES);
+        let kept: Vec<bool> = payload
+            .servers
+            .iter()
+            .map(|s| s.picture.is_some())
+            .collect();
+        assert_eq!(kept, [true, false, true]);
+
+        payload.verified = (0..30_000u32)
+            .map(|i| SentVerified {
+                key: [0; 32],
+                name: i.to_string(),
+                avatar: None,
+                seen: Vec::new(),
+            })
+            .collect();
+        assert!(seal_dropping_server_pictures(&mut payload).is_err());
+    }
+
+    #[test]
     fn every_qr_frame_has_the_same_size() {
         let export = sample_export();
         let first = export.frame(0);
         assert_eq!(first.dark.len(), (first.width * first.width) as usize);
-        for seq in [1, 50, 5000] {
-            assert_eq!(export.frame(seq).width, first.width);
+        for seq in 1..2000 {
+            assert_eq!(export.frame(seq).width, first.width, "frame {seq}");
         }
     }
 

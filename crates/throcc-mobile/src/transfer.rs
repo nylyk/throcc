@@ -83,8 +83,12 @@ impl IdentityScanner {
 #[uniffi::export]
 impl Core {
     /// Seals this install's identity, profile, servers, and verified and blocked people
-    /// under a new code. A made-up identity in the mock.
+    /// under a new code, refused while our screen is shared. A made-up identity in the mock.
     pub fn export_identity(&self) -> Result<Arc<IdentityExport>, CoreError> {
+        let state = self.client_state();
+        if let Some(refusal) = state.as_deref().and_then(transfer::sharing_refusal) {
+            return Err(anyhow::anyhow!(refusal).into());
+        }
         let export = if self.mock {
             transfer::sample_export()
         } else {

@@ -63,6 +63,32 @@ struct ExportIdentitySection: View {
 
 private let exportFile = FileManager.default.temporaryDirectory.appending(path: "throcc-identity.throcc")
 
+/// Removes an export file a share sheet left behind when the app last ended.
+func removeLeftoverExport() {
+    try? FileManager.default.removeItem(at: exportFile)
+}
+
+/// Hides the content while the screen is recorded or mirrored, or the app is out of focus,
+/// so no recording or app switcher snapshot holds the export.
+private struct HiddenWhileCaptured: ViewModifier {
+    @Environment(\.isSceneCaptured) private var captured
+    @Environment(\.scenePhase) private var phase
+
+    func body(content: Content) -> some View {
+        let hidden = captured || phase != .active
+        content
+            .opacity(hidden ? 0 : 1)
+            .overlay {
+                if hidden {
+                    Text("Hidden while the screen is recorded or shared.")
+                        .foregroundStyle(.muted)
+                        .multilineTextAlignment(.center)
+                        .padding(16)
+                }
+            }
+    }
+}
+
 /// Shows the system share sheet for the export file while `showing`, and tells `done`
 /// whether it was sent once it closes.
 private struct ShareSheet: UIViewControllerRepresentable {
@@ -108,6 +134,7 @@ struct ExportQRPage: View {
             .padding(16)
             .frame(maxWidth: .infinity)
         }
+        .modifier(HiddenWhileCaptured())
         .background(.bg)
         .navigationTitle("QR Code")
         .navigationBarTitleDisplayMode(.inline)
@@ -181,6 +208,7 @@ struct ExportCodePage: View {
             .padding(.top, 32)
             .frame(maxWidth: .infinity)
         }
+        .modifier(HiddenWhileCaptured())
         .background(.bg)
         .navigationTitle("Code")
         .navigationBarTitleDisplayMode(.inline)

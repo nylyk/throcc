@@ -7,6 +7,7 @@ struct ThroccApp: App {
     private let sample: Sample?
 
     init() {
+        removeLeftoverExport()
         let arguments = ProcessInfo.processInfo.arguments
         if arguments.contains("--software-decode") {
             setenv("THROCC_SOFTWARE_DECODE", "1", 1)

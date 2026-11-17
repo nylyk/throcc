@@ -832,6 +832,9 @@ impl ThroccApp {
         match event {
             UiEvent::State(state) => {
                 self.state = state;
+                if self.exporting.is_some() {
+                    self.refuse_export_while_sharing(cx);
+                }
                 if let Some(Dialog::RoomPassword { room, .. }) = self.dialog
                     && self.state.current.as_ref().is_some_and(|c| c.room == room)
                 {

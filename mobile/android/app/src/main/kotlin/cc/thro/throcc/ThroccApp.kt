@@ -21,6 +21,7 @@ class ThroccApp : Application() {
         super.onCreate()
         // A restored backup would roll the epoch floors back under the same identity key.
         setAppDirs(noBackupFilesDir.path, cacheDir.path)
+        removeLeftoverExport(this)
     }
 
     /** The model, which the first `launch` intent of the process opens over the core, or in a debuggable build
