@@ -359,16 +359,10 @@ final class AppModel {
         state = new
         // Fullscreen ends with the share or the watching, also when the room or the server
         // goes away.
-        if let user = fullscreenShare,
-            !(new.current?.watching.contains(user) ?? false)
-                || new.people.first(where: { $0.user == user })?.sharing == nil
-        {
+        if let user = fullscreenShare, !new.watchesShare(of: user) {
             fullscreenShare = nil
         }
-        if let user = pictureInPicture.showing?.user,
-            !(new.current?.watching.contains(user) ?? false)
-                || new.people.first(where: { $0.user == user })?.sharing == nil
-        {
+        if let user = pictureInPicture.showing?.user, !new.watchesShare(of: user) {
             pictureInPicture.stop()
         }
         callAudio?.follow(inRoom: new.liveRoom != nil)
@@ -440,6 +434,11 @@ extension AppModel: Listener {
 extension CoreState {
     func person(_ user: UInt64) -> Person? {
         people.first { $0.user == user }
+    }
+
+    /// Whether we watch `user`'s share, and they still share.
+    func watchesShare(of user: UInt64) -> Bool {
+        (current?.watching.contains(user) ?? false) && person(user)?.sharing != nil
     }
 
     var permissions: Permissions? {

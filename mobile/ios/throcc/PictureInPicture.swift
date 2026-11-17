@@ -33,9 +33,7 @@ final class SharePictureInPicture: NSObject, AVPictureInPictureControllerDelegat
         view.frame = content.view.bounds
         view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         content.view.addSubview(view)
-        // The core takes over a reference to the layer.
-        let layer = UInt64(UInt(bitPattern: Unmanaged.passRetained(view.displayLayer).toOpaque()))
-        showing = (user, core.showShare(user: user, view: layer))
+        showing = (user, view.showShare(of: user, from: core))
         let source = AVPictureInPictureController.ContentSource(
             activeVideoCallSourceView: source,
             contentViewController: content

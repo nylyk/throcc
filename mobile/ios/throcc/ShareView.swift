@@ -12,6 +12,13 @@ final class SampleBufferView: UIView {
         // The layer class above makes this one.
         layer as! AVSampleBufferDisplayLayer
     }
+
+    /// Has `core` show `user`'s share in this view, and returns the number it gave the view.
+    func showShare(of user: UInt64, from core: Core) -> UInt64 {
+        // The core takes over a reference to the layer.
+        let layer = UInt64(UInt(bitPattern: Unmanaged.passRetained(displayLayer).toOpaque()))
+        return core.showShare(user: user, view: layer)
+    }
 }
 
 /// Where a share surface's view is, once made.
@@ -46,9 +53,7 @@ struct ShareSurface: UIViewRepresentable {
         view.backgroundColor = .black
         view.isUserInteractionEnabled = false
         view.displayLayer.videoGravity = .resizeAspect
-        // The core takes over a reference to the layer.
-        let layer = UInt64(UInt(bitPattern: Unmanaged.passRetained(view.displayLayer).toOpaque()))
-        context.coordinator.shown = model.core.showShare(user: user, view: layer)
+        context.coordinator.shown = view.showShare(of: user, from: model.core)
         handle?.view = view
         return view
     }
@@ -96,7 +101,7 @@ struct ShareFullscreen: View {
 
     var body: some View {
         let state = model.state
-        let person = state.people.first { $0.user == user }
+        let person = state.person(user)
         ZStack {
             Color.black.ignoresSafeArea()
             if let person, let share = person.sharing {
@@ -158,8 +163,6 @@ private struct ShareOverlay: View {
                 VStack(spacing: 12) {
                     if fullscreen {
                         RoomStrip(people: state.people.filter { $0.room == state.current?.room })
-                    }
-                    if fullscreen {
                         HStack(spacing: 12) {
                             HStack(spacing: 0) {
                                 MicButton()
@@ -270,7 +273,6 @@ private struct Loading: View {
     }
 }
 
-/// Whose share this is, over the picture.
 /// How many people watch the share.
 private struct Audience: View {
     let count: UInt32
@@ -290,6 +292,7 @@ private struct Audience: View {
     }
 }
 
+/// Whose share this is, over the picture.
 private struct Sharer: View {
     let person: Person
     let details: String

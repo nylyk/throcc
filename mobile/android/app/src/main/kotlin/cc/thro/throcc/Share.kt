@@ -99,6 +99,10 @@ private enum class ShareWarning(val label: String, val hint: String) {
     ),
 }
 
+/** The panel colour, a little see-through, behind a label or pill over a share. */
+private val overlayColor: Color
+    @Composable get() = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.8f)
+
 /** The warning over `user`'s share, if any, the connection's first. */
 private fun shareWarning(state: CoreState, user: ULong) = when (user) {
     in state.health.slowShares -> ShareWarning.SlowConnection
@@ -148,7 +152,7 @@ private fun WarningPill(warning: ShareWarning) {
     ) {
         Row(
             Modifier
-                .background(MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.8f), CircleShape)
+                .background(overlayColor, CircleShape)
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             Arrangement.spacedBy(6.dp),
             Alignment.CenterVertically,
@@ -176,7 +180,7 @@ private fun Loading(state: CoreState, user: ULong) {
 private fun Sharer(model: AppModel, person: Person, details: String, modifier: Modifier = Modifier) {
     Row(
         modifier
-            .background(MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.8f), CircleShape)
+            .background(overlayColor, CircleShape)
             .padding(start = 4.dp, top = 4.dp, end = 12.dp, bottom = 4.dp),
         Arrangement.spacedBy(8.dp),
         Alignment.CenterVertically,
@@ -196,7 +200,7 @@ private fun Sharer(model: AppModel, person: Person, details: String, modifier: M
 private fun Audience(count: UInt) {
     Row(
         Modifier
-            .background(MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.8f), CircleShape)
+            .background(overlayColor, CircleShape)
             .padding(horizontal = 12.dp, vertical = 6.dp)
             .semantics(mergeDescendants = true) {},
         Arrangement.spacedBy(6.dp),
@@ -318,10 +322,10 @@ private fun ShareOverlay(model: AppModel, state: CoreState, person: Person, shar
                     RoomStrip(model, state.people.filter { it.room == state.current?.room })
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         CallButtons(model, state)
-                        ShareButtons(model, person, share, fullscreen = true, Modifier)
+                        ShareButtons(model, person, share, fullscreen = true)
                     }
                 } else {
-                    ShareButtons(model, person, share, fullscreen = false, Modifier)
+                    ShareButtons(model, person, share, fullscreen = false)
                 }
             }
         }
@@ -333,7 +337,7 @@ private fun ShareOverlay(model: AppModel, state: CoreState, person: Person, shar
 private fun CallButtons(model: AppModel, state: CoreState) {
     val scheme = MaterialTheme.colorScheme
     val mic = state.mic && !model.micDenied
-    Row(Modifier.background(scheme.surfaceContainer.copy(alpha = 0.8f), CircleShape)) {
+    Row(Modifier.background(overlayColor, CircleShape)) {
         IconButton({
             if (model.micDenied) {
                 model.notices.trySend("To talk, allow the microphone for throcc in the system settings.")
@@ -358,9 +362,9 @@ private fun CallButtons(model: AppModel, state: CoreState) {
 
 /** Stop watching, picture in picture, and fullscreen or back from it, in one pill. */
 @Composable
-private fun ShareButtons(model: AppModel, person: Person, share: Share, fullscreen: Boolean, modifier: Modifier) {
+private fun ShareButtons(model: AppModel, person: Person, share: Share, fullscreen: Boolean) {
     val activity = LocalView.current.context as? Activity
-    Row(modifier.background(MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.8f), CircleShape)) {
+    Row(Modifier.background(overlayColor, CircleShape)) {
         IconButton({ model.core.command(Command.Unwatch(person.user)) }) {
             Icon(Icons.Default.VisibilityOff, "Stop Watching")
         }
@@ -384,7 +388,7 @@ private fun RoomStrip(model: AppModel, people: List<Person>) {
     // Wraps, so a full room of 30 stays on screen.
     FlowRow(
         Modifier
-            .background(scheme.surfaceContainer.copy(alpha = 0.8f), MaterialTheme.shapes.extraLarge)
+            .background(overlayColor, MaterialTheme.shapes.extraLarge)
             .padding(horizontal = 8.dp, vertical = 4.dp),
         Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally),
         Arrangement.spacedBy(4.dp),
@@ -421,7 +425,7 @@ private fun KeepScreenOn() {
 private fun Immersive() {
     val view = LocalView.current
     DisposableEffect(view) {
-        val window = (view.context as? android.app.Activity)?.window ?: return@DisposableEffect onDispose {}
+        val window = (view.context as? Activity)?.window ?: return@DisposableEffect onDispose {}
         val controller = WindowCompat.getInsetsController(window, view)
         controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         controller.hide(WindowInsetsCompat.Type.systemBars())

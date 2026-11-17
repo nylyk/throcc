@@ -94,15 +94,20 @@ abstract class BuildCore @Inject constructor(private val exec: ExecOperations) :
     private fun codecs(): Map<String, String> {
         val root = repository.get().dir("deps/codecs").asFile
         // uniffi-bindgen builds the core for the host too, which links them on a Mac.
-        val printedHost = ByteArrayOutputStream()
-        run(emptyMap(), "rustc", "-vV", output = printedHost)
-        val host = printedHost.toString().lines().first { it.startsWith("host: ") }.removePrefix("host: ")
+        val host = printed("rustc", "-vV").first { it.startsWith("host: ") }.removePrefix("host: ")
         val targets = abis.get().map { rustTargets.getValue(it) } + listOf(host).filter { "apple" in it }
         val missing = targets.filter { !root.resolve("$it/lib/libvpx.a").exists() }
         if (missing.isNotEmpty()) run(emptyMap(), "packaging/codecs/build.sh", root.path, *missing.toTypedArray())
-        val printed = ByteArrayOutputStream()
-        run(emptyMap(), "packaging/codecs/env.sh", root.path, output = printed)
-        return printed.toString().lines().filter { "=" in it }.associate { it.substringBefore("=") to it.substringAfter("=") }
+        return printed("packaging/codecs/env.sh", root.path)
+            .filter { "=" in it }
+            .associate { it.substringBefore("=") to it.substringAfter("=") }
+    }
+
+    /** The lines `command` prints. */
+    private fun printed(vararg command: String): List<String> {
+        val output = ByteArrayOutputStream()
+        run(emptyMap(), *command, output = output)
+        return output.toString().lines()
     }
 
     private fun cargo(environment: Map<String, String>, vararg arguments: String) = run(environment, "cargo", *arguments)

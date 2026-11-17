@@ -94,12 +94,19 @@ struct PictureEditor: View {
 /// a side or can't be read.
 func shownPicture(in file: Data) -> UIImage? {
     guard let source = CGImageSourceCreateWithData(file as CFData, nil),
-          let claimed = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-          let width = claimed[kCGImagePropertyPixelWidth] as? Int,
-          let height = claimed[kCGImagePropertyPixelHeight] as? Int,
-          max(width, height) <= 512
+          let size = claimedSize(of: source),
+          max(size.width, size.height) <= 512
     else { return nil }
     return thumbnail(of: source, within: 256).map(UIImage.init(cgImage:))
+}
+
+/// The size in pixels the first picture in `source` claims, read without decoding it.
+private func claimedSize(of source: CGImageSource) -> (width: Int, height: Int)? {
+    guard let claimed = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+          let width = claimed[kCGImagePropertyPixelWidth] as? Int,
+          let height = claimed[kCGImagePropertyPixelHeight] as? Int
+    else { return nil }
+    return (width, height)
 }
 
 /// The first picture in `source`, upright and decoded at no more than `side` pixels a side.
@@ -118,12 +125,10 @@ private func thumbnail(of source: CGImageSource, within side: Int) -> CGImage? {
 func profilePicture(from file: Data?) throws -> Data {
     guard let file,
           let source = CGImageSourceCreateWithData(file as CFData, nil),
-          let claimed = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-          let width = claimed[kCGImagePropertyPixelWidth] as? Int,
-          let height = claimed[kCGImagePropertyPixelHeight] as? Int,
-          min(width, height) > 0
+          let size = claimedSize(of: source),
+          min(size.width, size.height) > 0
     else { throw UnreadablePicture() }
-    let (short, long) = (min(width, height), max(width, height))
+    let (short, long) = (min(size.width, size.height), max(size.width, size.height))
     let longSide = short <= maxChosenShortSide ? long : long * maxChosenShortSide / short
     guard let decoded = thumbnail(of: source, within: longSide),
           let png = standardPNG(of: decoded)
