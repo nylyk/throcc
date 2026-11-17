@@ -1,7 +1,7 @@
 //! Video encoders and decoders, and the NV12 pictures between them. One [`Encoder`] and one
-//! [`Decoder`] with a backend per platform: VideoToolbox on macOS and iOS, ffmpeg on Linux
-//! and Windows with the `ffmpeg` feature. A build without one has an encoder and a decoder
-//! that never open.
+//! [`Decoder`] with a backend per platform: VideoToolbox on macOS and iOS, MediaCodec for
+//! decoding on Android, ffmpeg on Linux and Windows with the `ffmpeg` feature. A build without
+//! one has an encoder and a decoder that never open.
 
 #[cfg(target_os = "linux")]
 mod dmabuf;

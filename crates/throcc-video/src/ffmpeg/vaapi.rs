@@ -283,8 +283,7 @@ pub struct Vpp {
 }
 
 // SAFETY: a VA display has no thread affinity. A Vpp is used only through the Encoder that
-// owns it, which lives on the share thread, and it is not Sync, so its display is never
-// used from two threads at once.
+// owns it, and it is not Sync, so its display is never used from two threads at once.
 unsafe impl Send for Vpp {}
 
 impl Vpp {

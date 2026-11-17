@@ -175,9 +175,9 @@ impl MediaCodec {
         true
     }
 
-    /// Queues one access unit, marked with `sequence` to find its timestamp again, and
-    /// returns the newest picture that came out. False in `queued` if no input buffer
-    /// was free.
+    /// Queues one access unit, marked with `sequence` to find its timestamp again. Returns
+    /// whether it was queued, false if no input buffer was free, and every picture that
+    /// came out with the sequence of its unit.
     pub fn decode(
         &mut self,
         unit: &[u8],

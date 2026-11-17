@@ -156,8 +156,8 @@ impl Decoder {
         }
     }
 
-    /// Waits for pictures still being decoded and returns the newest, for when units have
-    /// stopped coming.
+    /// The next picture still being decoded, waited for, for when units have stopped
+    /// coming. Only dav1d holds any back.
     pub fn drain(&mut self) -> Result<Option<Frame>, DecodeError> {
         let Engine::Software { decoder, spare } = &mut self.engine else {
             return Ok(None);

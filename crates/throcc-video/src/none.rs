@@ -1,4 +1,5 @@
-//! The backend of a build without one: an encoder and a decoder that never open.
+//! The backend of a build without one: an encoder and a decoder that never open. Android,
+//! which only decodes, takes its encoder.
 
 use std::convert::Infallible;
 

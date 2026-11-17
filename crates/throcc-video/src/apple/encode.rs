@@ -45,7 +45,7 @@ const GOP_SECONDS: u32 = 4;
 /// libvpx.
 const LADDER: &[Codec] = &[Codec::Hevc, Codec::H264, Codec::Vp9];
 
-/// A low-latency video encoder: no B-frames, no lookahead, constant bitrate, and an IDR on
+/// A low-latency video encoder: no B-frames, no lookahead, a capped bitrate, and an IDR on
 /// request. Takes captured pixel buffers uncopied, and fits pictures of another size into
 /// its own on the GPU, with black bars around them.
 pub struct Encoder {
@@ -351,8 +351,8 @@ impl VideoToolbox {
         for (key, value) in properties {
             // SAFETY: the session, key and value are live.
             let status = unsafe { VTSessionSetProperty(&self.session, key, Some(value)) };
-            // Data rate limits and some profiles are refused by some encoders; the rest
-            // must hold.
+            // Some encoders refuse data rate limits; every other property must hold.
+            // SAFETY: the key is an immutable static.
             if status != NO_ERR && key != unsafe { kVTCompressionPropertyKey_DataRateLimits } {
                 return Err(EncodeError::VideoToolbox(status));
             }

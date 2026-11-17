@@ -86,6 +86,8 @@ impl Encoder {
         cfg.rc_dropframe_thresh = 0;
         cfg.kf_mode = vpx::vpx_kf_mode::VPX_KF_AUTO;
         cfg.kf_max_dist = fps * GOP_SECONDS;
+        // SAFETY: a context holds only integers and nullable pointers, and an all-zero one
+        // is the uninitialised context that init expects.
         let mut ctx: Box<vpx::vpx_codec_ctx_t> = Box::new(unsafe { std::mem::zeroed() });
         // SAFETY: `ctx` and `cfg` are live and the ABI version is the one the bindings were
         // made for.
@@ -192,8 +194,9 @@ impl Encoder {
             if packet.kind != vpx::vpx_codec_cx_pkt_kind::VPX_CODEC_CX_FRAME_PKT {
                 continue;
             }
-            // SAFETY: a frame packet's union holds a frame, whose buffer has `sz` bytes.
+            // SAFETY: a frame packet's union holds a frame.
             let frame = unsafe { packet.data.frame };
+            // SAFETY: the frame's buffer holds `sz` bytes until the next encode.
             let data = unsafe { std::slice::from_raw_parts(frame.buf.cast::<u8>(), frame.sz) };
             units.push(EncodedUnit {
                 data: Bytes::copy_from_slice(data),
@@ -223,6 +226,7 @@ unsafe impl Send for Decoder {}
 
 impl Decoder {
     pub fn new(max_size: MaxSize) -> Result<Self, DecodeError> {
+        // SAFETY: as in `Encoder::open`.
         let mut ctx: Box<vpx::vpx_codec_ctx_t> = Box::new(unsafe { std::mem::zeroed() });
         let cfg = vpx::vpx_codec_dec_cfg_t {
             threads: super::threads(4) as c_uint,

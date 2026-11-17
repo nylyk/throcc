@@ -1,6 +1,6 @@
 //! Where a decoder shows its pictures itself, on the phones: the app hands over a view, an
 //! Android `Surface` or an iOS `AVSampleBufferDisplayLayer`, and the decoder presents each
-//! picture due into it. Elsewhere the renderer draws pictures from the share's `Picture`
+//! picture due into it. Elsewhere the renderer draws the pictures the decoder hands out,
 //! and an output stays empty.
 
 use std::sync::atomic::{AtomicU64, Ordering};

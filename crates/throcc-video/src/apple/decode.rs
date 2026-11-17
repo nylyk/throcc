@@ -166,8 +166,8 @@ impl Decoder {
         self.decode(unit, timestamp)
     }
 
-    /// Waits for pictures still being decoded and returns the newest, for when units have
-    /// stopped coming.
+    /// The next picture still being decoded, waited for, for when units have stopped
+    /// coming. Only dav1d holds any back.
     pub fn drain(&mut self) -> Result<Option<Frame>, DecodeError> {
         let Inner::Software {
             decoder,
