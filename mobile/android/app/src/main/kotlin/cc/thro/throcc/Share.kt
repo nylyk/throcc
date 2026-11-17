@@ -253,7 +253,13 @@ private const val MAX_TILE_HEIGHT = 0.6f
  */
 @Composable
 fun ShareFullscreen(model: AppModel, state: CoreState) {
-    val user = model.fullscreenShare ?: return
+    val user = model.fullscreenShare
+    // A share that ends in Picture in Picture leaves its small window black, not the app's pages
+    // shrunk into it.
+    if (user == null) {
+        if (model.pictureInPicture) Box(Modifier.fillMaxSize().background(Color.Black))
+        return
+    }
     val person = state.people.find { it.user == user }
     val share = person?.sharing
     val watching = state.current?.watching?.contains(user) == true
