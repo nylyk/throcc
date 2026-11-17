@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use throcc_proto::{DEFAULT_PORT, Fingerprint};
+use throcc_proto::Fingerprint;
 
 use crate::servers::{Hex, Servers};
 
@@ -25,17 +25,8 @@ impl KnownServers {
         })
     }
 
-    /// The pin for `address`, or for the same address spelled another way.
     pub fn get(&self, address: &str) -> Option<Fingerprint> {
-        if let Some(pin) = self.pins.get(address) {
-            return Some(*pin);
-        }
-        let wanted = canonical(address);
-        let alike = self
-            .pins
-            .iter()
-            .find(|(known, _)| canonical(known) == wanted);
-        alike.map(|(_, pin)| *pin)
+        self.pins.get(address).copied()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, Fingerprint)> {
@@ -82,18 +73,6 @@ impl KnownServers {
             }
         })
     }
-}
-
-/// `address` lower-cased, without a trailing dot on its host or the default port, so two
-/// spellings of one server compare equal.
-fn canonical(address: &str) -> String {
-    let address = address.trim().to_lowercase();
-    let default_port = format!(":{DEFAULT_PORT}");
-    let host = match address.strip_suffix(&default_port) {
-        Some(host) if !host.contains(':') || host.ends_with(']') => host,
-        _ => &address,
-    };
-    host.strip_suffix('.').unwrap_or(host).to_owned()
 }
 
 #[cfg(test)]
@@ -153,32 +132,6 @@ mod tests {
             None
         );
         assert!(kept(dir.path(), server));
-    }
-
-    #[test]
-    fn another_spelling_of_a_pinned_address_finds_its_pin() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut known = KnownServers::load(dir.path()).unwrap();
-        known
-            .trust("voice.example.net", Fingerprint([1; 32]))
-            .unwrap();
-        known.trust("[2001:db8::1]", Fingerprint([2; 32])).unwrap();
-        for spelling in [
-            "Voice.Example.NET",
-            "voice.example.net.",
-            &format!("voice.example.net:{DEFAULT_PORT}"),
-        ] {
-            assert_eq!(
-                known.get(spelling),
-                Some(Fingerprint([1; 32])),
-                "{spelling}"
-            );
-        }
-        assert_eq!(known.get("voice.example.net:9000"), None);
-        assert_eq!(known.get("other.example.net"), None);
-        let ipv6 = format!("[2001:db8::1]:{DEFAULT_PORT}");
-        assert_eq!(known.get(&ipv6), Some(Fingerprint([2; 32])));
-        assert_eq!(known.get("2001:db8::1:8476"), None);
     }
 
     #[test]

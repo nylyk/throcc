@@ -421,7 +421,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
                     is CoreException.NeedsInvite -> {
                         addingAddress = address
                         addingNeedsInvite = true
-                        if (Screen.AddServer !in stack) open(Screen.AddServer)
+                        showPages(Screen.AddServer)
                     }
                     is CoreException.Failed -> notices.trySend(failure.reason)
                     is CoreException.Cancelled -> {}

@@ -75,7 +75,7 @@ impl SignInError {
                 "The server is full right now. Try again in a while.".into()
             }
             Self::KnownAs(known) => {
-                format!("{address} answered as {known}, which you already have. If they aren’t the same server, something between you and {address} is pretending to be it.")
+                format!("{address} is the server you already have as {known}. Use that one, or remove it to add the server under this address. If they aren’t the same server, something between you and {address} is pretending to be it.")
             }
             Self::Login(LoginError::Unproven) => {
                 "Couldn’t confirm this is a server you joined, so it may not be the real one. Join with an invite code instead.".into()

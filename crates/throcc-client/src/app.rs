@@ -1890,7 +1890,8 @@ impl ThroccApp {
                                 None if e.needs_invite() => {
                                     app.needs_invite = true;
                                     app.join_error = None;
-                                    app.dialog = Some(Dialog::AddServer);
+                                    set_field(&app.address, address.clone(), false, window, cx);
+                                    app.set_dialog(Some(Dialog::AddServer), cx);
                                     app.code.update(cx, |s, cx| s.focus(window, cx));
                                 }
                                 None => app.join_error = Some(e.explain(&address)),
