@@ -2,7 +2,7 @@ use gpui::{Context, IntoElement, ParentElement, Styled, div, px};
 use gpui_component::Disableable;
 use gpui_component::input::Input;
 
-use super::common::{Typeset, card, description, field_error, primary};
+use super::common::{Typeset, card, description, error_box, field_error, primary, secondary};
 use super::join::frame;
 use super::mascot;
 use super::page::{field, picture_editor, save_line};
@@ -18,6 +18,8 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
         .disabled(!matches!(typed, Ok(Some(_))))
         .on_click(cx.listener(|app, _, window, cx| app.finish_onboarding(window, cx)));
     let finish = save_line(app.profile_form.status.as_ref(), finish);
+    let import = secondary("import-identity", "Import from Another Device…")
+        .on_click(cx.listener(|app, _, window, cx| app.choose_import_file(window, cx)));
     frame(app.mascot.pick(mascot::WELCOMERS))
         .child(div().typeset(theme::LARGE_TITLE).child("Welcome to throcc"))
         .child(description("Choose the name people see you as."))
@@ -30,5 +32,15 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
                 .child(picture)
                 .child(field("Name", Input::new(&app.name)).children(typed.err().map(field_error)))
                 .child(finish),
+        )
+        .child(
+            div()
+                .w(px(420.))
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_2()
+                .child(import)
+                .children(app.transfer_problem.clone().map(error_box)),
         )
 }

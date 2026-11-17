@@ -35,6 +35,10 @@ use throcc_proto::invite::{self, InviteCode};
 use throcc_proto::messages::User;
 use throcc_proto::{Fingerprint, permissions};
 
+mod transfer;
+
+pub use transfer::{Exporting, Importing, QR_MODULE_PIXELS};
+
 use crate::keep_display_awake::KeepDisplayAwake;
 use crate::theme;
 use crate::updates::{self, Release};
@@ -268,6 +272,10 @@ pub enum Dialog {
     /// The keychain lost the identity our servers know us by; offers to start over.
     IdentityMissing,
     OwnProfile,
+    /// Our identity as QR codes, or the code that opens it, as `ThroccApp::exporting` holds.
+    ExportIdentity,
+    /// Asks for the code of the file in `ThroccApp::importing`.
+    ImportIdentity,
 }
 
 /// How starting over after a lost identity goes, shown in its dialog.
@@ -463,6 +471,13 @@ pub struct ThroccApp {
     sign_ins: SignIns,
     pub join_error: Option<String>,
     pub start_over: StartOver,
+    pub exporting: Option<Exporting>,
+    /// Whether an export is being sealed, which may wait on a keychain prompt.
+    pub preparing_export: bool,
+    pub importing: Option<Importing>,
+    /// Why the last export or picked import file failed, if it did.
+    pub transfer_problem: Option<String>,
+    pub transfer_code: Entity<InputState>,
     pub profile_avatar: Option<Hash>,
     pub profile_form: PictureForm,
     pub known_servers: Vec<(String, Fingerprint)>,
@@ -547,6 +562,7 @@ impl ThroccApp {
         let address = cx.new(|cx| InputState::new(window, cx).placeholder("voice.example.net"));
         let code = cx.new(|cx| InputState::new(window, cx).placeholder("K7Q-M2XPD"));
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Your name"));
+        let transfer_code = cx.new(|cx| InputState::new(window, cx).placeholder("7K3M-Q9XZ-AB12"));
         let room_name = cx.new(|cx| InputState::new(window, cx).placeholder("Room name"));
         let room_password = cx.new(|cx| {
             InputState::new(window, cx)
@@ -633,6 +649,11 @@ impl ThroccApp {
             sign_ins: SignIns::default(),
             join_error: None,
             start_over: StartOver::NotStarted,
+            exporting: None,
+            preparing_export: false,
+            importing: None,
+            transfer_problem: None,
+            transfer_code,
             profile_avatar: None,
             profile_form: PictureForm::default(),
             known_servers,
@@ -1310,13 +1331,21 @@ impl ThroccApp {
     }
 
     pub fn set_dialog(&mut self, dialog: Option<Dialog>, cx: &mut Context<Self>) {
+        if dialog != Some(Dialog::ExportIdentity) {
+            self.exporting = None;
+        }
+        if dialog != Some(Dialog::ImportIdentity) {
+            self.importing = None;
+        }
         self.dialog = dialog;
         cx.notify();
     }
 
-    /// Closes the dialog the user dismissed, unless it waits for starting over to finish.
+    /// Closes the dialog the user dismissed, unless it waits for starting over or an import
+    /// to finish.
     pub fn dismiss_dialog(&mut self, cx: &mut Context<Self>) {
-        if self.start_over != StartOver::Running {
+        let importing = self.importing.as_ref().is_some_and(|i| i.running);
+        if self.start_over != StartOver::Running && !importing {
             self.set_dialog(None, cx);
         }
     }
@@ -1993,7 +2022,8 @@ impl ThroccApp {
     /// welcome, join, joinfailed, lost, personmenu, addserver, removeserver, room, testpattern,
     /// unwatched, alone, emptylobby, focus, fullscreen, popout, slow, slowpopout, slowfullscreen,
     /// lagging, share, connection, person, personverified, personchanged, keychange, ownprofile,
-    /// pinmismatch, settings, appearance, verified, blocked, blockedmenu, blockedpeople, about,
+    /// pinmismatch, settings, appearance, verified, blocked, blockedmenu, blockedpeople, exportqr,
+    /// exportcode, importcode, about,
     /// update, reconnect, elsewhere, newroom, editroom, roompassword, deleteroom, profile,
     /// profileerror, server, keys, members, invites, removeuser, leaveserver, identitymissing,
     /// identityback or startedover. Any other name leaves the lobby.
@@ -2265,6 +2295,28 @@ impl ThroccApp {
                 });
             }
             "leaveserver" => self.dialog = Some(Dialog::LeaveServer),
+            "exportqr" | "exportcode" => {
+                self.screen = Screen::Settings(SettingsPage::Profile);
+                let export = Arc::new(throcc_client_core::transfer::sample_export());
+                self.show_export(export, screen == "exportcode", cx);
+            }
+            "importcode" => {
+                offline(self);
+                self.known_servers.clear();
+                self.settings.profile = None;
+                self.profile_avatar = None;
+                self.show_screen(Screen::Onboarding, window, cx);
+                let file = throcc_client_core::transfer::sample_export()
+                    .sealed()
+                    .to_vec();
+                self.importing = Some(Importing {
+                    file: file.into(),
+                    running: false,
+                    error: Some(throcc_client_core::transfer::ImportError::WrongCode.to_string()),
+                });
+                set_field(&self.transfer_code, "7K3M-Q9XZ-AB13", false, window, cx);
+                self.dialog = Some(Dialog::ImportIdentity);
+            }
             "identitymissing" => {
                 offline(self);
                 self.show_identity_missing();

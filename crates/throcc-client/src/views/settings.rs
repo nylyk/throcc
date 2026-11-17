@@ -20,8 +20,9 @@ use throcc_client_core::state::BLOCKED_NAME;
 use throcc_proto::Fingerprint;
 
 use super::common::{
-    Typeset, avatar, caption, card, field_error, ghost_icon, key_cap, key_seed, mono, primary,
-    section, slider_gain, slider_value, update_notice, volume_slider,
+    Typeset, avatar, caption, card, description, error_box, field_error, ghost_icon, key_cap,
+    key_seed, mono, primary, secondary, section, slider_gain, slider_value, update_notice,
+    volume_slider,
 };
 use super::page::{field, frame, nav, picture_editor, row, save_line, segmented, switch_row};
 use crate::app::{DeviceNames, PictureFor, Screen, SettingsPage, ThroccApp, typed_name};
@@ -121,6 +122,7 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .child(field("Name", Input::new(&app.name)).children(name_error.map(field_error)))
                 .child(save),
         )
+        .child(export_card(app, cx))
         .into_any_element()
 }
 
@@ -516,6 +518,34 @@ fn audio(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             ),
         )
         .into_any_element()
+}
+
+fn export_card(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> Div {
+    let busy = app.preparing_export;
+    card()
+        .flex()
+        .flex_col()
+        .gap_4()
+        .child(section("Use on Another Device"))
+        .child(description(
+            "Bring your identity, servers and the people you verified or blocked to another device. Scan the QR code with a phone, or save a file for any device. Anyone who gets the export and its code can sign in as you.",
+        ))
+        .children(app.transfer_problem.clone().map(error_box))
+        .child(
+            div()
+                .flex()
+                .gap_2()
+                .child(
+                    primary("export-qr", "Show QR Code")
+                        .disabled(busy)
+                        .on_click(cx.listener(|app, _, _, cx| app.export_identity(false, cx))),
+                )
+                .child(
+                    secondary("export-file", "Save to File…")
+                        .disabled(busy)
+                        .on_click(cx.listener(|app, _, _, cx| app.export_identity(true, cx))),
+                ),
+        )
 }
 
 fn about(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {

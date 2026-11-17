@@ -3,7 +3,7 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Context, Div, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, RenderImage, SharedString, StatefulInteractiveElement, Styled, div, px,
+    ParentElement, RenderImage, SharedString, StatefulInteractiveElement, Styled, div, img, px,
     relative,
 };
 use gpui_component::Disableable;
@@ -24,7 +24,10 @@ use super::common::{
     primary, rate, secondary, title,
 };
 use super::page::{field, field_label};
-use crate::app::{Dialog, Screen, SettingsPage, StartOver, ThroccApp, typed_name, typed_password};
+use crate::app::{
+    Dialog, QR_MODULE_PIXELS, Screen, SettingsPage, StartOver, ThroccApp, typed_name,
+    typed_password,
+};
 use crate::theme;
 
 /// The modal for `dialog`, over a dimmed window.
@@ -56,6 +59,8 @@ pub fn render(app: &mut ThroccApp, dialog: Dialog, cx: &mut Context<ThroccApp>) 
         Dialog::RemoveServer(address) => remove_server(app, address, cx),
         Dialog::IdentityMissing => identity_missing(app, cx),
         Dialog::OwnProfile => own_profile(app, cx),
+        Dialog::ExportIdentity => export_identity(app, cx),
+        Dialog::ImportIdentity => import_identity(app, cx),
     };
     div()
         .id("scrim")
@@ -740,6 +745,75 @@ fn remove_server(app: &ThroccApp, address: String, cx: &mut Context<ThroccApp>) 
                     move |app, _, window, cx| app.remove_server(&address, window, cx),
                 )),
             ),
+        )
+        .into_any_element()
+}
+
+fn export_identity(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
+    let Some(exporting) = &app.exporting else {
+        return div().into_any_element();
+    };
+    if exporting.code_shown {
+        return body("Type This Code on the New Device")
+            .child(
+                mono(exporting.export.code()).typeset(theme::LARGE_TITLE),
+            )
+            .child(description(
+                "The code opens the export. Keep both to yourself: anyone with the two can sign in as you.",
+            ))
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .child(close_button("Done", cx)),
+            )
+            .into_any_element();
+    }
+    let qr = exporting.qr.clone().map(|qr| {
+        let side = px(qr.size(0).width.0 as f32 / QR_MODULE_PIXELS as f32 * 4.);
+        div().flex().justify_center().child(img(qr).size(side))
+    });
+    body("Scan with the New Device")
+        .child(description(
+            "On the new device, choose Import from Another Device and scan this code. Once it says the export is in, show the code.",
+        ))
+        .children(qr)
+        .child(
+            actions("Cancel", cx).child(
+                primary("show-export-code", "Show Code")
+                    .on_click(cx.listener(|app, _, _, cx| app.show_export_code(cx))),
+            ),
+        )
+        .into_any_element()
+}
+
+fn import_identity(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
+    let Some(importing) = &app.importing else {
+        return div().into_any_element();
+    };
+    let running = importing.running;
+    body("Import Your Identity")
+        .child(description(
+            "Type the code the other device showed when it made the export.",
+        ))
+        .child(field(
+            "Code",
+            Input::new(&app.transfer_code).font_family(theme::mono_font()),
+        ))
+        .children(importing.error.clone().map(error_box))
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap_2()
+                .child(close_button("Cancel", cx).disabled(running))
+                .child(
+                    primary("import", if running { "Importing…" } else { "Import" })
+                        .disabled(running)
+                        .on_click(
+                            cx.listener(|app, _, window, cx| app.import_identity(window, cx)),
+                        ),
+                ),
         )
         .into_any_element()
 }

@@ -73,6 +73,7 @@ pipewire.workspace = true
 [dev-dependencies]
 libc.workspace = true
 proptest.workspace = true
+rqrr.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]

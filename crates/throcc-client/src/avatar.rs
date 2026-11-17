@@ -13,11 +13,11 @@ pub fn sample() -> Vec<u8> {
     let gradient = image::ImageBuffer::from_fn(SIDE, SIDE, |x, y| {
         image::Rgb([(x * 2) as u8, (y * 2) as u8, 180 - (x + y) as u8 / 2])
     });
-    let mut png = Vec::new();
+    let mut jpeg = Vec::new();
     DynamicImage::ImageRgb8(gradient)
-        .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
+        .write_to(&mut Cursor::new(&mut jpeg), ImageFormat::Jpeg)
         .ok();
-    png
+    jpeg
 }
 
 /// Decodes a stored picture for gpui, which takes pixels in BGRA order, as

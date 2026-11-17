@@ -537,6 +537,37 @@ mod tests {
         }
     }
 
+    /// The text a scanner reads from `code`, drawn three pixels a module with its quiet zone.
+    fn scanned(code: &QrCode) -> String {
+        const SCALE: usize = 3;
+        let side = (code.width as usize + 8) * SCALE;
+        let mut image = rqrr::PreparedImage::prepare_from_greyscale(side, side, |x, y| {
+            let (column, row) = ((x / SCALE).checked_sub(4), (y / SCALE).checked_sub(4));
+            let width = code.width as usize;
+            match (column, row) {
+                (Some(c), Some(r)) if c < width && r < width && code.dark[r * width + c] => 0,
+                _ => 255,
+            }
+        });
+        let grids = image.detect_grids();
+        assert_eq!(grids.len(), 1);
+        grids[0].decode().unwrap().1
+    }
+
+    #[test]
+    fn an_export_scanned_frame_by_frame_opens_with_its_code() {
+        let export = sample_export();
+        let mut collector = crate::fountain::Collector::new();
+        for seq in (0..2000).step_by(2) {
+            collector.add(&scanned(&export.frame(seq)));
+            if collector.blob().is_some() {
+                break;
+            }
+        }
+        let opened = open(collector.blob().unwrap(), &export.code()).unwrap();
+        assert_eq!(opened.profile().unwrap().name, "Ilse");
+    }
+
     #[test]
     fn addresses_with_spaces_or_controls_are_dropped() {
         assert!(valid_address("voice.example.net:8476"));
