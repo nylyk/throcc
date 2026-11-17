@@ -48,9 +48,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** The modules of white around a QR code that scanners need to find it. */
-private const val QUIET_ZONE = 4
-
 private enum class ExportWay { Qr, File }
 
 private const val EXPORT_TITLE = "Use on Another Device"
@@ -164,17 +161,13 @@ fun ExportCode(model: AppModel) {
     }
 }
 
-/** Dark modules on white with a quiet zone, whatever the theme, as scanners need. */
+/** Dark modules on white, whatever the theme, as scanners need. */
 @Composable
 private fun QrCode(frame: QrFrame, modifier: Modifier) {
     val width = frame.width.toInt()
     Canvas(modifier.clip(MaterialTheme.shapes.large).background(Color.White)) {
-        val modules = width + 2 * QUIET_ZONE
-        val module = floor(size.minDimension / modules).coerceAtLeast(1f)
-        val origin = Offset(
-            floor((size.width - module * modules) / 2) + QUIET_ZONE * module,
-            floor((size.height - module * modules) / 2) + QUIET_ZONE * module,
-        )
+        val module = floor(size.minDimension / width).coerceAtLeast(1f)
+        val origin = Offset(floor((size.width - module * width) / 2), floor((size.height - module * width) / 2))
         val square = Size(module, module)
         frame.dark.forEachIndexed { index, dark ->
             if (dark) drawRect(Color.Black, origin + Offset(index % width * module, index / width * module), square)

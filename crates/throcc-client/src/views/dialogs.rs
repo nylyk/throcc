@@ -753,31 +753,21 @@ fn export_identity(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let Some(exporting) = &app.exporting else {
         return div().into_any_element();
     };
-    if exporting.code_shown {
+    let Some(qr) = exporting.qr.clone() else {
         return body("Type This Code on the New Device")
-            .child(
-                mono(exporting.export.code()).typeset(theme::LARGE_TITLE),
-            )
+            .child(mono(exporting.export.code()).typeset(theme::LARGE_TITLE))
             .child(description(
                 "The code opens the export. Keep both to yourself: anyone with the two can sign in as you.",
             ))
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .child(close_button("Done", cx)),
-            )
+            .child(div().flex().justify_end().child(close_button("Done", cx)))
             .into_any_element();
-    }
-    let qr = exporting.qr.clone().map(|qr| {
-        let side = px(qr.size(0).width.0 as f32 / QR_MODULE_PIXELS as f32 * 4.);
-        div().flex().justify_center().child(img(qr).size(side))
-    });
+    };
+    let side = px(qr.size(0).width.0 as f32 / QR_MODULE_PIXELS as f32 * 4.);
     body("Scan with the New Device")
         .child(description(
             "On the new device, choose Import from Another Device and scan this code. Once it says the export is in, show the code.",
         ))
-        .children(qr)
+        .child(div().flex().justify_center().child(img(qr).size(side)))
         .child(
             actions("Cancel", cx).child(
                 primary("show-export-code", "Show Code")

@@ -5,7 +5,7 @@ use throcc_client_core::transfer::{self, Export, ImportError};
 
 use crate::{Core, CoreError, lock};
 
-/// A QR code's modules, row by row from the top left.
+/// A QR code's modules with the quiet zone around them, row by row from the top left.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct QrFrame {
     pub width: u32,

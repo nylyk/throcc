@@ -4,7 +4,7 @@ import UIKit
 struct ExportIdentitySection: View {
     @Environment(AppModel.self) private var model
     @State private var exporting = false
-    @State private var shared: SharedExport?
+    @State private var sharedCode: String?
     @State private var problem: String?
 
     var body: some View {
@@ -26,12 +26,12 @@ struct ExportIdentitySection: View {
             }
             .disabled(exporting)
             .background {
-                ShareSheet(shared: shared) { sent in
-                    removeExportFile()
-                    if let code = shared?.code, sent {
-                        model.settingsPath.append(.exportCode(code))
+                ShareSheet(showing: sharedCode != nil) { sent in
+                    try? FileManager.default.removeItem(at: exportFile)
+                    if let sharedCode, sent {
+                        model.settingsPath.append(.exportCode(sharedCode))
                     }
-                    shared = nil
+                    sharedCode = nil
                 }
             }
             if let problem {
@@ -50,7 +50,7 @@ struct ExportIdentitySection: View {
                 let export = try await model.exportIdentity()
                 try export.file().write(to: exportFile, options: [.atomic, .completeFileProtection])
                 problem = nil
-                shared = SharedExport(code: export.code())
+                sharedCode = export.code()
             } catch {
                 problem = error.explanation
             }
@@ -58,21 +58,12 @@ struct ExportIdentitySection: View {
     }
 }
 
-/// An export being shared as a file, and the code that opens it.
-private struct SharedExport {
-    let code: String
-}
-
 private let exportFile = FileManager.default.temporaryDirectory.appending(path: "throcc-identity.throcc")
 
-private func removeExportFile() {
-    try? FileManager.default.removeItem(at: exportFile)
-}
-
-/// Shows the system share sheet for the export file while `shared` is set, and tells `done`
+/// Shows the system share sheet for the export file while `showing`, and tells `done`
 /// whether it was sent once it closes.
 private struct ShareSheet: UIViewControllerRepresentable {
-    let shared: SharedExport?
+    let showing: Bool
     let done: (Bool) -> Void
 
     func makeUIViewController(context: Context) -> UIViewController {
@@ -80,7 +71,7 @@ private struct ShareSheet: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ host: UIViewController, context: Context) {
-        guard shared != nil, host.presentedViewController == nil else { return }
+        guard showing, host.presentedViewController == nil else { return }
         let sheet = UIActivityViewController(activityItems: [exportFile], applicationActivities: nil)
         sheet.popoverPresentationController?.sourceView = host.view
         sheet.completionWithItemsHandler = { _, completed, _, _ in done(completed) }
@@ -145,18 +136,18 @@ private struct AnimatedQR: View {
     }
 }
 
-/// A QR code in black on white with its quiet zone, whatever the theme, so any camera reads it.
+/// A QR code in black on white, whatever the theme, so any camera reads it.
 private struct QRCode: View {
     let frame: QrFrame
 
     var body: some View {
         Canvas { context, size in
             let width = Int(frame.width)
-            let module = size.width / CGFloat(width + 2 * quietZone)
+            let module = size.width / CGFloat(width)
             var modules = Path()
             for (index, dark) in frame.dark.enumerated() where dark {
-                let x = CGFloat(index % width + quietZone) * module
-                let y = CGFloat(index / width + quietZone) * module
+                let x = CGFloat(index % width) * module
+                let y = CGFloat(index / width) * module
                 modules.addRect(CGRect(x: x, y: y, width: module, height: module))
             }
             context.fill(modules, with: .color(.black))
@@ -165,9 +156,6 @@ private struct QRCode: View {
         .background(.white)
     }
 }
-
-/// The light modules a QR code needs around it on every side.
-private let quietZone = 4
 
 struct ExportCodePage: View {
     @Environment(AppModel.self) private var model

@@ -101,7 +101,7 @@ pub fn seal(code: &TransferCode, plaintext: &[u8]) -> Vec<u8> {
 
 /// Opens what [`seal`] made under `code`.
 pub fn open(code: &TransferCode, sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>, TransferError> {
-    if sealed.len() < HEADER_BYTES + TAG_BYTES || !sealed.starts_with(MAGIC) {
+    if !looks_sealed(sealed) {
         return Err(TransferError::NotATransfer);
     }
     let (header, rest) = sealed.split_at(HEADER_BYTES);

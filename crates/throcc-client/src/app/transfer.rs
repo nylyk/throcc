@@ -6,8 +6,6 @@ use throcc_client_core::transfer::{self, Export, FRAME_INTERVAL, ImportError, Qr
 
 use super::{Dialog, Screen, ThroccApp, set_field};
 
-/// Light modules around a QR code, which scanners need to find it.
-const QUIET_ZONE: u32 = 4;
 /// The pixels each module of a QR code is drawn with.
 pub const QR_MODULE_PIXELS: u32 = 8;
 const EXPORT_FILE_NAME: &str = "throcc-identity.throcc";
@@ -15,8 +13,7 @@ const EXPORT_FILE_NAME: &str = "throcc-identity.throcc";
 /// An export made on the Profile page, kept while its dialog is open.
 pub struct Exporting {
     pub export: Arc<Export>,
-    /// Whether the code shows, which hides the QR code for good.
-    pub code_shown: bool,
+    /// The QR code on show, none once the code that opens the export shows in its place.
     pub qr: Option<Arc<RenderImage>>,
     frame: u32,
     _frames: Option<Task<()>>,
@@ -105,7 +102,6 @@ impl ThroccApp {
         let frames = (!code_shown).then(|| self.cycle_frames(cx));
         self.exporting = Some(Exporting {
             export,
-            code_shown,
             qr,
             frame: 0,
             _frames: frames,
@@ -118,7 +114,7 @@ impl ThroccApp {
             loop {
                 cx.background_executor().timer(FRAME_INTERVAL).await;
                 let cycling = this.update(cx, |app, cx| {
-                    let Some(exporting) = app.exporting.as_mut().filter(|e| !e.code_shown) else {
+                    let Some(exporting) = app.exporting.as_mut().filter(|e| e.qr.is_some()) else {
                         return false;
                     };
                     exporting.frame = exporting.frame.wrapping_add(1);
@@ -136,7 +132,6 @@ impl ThroccApp {
     /// Hides the QR codes for good and shows the code that opens them.
     pub fn show_export_code(&mut self, cx: &mut Context<Self>) {
         if let Some(exporting) = &mut self.exporting {
-            exporting.code_shown = true;
             exporting.qr = None;
             exporting._frames = None;
         }
@@ -232,17 +227,12 @@ impl ThroccApp {
     }
 }
 
-/// `code` with its quiet zone, dark on light whatever the theme, for gpui's BGRA pixels.
+/// `code` in dark on light whatever the theme, for gpui's BGRA pixels.
 fn qr_image(code: &QrCode) -> Arc<RenderImage> {
-    let modules = code.width + 2 * QUIET_ZONE;
-    let side = modules * QR_MODULE_PIXELS;
+    let side = code.width * QR_MODULE_PIXELS;
     let picture = image::RgbaImage::from_fn(side, side, |x, y| {
         let (column, row) = (x / QR_MODULE_PIXELS, y / QR_MODULE_PIXELS);
-        let inside = |m: u32| m.checked_sub(QUIET_ZONE).filter(|m| *m < code.width);
-        let dark = matches!(
-            (inside(column), inside(row)),
-            (Some(c), Some(r)) if code.dark[(r * code.width + c) as usize]
-        );
+        let dark = code.dark[(row * code.width + column) as usize];
         image::Rgba(if dark { [0, 0, 0, 255] } else { [255; 4] })
     });
     Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(

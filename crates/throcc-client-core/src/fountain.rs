@@ -46,9 +46,7 @@ impl Fountain {
         for index in mixed_blocks(&self.id, seq, blocks) {
             let start = index * BLOCK_BYTES;
             let end = (start + BLOCK_BYTES).min(self.blob.len());
-            for (out, byte) in body.iter_mut().zip(&self.blob[start..end]) {
-                *out ^= byte;
-            }
+            xor_into(&mut body, &self.blob[start..end]);
         }
         let mut frame = Vec::with_capacity(HEADER_BYTES + BLOCK_BYTES);
         frame.push(FORMAT);

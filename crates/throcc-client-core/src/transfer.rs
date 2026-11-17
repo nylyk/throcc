@@ -28,6 +28,8 @@ const MAX_AGE: Duration = Duration::from_secs(60 * 60);
 /// How far ahead of this device's clock an export's creation time may be.
 const MAX_AHEAD: Duration = Duration::from_secs(5 * 60);
 const MAX_ADDRESS_BYTES: usize = 255;
+/// The light modules on every side of a QR code, which scanners need to find it.
+const QUIET_ZONE: usize = 4;
 
 /// Everything that moves an identity to another device, sealed as one blob.
 #[derive(Default, Serialize, Deserialize)]
@@ -89,7 +91,7 @@ struct SentBlocked {
     server: Option<[u8; 32]>,
 }
 
-/// A QR code's modules, row by row from the top left.
+/// A QR code's modules with the quiet zone around them, row by row from the top left.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QrCode {
     pub width: u32,
@@ -119,13 +121,17 @@ impl Export {
         let text = self.fountain.frame(seq);
         let code = qrcode::QrCode::with_error_correction_level(text, qrcode::EcLevel::L)
             .expect("a frame fits a QR code");
+        let width = code.width() + 2 * QUIET_ZONE;
+        let mut dark = vec![false; width * width];
+        for (row, colors) in code.to_colors().chunks(code.width()).enumerate() {
+            let start = (row + QUIET_ZONE) * width + QUIET_ZONE;
+            for (module, color) in dark[start..].iter_mut().zip(colors) {
+                *module = *color == qrcode::Color::Dark;
+            }
+        }
         QrCode {
-            width: code.width() as u32,
-            dark: code
-                .to_colors()
-                .into_iter()
-                .map(|color| color == qrcode::Color::Dark)
-                .collect(),
+            width: width as u32,
+            dark,
         }
     }
 }
@@ -537,16 +543,16 @@ mod tests {
         }
     }
 
-    /// The text a scanner reads from `code`, drawn three pixels a module with its quiet zone.
+    /// The text a scanner reads from `code`, drawn three pixels a module.
     fn scanned(code: &QrCode) -> String {
         const SCALE: usize = 3;
-        let side = (code.width as usize + 8) * SCALE;
+        let width = code.width as usize;
+        let side = width * SCALE;
         let mut image = rqrr::PreparedImage::prepare_from_greyscale(side, side, |x, y| {
-            let (column, row) = ((x / SCALE).checked_sub(4), (y / SCALE).checked_sub(4));
-            let width = code.width as usize;
-            match (column, row) {
-                (Some(c), Some(r)) if c < width && r < width && code.dark[r * width + c] => 0,
-                _ => 255,
+            if code.dark[y / SCALE * width + x / SCALE] {
+                0
+            } else {
+                255
             }
         });
         let grids = image.detect_grids();
