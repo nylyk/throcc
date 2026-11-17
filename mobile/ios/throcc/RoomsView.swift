@@ -101,11 +101,18 @@ struct RoomsView: View {
 
     private func label(for room: Room) -> some View {
         HStack {
-            Image(systemName: room.locked ? "lock.fill" : "speaker.wave.2.fill")
-                .foregroundStyle(.muted)
-                .frame(width: 28)
-                .accessibilityLabel("Locked")
-                .accessibilityHidden(!room.locked)
+            Group {
+                if room.locked {
+                    Image(systemName: "lock.fill")
+                        .accessibilityLabel("Locked")
+                } else {
+                    Circle()
+                        .frame(width: 8, height: 8)
+                        .accessibilityHidden(true)
+                }
+            }
+            .foregroundStyle(.muted)
+            .frame(width: 28)
             Text(room.name)
                 .font(.headline)
                 .foregroundStyle(.text)

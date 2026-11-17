@@ -1,7 +1,9 @@
 package cc.thro.throcc
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -10,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ScreenShare
@@ -24,6 +27,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -171,7 +175,13 @@ private fun RoomCard(model: AppModel, state: CoreState, room: Room, onJoin: () -
             Arrangement.spacedBy(16.dp),
             Alignment.CenterVertically,
         ) {
-            Icon(if (room.locked) Icons.Default.Lock else Icons.AutoMirrored.Filled.VolumeUp, null)
+            Box(Modifier.size(24.dp), Alignment.Center) {
+                if (room.locked) {
+                    Icon(Icons.Default.Lock, null)
+                } else {
+                    Box(Modifier.size(8.dp).background(LocalContentColor.current, CircleShape))
+                }
+            }
             Column(Modifier.weight(1f).heightIn(min = 48.dp), Arrangement.Center) {
                 OneLineText(room.name, style = MaterialTheme.typography.titleMediumEmphasized)
                 Text(
