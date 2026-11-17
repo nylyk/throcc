@@ -325,8 +325,8 @@ impl Hub {
     }
 
     /// Registers a connection authenticated as `row`, notes the sign-in, keeps its checked
-    /// `profile` and kicks the user's earlier connection. Refuses a removed user, and a
-    /// newcomer past the sign-in limits.
+    /// `profile` and kicks the user's earlier connection. Refuses a removed user, a newcomer
+    /// past the sign-in limits, and a profile whose picture is past the upload allowance.
     pub fn connect(
         &mut self,
         row: UserRow,
