@@ -70,16 +70,26 @@ final class SharePictureInPicture: NSObject, AVPictureInPictureControllerDelegat
         finished()
     }
 
+    /// Finishes only for the current controller: one that `start` replaced reports its stop
+    /// late, after the new share is already showing.
+    private func finish(for stopped: ObjectIdentifier) {
+        if let controller, ObjectIdentifier(controller) == stopped {
+            finish()
+        }
+    }
+
     nonisolated func pictureInPictureControllerDidStopPictureInPicture(
         _ controller: AVPictureInPictureController
     ) {
-        Task { @MainActor in self.finish() }
+        let stopped = ObjectIdentifier(controller)
+        Task { @MainActor in self.finish(for: stopped) }
     }
 
     nonisolated func pictureInPictureController(
         _ controller: AVPictureInPictureController,
         failedToStartPictureInPictureWithError error: any Error
     ) {
-        Task { @MainActor in self.finish() }
+        let stopped = ObjectIdentifier(controller)
+        Task { @MainActor in self.finish(for: stopped) }
     }
 }
