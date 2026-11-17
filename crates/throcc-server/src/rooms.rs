@@ -1806,7 +1806,7 @@ pub(crate) fn check_profile(
     server: &Fingerprint,
     user: UserId,
 ) -> Result<Option<Hash>, Refusal> {
-    if valid_name(&profile.name) != Some(profile.name.as_str()) {
+    if !valid_as_given(&profile.name) {
         return Err(bad_name());
     }
     if let Some(bytes) = &profile.picture {
@@ -1833,6 +1833,12 @@ fn too_many_pictures() -> Refusal {
         ErrorCode::RateLimited,
         "too many pictures; try again in a minute",
     )
+}
+
+/// Whether `name` is valid without the trimming [`valid_name`] does, as a name that is signed
+/// or stored as given must be.
+pub(crate) fn valid_as_given(name: &str) -> bool {
+    valid_name(name) == Some(name)
 }
 
 fn checked_name(name: &str) -> Result<String, Refusal> {

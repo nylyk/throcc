@@ -7,7 +7,7 @@ use throcc_crypto::identity::random;
 use throcc_proto::framing::{self, FrameError, LEN_BYTES};
 use throcc_proto::messages::{
     AccountStep, AuthResult, ClientHello, ClientMessage, ErrorCode, MAX_AVATAR_BYTES, MIN_PROTOCOL,
-    PROTOCOL, PakeStep, Request, Response, ServerHello, ServerMessage,
+    PROTOCOL, PakeStep, Request, Response, ServerHello, ServerMessage, SignedProfile,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{Semaphore, mpsc};
@@ -47,27 +47,26 @@ pub enum ReadError {
 }
 
 pub async fn read_frame<T: DeserializeOwned>(recv: &mut quinn::RecvStream) -> Result<T, ReadError> {
-    Ok(framing::decode(
-        &read_body(recv, framing::MAX_FRAME_BYTES).await?,
-    )?)
+    read_within(recv, framing::MAX_FRAME_BYTES).await
 }
 
 /// Reads one handshake frame, which is never larger than [`HANDSHAKE_FRAME_BYTES`].
 pub async fn read_handshake<T: DeserializeOwned>(
     recv: &mut quinn::RecvStream,
 ) -> Result<T, ReadError> {
-    Ok(framing::decode(
-        &read_body(recv, HANDSHAKE_FRAME_BYTES).await?,
-    )?)
+    read_within(recv, HANDSHAKE_FRAME_BYTES).await
 }
 
 /// Reads a sign-in's profile, which is never larger than [`PROFILE_FRAME_BYTES`].
-pub async fn read_profile<T: DeserializeOwned>(
+pub async fn read_profile(recv: &mut quinn::RecvStream) -> Result<SignedProfile, ReadError> {
+    read_within(recv, PROFILE_FRAME_BYTES).await
+}
+
+async fn read_within<T: DeserializeOwned>(
     recv: &mut quinn::RecvStream,
+    cap: usize,
 ) -> Result<T, ReadError> {
-    Ok(framing::decode(
-        &read_body(recv, PROFILE_FRAME_BYTES).await?,
-    )?)
+    Ok(framing::decode(&read_body(recv, cap).await?)?)
 }
 
 /// Reads one frame's body. The body is allocated only after its length passes `cap`.
@@ -335,7 +334,7 @@ fn request_kind(req: &Request) -> &'static str {
     match req {
         Request::JoinRoom { .. } => "JoinRoom",
         Request::LeaveRoom => "LeaveRoom",
-        Request::SetProfile { .. } => "SetProfile",
+        Request::SetProfile(_) => "SetProfile",
         Request::FetchAvatar(_) => "FetchAvatar",
         Request::SetEncryptionKey(_) => "SetEncryptionKey",
         Request::SetMedia(_) => "SetMedia",

@@ -7,13 +7,13 @@ use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::invite::{self, ID_CHARS, SECRET_CHARS};
 use throcc_proto::messages::{
     AccountStep, AuthError, Event, PakeFinish, PakeReply, PakeStep, PublicKey, SignIn,
-    SignedProfile, valid_name,
+    SignedProfile,
 };
 use tracing::{debug, info, warn};
 
 use crate::database::{Enrolled, InviteRow, UserRow};
 use crate::limits::SourceKey;
-use crate::rooms::{Hub, Refusal, check_profile};
+use crate::rooms::{Hub, Refusal, check_profile, valid_as_given};
 use crate::session::{FrameStream, read_handshake, read_profile, write_frame};
 use crate::{ServerState, unix_now};
 
@@ -79,7 +79,7 @@ pub async fn authenticate(
             pake_a,
             name,
         } => {
-            if valid_name(&name) != Some(name.as_str()) {
+            if !valid_as_given(&name) {
                 return Err(AuthRefusal::Enroll(AuthError::BadName));
             }
             let run = Enrollment {
@@ -114,7 +114,7 @@ async fn take_profile(
     write_frame(&mut stream.send, &step)
         .await
         .map_err(|_| BAD_PROFILE)?;
-    let profile: SignedProfile = read_profile(&mut stream.recv)
+    let profile = read_profile(&mut stream.recv)
         .await
         .map_err(|_| BAD_PROFILE)?;
     if let Err(Refusal(_, reason)) =
