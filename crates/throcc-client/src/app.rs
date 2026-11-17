@@ -242,10 +242,7 @@ pub struct SoundLevelControl {
 pub enum Dialog {
     Share,
     Connection,
-    /// `user`'s profile, with our safety number for them. `shown` is the identity key the
-    /// number on screen is for, with the number, once they presented one; `key_changed` once
-    /// another key replaced it while open, until the user goes on to compare the new number.
-    /// Marking waits for that, so a click meant for one number can't land on the next.
+    /// Someone's profile, with our safety number for them as the check keeps it on screen.
     Profile(SafetyCheck),
     Remove {
         user: UserId,
