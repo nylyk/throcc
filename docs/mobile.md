@@ -18,7 +18,7 @@ Native iOS and Android clients on top of `throcc-client-core`. Same servers, sam
 | Echo | Both phones play as media, so their volume goes down to silence and Bluetooth stays in full quality, and sonora cancels the echo as on desktop |
 | Codecs | Platform codecs on iOS, Android and macOS, with dav1d and libvpx filling the gaps. ffmpeg stays only on Linux and Windows. No codec negotiation. See [Codecs](#codecs) and [macOS without ffmpeg](#macos-without-ffmpeg) |
 | Video crate | `media/video/` becomes its own crate, `throcc-video`, with a backend per platform behind one encoder and decoder. See [Core changes](#core-changes) |
-| Devices | At onboarding, a phone either creates its own identity or imports one from another device by QR. One device per identity is online at a time. See [Devices](#devices) |
+| Devices | At onboarding, any client either creates its own identity or imports one from another device, by QR on phones or from a file anywhere. One device per identity is online at a time. See [Devices](#devices) |
 | Invites | `https://thro.cc/join#<address+code>` on every platform. Verified links open the mobile apps; desktop gets `throcc://`. See [Invite links](#invite-links) |
 | iOS distribution | App Store, TestFlight for betas |
 | Android distribution | Signed APK on the GitHub release, and F-Droid's main repo with reproducible builds so it ships the same signature. IzzyOnDroid is out: it rejects apps partly written by generative AI |
@@ -127,18 +127,28 @@ App Store Guideline 1.2 asks apps with user content for filtering, reporting, bl
 
 ## Identity transfer
 
-Import is a choice at onboarding, next to creating a new identity. A phone that has an identity never imports another.
+Import is a choice at onboarding on every client, next to creating a new identity. A client that has an identity never imports another. Export sits in settings on every client and offers two ways out: an animated QR, or a file. Nothing goes over a network.
 
-The phone shows a code; the user types it on the source device. The source then shows an animated QR, and the phone scans it. The QR and the code never appear on the same screen, so one photo or screen share can't capture both. The source refuses to export while it is sharing its screen.
-
-- **Payload:** the identity key, each known server's address and pinned fingerprint, each verified key with its stored name and the server and user-id pairs it was seen under, and every standing key-changed warning, so a warning isn't lost by switching devices. No encryption key, settings, floors or volumes.
-- **Encryption:** the payload is sealed under a key derived from the code, about 60 bits, with a memory-hard KDF.
-- **Framing:** fixed-size frames that the source cycles through. A small payload is one frame. The phone collects frames in any order.
-- **After import:** the phone always makes a new encryption key, as enrollment does, and publishes it on sign-in. Sender keys from before were wrapped to the other device's encryption key, so the phone can't open them, and leaving the floors out loses nothing. The transfer is a snapshot; later verifications don't sync.
+- **Flow:** the source makes a random code, seals the payload under it, then shows the QR or saves the file. Only then does it show the code: once the phone says Done, the user taps Show code on the source. The QR and the code are never on screen together, so one photo can't capture both. The source refuses to export while it is sharing its screen.
+- **Payload:** the identity key; our own name and picture; each known server's address, pinned fingerprint, name and picture; each verified key with its stored name, picture hash and the server and user-id pairs it was seen under; every standing key-changed warning; and each blocked key as stored. No encryption key, floors, volumes, theme or other settings: those belong to a device.
+- **Creation time:** sealed inside the payload. An import refuses a payload older than an hour or more than five minutes ahead. This keeps a stale snapshot out; it doesn't stop someone who stole a file, who attacks it with their own tools.
+- **Encryption:** the code is 12 Crockford base32 characters, 60 bits, shown in mono. The payload is sealed under a key derived from it with Argon2id, its salt in the clear beside it, at settings that take about a second on an old phone.
+- **One format:** the file is the sealed payload, and the QR frames carry exactly its bytes.
+- **Frames:** fountain-coded. The sealed payload is cut into equal blocks. The first frames carry the blocks in order; every later one carries the XOR of a few blocks, picked by a generator seeded with its frame number. The phone solves blocks as frames arrive, in any order, so a missed frame costs about one more frame rather than a whole cycle. Each frame's header holds the block count and total length, so the phone shows a progress bar with an estimate from the rate frames arrive.
+- **QR:** made in Rust in the core, one implementation for every source. Scanned with VisionKit on iOS and ZXing on Android; ML Kit needs Google Play services, which F-Droid rejects. Desktop has no scanner and imports only from a file.
+- **After import:** the target always makes a new encryption key, as enrollment does, and publishes it on sign-in. Sender keys from before were wrapped to the other device's encryption key, so the target can't open them, and leaving the floors out loses nothing. The transfer is a snapshot; later verifications don't sync.
+- **Copy, not move:** the source keeps its identity. Both devices hold it, and one at a time is online.
 - **Lost device:** whoever holds the identity key can sign new encryption keys and sign in indefinitely; it can't be revoked. A "Signed in on another device" kick is the only warning. An admin of each server removes the account, the owner starts a new identity, and the people who verified them verify the new one.
-- The source can be desktop or phone; the target needs a camera.
 
 This is security-critical code. A subagent that didn't write it reviews it before merge.
+
+### Pictures
+
+Pictures are JPEG only, which keeps the payload small: a 128 px JPEG is around 6 KB, the PNG it replaces often 30 to 50 KB.
+
+- `prepare` always writes a 128 px JPEG, with transparency flattened onto white.
+- Clients show only JPEG pictures, others' and their own. A stored picture in another format counts as none, so everyone sets theirs again; nothing converts.
+- The server uses its own picture only when it is a JPEG, told by its signature bytes without decoding it.
 
 ## Invite links
 
@@ -158,7 +168,7 @@ This is security-critical code. A subagent that didn't write it reviews it befor
 3. **Shell on mock data.** Starts once phase 2 lands, since it mirrors the `State` that phase changes. The UniFFI layer and every screen against `MockClient` on both platforms: onboarding, server list, rooms, room, person sheet, profile, settings, verified people, server pages. Each screen is laid out for any window width, since an iPad or tablet window can be resized.
 4. **Voice.** Audio backends and the app audio work. Join a real server and talk.
 5. **Watching shares,** one at a time. First `throcc-video` with the ffmpeg backend moved in unchanged. Then the Apple backend, which decodes on iOS and replaces ffmpeg on macOS for decode and encode, then MediaCodec, dav1d and libvpx, fullscreen and rotation.
-6. **Identity transfer.** Export on desktop and mobile, import on mobile, security review.
+6. **Identity transfer.** JPEG-only pictures first. Then export and file import on every client, QR import on the phones, and a security review.
 7. **Invite links.** The web page with its phone fallback and verification files, links on all five platforms, the desktop's single instance and dialog change.
 8. **Distribution.** App Store Connect upload from CI with an API key. The Android signing key in CI secrets, APK on the release. F-Droid recipe, reproducible builds, merge request to `fdroiddata`.
 9. **Sending shares.** Android first, then the iOS broadcast extension.
