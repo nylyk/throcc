@@ -371,17 +371,19 @@ impl Database {
 
     /// Keeps `address`, signed by `user`'s identity, as one they reach this server at, and
     /// only the newest [`MAX_SIGNED_ADDRESSES`] of theirs.
-    pub fn keep_address(&self, user: UserId, address: &SignedAddress, now: u64) -> Result<()> {
-        self.conn.execute(
+    pub fn keep_address(&mut self, user: UserId, address: &SignedAddress, now: u64) -> Result<()> {
+        let tx = self.write()?;
+        tx.execute(
             "INSERT INTO addresses (user, address, sig, signed_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT (user, address) DO UPDATE SET sig = excluded.sig, signed_at = excluded.signed_at",
             params![user.0 as i64, address.address, address.sig.as_slice(), now as i64],
         )?;
-        self.conn.execute(
+        tx.execute(
             "DELETE FROM addresses WHERE user = ?1 AND rowid NOT IN
              (SELECT rowid FROM addresses WHERE user = ?1 ORDER BY signed_at DESC, rowid DESC LIMIT ?2)",
             params![user.0 as i64, MAX_SIGNED_ADDRESSES as i64],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
