@@ -7,6 +7,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::crypto::{CryptoProvider, verify_tls13_signature};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
+use throcc_proto::messages::valid_address;
 use throcc_proto::transport::{self, DatagramError, check_datagrams};
 use throcc_proto::{ALPN, DEFAULT_PORT, Fingerprint, SERVER_NAME};
 
@@ -62,6 +63,9 @@ pub enum ConnectError {
 /// Connects to `address` (`host` or `host:port`) and checks the server's key against `pin`.
 /// With no pin, any key is accepted and returned in [`Connected::fingerprint`].
 pub async fn connect(address: &str, pin: Option<Fingerprint>) -> Result<Connected, ConnectError> {
+    if !valid_address(address) {
+        return Err(ConnectError::Resolve(address.to_owned()));
+    }
     let (config, verifier) = client_config(pin, transport_config())?;
     connect_with(address, config, &verifier).await
 }

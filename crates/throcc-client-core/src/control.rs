@@ -10,6 +10,7 @@ use throcc_proto::Fingerprint;
 use throcc_proto::framing::{self, FrameError, LEN_BYTES};
 use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::invite::InviteCode;
+use throcc_proto::limits::MAX_SIGNED_ADDRESSES;
 use throcc_proto::messages::{
     Account, AccountStep, AuthError, AuthResult, ClientHello, ClientMessage, Event, PROTOCOL,
     PakeFinish, PakeStep, ProfileStep, Request, Response, ServerHello, ServerMessage, SignIn,
@@ -264,7 +265,8 @@ fn proves_account(
     server: &Fingerprint,
     address: &str,
 ) -> bool {
-    account.addresses.iter().any(|signed| {
+    let mut newest = account.addresses.iter().take(MAX_SIGNED_ADDRESSES);
+    newest.any(|signed| {
         signed.address == address
             && identity::verify_address(
                 &identity.public(),

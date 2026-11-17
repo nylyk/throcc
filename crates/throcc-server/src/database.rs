@@ -369,14 +369,20 @@ impl Database {
         Ok(())
     }
 
-    /// Keeps `address`, signed by `user`'s identity, as one they reach this server at, and
-    /// only the newest [`MAX_SIGNED_ADDRESSES`] of theirs.
+    /// Keeps `address`, signed by `user`'s identity, as the newest they reach this server at,
+    /// even when the clock went back, and only the newest [`MAX_SIGNED_ADDRESSES`] of theirs.
     pub fn keep_address(&mut self, user: UserId, address: &SignedAddress, now: u64) -> Result<()> {
         let tx = self.write()?;
+        let newest: Option<i64> = tx.query_row(
+            "SELECT MAX(signed_at) FROM addresses WHERE user = ?1",
+            [user.0 as i64],
+            |r| r.get(0),
+        )?;
+        let signed_at = newest.map_or(now as i64, |newest| (now as i64).max(newest + 1));
         tx.execute(
             "INSERT INTO addresses (user, address, sig, signed_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT (user, address) DO UPDATE SET sig = excluded.sig, signed_at = excluded.signed_at",
-            params![user.0 as i64, address.address, address.sig.as_slice(), now as i64],
+            params![user.0 as i64, address.address, address.sig.as_slice(), signed_at],
         )?;
         tx.execute(
             "DELETE FROM addresses WHERE user = ?1 AND rowid NOT IN
@@ -825,6 +831,9 @@ mod tests {
         assert!(!kept.iter().any(|a| a.address == "a1"));
         assert!(kept.iter().any(|a| a.address == "a2"));
         assert_eq!(db.signed_addresses(teo).unwrap(), [signed("t", 1)]);
+
+        db.keep_address(teo, &signed("late", 2), 50).unwrap();
+        assert_eq!(db.signed_addresses(teo).unwrap()[0].address, "late");
 
         db.remove_users(&[mara]).unwrap();
         assert!(db.signed_addresses(mara).unwrap().is_empty());
