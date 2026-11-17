@@ -19,13 +19,14 @@ pub struct SafetyCheck {
 impl SafetyCheck {
     /// Keeps the number on the key the person presents now. True if what shows changed.
     pub fn follow(&self) -> bool {
-        let connected = lock(&self.core.connected);
-        let Some(client) = connected.as_ref().map(|c| c.client.clone()) else {
-            return false;
-        };
-        drop(connected);
-        let state = client.state();
-        lock(&self.check).follow(&state, |key| client.safety_number(key))
+        // Under the connection's lock, so this never holds the last reference to a client and
+        // so never runs its goodbye on the UI thread.
+        self.core
+            .with_client(|client| {
+                let state = client.state();
+                lock(&self.check).follow(&state, |key| client.safety_number(key))
+            })
+            .unwrap_or(false)
     }
 
     /// Lets the user act on the number that replaced the one they were comparing.

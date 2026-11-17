@@ -872,7 +872,7 @@ impl Core {
     }
 
     /// Runs `f` on the client of the connection there is, under the lock on it.
-    fn with_client<T>(&self, f: impl FnOnce(&dyn ClientApi) -> T) -> Option<T> {
+    pub(crate) fn with_client<T>(&self, f: impl FnOnce(&dyn ClientApi) -> T) -> Option<T> {
         Some(f(&*lock(&self.connected).as_ref()?.client))
     }
 
