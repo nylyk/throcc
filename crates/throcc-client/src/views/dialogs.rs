@@ -484,7 +484,7 @@ fn profile(app: &mut ThroccApp, check: SafetyCheck, cx: &mut Context<ThroccApp>)
     let user = check.user();
     let avatar = app.state.person(user).and_then(|p| p.avatar);
     let picture = app.picture(avatar, cx);
-    let state = app.state.clone();
+    let state = &app.state;
     let person = state.person(user);
     let name = person.map_or(format!("User {}", user.0), |p| p.name.clone());
     let verified = person.is_some_and(|p| p.verified);
@@ -548,7 +548,7 @@ fn profile(app: &mut ThroccApp, check: SafetyCheck, cx: &mut Context<ThroccApp>)
         );
     }
     let groups = check.groups();
-    let mark_command = check.mark(&state, !verified);
+    let mark_command = check.mark(state, !verified);
     let mark = if verified {
         secondary("mark-verified", "Mark as Not Verified")
     } else {
@@ -594,7 +594,7 @@ fn profile(app: &mut ThroccApp, check: SafetyCheck, cx: &mut Context<ThroccApp>)
         .child(mark);
     let mut buttons = actions("Done", cx).w_full();
     if change.is_some() {
-        let dismiss = check.dismiss_warning(&state);
+        let dismiss = check.dismiss_warning(state);
         buttons = buttons.child(
             secondary("dismiss-key-change", "Dismiss Warning")
                 .disabled(dismiss.is_none())
@@ -610,7 +610,7 @@ fn profile(app: &mut ThroccApp, check: SafetyCheck, cx: &mut Context<ThroccApp>)
         .child(number)
         .children(
             check
-                .explanation(&state, &name)
+                .explanation(state, &name)
                 .map(|explanation| description(explanation).text_center()),
         )
         .child(buttons)

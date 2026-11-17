@@ -12,6 +12,7 @@ use gpui_component::notification::Notification;
 use gpui_component::slider::{SliderEvent, SliderState};
 use gpui_component::{Icon, Sizable, Size};
 pub use throcc_client_core::state::{gain_to_loudness, initial, loudness_to_gain};
+use throcc_proto::Fingerprint;
 
 use crate::theme;
 use crate::updates::Release;
@@ -73,6 +74,12 @@ pub fn server_seed(address: &str) -> u64 {
     address.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
     })
+}
+
+/// An avatar colour seed for the person whose identity key is `key`, the same wherever it is
+/// drawn.
+pub fn key_seed(key: &Fingerprint) -> u64 {
+    u64::from_le_bytes(key.0.first_chunk().copied().unwrap_or_default())
 }
 
 /// The grey disc in place of a blocked person's picture.

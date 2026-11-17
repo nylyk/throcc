@@ -216,10 +216,7 @@ impl Render for PopOut {
                     buttons,
                     audience: person.map_or(0, |p| p.audience),
                     controls,
-                    warning: config
-                        .is_some()
-                        .then(|| ShareWarning::of(&state.health, user))
-                        .flatten(),
+                    warning: config.and_then(|_| ShareWarning::of(&state.health, user)),
                     fullscreen,
                 }
                 .render(),

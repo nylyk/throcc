@@ -20,8 +20,8 @@ use throcc_client_core::state::BLOCKED_NAME;
 use throcc_proto::Fingerprint;
 
 use super::common::{
-    Typeset, avatar, caption, card, field_error, ghost_icon, key_cap, mono, primary, section,
-    slider_gain, slider_value, update_notice, volume_slider,
+    Typeset, avatar, caption, card, field_error, ghost_icon, key_cap, key_seed, mono, primary,
+    section, slider_gain, slider_value, update_notice, volume_slider,
 };
 use super::page::{field, frame, nav, picture_editor, row, save_line, segmented, switch_row};
 use crate::app::{DeviceNames, PictureFor, Screen, SettingsPage, ThroccApp, typed_name};
@@ -568,7 +568,6 @@ fn verified(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         } else {
             person.name.clone()
         };
-        let seed = u64::from_le_bytes(key.0.first_chunk().copied().unwrap_or_default());
         let servers: Vec<String> = person
             .servers
             .iter()
@@ -580,7 +579,13 @@ fn verified(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             .gap_3()
             .min_h(theme::TOUCH)
             .px_2()
-            .child(avatar(&name, seed, look.picture.clone(), px(26.), false))
+            .child(avatar(
+                &name,
+                key_seed(&key),
+                look.picture.clone(),
+                px(26.),
+                false,
+            ))
             .child(
                 div()
                     .flex_1()
@@ -631,7 +636,6 @@ fn blocked(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let rows = app.blocked_people.iter().enumerate().map(|(i, look)| {
         let person = &look.person;
         let key = person.key;
-        let seed = u64::from_le_bytes(key.0.first_chunk().copied().unwrap_or_default());
         div()
             .flex()
             .items_center()
@@ -640,7 +644,7 @@ fn blocked(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
             .px_2()
             .child(avatar(
                 &person.name,
-                seed,
+                key_seed(&key),
                 look.picture.clone(),
                 px(26.),
                 false,
