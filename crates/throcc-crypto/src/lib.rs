@@ -5,6 +5,8 @@ pub mod identity;
 pub mod media;
 pub mod pake;
 pub mod safety;
+#[cfg(feature = "transfer")]
+pub mod transfer;
 
 #[cfg(test)]
 fn hex(bytes: &[u8]) -> String {

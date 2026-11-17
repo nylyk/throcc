@@ -17,9 +17,9 @@ use crate::state::BlockedPerson;
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct BlockedRecord {
-    name: String,
-    avatar: Option<Hex>,
-    server: Option<Hex>,
+    pub name: String,
+    pub avatar: Option<Hex>,
+    pub server: Option<Hex>,
 }
 
 pub(crate) type BlockedRecords = BTreeMap<Hex, BlockedRecord>;
@@ -75,6 +75,19 @@ impl BlockedStore {
         };
         self.change(|records| {
             records.insert(Hex(person.key.0), record);
+        })
+    }
+
+    pub(crate) fn records(&self) -> BlockedRecords {
+        lock(&self.0).records.clone()
+    }
+
+    /// Blocks the people of `other` who aren't blocked here yet.
+    pub(crate) fn merge(&self, other: BlockedRecords) -> Result<()> {
+        self.change(|records| {
+            for (key, record) in other {
+                records.entry(key).or_insert(record);
+            }
         })
     }
 

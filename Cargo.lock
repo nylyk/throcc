@@ -6165,6 +6165,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
+
+[[package]]
 name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8075,7 +8081,9 @@ dependencies = [
  "objc2-audio-toolbox",
  "objc2-core-audio-types",
  "pipewire",
+ "postcard",
  "proptest",
+ "qrcode",
  "quinn",
  "ropus",
  "rtrb",
@@ -8084,6 +8092,7 @@ dependencies = [
  "screencapturekit 11.0.0",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "sonora",
  "sonora-agc2",
  "sonora-common-audio",
@@ -8105,6 +8114,7 @@ name = "throcc-crypto"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "argon2",
  "ed25519-dalek",
  "getrandom 0.4.3",
  "hkdf 0.13.0",

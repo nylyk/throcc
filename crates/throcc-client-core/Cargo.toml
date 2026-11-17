@@ -13,7 +13,7 @@ ffmpeg = ["throcc-video/ffmpeg"]
 
 [dependencies]
 throcc-proto.workspace = true
-throcc-crypto = { workspace = true, features = ["media"] }
+throcc-crypto = { workspace = true, features = ["media", "transfer"] }
 throcc-video.workspace = true
 anyhow.workspace = true
 bytes.workspace = true
@@ -31,6 +31,9 @@ rustls.workspace = true
 rustls-webpki.workspace = true
 thiserror.workspace = true
 image = { workspace = true, features = ["gif", "bmp", "webp"] }
+postcard.workspace = true
+qrcode.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 zeroize.workspace = true

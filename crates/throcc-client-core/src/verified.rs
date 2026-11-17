@@ -37,34 +37,34 @@ pub(crate) struct VerifiedKeys {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct VerifiedRecords {
-    verified: BTreeMap<Hex, VerifiedEntry>,
+    pub verified: BTreeMap<Hex, VerifiedEntry>,
     /// Pairs seen under a verified key that later showed another, unverified key. Each is
     /// one of a verified key's `seen` pairs, so they are bounded alike.
-    changed: Vec<KeyChange>,
+    pub changed: Vec<KeyChange>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
-struct VerifiedEntry {
+pub(crate) struct VerifiedEntry {
     /// The name they were shown with when verified, to tell them apart in the list.
-    name: String,
+    pub name: String,
     /// The picture they were shown with when verified.
-    avatar: Option<Hex>,
-    seen: BTreeSet<SeenAs>,
+    pub avatar: Option<Hex>,
+    pub seen: BTreeSet<SeenAs>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-struct SeenAs {
-    server: Hex,
-    user: UserId,
+pub(crate) struct SeenAs {
+    pub server: Hex,
+    pub user: UserId,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
-struct KeyChange {
+pub(crate) struct KeyChange {
     #[serde(flatten)]
-    at: SeenAs,
+    pub at: SeenAs,
     /// The key shown there last that wasn't the verified one.
-    now: Hex,
+    pub now: Hex,
 }
 
 impl VerifiedRecords {
@@ -93,6 +93,32 @@ impl VerifiedRecords {
 
     fn forget_change(&mut self, at: SeenAs) {
         self.changed.retain(|c| c.at != at);
+    }
+
+    /// Takes in the keys and warnings of `other` that these lack. A pair already seen under
+    /// a key here stays with it, and a warning comes only for a pair taken in.
+    fn merge(&mut self, other: VerifiedRecords) {
+        let mut taken = BTreeSet::new();
+        for (key, entry) in other.verified {
+            let seen = entry.seen.clone();
+            self.verified.entry(key).or_insert(VerifiedEntry {
+                seen: BTreeSet::new(),
+                ..entry
+            });
+            for at in seen {
+                if !self.verified.values().any(|v| v.seen.contains(&at)) {
+                    self.see(&key.0, at);
+                    if self.verified[&key].seen.contains(&at) {
+                        taken.insert(at);
+                    }
+                }
+            }
+        }
+        for change in other.changed {
+            if taken.contains(&change.at) && self.changed_at(change.at).is_none() {
+                self.changed.push(change);
+            }
+        }
     }
 }
 
@@ -309,6 +335,15 @@ impl VerifiedStore {
 
     pub fn list(&self) -> Vec<VerifiedIdentity> {
         self.lock().list()
+    }
+
+    pub(crate) fn records(&self) -> VerifiedRecords {
+        self.lock().records.clone()
+    }
+
+    /// Takes in the verified keys and warnings of `other` that this install lacks.
+    pub(crate) fn merge(&self, other: VerifiedRecords) -> Result<()> {
+        self.lock().change(|records| records.merge(other))
     }
 
     /// Takes `key` off the verified ones, on every server.

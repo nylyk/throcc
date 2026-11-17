@@ -10,9 +10,11 @@ workspace = true
 
 [features]
 media = ["dep:hpke", "dep:aes-gcm"]
+transfer = ["dep:aes-gcm", "dep:argon2"]
 
 [dependencies]
 aes-gcm = { workspace = true, optional = true }
+argon2 = { workspace = true, optional = true }
 ed25519-dalek.workspace = true
 getrandom.workspace = true
 hkdf.workspace = true
@@ -28,6 +30,6 @@ zeroize.workspace = true
 proptest.workspace = true
 rand_core.workspace = true
 ring.workspace = true
-# Runs the media and HPKE tests in `cargo test -p throcc-crypto` too. Dev-dependency features
+# Runs the media, HPKE and transfer tests in `cargo test -p throcc-crypto` too. Dev-dependency features
 # reach only test builds, so the server still builds this crate without `media`.
-throcc-crypto = { workspace = true, features = ["media"] }
+throcc-crypto = { workspace = true, features = ["media", "transfer"] }

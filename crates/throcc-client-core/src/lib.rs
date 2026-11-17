@@ -7,6 +7,7 @@ pub mod connection;
 pub mod control;
 mod files;
 mod floors;
+pub mod fountain;
 pub mod install;
 mod json_file;
 mod keys;
@@ -24,6 +25,7 @@ mod session;
 pub mod settings;
 pub mod state;
 pub mod theme;
+pub mod transfer;
 mod trust;
 pub mod verified;
 

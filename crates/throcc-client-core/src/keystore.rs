@@ -42,6 +42,12 @@ const ENCRYPTION_KEY_CLOCK_SKEW: Duration = Duration::from_secs(24 * 60 * 60);
 )]
 pub struct IdentityMissing;
 
+/// The install already knows servers, so its identity is in use and is never replaced by
+/// another device's.
+#[derive(Debug, thiserror::Error)]
+#[error("this device already has an identity that servers know")]
+pub struct IdentityInUse;
+
 /// What [`Keystore::start_over`] did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartedOver {
@@ -179,6 +185,35 @@ impl Keystore {
     }
 }
 
+/// Makes `identity` this install's, with a new encryption key, while no server knows the
+/// identity it has. For bringing over another device's identity.
+pub fn import_identity(identity: &IdentityKey) -> Result<()> {
+    let dir = config_dir()?;
+    fs::create_dir_all(&dir)?;
+    let _opening = crate::lock(&OPENING);
+    import_into(platform::identity_entry(&dir)?.as_ref(), &dir, identity)
+}
+
+fn import_into<E: SeedEntry>(
+    keychain: Option<&E>,
+    dir: &Path,
+    identity: &IdentityKey,
+) -> Result<()> {
+    if knows_servers(dir)? {
+        return Err(IdentityInUse.into());
+    }
+    new_encryption_key(&dir.join(ENCRYPTION_KEY_FILE), unix_now()?)?;
+    let seed = identity.seed();
+    let file = dir.join(IDENTITY_FILE);
+    if let Some(keychain) = keychain {
+        keychain.write(seed.as_slice())?;
+        if !file.exists() {
+            return Ok(());
+        }
+    }
+    replace_file(&file, seed.as_slice())
+}
+
 /// Where throcc keeps its keys, pins and settings on this machine.
 pub fn config_dir() -> Result<PathBuf> {
     Ok(app_dirs()?.config)
@@ -252,6 +287,12 @@ fn new_encryption_key(path: &Path, now: u64) -> Result<(EncryptionKeyPair, u64)>
     Ok((key, now))
 }
 
+/// Held while the identity is read or written. Two first runs at once would each start an
+/// identity, and the one whose write loses would sign in with a key that is stored nowhere.
+/// On Android the later wrapping key would also replace the earlier one, leaving a seed
+/// nothing can unwrap.
+static OPENING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Whether an empty keychain may start a new identity while servers are known.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WhenMissing {
@@ -283,10 +324,6 @@ trait SeedEntry {
 /// The identity key in the OS keychain, put there when it has none. `None` on a platform
 /// without a keychain.
 fn keychain_identity(dir: &Path, when_missing: WhenMissing) -> Result<Option<Found>> {
-    // Two first runs at once would each start an identity, and the one whose write loses
-    // would sign in with a key that is stored nowhere. On Android the later wrapping key
-    // would also replace the earlier one, leaving a seed nothing can unwrap.
-    static OPENING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _opening = crate::lock(&OPENING);
     let Some(entry) = platform::identity_entry(dir)? else {
         return Ok(None);
@@ -578,6 +615,45 @@ mod tests {
             );
             assert_eq!(encryption_key_file(dir.path()), old_encryption_key);
         }
+    }
+
+    #[test]
+    fn an_imported_identity_replaces_one_no_server_knows_with_a_new_encryption_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = FakeEntry::default();
+        identity_in(&fresh, dir.path(), WhenMissing::Refuse).unwrap();
+        load_encryption_key(&dir.path().join(ENCRYPTION_KEY_FILE)).unwrap();
+        let old_encryption_key = encryption_key_file(dir.path());
+
+        let imported = IdentityKey::generate();
+        import_into(Some(&fresh), dir.path(), &imported).unwrap();
+        assert_eq!(fresh.held().unwrap(), imported.seed().as_slice());
+        assert!(!dir.path().join(IDENTITY_FILE).exists());
+        assert_ne!(encryption_key_file(dir.path()), old_encryption_key);
+
+        let kept = file_identity(dir.path()).unwrap();
+        import_into(Some(&fresh), dir.path(), &imported).unwrap();
+        assert_ne!(kept.public(), imported.public());
+        assert_eq!(
+            file_identity(dir.path()).unwrap().public(),
+            imported.public()
+        );
+
+        import_into(None::<&FakeEntry>, dir.path(), &kept).unwrap();
+        assert_eq!(file_identity(dir.path()).unwrap().public(), kept.public());
+    }
+
+    #[test]
+    fn an_identity_servers_know_is_never_replaced_by_an_import() {
+        let dir = tempfile::tempdir().unwrap();
+        knowing_a_server(dir.path());
+        let entry = FakeEntry::default();
+        let mine = IdentityKey::generate();
+        entry.write(mine.seed().as_slice()).unwrap();
+        let refused = import_into(Some(&entry), dir.path(), &IdentityKey::generate()).unwrap_err();
+        assert!(refused.downcast_ref::<IdentityInUse>().is_some());
+        assert_eq!(entry.held().unwrap(), mine.seed().as_slice());
+        assert!(!dir.path().join(ENCRYPTION_KEY_FILE).exists());
     }
 
     #[test]
