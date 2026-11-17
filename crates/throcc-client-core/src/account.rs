@@ -41,6 +41,11 @@ impl SignInError {
         }
     }
 
+    /// Whether the server doesn't know our identity, so joining it takes an invite.
+    pub fn needs_invite(&self) -> bool {
+        matches!(self, Self::NotEnrolled(_))
+    }
+
     /// Whether the identity the known servers know us by is gone from the keychain.
     pub fn identity_missing(&self) -> bool {
         matches!(self, Self::Store(e) if e.is::<IdentityMissing>())

@@ -687,19 +687,25 @@ fn remove(user: UserId, name: &str, cascade: bool, cx: &mut Context<ThroccApp>) 
 }
 
 fn add_server(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
-    body("Add Server")
-        .child(field(
-            "Address",
-            Input::new(&app.address),
-        ))
-        .child(
-            field(
-                "Invite code",
-                Input::new(&app.code).font_family(theme::mono_font()),
+    let step = if app.needs_invite {
+        let address = app.address.read(cx).value().trim().to_owned();
+        body("Add Server")
+            .child(description(format!(
+                "{address} doesn’t know you yet. Join with an invite code from someone there."
+            )))
+            .child(
+                field(
+                    "Invite code",
+                    Input::new(&app.code).font_family(theme::mono_font()),
+                )
+                .child(caption("The code also proves you reached the real server.")),
             )
-            .child(caption("The code also proves you reached the real server. Leave it empty for a server you joined on any of your devices.")),
-        )
-        .children(app.join_error.clone().map(error_box))
+    } else {
+        body("Add Server").child(field("Address", Input::new(&app.address)).child(caption(
+            "An invite code is asked for only if the server doesn’t know you yet.",
+        )))
+    };
+    step.children(app.join_error.clone().map(error_box))
         .child(
             actions("Cancel", cx).child(
                 primary("join", if app.joining { "Joining…" } else { "Join" })
@@ -917,6 +923,7 @@ fn pin_mismatch(
                 .justify_end()
                 .gap_2()
                 .child(primary("use-invite", "Use a Fresh Invite").on_click(cx.listener(|app, _, window, cx| {
+                    app.needs_invite = true;
                     app.code.update(cx, |s, cx| s.focus(window, cx));
                     app.set_dialog(Some(Dialog::AddServer), cx);
                 })))

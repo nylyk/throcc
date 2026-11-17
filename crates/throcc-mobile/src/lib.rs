@@ -88,6 +88,9 @@ pub enum CoreError {
     /// A newer `connect`, `cancel_connect` or `disconnect` took over from this `connect`.
     #[error("connecting was cancelled")]
     Cancelled,
+    /// The server doesn't know our identity, so joining it takes an invite code.
+    #[error("this server needs an invite code")]
+    NeedsInvite,
 }
 
 impl From<anyhow::Error> for CoreError {
@@ -109,6 +112,9 @@ impl CoreError {
         }
         if error.identity_missing() {
             return Self::IdentityMissing;
+        }
+        if error.needs_invite() {
+            return Self::NeedsInvite;
         }
         Self::Failed {
             reason: error.explain(address),

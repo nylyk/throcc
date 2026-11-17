@@ -470,6 +470,8 @@ pub struct ThroccApp {
     pub mascot: views::mascot::Shown,
     sign_ins: SignIns,
     pub join_error: Option<String>,
+    /// Whether adding a server asks for an invite code, as its server doesn't know us.
+    pub needs_invite: bool,
     pub start_over: StartOver,
     pub exporting: Option<Exporting>,
     /// Whether an export is being sealed, which may wait on a keychain prompt.
@@ -648,6 +650,7 @@ impl ThroccApp {
             mascot: views::mascot::Shown::default(),
             sign_ins: SignIns::default(),
             join_error: None,
+            needs_invite: false,
             start_over: StartOver::NotStarted,
             exporting: None,
             preparing_export: false,
@@ -1787,6 +1790,7 @@ impl ThroccApp {
 
     pub fn open_add_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.join_error = None;
+        self.needs_invite = false;
         set_field(&self.address, "", true, window, cx);
         set_field(&self.code, "", false, window, cx);
         self.set_dialog(Some(Dialog::AddServer), cx);
@@ -1802,8 +1806,11 @@ impl ThroccApp {
             self.join_error = Some("Enter the server’s address.".into());
             return;
         }
-        let invite = if code_text.trim().is_empty() {
+        let invite = if !self.needs_invite {
             None
+        } else if code_text.trim().is_empty() {
+            self.join_error = Some("Enter the invite code.".into());
+            return;
         } else {
             match code_text.parse::<InviteCode>() {
                 Ok(code) => Some(code),
@@ -1879,6 +1886,11 @@ impl ThroccApp {
                                     });
                                 }
                                 None if e.identity_missing() => app.show_identity_missing(),
+                                None if e.needs_invite() => {
+                                    app.needs_invite = true;
+                                    app.join_error = None;
+                                    app.code.update(cx, |s, cx| s.focus(window, cx));
+                                }
                                 None => app.join_error = Some(e.explain(&address)),
                             }
                         }
@@ -2025,7 +2037,7 @@ impl ThroccApp {
     /// welcome, join, joinfailed, lost, personmenu, addserver, removeserver, room, testpattern,
     /// unwatched, alone, emptylobby, focus, fullscreen, popout, slow, slowpopout, slowfullscreen,
     /// lagging, share, connection, person, personverified, personchanged, keychange, ownprofile,
-    /// pinmismatch, settings, appearance, verified, blocked, blockedmenu, blockedpeople, exportqr,
+    /// addserverinvite, pinmismatch, settings, appearance, verified, blocked, blockedmenu, blockedpeople, exportqr,
     /// exportcode, importcode, about,
     /// update, reconnect, elsewhere, newroom, editroom, roompassword, deleteroom, profile,
     /// profileerror, server, keys, members, invites, removeuser, leaveserver, identitymissing,
@@ -2111,8 +2123,10 @@ impl ThroccApp {
                     cx,
                 );
             }
-            "addserver" => {
+            "addserver" | "addserverinvite" => {
                 offline(self);
+                self.needs_invite = screen == "addserverinvite";
+                set_field(&self.address, "owls.thro.cc", false, window, cx);
                 self.dialog = Some(Dialog::AddServer);
             }
             "removeserver" => {
