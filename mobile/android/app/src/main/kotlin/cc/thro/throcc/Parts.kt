@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
@@ -53,6 +55,7 @@ import androidx.compose.material3.LargeFlexibleTopAppBar
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuDefaults
@@ -76,26 +79,32 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.window.core.layout.WindowSizeClass
-import cc.thro.throcc.core.Connection
 import cc.thro.throcc.core.CoreState
 import cc.thro.throcc.core.KnownServer
+import cc.thro.throcc.core.CoreException
+import cc.thro.throcc.core.KeyTrust
 import cc.thro.throcc.core.NameCheck
+import cc.thro.throcc.core.NoticeAction
 import cc.thro.throcc.core.Person
 import cc.thro.throcc.core.Server
 import cc.thro.throcc.core.checkName
-import cc.thro.throcc.core.limits
+import cc.thro.throcc.core.initial
+import cc.thro.throcc.core.nameProblem
 import kotlinx.coroutines.launch
 
 /** The width and side margins of a page's content, kept narrow in the middle of a wide window. */
@@ -107,14 +116,14 @@ fun Page(
     model: AppModel,
     title: String,
     onBack: (() -> Unit)? = model::back,
-    subtitle: String? = null,
+    largeTitle: Boolean = true,
     notices: Boolean = true,
     actions: @Composable RowScope.() -> Unit = {},
     floatingButton: @Composable () -> Unit = {},
     buttonPosition: FabPosition = FabPosition.End,
     content: @Composable (PaddingValues) -> Unit,
 ) {
-    val tall = currentWindowAdaptiveInfoV2().windowSizeClass
+    val tall = largeTitle && currentWindowAdaptiveInfoV2().windowSizeClass
         .isHeightAtLeastBreakpoint(WindowSizeClass.HEIGHT_DP_MEDIUM_LOWER_BOUND)
     val scroll = if (tall) {
         TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
@@ -122,7 +131,7 @@ fun Page(
         TopAppBarDefaults.pinnedScrollBehavior()
     }
     val name = @Composable {
-        Text(title, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        OneLineText(title, fontWeight = FontWeight.Medium)
     }
     val back = @Composable {
         if (onBack != null) IconButton(onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
@@ -134,7 +143,6 @@ fun Page(
             if (tall) {
                 LargeFlexibleTopAppBar(
                     name,
-                    subtitle = subtitle?.let { { Text(it, maxLines = 1, overflow = TextOverflow.Ellipsis) } },
                     navigationIcon = back,
                     actions = actions,
                     colors = colors,
@@ -152,11 +160,42 @@ fun Page(
     )
 }
 
+/** Text on one line that ends in an ellipsis where it doesn't fit, for the names people choose. */
+@Composable
+fun OneLineText(
+    text: String,
+    modifier: Modifier = Modifier,
+    color: Color = Color.Unspecified,
+    fontWeight: FontWeight? = null,
+    textAlign: TextAlign? = null,
+    style: TextStyle = LocalTextStyle.current,
+) = Text(
+    text,
+    modifier,
+    color,
+    fontWeight = fontWeight,
+    textAlign = textAlign,
+    maxLines = 1,
+    overflow = TextOverflow.Ellipsis,
+    style = style,
+)
+
+/** These paddings above and beside only, for scrolling content that takes the bottom one inside. */
+@Composable
+fun PaddingValues.exceptBottom(): PaddingValues {
+    val direction = LocalLayoutDirection.current
+    return PaddingValues(calculateStartPadding(direction), calculateTopPadding(), calculateEndPadding(direction), 0.dp)
+}
+
 /** A scrolling column of fields. */
 @Composable
 fun Form(padding: PaddingValues, content: @Composable ColumnScope.() -> Unit) {
     Column(
-        Modifier.padding(padding).verticalScroll(rememberScrollState()).pageWidth().padding(vertical = 16.dp),
+        Modifier.padding(padding.exceptBottom())
+            .verticalScroll(rememberScrollState())
+            .padding(bottom = padding.calculateBottomPadding())
+            .pageWidth()
+            .padding(vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
         content = content,
     )
@@ -263,9 +302,9 @@ fun MainButton(text: String, enabled: Boolean = true, busy: Boolean = false, onC
     }
 }
 
-/** A round picture, or the first letter of `name` where there is none. */
+/** A round picture, or the letter it stands in with where there is none, or a person sign for no name yet. */
 @Composable
-fun Avatar(picture: ImageBitmap?, name: String, size: Dp, modifier: Modifier = Modifier) {
+fun Avatar(picture: ImageBitmap?, initial: String?, size: Dp, modifier: Modifier = Modifier) {
     Box(
         modifier.size(size).clip(CircleShape).background(MaterialTheme.colorScheme.secondaryContainer),
         Alignment.Center,
@@ -273,9 +312,9 @@ fun Avatar(picture: ImageBitmap?, name: String, size: Dp, modifier: Modifier = M
         val type = MaterialTheme.typography
         when {
             picture != null -> Image(picture, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-            name.isBlank() -> Icon(Icons.Default.Person, null, Modifier.size(size / 2))
+            initial == null -> Icon(Icons.Default.Person, null, Modifier.size(size / 2))
             else -> Text(
-                name.trim().take(if (name.trim().first().isHighSurrogate()) 2 else 1).uppercase(),
+                initial,
                 color = MaterialTheme.colorScheme.onSecondaryContainer,
                 style = if (size < 56.dp) type.titleMedium else type.headlineMedium,
             )
@@ -289,7 +328,7 @@ fun PersonPicture(model: AppModel, person: Person, size: Dp, modifier: Modifier 
     if (person.blocked) {
         Icon(Icons.Default.Block, null, modifier.size(size), MaterialTheme.colorScheme.onSurfaceVariant)
     } else {
-        Avatar(model.picture(person.avatar), person.name, size, modifier)
+        Avatar(model.picture(person.avatar), person.initial, size, modifier)
     }
 }
 
@@ -302,21 +341,13 @@ fun MutedIcon(person: Person) {
     }
 }
 
-enum class Trust { Verified, Unverified, KeyChanged }
-
-fun CoreState.trust(person: Person) = when {
-    keyWarnings.any { it.user == person.user } -> Trust.KeyChanged
-    person.verified || person.user == me -> Trust.Verified
-    else -> Trust.Unverified
-}
-
 @Composable
-fun TrustLabel(trust: Trust) {
+fun TrustLabel(trust: KeyTrust) {
     val scheme = MaterialTheme.colorScheme
     val (icon, text, color) = when (trust) {
-        Trust.KeyChanged -> Triple(Icons.Default.Warning, "Key changed", scheme.error)
-        Trust.Verified -> Triple(Icons.Default.VerifiedUser, "Verified", scheme.primary)
-        Trust.Unverified -> Triple(Icons.Outlined.GppMaybe, "Not verified", scheme.onSurfaceVariant)
+        KeyTrust.KEY_CHANGED -> Triple(Icons.Default.Warning, "Key changed", scheme.error)
+        KeyTrust.VERIFIED -> Triple(Icons.Default.VerifiedUser, "Verified", scheme.primary)
+        KeyTrust.UNVERIFIED -> Triple(Icons.Outlined.GppMaybe, "Not verified", scheme.onSurfaceVariant)
     }
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         Icon(icon, null, Modifier.size(16.dp), color)
@@ -333,17 +364,9 @@ val KnownServer.title get() = name ?: address
 /** The name a server keeps for `typed`, or null where it refuses it. */
 fun validName(typed: String) = (checkName(typed) as? NameCheck.Fine)?.name
 
-/** Why a server refuses `typed` as a name, or null where it takes it or nothing is typed. */
-fun nameError(typed: String) = when (checkName(typed)) {
-    NameCheck.TooLong -> "Names can be at most ${limits().nameChars} characters."
-    NameCheck.HidesText -> "Names can’t contain control or invisible characters."
-    NameCheck.ShowsNothing -> "Names need at least one visible character."
-    NameCheck.Empty, is NameCheck.Fine -> null
-}
-
 @Composable
 fun NameField(name: String, onChange: (String) -> Unit) {
-    val error = nameError(name)
+    val error = nameProblem(name)
     OutlinedTextField(
         name,
         onChange,
@@ -363,13 +386,17 @@ fun PictureField(model: AppModel, picture: ByteArray?, name: String, onChange: (
     val picker = rememberLauncherForActivityResult(PickVisualMedia()) { uri ->
         if (uri != null) {
             scope.launch {
-                squarePicture(context, uri)?.let(onChange)
-                    ?: model.notices.trySend("Couldn’t read that picture. Choose another one.")
+                try {
+                    profilePicture(context, uri)?.let(onChange)
+                        ?: model.notices.trySend("Couldn’t read that picture. Choose another one.")
+                } catch (failure: CoreException) {
+                    model.notices.trySend(failure.explained)
+                }
             }
         }
     }
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-        Avatar(remember(picture) { picture?.toImage() }, name, 80.dp)
+        Avatar(remember(picture) { picture?.toImage() }, initial(name).takeIf { name.isNotBlank() }, 80.dp)
         Column {
             FilledTonalButton({ picker.launch(PickVisualMediaRequest(PickVisualMedia.ImageOnly)) }) {
                 Text("Choose Picture…")
@@ -397,9 +424,9 @@ fun DangerItem(text: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun DangerButton(text: String, onClick: () -> Unit) {
+fun DangerButton(text: String, enabled: Boolean = true, onClick: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
-    Button(onClick, colors = ButtonDefaults.buttonColors(scheme.error, scheme.onError)) { Text(text) }
+    Button(onClick, enabled = enabled, colors = ButtonDefaults.buttonColors(scheme.error, scheme.onError)) { Text(text) }
 }
 
 /** Asks before `action`, which can't be undone. */
@@ -452,27 +479,20 @@ fun RemoveDialog(name: String, onDismiss: () -> Unit, onRemove: (cascade: Boolea
 /** What became of the connection, with a way to get it back. */
 @Composable
 fun ConnectionBanner(model: AppModel, state: CoreState) {
+    val notice = state.notice ?: return
     val signIn = { state.server?.let { model.connect(it.address) } ?: Unit }
-    val signingIn = model.connectingTo != null
-    when (val connection = state.connection) {
-        Connection.Connected, Connection.Disconnected -> {}
-        is Connection.Reconnecting -> Banner(
-            "Reconnecting (attempt ${connection.attempt}): ${connection.reason}. You’ll be put back in your room.",
-            busy = true,
-        )
-        Connection.AwaitingReconnect -> Banner(
-            "The connection was down for a while. Reconnecting here signs you out on any other device.",
-            action = "Reconnect",
-            onAction = model::reconnect,
-        )
-        Connection.SignedInElsewhere -> Banner("Signed in on another device.", signingIn, "Sign In Here", signIn)
-        is Connection.Failed -> Banner("Disconnected: ${connection.reason}", signingIn, "Try Again", signIn)
+    val (action, onAction) = when (notice.action) {
+        NoticeAction.RECONNECT -> "Reconnect" to model::reconnect
+        NoticeAction.SIGN_IN_HERE -> "Sign In Here" to signIn
+        NoticeAction.TRY_AGAIN -> "Try Again" to signIn
+        null -> null to {}
     }
+    Banner(notice.hint, notice.problem, notice.busy || model.connectingTo != null, action, onAction)
 }
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun Banner(text: String, busy: Boolean = false, action: String? = null, onAction: () -> Unit = {}) {
+private fun Banner(text: String, problem: String?, busy: Boolean, action: String?, onAction: () -> Unit) {
     val container = CardDefaults.cardColors(MaterialTheme.colorScheme.surfaceContainerHigh)
     Card(Modifier.fillMaxWidth().padding(bottom = 12.dp), MaterialTheme.shapes.extraLarge, container) {
         Column(Modifier.fillMaxWidth().padding(16.dp), Arrangement.spacedBy(8.dp)) {
@@ -480,7 +500,14 @@ private fun Banner(text: String, busy: Boolean = false, action: String? = null, 
                 if (busy) LoadingIndicator(Modifier.size(24.dp)) else Icon(Icons.Default.CloudOff, null)
                 Text(text)
             }
+            problem?.let { ErrorText(it) }
             if (action != null) Button(onAction, Modifier.align(Alignment.End), !busy) { Text(action) }
         }
     }
+}
+
+/** Small text in the error colour, for what went wrong or why something can't be read. */
+@Composable
+fun ErrorText(text: String, modifier: Modifier = Modifier) {
+    Text(text, modifier, MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
 }

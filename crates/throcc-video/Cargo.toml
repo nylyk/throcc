@@ -1,0 +1,43 @@
+[package]
+name = "throcc-video"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+ffmpeg = ["dep:rsmpeg"]
+# dav1d and libvpx on platforms that don't need them, to test them there.
+software = ["dep:dav1d-sys", "dep:vpx-sys"]
+
+[dependencies]
+throcc-proto.workspace = true
+bytes.workspace = true
+dav1d-sys = { workspace = true, optional = true }
+libc.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+vpx-sys = { workspace = true, optional = true }
+
+[target.'cfg(not(any(target_vendor = "apple", target_os = "android")))'.dependencies]
+rsmpeg = { workspace = true, optional = true }
+
+[target.'cfg(any(target_vendor = "apple", target_os = "android"))'.dependencies]
+dav1d-sys.workspace = true
+vpx-sys.workspace = true
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2-core-foundation = { workspace = true, features = ["std", "CFArray", "CFBase", "CFData", "CFDictionary", "CFNumber", "CFString"] }
+objc2-core-media.workspace = true
+objc2-core-video.workspace = true
+objc2-video-toolbox.workspace = true
+
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2.workspace = true
+objc2-av-foundation.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+ndk-sys = { version = "0.6", features = ["media", "nativewindow"] }

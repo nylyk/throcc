@@ -7,20 +7,8 @@ use rsmpeg::ffi;
 use throcc_proto::messages::Codec;
 use tracing::{info, warn};
 
-use super::Frame;
-use super::frame::VideoFrame;
-
-#[derive(Debug, thiserror::Error)]
-pub enum DecodeError {
-    #[error("no decoder for {0:?}")]
-    NoDecoder(Codec),
-    #[error("decoded frames in pixel format {0}, which throcc doesn't present")]
-    Format(i32),
-    #[error("a {0}×{1} picture is larger than this share may send")]
-    TooLarge(i32, i32),
-    #[error("ffmpeg: {0}")]
-    Ffmpeg(#[from] RsmpegError),
-}
+use crate::frame::VideoFrame;
+use crate::{DecodeError, Frame, MaxSize, Output, switches};
 
 /// FFmpeg's own decoder for `codec`, the one that hands work to a hardware device.
 fn native_decoder(codec: Codec) -> &'static CStr {
@@ -43,48 +31,12 @@ fn software_decoder(codec: Codec) -> &'static CStr {
 
 /// Hardware decoding devices on this platform, tried in order before software.
 fn devices() -> &'static [ffi::AVHWDeviceType] {
-    if cfg!(target_os = "macos") {
-        &[ffi::AV_HWDEVICE_TYPE_VIDEOTOOLBOX]
-    } else if cfg!(target_os = "linux") {
+    if cfg!(target_os = "linux") {
         &[ffi::AV_HWDEVICE_TYPE_VAAPI, ffi::AV_HWDEVICE_TYPE_CUDA]
     } else if cfg!(windows) {
         &[ffi::AV_HWDEVICE_TYPE_D3D11VA, ffi::AV_HWDEVICE_TYPE_CUDA]
     } else {
         &[]
-    }
-}
-
-/// The widest and tallest any decoded picture may be.
-pub const MAX_SIDE: usize = 4096;
-
-/// The largest picture a decoder hands on, each side at most [`MAX_SIDE`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MaxSize {
-    width: usize,
-    height: usize,
-}
-
-impl MaxSize {
-    #[cfg(test)]
-    pub const ANY: Self = Self {
-        width: MAX_SIDE,
-        height: MAX_SIDE,
-    };
-
-    pub fn new(width: usize, height: usize) -> Self {
-        Self {
-            width: width.min(MAX_SIDE),
-            height: height.min(MAX_SIDE),
-        }
-    }
-
-    fn pixels(self) -> usize {
-        self.width * self.height
-    }
-
-    fn fits(self, frame: &AVFrame) -> bool {
-        let side = |v: i32| usize::try_from(v).unwrap_or(usize::MAX);
-        side(frame.width) <= self.width && side(frame.height) <= self.height
     }
 }
 
@@ -112,9 +64,13 @@ pub struct Decoder {
 const HARDWARE_GRACE: u32 = 3 * 90_000;
 
 impl Decoder {
-    /// Opens a decoder that refuses pictures larger than `max_size`.
-    pub fn new(codec: Codec, max_size: MaxSize) -> Result<Self, DecodeError> {
-        let decoder = match Self::on_hardware(codec, max_size) {
+    /// Opens a decoder that refuses pictures larger than `max_size`. Desktops draw pictures
+    /// themselves, so `output` stays unused.
+    pub fn new(codec: Codec, max_size: MaxSize, _output: Output) -> Result<Self, DecodeError> {
+        let hardware = (!switches::software_decoding())
+            .then(|| Self::on_hardware(codec, max_size))
+            .flatten();
+        let decoder = match hardware {
             Some(decoder) => decoder,
             None => Self::in_software(codec, max_size)?,
         };
@@ -163,6 +119,10 @@ impl Decoder {
         let found = AVCodec::find_decoder_by_name(software_decoder(codec))
             .ok_or(DecodeError::NoDecoder(codec))?;
         let mut ctx = context(&found, max_size.pixels());
+        // Zero is a thread per core; FFmpeg's default is one. The low-delay flag keeps
+        // pictures from being held across units, so this threads within each picture.
+        // SAFETY: `ctx` is a live codec context that has not been opened yet.
+        unsafe { (*ctx.as_mut_ptr()).thread_count = 0 };
         ctx.open(None)?;
         let engine = if found.name().to_bytes() == b"libdav1d" {
             "dav1d (software)"
@@ -188,9 +148,23 @@ impl Decoder {
         self.hardware
     }
 
+    /// Desktops draw pictures themselves.
+    pub fn present(&mut self, _frame: &Frame) {}
+
+    /// Desktops have no views to follow.
+    pub fn follow_view(&mut self) -> bool {
+        false
+    }
+
     /// Hands back a spent picture, so the next one reuses its memory.
     pub fn recycle(&mut self, frame: VideoFrame) {
         self.spare = Some(frame);
+    }
+
+    /// Pictures in flight come out only with the next unit: FFmpeg drains only at the end
+    /// of a stream.
+    pub fn drain(&mut self) -> Result<Option<Frame>, DecodeError> {
+        Ok(None)
     }
 
     /// Whether the decoder dropped its reference pictures since the last call, so only a
@@ -248,7 +222,7 @@ impl Decoder {
         let mut newest = None;
         loop {
             match self.ctx.receive_frame() {
-                Ok(frame) if !self.max_size.fits(&frame) => {
+                Ok(frame) if !self.max_size.fits(frame.width.into(), frame.height.into()) => {
                     return Err(DecodeError::TooLarge(frame.width, frame.height));
                 }
                 Ok(frame) => newest = Some(frame),
@@ -261,11 +235,6 @@ impl Decoder {
         let Some(frame) = newest else {
             return Ok(None);
         };
-        #[cfg(target_os = "macos")]
-        if let Some(buffer) = full_range_pixel_buffer(&frame) {
-            let picture = crate::media::capture::PixelBuffer { buffer, timestamp };
-            return Ok(Some(Frame::PixelBuffer(picture)));
-        }
         let frame = if frame.hw_frames_ctx.is_null() {
             &frame
         } else {
@@ -299,27 +268,8 @@ fn decoded_format(frame: &AVFrame) -> ffi::AVPixelFormat {
     unsafe { (*(*frame.hw_frames_ctx).data.cast::<ffi::AVHWFramesContext>()).sw_format }
 }
 
-/// The pixel buffer a VideoToolbox frame was decoded into, when renderers can draw it as it
-/// is: full-range NV12 holding exactly the frame's picture, with no padding cropped away.
-#[cfg(target_os = "macos")]
-fn full_range_pixel_buffer(frame: &AVFrame) -> Option<screencapturekit::cv::CVPixelBuffer> {
-    use crate::media::capture::macos::FULL_RANGE_NV12;
-
-    if frame.format != ffi::AV_PIX_FMT_VIDEOTOOLBOX {
-        return None;
-    }
-    // SAFETY: a VideoToolbox frame carries its CVPixelBufferRef in data[3], live while the
-    // frame is, and the wrapper takes a reference of its own.
-    let buffer =
-        unsafe { screencapturekit::cv::CVPixelBuffer::from_raw_borrowed(frame.data[3].cast()) }?;
-    let size = (frame.width as usize, frame.height as usize);
-    (buffer.pixel_format() == FULL_RANGE_NV12 && (buffer.width(), buffer.height()) == size)
-        .then_some(buffer)
-}
-
 fn device_name(device_type: ffi::AVHWDeviceType) -> &'static str {
     match device_type {
-        ffi::AV_HWDEVICE_TYPE_VIDEOTOOLBOX => "VideoToolbox",
         ffi::AV_HWDEVICE_TYPE_VAAPI => "VA-API",
         ffi::AV_HWDEVICE_TYPE_CUDA => "NVDEC",
         ffi::AV_HWDEVICE_TYPE_D3D11VA => "D3D11VA",
@@ -338,7 +288,7 @@ fn context(found: &AVCodec, max_pixels: usize) -> AVCodecContext {
 
 /// Copies a 4:2:0 frame, planar or NV12, into NV12 cropped to even dimensions, reusing the
 /// planes of `spare` if given. `None` for frames in any other format.
-pub(super) fn to_nv12(
+pub(crate) fn to_nv12(
     frame: &AVFrame,
     timestamp: u32,
     spare: Option<VideoFrame>,
@@ -389,27 +339,5 @@ unsafe fn plane_row(frame: &AVFrame, plane: usize, row: usize, len: usize) -> &[
             frame.data[plane].add(row * frame.linesize[plane] as usize),
             len,
         )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn frame(width: i32, height: i32) -> AVFrame {
-        let mut frame = AVFrame::new();
-        frame.set_width(width);
-        frame.set_height(height);
-        frame
-    }
-
-    #[test]
-    fn each_side_is_bounded_not_only_the_area() {
-        let size = MaxSize::new(1920 + 64, 1080 + 64);
-        assert!(size.fits(&frame(1920, 1080)));
-        assert!(!size.fits(&frame(65_536, 16)));
-        assert!(!size.fits(&frame(16, 4096)));
-        assert!(!MaxSize::ANY.fits(&frame(MAX_SIDE as i32 + 2, 2)));
-        assert_eq!(MaxSize::new(usize::MAX, 8), MaxSize::new(MAX_SIDE, 8));
     }
 }

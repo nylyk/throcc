@@ -16,6 +16,7 @@ unsafe_op_in_unsafe_fn = "deny"
 throcc-proto = { path = "crates/throcc-proto" }
 throcc-crypto = { path = "crates/throcc-crypto", default-features = false }
 throcc-client-core = { path = "crates/throcc-client-core" }
+throcc-video = { path = "crates/throcc-video" }
 
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "zeroize"] }
 anyhow = "1.0.104"
@@ -28,6 +29,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 cpal = "0.18.2"
 embed-resource = "3.0.12"
 ed25519-dalek = { version = "3.0.0", features = ["zeroize"] }
+dav1d-sys = "0.8.3"
 directories = "6.0.0"
 futures-core = "0.3.34"
 getrandom = "0.4.3"
@@ -38,7 +40,11 @@ keyring = "4.2.0"
 keyring-core = "1.0.1"
 libc = "0.2.191"
 objc2 = "0.6.5"
+objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-media", "objc2-quartz-core", "AVQueuedSampleBufferRendering", "AVSampleBufferDisplayLayer", "AVSampleBufferVideoRenderer"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false }
+objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-video", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime"] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVReturn"] }
+objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-media", "objc2-core-video", "VTBase", "VTCompressionProperties", "VTCompressionSession", "VTDecompressionProperties", "VTDecompressionSession", "VTErrors", "VTPixelTransferProperties", "VTPixelTransferSession", "VTSession", "VTUtilities"] }
 objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = ["std", "AUComponent", "AudioComponent", "AudioOutputUnit", "AudioUnitProperties", "objc2-core-audio-types"] }
 objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSButton", "NSControl", "NSResponder", "NSView", "NSWindow"] }
@@ -103,6 +109,7 @@ windows = { version = "0.62.2", features = [
     "Win32_Security",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_Performance",
     "Win32_System_Power",
     "Win32_System_Threading",
     "Win32_System_Variant",
@@ -111,6 +118,7 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 windows-core = "0.62.2"
+vpx-sys = { package = "libvpx-native-sys", version = "5.0.17" }
 zeroize = "1.9.1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 

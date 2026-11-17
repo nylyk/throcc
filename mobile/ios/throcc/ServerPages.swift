@@ -38,15 +38,15 @@ private struct ServerOverview: View {
                         ThemedField("Name", text: $name)
                     } else {
                         LabeledContent("Name") {
-                            Avatar(picture: model.picture(in: picture), name: server.title, size: 28)
-                            Text(server.title).foregroundStyle(.muted)
+                            Avatar(picture: model.picture(in: picture), initial: initial(name: server.title), size: 28)
+                            Text(server.title).lineLimit(1).foregroundStyle(.muted)
                         }
                         .foregroundStyle(.text)
                     }
-                    LabeledContent("Address") { Text(server.address).foregroundStyle(.muted) }
+                    LabeledContent("Address") { Text(server.address).lineLimit(1).foregroundStyle(.muted) }
                         .foregroundStyle(.text)
                 } footer: {
-                    if let problem = check.problem {
+                    if let problem = nameProblem(typed: name) {
                         Text(problem).foregroundStyle(.bad)
                     }
                 }
@@ -65,7 +65,7 @@ private struct ServerOverview: View {
                             ProgressView()
                         } else {
                             Button("Save") { save(name: check.name, over: server) }
-                                .disabled(!changed || check.problem != nil)
+                                .disabled(!changed || nameProblem(typed: name) != nil)
                         }
                     } footer: {
                         SaveStatusText(status: model.serverSave)
@@ -112,13 +112,13 @@ private struct MembersPage: View {
                     HStack(spacing: 12) {
                         Avatar(
                             picture: state.person(user.id)?.avatar.flatMap { model.pictures[$0] },
-                            name: user.name,
+                            initial: initial(name: user.name),
                             size: 28
                         )
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(user.id == state.me ? "\(user.name) (you)" : user.name).foregroundStyle(.text)
+                            Text(user.id == state.me ? "\(user.name) (you)" : user.name).lineLimit(1).foregroundStyle(.text)
                             if let inviter = model.users.first(where: { $0.id == user.invitedBy }) {
-                                Text("Invited by \(inviter.name)")
+                                Text("Invited by \(inviter.name)").lineLimit(1)
                                     .font(.caption)
                                     .foregroundStyle(.muted)
                             }
@@ -208,7 +208,7 @@ private struct KeysPage: View {
         ThemedList {
             if let server = state.server {
                 Section {
-                    Text(server.address).foregroundStyle(.text)
+                    Text(server.address).lineLimit(1).foregroundStyle(.text)
                     Text(fingerprintText(key: server.fingerprint))
                         .font(.footnote)
                         .monospaced()
@@ -226,13 +226,13 @@ private struct KeysPage: View {
                         HStack(spacing: 12) {
                             PersonPicture(person: person, size: 28)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(person.name).foregroundStyle(person.blocked ? ThemeColor.muted : .text)
+                                Text(person.name).lineLimit(1).foregroundStyle(person.blocked ? ThemeColor.muted : .text)
                                 if let key = person.identityKey {
                                     ShortKey(key: key)
                                 }
                             }
                             Spacer()
-                            TrustLabel(trust: state.trust(of: person)).font(.caption)
+                            TrustLabel(trust: person.trust).font(.caption)
                         }
                     }
                 }

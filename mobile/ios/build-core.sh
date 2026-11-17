@@ -10,6 +10,7 @@ generated=mobile/ios/throcc/Generated
 framework=mobile/ios/ThroccCore.xcframework
 
 targets=()
+triples=()
 libraries=()
 xcframework=()
 for slice in "$@"; do
@@ -20,9 +21,23 @@ for slice in "$@"; do
     esac
     library=target/$triple/release/libthrocc_mobile.a
     targets+=(--target "$triple")
+    triples+=("$triple")
     libraries+=("$library")
     xcframework+=(-library "$library" -headers "$headers")
 done
+
+# dav1d and libvpx link statically, built once per slice and for this Mac, where
+# uniffi-bindgen builds the core too.
+missing=()
+for triple in "${triples[@]}" "$(rustc -vV | sed -n 's/^host: //p')"; do
+    [ -f "deps/codecs/$triple/lib/libvpx.a" ] || missing+=("$triple")
+done
+[ ${#missing[@]} -eq 0 ] || packaging/codecs/build.sh deps/codecs "${missing[@]}"
+# Captured first, so a failing env.sh stops the script: eval of nothing would not.
+codec_env=$(packaging/codecs/env.sh deps/codecs)
+set -a
+eval "$codec_env"
+set +a
 
 cargo build --locked -p throcc-mobile --release "${targets[@]}"
 

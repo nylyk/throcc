@@ -10,8 +10,7 @@ use throcc_proto::ids::{Hash, MediaId, RoomId, UserId};
 use throcc_proto::limits::{MAX_ROOM_MEMBERS, MAX_ROOM_SHARES};
 use throcc_proto::messages::{
     Audiences, AuthError, ErrorCode, Event as ServerEvent, MediaState, Peer, Placement, Presence,
-    PublicKey, Recovery, Request, Response, ShareConfig, ShareTracks, Signature, Tracks, User,
-    UserProfile, Welcome,
+    PublicKey, Recovery, Request, Response, ShareConfig, ShareTracks, Tracks, User, Welcome,
 };
 use throcc_proto::transport::close;
 use tokio::sync::{Semaphore, broadcast, mpsc, watch};
@@ -28,8 +27,9 @@ use crate::keystore::Keystore;
 use crate::lock;
 use crate::media::cues::Cue;
 use crate::media::engine::Kind;
+use crate::media::share::FellBehind;
 use crate::media::share_audio::Playout;
-use crate::media::video::{Picture, PreviewDemand};
+use crate::media::video::{Output, Picture, PreviewDemand, View};
 use crate::media::voice::{AudioEngine, CallAudio, CallCommand};
 use crate::playback::SavedPlayback;
 use crate::profile::Profile;
@@ -44,6 +44,9 @@ use crate::verified::VerifiedStore;
 
 const LEVELS_EVERY: Duration = Duration::from_millis(100);
 const HEALTH_EVERY: Duration = Duration::from_secs(2);
+/// Health refreshes a share counts as one this device can't keep up with after its decoder
+/// last dropped a backlog or waited for a keyframe after one.
+const LAGGING_REFRESHES: u32 = 5;
 /// The shortest time between two cues for others joining or leaving an audience.
 const AUDIENCE_CUE_GAP: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(15);
@@ -70,6 +73,9 @@ pub(crate) struct Shared {
     pub state: Mutex<Arc<State>>,
     pub events: broadcast::Sender<UiEvent>,
     pub pictures: Mutex<HashMap<UserId, Picture>>,
+    /// Where each share is shown on the phones, set and cleared by the app whether or not it
+    /// is watched, so a share restarted or watched again shows in the same view.
+    outputs: Mutex<HashMap<UserId, Output>>,
     /// Our own user and the preview demand of our running share.
     pub preview: Mutex<Option<(UserId, Arc<PreviewDemand>)>>,
     pub avatars: Mutex<HashMap<Hash, AvatarSlot>>,
@@ -90,6 +96,7 @@ impl Shared {
             state: Mutex::new(Arc::new(state)),
             events,
             pictures: Mutex::default(),
+            outputs: Mutex::default(),
             preview: Mutex::default(),
             avatars: Mutex::default(),
         }
@@ -141,6 +148,22 @@ impl Shared {
         }
     }
 
+    /// Where `user`'s share is shown, on the phones.
+    pub fn output(&self, user: UserId) -> Output {
+        lock(&self.outputs).entry(user).or_default().clone()
+    }
+
+    /// Shows `user`'s share in `view` on the phones from now on, or nowhere. An output that
+    /// shows nowhere and feeds no decoder is forgotten.
+    pub fn set_view(&self, user: UserId, view: Option<View>) {
+        let mut outputs = lock(&self.outputs);
+        if view.is_none() && outputs.get(&user).is_none_or(|output| !output.is_shared()) {
+            outputs.remove(&user);
+            return;
+        }
+        outputs.entry(user).or_default().set(view);
+    }
+
     fn set_picture(&self, user: UserId, picture: Option<Picture>) {
         let mut pictures = lock(&self.pictures);
         match picture {
@@ -181,6 +204,10 @@ struct Watched {
     last_lost: u64,
     /// How many server reports in a row said it dropped units of this track for us.
     reports_with_drops: u32,
+    /// The decoder's count of backlogs dropped, as last looked at.
+    fell_behind_seen: u64,
+    /// Health refreshes left that count the share as one this device can't keep up with.
+    lagging_for: u32,
 }
 
 impl Watched {
@@ -197,6 +224,28 @@ impl Watched {
     fn too_slow(&self) -> bool {
         self.reports_with_drops >= 2
     }
+
+    /// Whether this device decodes the share too slowly: its decoder dropped a backlog or
+    /// waited for a keyframe after one in the last [`LAGGING_REFRESHES`] health refreshes.
+    /// Called once per refresh.
+    fn lagging(&mut self) -> bool {
+        let Carries::ShareVideo {
+            fell_behind: Some(fell_behind),
+            ..
+        } = &self.carries
+        else {
+            return false;
+        };
+        let drops = fell_behind.drops.load(Ordering::Relaxed);
+        let recovering = fell_behind.recovering.load(Ordering::Relaxed);
+        if drops != self.fell_behind_seen || recovering {
+            self.fell_behind_seen = drops;
+            self.lagging_for = LAGGING_REFRESHES;
+        } else {
+            self.lagging_for = self.lagging_for.saturating_sub(1);
+        }
+        self.lagging_for > 0
+    }
 }
 
 /// What a watched track carries.
@@ -206,6 +255,7 @@ enum Carries {
     ShareVideo {
         config: ShareConfig,
         decoder: Option<watch::Receiver<&'static str>>,
+        fell_behind: Option<Arc<FellBehind>>,
     },
 }
 
@@ -230,7 +280,9 @@ impl Carries {
         match self {
             Carries::Mic => VOICE_DETAIL.into(),
             Carries::ShareAudio => SHARE_AUDIO_DETAIL.into(),
-            Carries::ShareVideo { config, decoder } => share_detail(
+            Carries::ShareVideo {
+                config, decoder, ..
+            } => share_detail(
                 config,
                 decoder.as_ref().map_or("not decoded", |d| *d.borrow()),
             ),
@@ -265,20 +317,17 @@ pub(crate) struct Session {
     /// Whether the mic was on when we deafened, so undeafening restores it.
     mic_before_deafen: bool,
     profile: Profile,
-    /// Our profile as saved while we joined, newer than `profile` once it changes.
-    kept_profile: watch::Receiver<Profile>,
     /// Our profile as the server has it.
-    server_profile: UserProfile,
-    /// Our profile as the server refused it for coming too soon after the last change. Its
-    /// picture is uploaded, and the health refresh sets it again.
-    too_soon_profile: Option<UserProfile>,
+    server_profile: Profile,
+    /// Our profile as the server refused it for coming too soon after the last change, which
+    /// the health refresh sets again.
+    too_soon_profile: Option<Profile>,
     saved_playback: SavedPlayback,
     /// Each sound set for people who presented no identity key yet, saved under the key
     /// once they do.
     unkeyed_playback: HashMap<(UserId, Sound), SoundLevel>,
     server_look: ServerLook,
     avatar_fetches: Arc<Semaphore>,
-    #[cfg(feature = "ffmpeg")]
     sharing: Option<crate::media::share::ShareSender>,
     share_starts: ShareStarts,
     tracks: HashMap<MediaId, Watched>,
@@ -293,7 +342,6 @@ pub(crate) struct Session {
 
 /// The starts of our share. A capture starts beside the session loop, since picking what to
 /// share waits on the user; only the latest start is applied, and only while still wanted.
-#[cfg(feature = "ffmpeg")]
 struct ShareStarts {
     /// The number of the start still wanted.
     wanted: Option<u64>,
@@ -302,16 +350,13 @@ struct ShareStarts {
     started: mpsc::Receiver<StartedShare>,
 }
 
-#[cfg(feature = "ffmpeg")]
 type StartedShare = (u64, StartResult);
 
-#[cfg(feature = "ffmpeg")]
 type StartResult = Result<
     Result<crate::media::share::ShareSender, crate::media::share::ShareError>,
     tokio::task::JoinError,
 >;
 
-#[cfg(feature = "ffmpeg")]
 impl ShareStarts {
     fn new() -> Self {
         let (done, started) = mpsc::channel(4);
@@ -325,24 +370,6 @@ impl ShareStarts {
 
     async fn next(&mut self) -> Option<StartedShare> {
         self.started.recv().await
-    }
-}
-
-/// Without ffmpeg nothing is shared, so no start ever ends.
-#[cfg(not(feature = "ffmpeg"))]
-struct ShareStarts;
-
-#[cfg(not(feature = "ffmpeg"))]
-type StartedShare = std::convert::Infallible;
-
-#[cfg(not(feature = "ffmpeg"))]
-impl ShareStarts {
-    fn new() -> Self {
-        Self
-    }
-
-    async fn next(&mut self) -> Option<StartedShare> {
-        std::future::pending().await
     }
 }
 
@@ -389,13 +416,12 @@ impl Session {
         shared: Arc<Shared>,
         keystore: Keystore,
         address: String,
-        mut kept_profile: watch::Receiver<Profile>,
+        profile: Profile,
         audio: Option<Arc<AudioEngine>>,
         call: Call,
         lists: Lists,
     ) -> Self {
         let Lists { verified, blocked } = lists;
-        let profile = kept_profile.borrow_and_update().clone();
         let server = call.server();
         let saved_playback = SavedPlayback::load(keystore.dir()).unwrap_or_else(|e| {
             warn!("no saved playback: {e:#}");
@@ -426,15 +452,13 @@ impl Session {
             last_audience_cue: None,
             watched_shares: HashMap::new(),
             mic_before_deafen: false,
-            server_profile: call.welcome.profile.clone(),
+            server_profile: profile.clone(),
             too_soon_profile: None,
             profile,
-            kept_profile,
             saved_playback,
             unkeyed_playback: HashMap::new(),
             server_look,
             avatar_fetches: Arc::new(Semaphore::new(AVATAR_FETCHES)),
-            #[cfg(feature = "ffmpeg")]
             sharing: None,
             share_starts: ShareStarts::new(),
             tracks: HashMap::new(),
@@ -449,52 +473,24 @@ impl Session {
         session
     }
 
-    /// Takes the profile saved during the join, if one came since we last looked.
-    fn take_kept_profile(&mut self) {
-        let kept = self.kept_profile.borrow_and_update();
-        if kept.has_changed() {
-            self.profile = kept.clone();
-        }
-    }
-
-    /// Gives the server our profile, uploading the picture only if the server lacks it, and
-    /// tells the UI how that went.
+    /// Gives the server our profile unless it has it, and tells the UI how that went.
     async fn push_profile(&mut self) {
         self.too_soon_profile = None;
-        self.take_kept_profile();
-        let (name, avatar) = (self.profile.name.clone(), self.profile.avatar());
-        let wanted = UserProfile {
-            sig: Some(self.profile_sig(&name, avatar)),
-            name,
-            avatar,
-        };
-        if wanted == self.server_profile {
+        if self.profile == self.server_profile {
             return self.shared.emit(UiEvent::ProfileSaved);
         }
-        if let Some(bytes) = &self.profile.picture
-            && wanted.avatar != self.server_profile.avatar
-        {
-            match self
-                .call
-                .request(Request::UploadAvatar(bytes.to_vec()))
-                .await
-            {
-                Ok(Response::AvatarHash(hash)) if Some(hash) == wanted.avatar => {}
-                other => return self.profile_refused(other),
-            }
-        }
-        self.set_profile(wanted).await;
+        self.set_profile(self.profile.clone()).await;
     }
 
-    /// Puts `wanted`, whose picture the server holds, on our profile and tells the UI how that
-    /// went. A refusal for coming too soon tells it nothing until a later try settles it.
-    async fn set_profile(&mut self, wanted: UserProfile) {
-        let request = Request::SetProfile {
-            name: wanted.name.clone(),
-            avatar: wanted.avatar,
-            sig: self.profile_sig(&wanted.name, wanted.avatar),
-        };
-        match self.call.request(request).await {
+    /// Puts `wanted` on our profile and tells the UI how that went. A refusal for coming too
+    /// soon tells it nothing until a later try settles it.
+    async fn set_profile(&mut self, wanted: Profile) {
+        let signed = wanted.signed(
+            self.keystore.identity(),
+            &self.call.server(),
+            self.call.me(),
+        );
+        match self.call.request(Request::SetProfile(signed)).await {
             Ok(Response::Ok) => {
                 self.server_profile = wanted;
                 self.shared.emit(UiEvent::ProfileSaved);
@@ -507,17 +503,13 @@ impl Session {
         }
     }
 
-    /// Our identity key's signature over `name` and `avatar` for this server and for us.
-    fn profile_sig(&self, name: &str, avatar: Option<Hash>) -> Signature {
-        self.keystore
-            .profile_sig(&self.call.server(), self.call.me(), name, avatar)
-    }
-
     /// Tells the UI the server refused our profile. A push the closing connection cut off
-    /// tells it nothing, since the session pushes again once reconnected.
+    /// tells it nothing, since signing in again gives the server our profile.
     fn profile_refused(&self, response: anyhow::Result<Response>) {
         if self.call.connection.close_reason().is_none() {
-            self.shared.emit(UiEvent::ProfileRefused(refusal(response)));
+            let reason = refusal(response);
+            let notice = format!("This server refused your profile: {reason}");
+            self.shared.emit(UiEvent::ProfileRefused(notice));
         }
     }
 
@@ -572,7 +564,6 @@ impl Session {
     }
 
     async fn run_until_done(&mut self, mut commands: mpsc::Receiver<UiCommand>) {
-        self.push_profile().await;
         let mut levels = tokio::time::interval(LEVELS_EVERY);
         let mut health = tokio::time::interval(HEALTH_EVERY);
         let mut renewal = tokio::time::interval(RENEWAL_CHECK_EVERY);
@@ -595,7 +586,6 @@ impl Session {
                                 return;
                             }
                         }
-                        self.push_profile().await;
                     }
                 },
                 _ = levels.tick() => {
@@ -798,10 +788,14 @@ impl Session {
             };
             match Call::restart(link, &self.keystore, &self.call) {
                 Ok(call) => {
+                    // Watched tracks unsubscribe from the engine they were subscribed to;
+                    // one left subscribed keeps its decoder alive.
+                    self.reset_room();
                     self.call = call;
+                    self.server_profile = self.profile.clone();
+                    self.too_soon_profile = None;
                     self.last_alive = SystemTime::now();
                     self.trust.forget_presented();
-                    self.reset_room();
                     self.audio = self.audio.as_ref().map(CallAudio::renew);
                     self.cue(Cue::Reconnected);
                     let welcome = self.call.welcome.clone();
@@ -833,7 +827,8 @@ impl Session {
             return Ok(SignIn::Stale);
         }
         let connection = connected.connection.clone();
-        let failed = match account::sign_in_over(&self.keystore, connected, want_room).await {
+        let signing_in = account::sign_in_over(&self.keystore, connected, &self.profile, want_room);
+        let failed = match signing_in.await {
             Ok(link) => return Ok(SignIn::Done(Box::new(link))),
             Err(e) => e,
         };
@@ -860,6 +855,7 @@ impl Session {
         self.audio(CallCommand::ForgetAll);
         self.audio(CallCommand::SendOn(None));
         self.shared.update(|s| s.current = None);
+        self.follow_presence_keys(&BTreeMap::new());
     }
 
     fn reset_room(&mut self) {
@@ -880,11 +876,19 @@ impl Session {
         // A new connection counts audiences afresh.
         self.audiences = Audiences::default();
         let fingerprint = self.call.server();
-        self.server_profile = welcome.profile.clone();
+        let me = welcome.me;
+        let room = welcome.placement.room;
+        let proven: Vec<(UserId, PublicKey)> = welcome
+            .presence
+            .iter()
+            .filter(|p| p.user != me && presents_by_presence(p.room, room))
+            .filter(|p| proves_identity(p, &fingerprint))
+            .map(|p| (p.user, p.identity_key))
+            .collect();
+        self.note_identities(&proven);
         self.remember_server(welcome.server.name.clone(), welcome.server.avatar);
         let address = self.address.clone();
         let media = self.media;
-        let room = welcome.placement.room;
         let people: Vec<Person> = welcome
             .presence
             .iter()
@@ -914,6 +918,7 @@ impl Session {
                 room,
                 sharing: None,
                 watching: vec![],
+                showing: vec![],
             });
         });
         let state = self.shared.state();
@@ -967,6 +972,7 @@ impl Session {
                 room,
                 sharing: None,
                 watching: vec![],
+                showing: vec![],
             });
         });
     }
@@ -981,7 +987,9 @@ impl Session {
         let current: BTreeMap<UserId, Peer> = trusted.into_iter().map(|p| (p.user, p)).collect();
         let changed = current != self.peers;
         self.note_trusted(earlier);
-        self.note_identities(&current);
+        // Peers are noted last, so they are kept should noting go past `MAX_SIGNED_IN`.
+        self.follow_presence_keys(&current);
+        self.note_identities(&presented_by(&current));
         let arrived: Vec<UserId> = current
             .iter()
             .filter(|(user, peer)| {
@@ -1030,6 +1038,33 @@ impl Session {
         changed
     }
 
+    /// Brings the keys signed presences present in line with where we are: forgotten for
+    /// people shown in our room who are not among `peers`, so the badge there stays with who
+    /// hears us, and noted again for those shown elsewhere once we left the room they were in.
+    fn follow_presence_keys(&mut self, peers: &BTreeMap<UserId, Peer>) {
+        let me = self.call.me();
+        let state = self.shared.state();
+        let mut presented = Vec::new();
+        let mut forgot = false;
+        for (user, shown) in &self.shown {
+            let Some(person) = state.person(*user) else {
+                continue;
+            };
+            if *user == me || peers.contains_key(user) {
+                continue;
+            }
+            if !presents_by_presence(person.room, self.room) {
+                forgot |= self.trust.forget(*user);
+            } else if shown.proven {
+                presented.push((*user, shown.key));
+            }
+        }
+        if forgot {
+            self.refresh_trust();
+        }
+        self.note_identities(&presented);
+    }
+
     /// Notes every identity key our secret was wrapped to, oldest first, including one the
     /// server showed and took back between two looks at the room.
     fn note_trusted(&mut self, keys: Vec<(UserId, PublicKey)>) {
@@ -1042,15 +1077,11 @@ impl Session {
         }
     }
 
-    /// Notes the identity keys `peers` present, saves playback set before under them, then
-    /// shows who is verified and whose verified key changed.
-    fn note_identities(&mut self, peers: &BTreeMap<UserId, Peer>) {
-        let presented: Vec<(UserId, PublicKey)> = peers
-            .iter()
-            .map(|(user, peer)| (*user, peer.identity_key))
-            .collect();
-        let noted = self.trust.note(&presented);
-        for (user, key) in &presented {
+    /// Notes the identity keys room peers or signed presences present, saves playback set
+    /// before under them, then shows who is verified and whose verified key changed.
+    fn note_identities(&mut self, presented: &[(UserId, PublicKey)]) {
+        let noted = self.trust.note(presented);
+        for (user, key) in presented {
             for sound in Sound::ALL {
                 if let Some(playback) = self.unkeyed_playback.remove(&(*user, sound)) {
                     self.saved_playback.set(key, sound, playback);
@@ -1111,10 +1142,13 @@ impl Session {
     /// Shows who is verified and whose verified key changed.
     fn refresh_trust(&self) {
         let state = self.shared.state();
-        let trust: BTreeMap<UserId, (bool, Option<PublicKey>)> = state
+        let trust: BTreeMap<UserId, (bool, Option<PublicKey>, Option<String>)> = state
             .people
             .keys()
-            .map(|user| (*user, self.trust.of(*user)))
+            .map(|user| {
+                let (verified, key) = self.trust.of(*user);
+                (*user, (verified, key, self.trust.verified_name(*user)))
+            })
             .collect();
         let me = self.call.me();
         let warnings: Vec<KeyWarning> = state
@@ -1125,8 +1159,9 @@ impl Session {
             .collect();
         self.shared.update(|s| {
             for (user, person) in &mut s.people {
-                if let Some(&(verified, key)) = trust.get(user) {
-                    (person.verified, person.identity_key) = (verified, key);
+                if let Some((verified, key, name)) = trust.get(user) {
+                    (person.verified, person.identity_key) = (*verified, *key);
+                    person.verified_name = name.clone();
                 }
             }
             s.key_warnings = warnings;
@@ -1136,21 +1171,18 @@ impl Session {
     /// Verifies `key`, whose safety number the user compared, or takes it off the verified
     /// ones, while `user` still presents it.
     fn set_verified(&mut self, user: UserId, key: &PublicKey, verified: bool) {
-        let name = self
-            .shared
-            .state()
-            .person(user)
-            .map_or_else(|| person_name(user, ""), |p| p.name.clone());
-        let changed = self.trust.set_verified(user, key, verified, &name);
+        let (name, avatar) = self.shared.state().person(user).map_or_else(
+            || (person_name(user, ""), None),
+            |p| (p.name.clone(), p.avatar),
+        );
+        let changed = self.trust.set_verified(user, key, verified, &name, avatar);
         if let Ok(false) = changed {
             self.shared.notice(if self.trust.of(user).1.is_some() {
                 format!(
                     "{name}'s key changed before you confirmed, so nothing changed. Compare the new safety number."
                 )
             } else {
-                format!(
-                    "{name} isn't presenting a key right now, so nothing changed. Compare the safety number again once they're in a room with you."
-                )
+                format!("{name} isn't presenting a signed key right now, so nothing changed.")
             });
             return;
         }
@@ -1382,7 +1414,6 @@ impl Session {
                 });
             }
             UiCommand::SetProfile(profile) => {
-                self.kept_profile.mark_unchanged();
                 self.profile = profile;
                 self.push_profile().await;
             }
@@ -1580,14 +1611,7 @@ impl Session {
         picture: Option<Option<Vec<u8>>>,
     ) -> anyhow::Result<Response> {
         if let Some(picture) = picture {
-            let avatar = match picture {
-                Some(bytes) => match self.call.request(Request::UploadAvatar(bytes)).await? {
-                    Response::AvatarHash(hash) => Some(hash),
-                    other => return Ok(other),
-                },
-                None => None,
-            };
-            let answer = self.call.request(Request::SetServerAvatar(avatar)).await?;
+            let answer = self.call.request(Request::SetServerAvatar(picture)).await?;
             if answer != Response::Ok {
                 return Ok(answer);
             }
@@ -1715,14 +1739,33 @@ impl Session {
                 playout
             });
             let video = share.video;
-            #[cfg(feature = "ffmpeg")]
             let decoder = {
                 let units = self.call.engine.subscribe(video, Kind::Video, 64);
                 let ask_idr = self.call.engine.idr_requester(video);
-                match crate::media::share::receive(units, config, playout, ask_idr) {
-                    Ok((picture, decoder)) => {
-                        self.shared.set_picture(user, Some(picture));
-                        Some(decoder)
+                let output = self.shared.output(user);
+                let shared = self.shared.clone();
+                let first_picture = move || {
+                    shared.update(|s| {
+                        if let Some(c) = s.current.as_mut()
+                            && c.watching.contains(&user)
+                            && !c.showing.contains(&user)
+                        {
+                            c.showing.push(user);
+                        }
+                    });
+                };
+                let receiving = crate::media::share::receive(
+                    units,
+                    config,
+                    playout,
+                    output,
+                    ask_idr,
+                    first_picture,
+                );
+                match receiving {
+                    Ok(receiving) => {
+                        self.shared.set_picture(user, Some(receiving.picture));
+                        Some((receiving.engine, receiving.fell_behind))
                     }
                     Err(e) => {
                         self.shared.notice(format!("Can't show this share: {e}"));
@@ -1730,14 +1773,12 @@ impl Session {
                     }
                 }
             };
-            #[cfg(not(feature = "ffmpeg"))]
-            let decoder = {
-                drop(playout);
-                self.shared
-                    .notice("This build can't show video; it was built without ffmpeg.");
-                None
+            let (decoder, fell_behind) = decoder.unzip();
+            let carries = Carries::ShareVideo {
+                config,
+                decoder,
+                fell_behind,
             };
-            let carries = Carries::ShareVideo { config, decoder };
             self.tracks
                 .insert(video, self.watched(video, user, carries));
             let watched = WatchedShare {
@@ -1759,9 +1800,13 @@ impl Session {
             last_received: arrived.datagrams,
             last_lost: arrived.lost,
             reports_with_drops: 0,
+            fell_behind_seen: 0,
+            lagging_for: 0,
         }
     }
 
+    /// Stops receiving `user`'s share. Where it is shown stays: the app sets and clears that,
+    /// and a share watched again, or restarted at another size, shows there again.
     fn stop_watching(&mut self, user: UserId) {
         if let Some(watched) = self.watched_shares.remove(&user) {
             self.call.engine.unsubscribe(watched.video);
@@ -1773,6 +1818,11 @@ impl Session {
             }
         }
         self.shared.set_picture(user, None);
+        self.shared.update(|s| {
+            if let Some(c) = s.current.as_mut() {
+                c.showing.retain(|shown| *shown != user);
+            }
+        });
     }
 
     fn stop_watching_all(&mut self) {
@@ -1784,8 +1834,12 @@ impl Session {
 
     /// Starts capturing for a share, unless one runs or is starting. The capture may wait on
     /// the user picking what to share, so it reports back through [`ShareStarts`].
-    #[cfg(feature = "ffmpeg")]
     fn start_share(&mut self, wanted: ShareConfig) {
+        if !throcc_video::ENCODES {
+            self.shared
+                .notice("This build can't share video; it has no video encoder.");
+            return;
+        }
         if self.share_starts.wanted.is_some() {
             self.shared
                 .notice("Already choosing what to share. Finish in the picker that's open.");
@@ -1823,7 +1877,6 @@ impl Session {
     }
 
     /// Applies a share start that has finished, if it is still wanted.
-    #[cfg(feature = "ffmpeg")]
     async fn share_started(&mut self, (number, started): StartedShare) {
         if self.share_starts.wanted != Some(number) {
             drop_unwanted_share(started);
@@ -1846,34 +1899,19 @@ impl Session {
         }
     }
 
-    #[cfg(not(feature = "ffmpeg"))]
-    fn start_share(&mut self, _wanted: ShareConfig) {
-        self.shared
-            .notice("This build can't share video; it was built without ffmpeg.");
-    }
-
-    #[cfg(not(feature = "ffmpeg"))]
-    async fn share_started(&mut self, started: StartedShare) {
-        match started {}
-    }
-
     /// Stops our share, and any start of one.
     fn stop_share(&mut self) {
         self.media.share = None;
-        #[cfg(feature = "ffmpeg")]
-        {
-            self.share_starts.wanted = None;
-            if let Some(sender) = self.sharing.take() {
-                tokio::task::spawn_blocking(move || drop(sender));
-                self.shared.set_picture(self.call.me(), None);
-                *lock(&self.shared.preview) = None;
-            }
+        self.share_starts.wanted = None;
+        if let Some(sender) = self.sharing.take() {
+            tokio::task::spawn_blocking(move || drop(sender));
+            self.shared.set_picture(self.call.me(), None);
+            *lock(&self.shared.preview) = None;
         }
     }
 
     /// Stops and announces the end of a share whose capture stopped on its own.
     async fn stop_ended_share(&mut self) {
-        #[cfg(feature = "ffmpeg")]
         if self
             .sharing
             .as_ref()
@@ -1894,22 +1932,15 @@ impl Session {
 
     /// The running share's codec, size, frame rate and encoder.
     fn sharing_detail(&self) -> Option<String> {
-        #[cfg(feature = "ffmpeg")]
-        return self
-            .sharing
+        self.sharing
             .as_ref()
-            .map(|sender| share_detail(&sender.config, sender.engine));
-        #[cfg(not(feature = "ffmpeg"))]
-        None
+            .map(|sender| share_detail(&sender.config, sender.engine))
     }
 
     fn recover_share(&self, kind: Recovery) {
-        #[cfg(feature = "ffmpeg")]
         if let Some(sender) = &self.sharing {
             sender.recover(kind);
         }
-        #[cfg(not(feature = "ffmpeg"))]
-        let _ = kind;
     }
 
     /// Replaces our encryption key once it nears expiry, and gives the server the new one.
@@ -1979,8 +2010,7 @@ impl Session {
             CallEvent::Trusted(keys) => {
                 self.note_trusted(keys);
                 // Noting may have dropped the keys of people here to stay under its limit.
-                let peers = self.peers.clone();
-                self.note_identities(&peers);
+                self.note_identities(&presented_by(&self.peers));
             }
         }
     }
@@ -2006,7 +2036,19 @@ impl Session {
                     Some(shown) => shown.blocked,
                     None => self.blocks(&p),
                 };
+                // A room peer presents its key with a fresh signed encryption key, which a
+                // replayed presence must not displace, not even for a moment.
+                if p.user != self.call.me() && !self.peers.contains_key(&p.user) {
+                    if presents_by_presence(p.room, self.room)
+                        && proves_identity(&p, &self.call.server())
+                    {
+                        self.note_identities(&[(p.user, p.identity_key)]);
+                    } else {
+                        self.trust.forget(p.user);
+                    }
+                }
                 let (verified, identity_key) = self.trust.of(p.user);
+                let verified_name = self.trust.verified_name(p.user);
                 let playback = self.playback_of(p.user);
                 let sharing = self.sharing_of(p.user);
                 let audience = self.audience_of(p.user);
@@ -2014,6 +2056,7 @@ impl Session {
                     let speaking = s.people.get(&p.user).is_some_and(|old| old.speaking);
                     let updated = Person {
                         verified,
+                        verified_name,
                         identity_key,
                         speaking,
                         sharing,
@@ -2044,6 +2087,7 @@ impl Session {
             ServerEvent::PresenceEnded(user) => {
                 self.room_cue(user, None);
                 self.shown.remove(&user);
+                self.trust.forget(user);
                 let notices = self.call.engine.end_presence(user);
                 self.notices(notices);
                 self.shared.update(|s| {
@@ -2067,7 +2111,31 @@ impl Session {
                     self.put_out_of_room();
                     self.shared.notice("The room you were in was deleted.");
                 }
-                self.shared.update(|s| s.rooms.retain(|r| r.id != room));
+                // The server moves everyone out before it says, so nobody should be left
+                // in it; nobody is ever shown in a room that isn't there. Whoever is left goes
+                // as if their presence ended, so the key manager never trusts someone the
+                // state no longer shows.
+                let left: Vec<UserId> = self
+                    .shared
+                    .state()
+                    .people
+                    .iter()
+                    .filter(|(_, p)| p.room == Some(room))
+                    .map(|(user, _)| *user)
+                    .collect();
+                for user in &left {
+                    self.shown.remove(user);
+                    self.trust.forget(*user);
+                    let notices = self.call.engine.end_presence(*user);
+                    self.notices(notices);
+                }
+                self.shared.update(|s| {
+                    s.rooms.retain(|r| r.id != room);
+                    s.people.retain(|_, p| p.room != Some(room));
+                });
+                if !left.is_empty() {
+                    self.follow_room().await;
+                }
             }
             ServerEvent::PeersChanged { room, .. } => {
                 if Some(room) == self.room {
@@ -2169,6 +2237,7 @@ impl Session {
         let state = self.shared.state();
         let mut rows = Vec::new();
         let mut slow_shares = BTreeSet::new();
+        let mut lagging_shares = BTreeSet::new();
         let (mut received_total, mut lost_total) = (0, 0);
         for (media_id, track) in self.tracks.iter_mut() {
             let arrived = self.call.engine.arrived(*media_id);
@@ -2179,6 +2248,9 @@ impl Session {
             lost_total += new_lost;
             if track.too_slow() {
                 slow_shares.insert(track.user);
+            }
+            if track.lagging() {
+                lagging_shares.insert(track.user);
             }
             let name = state
                 .person(track.user)
@@ -2203,6 +2275,7 @@ impl Session {
             download_loss,
             dropped_for_you: dropped,
             slow_shares,
+            lagging_shares,
             sending: self.sent_tracks(new_local_drops),
             receiving: rows,
         };
@@ -2252,7 +2325,6 @@ impl Session {
 
 /// Drops a share that started after it was no longer wanted, off the async workers, since
 /// stopping it joins its threads.
-#[cfg(feature = "ffmpeg")]
 fn drop_unwanted_share(started: StartResult) {
     if let Ok(Ok(sender)) = started {
         tokio::task::spawn_blocking(move || drop(sender));
@@ -2271,6 +2343,21 @@ fn shown_as(presence: &Presence, person: &Person, server: &Fingerprint) -> Shown
     }
 }
 
+/// Whether a presence that places someone in `their_room` may present their identity key,
+/// with us in `our_room`. Not in our own room: a signed presence can be replayed, so there
+/// only a room peer's fresh signed encryption key presents one.
+fn presents_by_presence(their_room: Option<RoomId>, our_room: Option<RoomId>) -> bool {
+    our_room.is_none() || their_room != our_room
+}
+
+/// The identity key each of `peers` presents.
+fn presented_by(peers: &BTreeMap<UserId, Peer>) -> Vec<(UserId, PublicKey)> {
+    peers
+        .iter()
+        .map(|(user, peer)| (*user, peer.identity_key))
+        .collect()
+}
+
 /// Whether `shown` is proven, and `peer`, the room peer we hear under the same user, if any,
 /// presents the same identity key.
 fn proves_whom_we_hear(shown: &Shown, peer: Option<&Peer>) -> bool {
@@ -2280,17 +2367,15 @@ fn proves_whom_we_hear(shown: &Shown, peer: Option<&Peer>) -> bool {
 /// Whether the identity key of `presence` signed its name and picture for its user on the
 /// server `server`, which only the holder of that identity key can do.
 fn proves_identity(presence: &Presence, server: &Fingerprint) -> bool {
-    presence.profile_sig.is_some_and(|sig| {
-        identity::verify_profile(
-            &presence.identity_key,
-            &server.0,
-            presence.user,
-            &presence.name,
-            presence.avatar,
-            &sig,
-        )
-        .is_ok()
-    })
+    identity::verify_profile(
+        &presence.identity_key,
+        &server.0,
+        presence.user,
+        &presence.name,
+        presence.avatar,
+        &presence.profile_sig,
+    )
+    .is_ok()
 }
 
 /// How [`Session::sign_in_unless_stale`] ended without failing.
@@ -2336,6 +2421,7 @@ fn person(p: &Presence, playback: Playback, blocked: bool) -> Person {
         speaking: false,
         playback,
         verified: false,
+        verified_name: None,
         identity_key: None,
         role: p.role,
         blocked,
@@ -2480,6 +2566,18 @@ fn receivers_of(audiences: &Audiences, video: MediaId) -> Option<&[UserId]> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn an_output_without_a_view_or_a_decoder_is_forgotten() {
+        let shared = Shared::new(State::default());
+        let user = UserId(7);
+        let decoders = shared.output(user);
+        shared.set_view(user, None);
+        assert!(lock(&shared.outputs).contains_key(&user));
+        drop(decoders);
+        shared.set_view(user, None);
+        assert!(!lock(&shared.outputs).contains_key(&user));
+    }
+
     /// Whether the track counts as too slow at each health refresh, given the units each
     /// server report between refreshes dropped.
     fn too_slow_at_refreshes(reports: &[&[u32]]) -> Vec<bool> {
@@ -2490,6 +2588,8 @@ mod tests {
             last_received: 0,
             last_lost: 0,
             reports_with_drops: 0,
+            fell_behind_seen: 0,
+            lagging_for: 0,
         };
         reports
             .iter()
@@ -2500,6 +2600,54 @@ mod tests {
                 track.too_slow()
             })
             .collect()
+    }
+
+    #[test]
+    fn a_share_lags_while_its_decoder_recovers_and_five_refreshes_after_a_drop() {
+        let fell_behind = Arc::new(FellBehind::default());
+        let mut track = Watched {
+            user: UserId(4),
+            carries: Carries::ShareVideo {
+                config: ShareConfig {
+                    codec: throcc_proto::messages::Codec::Av1,
+                    width: 1920,
+                    height: 1080,
+                    fps: 60,
+                    kbps: 8000,
+                    audio: false,
+                    recovery: Recovery::Idr,
+                },
+                decoder: None,
+                fell_behind: Some(fell_behind.clone()),
+            },
+            last_bytes: 0,
+            last_received: 0,
+            last_lost: 0,
+            reports_with_drops: 0,
+            fell_behind_seen: 0,
+            lagging_for: 0,
+        };
+        let mut refreshes = Vec::new();
+        for (drops, recovering) in [
+            (0, false),
+            (1, true),
+            (0, true),
+            (0, true),
+            (0, false),
+            (0, false),
+            (0, false),
+            (0, false),
+            (0, false),
+            (2, false),
+        ] {
+            fell_behind.drops.fetch_add(drops, Ordering::Relaxed);
+            fell_behind.recovering.store(recovering, Ordering::Relaxed);
+            refreshes.push(track.lagging());
+        }
+        assert_eq!(
+            refreshes,
+            [false, true, true, true, true, true, true, true, false, true]
+        );
     }
 
     #[test]
@@ -2594,6 +2742,16 @@ mod tests {
     }
 
     #[test]
+    fn a_presence_presents_a_key_only_for_someone_outside_our_room() {
+        let (ours, other) = (Some(RoomId(1)), Some(RoomId(2)));
+        assert!(!presents_by_presence(ours, ours));
+        assert!(presents_by_presence(other, ours));
+        assert!(presents_by_presence(None, ours));
+        assert!(presents_by_presence(ours, None));
+        assert!(presents_by_presence(None, None));
+    }
+
+    #[test]
     fn a_presence_proves_its_identity_key_only_with_its_own_signature() {
         use throcc_crypto::identity::{IdentityKey, profile_message};
         use throcc_proto::ids::Role;
@@ -2604,7 +2762,7 @@ mod tests {
             IdentityKey::from_seed(&[4; 32]),
         );
         let signed_by = |key: &IdentityKey, user: UserId, name: &str| {
-            Some(key.sign(&profile_message(&server.0, user, name, None)))
+            key.sign(&profile_message(&server.0, user, name, None))
         };
         let presence = |identity_key, profile_sig| Presence {
             user: UserId(7),
@@ -2620,7 +2778,10 @@ mod tests {
         };
         let own = signed_by(&holder, UserId(7), "mara");
         assert!(proves_identity(&presence(holder.public(), own), &server));
-        assert!(!proves_identity(&presence(holder.public(), None), &server));
+        assert!(!proves_identity(
+            &presence(holder.public(), [0; 64]),
+            &server
+        ));
         assert!(!proves_identity(&presence(other.public(), own), &server));
         for forged in [
             signed_by(&holder, UserId(8), "mara"),

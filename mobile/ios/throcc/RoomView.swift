@@ -3,44 +3,57 @@ import SwiftUI
 struct RoomView: View {
     @Environment(AppModel.self) private var model
 
+    private var fullscreen: Binding<Bool> {
+        Binding(get: { model.fullscreenShare != nil }, set: { if !$0 { model.fullscreenShare = nil } })
+    }
+
     var body: some View {
         let state = model.state
-        let micOn = state.mic && !model.micDenied
         if let current = state.current, let room = state.rooms.first(where: { $0.id == current.room }) {
-            ScrollView {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
-                    ForEach(state.people.filter { $0.room == room.id }, id: \.user) { person in
-                        Button { model.sheet = .person(person.user) } label: { PersonCard(person: person) }
-                            .buttonStyle(.plain)
-                            .accessibilityValue(person.speaking ? "Speaking" : "")
+            let people = state.people.filter { $0.room == room.id }
+            let watched = people.filter { !$0.blocked && $0.sharing != nil && current.watching.contains($0.user) }
+            GeometryReader { window in
+                ScrollView {
+                    VStack(spacing: 16) {
+                        ForEach(watched, id: \.user) { person in
+                            if let share = person.sharing {
+                                ShareTile(
+                                    person: person,
+                                    share: share,
+                                    space: CGSize(width: window.size.width - 32, height: window.size.height * 0.6)
+                                )
+                            }
+                        }
+                        CenteredGrid(minimumWidth: 150, spacing: 12) {
+                            ForEach(people, id: \.user) { person in
+                                PersonCard(person: person, watched: current.watching.contains(person.user))
+                                    .contentShape(.rect(cornerRadius: 16))
+                                    .onTapGesture { model.sheet = .person(person.user) }
+                                    .accessibilityElement(children: .contain)
+                                    .accessibilityAddTraits(.isButton)
+                                    .accessibilityAction { model.sheet = .person(person.user) }
+                                    .accessibilityValue(person.speaking ? "Speaking" : "")
+                            }
+                        }
                     }
+                    .padding(16)
+                    .frame(maxWidth: .infinity, minHeight: window.size.height)
                 }
-                .padding(16)
             }
             .background(.bg)
+            .fullScreenCover(isPresented: fullscreen) {
+                if let user = model.fullscreenShare {
+                    ShareFullscreen(user: user).environment(model)
+                }
+            }
             .navigationTitle(room.name)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItemGroup(placement: .bottomBar) {
-                    Button("Microphone", systemImage: micOn ? "mic.fill" : "mic.slash.fill") {
-                        if model.micDenied {
-                            model.notice = "To talk, allow the microphone for throcc in Settings."
-                        } else {
-                            model.core.command(command: .setMic(on: !state.mic))
-                        }
-                    }
-                    .tint(micOn ? model.theme.text : model.theme.bad)
-                    .accessibilityValue(micOn ? "On" : "Off")
-                    Button("Sound", systemImage: state.deafened ? "speaker.slash.fill" : "speaker.wave.2.fill") {
-                        model.core.command(command: .setDeafened(on: !state.deafened))
-                    }
-                    .tint(state.deafened ? model.theme.bad : model.theme.text)
-                    .accessibilityValue(state.deafened ? "Off" : "On")
+                    MicButton()
+                    SoundButton()
                     Spacer()
-                    Button("Leave Room", systemImage: "phone.down.fill") {
-                        model.core.command(command: .join(room: nil))
-                    }
-                    .tint(model.theme.bad)
+                    LeaveButton()
                 }
             }
         } else {
@@ -61,6 +74,8 @@ struct RoomView: View {
 
 private struct PersonCard: View {
     let person: Person
+    let watched: Bool
+    @Environment(AppModel.self) private var model
 
     var body: some View {
         VStack(spacing: 8) {
@@ -76,11 +91,22 @@ private struct PersonCard: View {
                 MutedIcon(person: person).font(.footnote)
             }
             .foregroundStyle(person.blocked ? ThemeColor.muted : .text)
-            if let sharing = person.sharing {
-                Text("Sharing \(sharing.label)")
-                    .font(.caption)
-                    .foregroundStyle(.muted)
-                    .lineLimit(1)
+            // Held empty for those not sharing, so every card has the same height.
+            if let share = person.sharing, !person.blocked {
+                Button {
+                    model.core.watchOnly(user: person.user)
+                } label: {
+                    Label(watched ? "Watching" : "Watch", systemImage: "rectangle.on.rectangle")
+                        .font(.caption.weight(.medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(watched)
+                .frame(height: 28)
+                .accessibilityLabel("Watch \(person.name)’s share")
+                .accessibilityValue(share.label)
+            } else {
+                Color.clear.frame(height: 28)
             }
         }
         .frame(maxWidth: .infinity, minHeight: 140)
@@ -91,5 +117,46 @@ private struct PersonCard: View {
                 RoundedRectangle(cornerRadius: 16).strokeBorder(.panel)
             }
         }
+    }
+}
+
+struct MicButton: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let on = model.state.mic && !model.micDenied
+        Button("Microphone", systemImage: on ? "mic.fill" : "mic.slash.fill") {
+            if model.micDenied {
+                model.notice = "To talk, allow the microphone for throcc in Settings."
+            } else {
+                model.core.command(command: .setMic(on: !model.state.mic))
+            }
+        }
+        .tint(on ? model.theme.text : model.theme.bad)
+        .accessibilityValue(on ? "On" : "Off")
+    }
+}
+
+struct SoundButton: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let deafened = model.state.deafened
+        Button("Sound", systemImage: deafened ? "speaker.slash.fill" : "speaker.wave.2.fill") {
+            model.core.command(command: .setDeafened(on: !deafened))
+        }
+        .tint(deafened ? model.theme.bad : model.theme.text)
+        .accessibilityValue(deafened ? "Off" : "On")
+    }
+}
+
+struct LeaveButton: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        Button("Leave Room", systemImage: "phone.down.fill") {
+            model.core.command(command: .join(room: nil))
+        }
+        .tint(model.theme.bad)
     }
 }

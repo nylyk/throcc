@@ -1,12 +1,18 @@
 import SwiftUI
 
 enum Sheet: Hashable, Identifiable {
-    case addServer
+    case addServer(address: String)
     case settings
     case newRoom
     case editRoom(Room)
     case person(UInt64)
     case server(ServerPage)
+    /// The server at `address` showed another key than the one this install trusted for it,
+    /// on a sign-in with the invite `code`, if any.
+    case pinMismatch(address: String, code: String?, expected: Data, actual: Data)
+    /// Signing in to the server at `address`, with the invite `code` if any, found our identity
+    /// gone from the keychain.
+    case identityMissing(address: String, code: String?)
 
     var id: Self { self }
 }
@@ -42,6 +48,8 @@ struct AlertText {
 @MainActor @Observable
 final class AppModel {
     let core: Core
+    /// Why what this install keeps couldn't be read, where it couldn't.
+    let storeProblems: StoreProblems
     private(set) var profile: Profile?
     private(set) var voice: Voice
     let themes: [ThemeChoice]
@@ -73,15 +81,22 @@ final class AppModel {
     var settingsPath: [SettingsPage] = []
     /// The connection that the samples of a lost connection show in place of the state's.
     var sampleConnection: Connection?
+    /// The share shown over the whole screen, if any.
+    var fullscreenShare: UInt64?
+    @ObservationIgnored private(set) lazy var pictureInPicture = SharePictureInPicture(core: core) { [weak self] in
+        self?.followSight()
+    }
+    /// Whether the app is in the background, where shares go undecoded unless Picture in Picture shows one.
+    @ObservationIgnored var inBackground = false {
+        didSet { followSight() }
+    }
     @ObservationIgnored private let decoded = NSCache<NSData, UIImage>()
     /// The hashes of the pictures the core was asked for on this connection.
     @ObservationIgnored private var askedPictures: Set<Data> = []
     /// The alert that waits for the sheet over the root to close.
     @ObservationIgnored private var heldAlert: AlertText?
-    /// Runs the core's connects, disconnects and forgets off the main actor, in the order asked.
+    /// Runs the core's disconnects, forgets and start-overs off the main actor, in the order asked.
     @ObservationIgnored private let switching = DispatchQueue(label: "cc.thro.throcc.switching", qos: .userInitiated)
-    /// The number of connects and disconnects asked for, by which a connect sees a later one.
-    @ObservationIgnored private var switches = 0
     /// Runs the theme's saves off the main actor, in the order asked.
     @ObservationIgnored private let themeSaves = DispatchQueue(label: "cc.thro.throcc.theme-saves", qos: .utility)
     /// Waits for the Custom theme's colours to rest before it saves them.
@@ -94,6 +109,7 @@ final class AppModel {
 
     init(core: Core, mock: Bool) {
         self.core = core
+        storeProblems = core.storeProblems()
         profile = core.profile()
         voice = core.voice()
         themes = core.themes()
@@ -168,37 +184,78 @@ final class AppModel {
     }
 
     /// Signs in to the server at `address`, joining it first with the invite `code`, and opens
-    /// its rooms. It does nothing while another sign-in is under way.
+    /// its rooms. It takes over from a sign-in under way. A changed server key or a
+    /// missing identity opens its dialog in place of the sheet that asked rather than throwing,
+    /// and signing in closes the add-server sheet or either dialog.
     func connect(to address: String, code: String? = nil) async throws {
-        if address == connectedAddress, state.connection == .connected {
+        if address == connectedAddress, state.holdsSession {
             showsRooms = true
             return
         }
-        guard connecting == nil else { return }
         connecting = address
-        defer { connecting = nil }
-        switches += 1
-        let (asked, core, switching) = (switches, core, switching)
+        let core = core
         do {
+            // Not on `switching`: a newer connect has to reach the core while this one waits.
             try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, Error>) in
-                switching.async { done.resume(with: Result { try core.connect(address: address, invite: code) }) }
+                DispatchQueue.global(qos: .userInitiated).async {
+                    done.resume(with: Result { try core.connect(address: address, invite: code) })
+                }
             }
+        } catch CoreError.Cancelled {
+            return
         } catch {
-            guard asked == switches else { return }
+            connecting = nil
             connectedAddress = nil
             showsRooms = false
-            throw error
+            switch error as? CoreError {
+            case .PinMismatch(let expected, let actual):
+                sheet = .pinMismatch(address: address, code: code, expected: expected, actual: actual)
+            case .IdentityMissing:
+                sheet = .identityMissing(address: address, code: code)
+            case .Failed, .Cancelled, nil:
+                throw error
+            }
+            return
         }
-        guard asked == switches else { return }
+        connecting = nil
         connectedAddress = address
         users = []
         invite = nil
         loadServers()
         showsRooms = true
+        switch sheet {
+        case .addServer, .pinMismatch, .identityMissing:
+            sheet = nil
+        default:
+            break
+        }
     }
 
-    /// Connects to a server on the list, and says why if that fails.
+    /// Trusts `actual` as the key of the server at `address` on the user's word, and signs in
+    /// to it again with the invite `code`, if any, as `connect(to:code:)` does.
+    func trustServerKey(at address: String, actual: Data, code: String?) async throws {
+        try core.trustServerKey(address: address, actual: actual)
+        try await connect(to: address, code: code)
+    }
+
+    /// Makes a new identity and forgets every server, unless the keychain holds the old
+    /// identity again by now. It runs off the main actor, as the keychain may ask the user.
+    func startOver() async throws -> StartedOver {
+        let (core, switching) = (core, switching)
+        let started = try await withCheckedThrowingContinuation { (done: CheckedContinuation<StartedOver, Error>) in
+            switching.async { done.resume(with: Result { try core.startOver() }) }
+        }
+        loadServers()
+        return started
+    }
+
+    /// Connects to a server on the list, and says why if that fails. Opening the server being
+    /// signed in to cancels that sign-in.
     func open(_ address: String) {
+        if connecting == address {
+            cancelConnect()
+            return
+        }
         Task {
             do {
                 try await connect(to: address)
@@ -208,8 +265,16 @@ final class AppModel {
         }
     }
 
+    /// Gives up the sign-in under way.
+    func cancelConnect() {
+        connecting = nil
+        core.cancelConnect()
+    }
+
     func disconnect() {
-        switches += 1
+        if connecting != nil {
+            cancelConnect()
+        }
         connectedAddress = nil
         showsRooms = false
         sheet = nil
@@ -221,8 +286,10 @@ final class AppModel {
     }
 
     func forget(_ address: String) {
-        if address == connectedAddress || address == connecting {
-            switches += 1
+        if address == connecting {
+            cancelConnect()
+        }
+        if address == connectedAddress {
             connectedAddress = nil
         }
         servers.removeAll { $0.address == address }
@@ -280,7 +347,7 @@ final class AppModel {
     }
 
     private func loadServers() {
-        attempt { servers = try core.servers() }
+        servers = core.servers()
     }
 
     private func apply(_ new: CoreState) {
@@ -290,9 +357,18 @@ final class AppModel {
             column = .detail
         }
         state = new
-        callAudio?.follow(inRoom: new.hasLiveRoom)
+        // Fullscreen ends with the share or the watching, also when the room or the server
+        // goes away.
+        if let user = fullscreenShare, !new.watchesShare(of: user) {
+            fullscreenShare = nil
+        }
+        if let user = pictureInPicture.showing?.user, !new.watchesShare(of: user) {
+            pictureInPicture.stop()
+        }
+        callAudio?.follow(inRoom: new.liveRoom != nil)
         if let sampleConnection {
             state.connection = sampleConnection
+            state.notice = connectionNotice(connection: sampleConnection)
         }
         if state.connection != .connected {
             serverSave = nil
@@ -339,6 +415,10 @@ final class AppModel {
             disconnect()
         }
     }
+
+    private func followSight() {
+        core.setViewsHidden(hidden: inBackground && pictureInPicture.showing == nil)
+    }
 }
 
 extension AppModel: Listener {
@@ -356,16 +436,12 @@ extension CoreState {
         people.first { $0.user == user }
     }
 
-    var permissions: Permissions? {
-        role.map(permissionsOf(role:))
+    /// Whether we watch `user`'s share, and they still share.
+    func watchesShare(of user: UInt64) -> Bool {
+        (current?.watching.contains(user) ?? false) && person(user)?.sharing != nil
     }
 
-    /// Whether we are in a room over a connection that is up, or that the core is bringing back.
-    var hasLiveRoom: Bool {
-        guard current != nil else { return false }
-        return switch connection {
-        case .connected, .reconnecting: true
-        case .disconnected, .awaitingReconnect, .signedInElsewhere, .failed: false
-        }
+    var permissions: Permissions? {
+        role.map(permissionsOf(role:))
     }
 }

@@ -38,12 +38,13 @@ use pw::spa::utils::{
     Choice, ChoiceEnum, ChoiceFlags, Direction, Fraction, Id, Rectangle, SpaTypes,
 };
 use pw::stream::{Stream, StreamBox, StreamFlags};
+use throcc_video::frame::{VideoFrame, copy_nv12, resize, rgb_to_nv12};
+use throcc_video::{DmaBuf, DmaBufPlane, MAX_PLANES};
 use tracing::warn;
 
-use super::clock::ShareClock;
-use super::{Capture, CaptureConfig, CaptureError, copy_nv12, failed, resize};
+use super::clock::{ShareClock, clock_nanos};
+use super::{Capture, CaptureConfig, CaptureError, failed};
 use crate::media::share_audio::STEREO_FRAME;
-use crate::media::video::frame::{VideoFrame, rgb_to_nv12};
 use desktop_audio::DesktopAudio;
 
 /// Frame buffers shared by the PipeWire thread and the share thread.
@@ -51,7 +52,6 @@ const POOL: usize = 4;
 /// PipeWire buffers the share thread may hold at once: the ring's, the one it reads, and
 /// one on its way back.
 const LENT: usize = POOL + 2;
-const MAX_PLANES: usize = 4;
 /// Formats offered in GPU memory, with their DRM fourccs.
 const DMABUF_FORMATS: [(VideoFormat, u32); 4] = [
     (VideoFormat::BGRx, fourcc(b"XR24")),
@@ -258,7 +258,8 @@ impl PipeWireCapture {
             current: None,
             refused: Vec::new(),
             audio,
-            clock: ShareClock::new(NANOS),
+            // CLOCK_MONOTONIC is the clock PipeWire's audio times are on.
+            clock: ShareClock::new(NANOS, || clock_nanos(libc::CLOCK_MONOTONIC)),
         })
     }
 
@@ -319,6 +320,10 @@ fn spawn_ready(
 }
 
 impl Capture for PipeWireCapture {
+    fn repeat_timestamp(&mut self) -> Option<u32> {
+        self.clock.repeat()
+    }
+
     fn next_dmabuf(&mut self) -> Option<&DmaBuf> {
         self.give_back();
         while let Some(held) = self.pop_dmabuf() {
@@ -336,6 +341,10 @@ impl Capture for PipeWireCapture {
             return Some(&held.frame);
         }
         None
+    }
+
+    fn current_dmabuf(&self) -> Option<&DmaBuf> {
+        self.current.as_ref().map(|held| &held.frame)
     }
 
     fn refuse_dmabuf(&mut self, modifier: Option<u64>) {
@@ -388,17 +397,6 @@ impl Capture for PipeWireCapture {
             audio.pop(|at, samples| clock.push_audio(at, samples))
         })
     }
-}
-
-/// CLOCK_MONOTONIC in nanoseconds, the clock PipeWire's audio times are on.
-fn monotonic_nanos() -> i64 {
-    let mut now = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: clock_gettime only writes the timespec it is given.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
-    now.tv_sec * NANOS + now.tv_nsec
 }
 
 impl Drop for PipeWireCapture {
@@ -455,7 +453,7 @@ fn run(
             (1 << spa::sys::SPA_DATA_MemPtr) | (1 << spa::sys::SPA_DATA_MemFd),
         ))?,
     };
-    let offers = if encoder_takes_dmabufs() {
+    let offers = if throcc_video::tries_gpu_input_first() {
         dmabuf_offers(egl::dmabuf_modifiers)
     } else {
         Vec::new()
@@ -516,16 +514,6 @@ fn run(
     ready.send(Ok(())).ok();
     mainloop.run();
     Ok(())
-}
-
-#[cfg(feature = "ffmpeg")]
-fn encoder_takes_dmabufs() -> bool {
-    crate::media::video::encode::tries_gpu_input_first()
-}
-
-#[cfg(not(feature = "ffmpeg"))]
-fn encoder_takes_dmabufs() -> bool {
-    false
 }
 
 fn renegotiate(
@@ -752,7 +740,7 @@ impl StreamState {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             return false;
         };
-        let at = monotonic_nanos();
+        let at = clock_nanos(libc::CLOCK_MONOTONIC);
         let in_gpu_memory = datas.first().is_some_and(|d| d.type_() == DataType::DmaBuf);
         let lent = match layout.drm {
             Some(drm) if in_gpu_memory => {
@@ -1019,31 +1007,6 @@ impl Slot {
             dmabuf: None,
         }
     }
-}
-
-/// A captured picture still in GPU memory, as DRM PRIME planes.
-#[derive(Debug)]
-pub struct DmaBuf {
-    pub width: u32,
-    pub height: u32,
-    pub fourcc: u32,
-    pub modifier: u64,
-    pub planes: [Option<DmaBufPlane>; MAX_PLANES],
-    /// Media timestamp, 90 kHz.
-    pub timestamp: u32,
-}
-
-impl DmaBuf {
-    pub fn planes(&self) -> impl Iterator<Item = &DmaBufPlane> {
-        self.planes.iter().flatten()
-    }
-}
-
-#[derive(Debug)]
-pub struct DmaBufPlane {
-    pub fd: OwnedFd,
-    pub offset: u32,
-    pub stride: u32,
 }
 
 /// A frame in GPU memory and the PipeWire buffer it lives in, lent to the share thread.

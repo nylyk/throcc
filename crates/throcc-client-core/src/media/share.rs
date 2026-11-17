@@ -1,11 +1,12 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use throcc_proto::frame::Flags;
 use throcc_proto::messages::{Recovery, ShareConfig, ShareTracks};
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
@@ -13,14 +14,27 @@ use tracing::{info, warn};
 use super::capture::{Capture, CaptureConfig, CaptureError, FrameLimiter};
 use super::engine::{Kind, MediaEngine, Outgoing, Received};
 use super::share_audio::{Playout, STEREO_FRAME, ShareAudioEncoder, due_frames};
-use super::video::decode::{DecodeError, Decoder, MaxSize};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use super::video::encode::EncodeError;
-use super::video::encode::{EncodedUnit, Encoder, EncoderConfig};
-use super::video::frame::{VideoFrame, share_size};
-use super::video::{Frame, Picture, PreviewDemand};
+use super::video::{Picture, PreviewDemand};
+#[cfg(target_os = "macos")]
+use throcc_video::PixelBuffer;
+#[cfg(target_os = "linux")]
+use throcc_video::Refusal;
+use throcc_video::frame::{VideoFrame, share_size};
+use throcc_video::{
+    DecodeError, Decoder, EncodedUnit, Encoder, EncoderConfig, Frame, MaxSize, Output,
+};
 
 const IDLE: Duration = Duration::from_millis(2);
+/// A share whose screen stands still sends its last picture again this often, so viewers
+/// keep getting pictures and a keyframe asked for comes out with the next one.
+const STILL_REPEAT: Duration = Duration::from_millis(500);
+/// How long a share's decode thread waits for a unit before it looks at the view again while
+/// it holds no picture.
+const WAITING: Duration = Duration::from_millis(10);
+/// Units waiting to be decoded past which decoding has fallen behind, half a second at
+/// 60 fps. They are dropped, and decoding goes on from the newest keyframe among them or
+/// the next one.
+const BACKLOG: usize = 30;
 /// Self-view gets every Nth frame.
 const SELF_VIEW_EVERY: u32 = 2;
 /// The widest a self-view picture held in memory is shrunk to. A macOS pixel buffer is shown
@@ -196,7 +210,9 @@ impl ShareSender {
             engine,
             tracks,
             frame,
-            unsent: first == Some(First::Copied),
+            unsent: first.is_some(),
+            last: Last::Nothing,
+            last_sent: Instant::now(),
             self_view: self_tx,
             admission: Admission {
                 limiter: FrameLimiter::new(capture_config.fps),
@@ -252,14 +268,31 @@ struct Sending {
     engine: Arc<MediaEngine>,
     tracks: ShareTracks,
     frame: VideoFrame,
-    /// Whether `frame` holds a captured picture that has not been sent yet.
+    /// Whether the first captured picture, in `frame` or still held by the capture in GPU
+    /// memory, has not been sent yet.
     unsent: bool,
+    /// Where the last picture sent is, to send it again while the screen stands still.
+    last: Last,
+    /// When a picture was last given to the encoder.
+    last_sent: Instant,
     self_view: watch::Sender<Option<Arc<Frame>>>,
     admission: Admission,
     tally: Tally,
     /// Whether captured pixel buffers go to the encoder uncopied.
     #[cfg(target_os = "macos")]
     pixel_buffers: bool,
+}
+
+/// Where the last picture sent is kept.
+enum Last {
+    Nothing,
+    /// In [`Sending::frame`].
+    Memory,
+    /// In the encoder, which took it in GPU memory.
+    #[cfg(target_os = "linux")]
+    Gpu,
+    #[cfg(target_os = "macos")]
+    PixelBuffer(PixelBuffer),
 }
 
 impl Sending {
@@ -286,7 +319,11 @@ impl Sending {
             let fresh =
                 std::mem::take(&mut self.unsent) || self.capture.next_frame(&mut self.frame);
             if !fresh {
-                std::thread::sleep(IDLE);
+                if self.last_sent.elapsed() >= STILL_REPEAT {
+                    self.send_again();
+                } else {
+                    std::thread::sleep(IDLE);
+                }
                 continue;
             }
             let Some(self_view) = self.admission.admit(self.frame.timestamp) else {
@@ -305,16 +342,24 @@ impl Sending {
     /// no more like it, so frames arrive in shared memory instead. True if there was one.
     #[cfg(target_os = "linux")]
     fn send_dmabuf(&mut self) -> bool {
-        let Some(frame) = self.capture.next_dmabuf() else {
+        let frame = if self.unsent {
+            self.capture.current_dmabuf()
+        } else {
+            self.capture.next_dmabuf()
+        };
+        let Some(frame) = frame else {
             return false;
         };
+        self.unsent = false;
         let modifier = frame.modifier;
         let Some(self_view) = self.admission.admit(frame.timestamp) else {
             return true;
         };
         let preview = self_view.then_some(SELF_VIEW_WIDTH);
+        self.last_sent = Instant::now();
         match self.encoder.encode_dmabuf(frame, preview) {
             Ok(encoded) => {
+                self.last = Last::Gpu;
                 self.send_units(encoded.units);
                 match encoded.preview {
                     Some(Ok(preview)) => {
@@ -325,41 +370,47 @@ impl Sending {
                     None => {}
                 }
             }
-            Err(e) => match refusal(&e, modifier) {
-                Some(refused) => {
-                    warn!(?refused, "falling back to frames in shared memory: {e}");
-                    self.capture.refuse_dmabuf(match refused {
-                        Refusal::Modifier(modifier) => Some(modifier),
-                        Refusal::All => None,
-                    });
+            Err(e) => {
+                // The encoder's last picture is older than the one that failed.
+                if matches!(self.last, Last::Gpu) {
+                    self.last = Last::Nothing;
                 }
-                None => warn!("encoding failed: {e}"),
-            },
+                match e.refusal(modifier) {
+                    Some(refused) => {
+                        warn!(?refused, "falling back to frames in shared memory: {e}");
+                        self.capture.refuse_dmabuf(match refused {
+                            Refusal::Modifier(modifier) => Some(modifier),
+                            Refusal::All => None,
+                        });
+                    }
+                    None => warn!("encoding failed: {e}"),
+                }
+            }
         }
         true
     }
 
-    /// Encodes the next frame from the pixel buffer it was captured into. A picture of
-    /// another size than the encoder's sends this and later frames down the copying path.
-    /// True if there was one.
+    /// Encodes the next frame from the pixel buffer it was captured into, uncopied. True if
+    /// there was one.
     #[cfg(target_os = "macos")]
     fn send_pixel_buffer(&mut self) -> bool {
         let Some(picture) = self.capture.next_pixel_buffer() else {
             return false;
         };
         let Some(self_view) = self.admission.admit(picture.timestamp) else {
+            // Skipped for the frame rate, but the newest picture, to send if the screen stops.
+            self.last = Last::PixelBuffer(picture);
             return true;
         };
         if self_view {
             let shown = Frame::PixelBuffer(picture.clone());
             self.self_view.send_replace(Some(Arc::new(shown)));
         }
-        match self.encoder.encode_pixel_buffer(&picture) {
+        let encoded = self.encoder.encode_pixel_buffer(&picture);
+        self.last = Last::PixelBuffer(picture);
+        self.last_sent = Instant::now();
+        match encoded {
             Ok(units) => self.send_units(units),
-            Err(e @ EncodeError::OtherSize(..)) => {
-                warn!("copying captured pictures from here on: {e}");
-                self.pixel_buffers = false;
-            }
             Err(e) => warn!("encoding failed: {e}"),
         }
         true
@@ -379,9 +430,43 @@ impl Sending {
     }
 
     fn send_video(&mut self) {
+        self.last = Last::Memory;
+        self.last_sent = Instant::now();
         match self.encoder.encode(&self.frame) {
             Ok(units) => self.send_units(units),
             Err(e) => warn!("encoding failed: {e}"),
+        }
+    }
+
+    /// Encodes the last picture sent again, stamped now.
+    fn send_again(&mut self) {
+        self.last_sent = Instant::now();
+        if matches!(self.last, Last::Nothing) {
+            return;
+        }
+        let Some(timestamp) = self.capture.repeat_timestamp() else {
+            return;
+        };
+        let encoded = match &self.last {
+            Last::Nothing => return,
+            Last::Memory => {
+                self.frame.timestamp = timestamp;
+                self.encoder.encode(&self.frame)
+            }
+            #[cfg(target_os = "linux")]
+            Last::Gpu => self.encoder.encode_gpu_again(timestamp),
+            #[cfg(target_os = "macos")]
+            Last::PixelBuffer(picture) => {
+                let again = PixelBuffer {
+                    buffer: picture.buffer.clone(),
+                    timestamp,
+                };
+                self.encoder.encode_pixel_buffer(&again)
+            }
+        };
+        match encoded {
+            Ok(units) => self.send_units(units),
+            Err(e) => warn!("encoding the still picture again failed: {e}"),
         }
     }
 
@@ -392,27 +477,6 @@ impl Sending {
                 Outgoing::new(self.tracks.video, unit.data, unit.timestamp, unit.keyframe);
             self.engine.send(Kind::Video, outgoing);
         }
-    }
-}
-
-/// Frames in GPU memory a share stops taking after one of them failed.
-#[cfg(target_os = "linux")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Refusal {
-    /// Those with this modifier, which failed to import.
-    Modifier(u64),
-    /// All of them, since the encoder or the GPU can't process them.
-    All,
-}
-
-/// What to refuse after a frame in GPU memory with `modifier` failed with `error`. `None`
-/// for errors that may pass, which cost only that frame.
-#[cfg(target_os = "linux")]
-fn refusal(error: &EncodeError, modifier: u64) -> Option<Refusal> {
-    match error {
-        EncodeError::Import(_) => Some(Refusal::Modifier(modifier)),
-        EncodeError::NoGpuInput | EncodeError::Gpu(_) => Some(Refusal::All),
-        _ => None,
     }
 }
 
@@ -458,19 +522,22 @@ pub enum ShareError {
 const MAX_HELD: usize = 32;
 /// Bytes of decoded frames held back for the share audio, at most.
 const MAX_HELD_BYTES: usize = 256 << 20;
-/// Room above each announced side for decoders that pad pictures to their alignment.
-const DECODER_PADDING: usize = 64;
 
 /// The largest decoded picture a share announced as `config` may have.
 fn max_size(config: &ShareConfig) -> MaxSize {
-    let side = |announced: u16| usize::from(announced) + DECODER_PADDING;
-    MaxSize::new(side(config.width), side(config.height))
+    MaxSize::for_share(config.width.into(), config.height.into())
 }
 
 /// The bytes of an NV12 picture of `frame`'s size, wherever it is held.
 fn frame_bytes(frame: &Frame) -> usize {
     let (width, height) = frame.size();
     width * height + 2 * width.div_ceil(2) * height.div_ceil(2)
+}
+
+/// Holds `frame` back for the share audio, dropping the oldest held frames to make room.
+fn hold(held: &mut VecDeque<Arc<Frame>>, frame: Frame) {
+    make_room(held, frame_bytes(&frame));
+    held.push_back(Arc::new(frame));
 }
 
 /// Drops the oldest held frames until one of `incoming` bytes fits both bounds.
@@ -510,44 +577,158 @@ impl KeyframeAsks {
     }
 }
 
-/// Decodes a share's `units` on its own thread into its newest picture due by `playout`, and
-/// returns what decodes them. `ask_idr` runs after a reset, and on failures at most once per
-/// [`KEYFRAME_RETRY`] until a picture decodes.
+/// What a share's decode thread reports.
+pub struct Receiving {
+    pub picture: Picture,
+    /// What decodes the share, as people see it named.
+    pub engine: watch::Receiver<&'static str>,
+    pub fell_behind: Arc<FellBehind>,
+}
+
+/// How a share's decoding falls behind the units arriving for it.
+#[derive(Default)]
+pub struct FellBehind {
+    /// How many times decoding fell so far behind that units waiting for it were dropped.
+    pub drops: AtomicU64,
+    /// Whether decoding waits for a keyframe after such a drop.
+    pub recovering: AtomicBool,
+}
+
+/// Decodes a share's `units` on its own thread into its newest picture due by `playout`,
+/// shown in `output` on the phones. `ask_idr` runs after a reset, and on failures at most
+/// once per [`KEYFRAME_RETRY`] until a picture decodes. `first_picture` runs once the first
+/// picture is out.
 pub fn receive(
     mut units: mpsc::Receiver<Received>,
     config: ShareConfig,
     playout: Option<Arc<Playout>>,
+    output: Output,
     ask_idr: impl Fn() + Send + 'static,
-) -> Result<(Picture, watch::Receiver<&'static str>), String> {
-    let mut decoder = Decoder::new(config.codec, max_size(&config)).map_err(|e| e.to_string())?;
+    first_picture: impl FnOnce() + Send + 'static,
+) -> Result<Receiving, String> {
+    let mut decoder =
+        Decoder::new(config.codec, max_size(&config), output).map_err(|e| e.to_string())?;
     let (tx, picture) = watch::channel(None);
     let (engine_tx, engine) = watch::channel(decoder.engine());
+    let fell_behind = Arc::new(FellBehind::default());
+    let falls = fell_behind.clone();
     std::thread::Builder::new()
         .name("throcc-decode".into())
         .spawn(move || {
+            let mut first_picture = Some(first_picture);
+            // Waits for the next unit without polling while no picture is held. Without it,
+            // the loop polls at `WAITING`.
+            let waiter = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .inspect_err(|e| warn!("no timer for the decode thread, so it polls: {e}"))
+                .ok();
             let mut held: VecDeque<Arc<Frame>> = VecDeque::new();
             let mut replaced: Option<Arc<Frame>> = None;
             let mut asks = KeyframeAsks::default();
+            // Set while the decoder lacks the references anything but a keyframe needs.
+            let mut awaiting_keyframe = false;
+            // Units taken from the channel to be decoded before any still in it.
+            let mut queued: VecDeque<Received> = VecDeque::new();
             let mut oversized: u64 = 0;
             loop {
-                let unit = if held.is_empty() {
-                    let Some(unit) = units.blocking_recv() else {
-                        return;
-                    };
-                    Some(unit)
-                } else {
-                    match units.try_recv() {
-                        Ok(unit) => Some(unit),
-                        Err(mpsc::error::TryRecvError::Empty) => {
-                            std::thread::sleep(IDLE);
-                            None
-                        }
-                        Err(mpsc::error::TryRecvError::Disconnected) => return,
+                // A sender sends nothing while its screen stands still, so the loop keeps
+                // turning without units to follow the app's view and show the picture again
+                // in a new one.
+                if decoder.follow_view() {
+                    let shown: Option<Arc<Frame>> = tx.borrow().clone();
+                    let flushed = decoder.take_flushed();
+                    awaiting_keyframe |= flushed;
+                    let blank = shown.as_ref().is_some_and(|frame| !frame.shows_again());
+                    if (flushed || blank) && asks.ask(Instant::now(), true, false) {
+                        ask_idr();
                     }
+                    if let Some(shown) = shown {
+                        decoder.present(&shown);
+                    }
+                }
+                if units.len() >= BACKLOG {
+                    let mut backlog: Vec<Received> = queued
+                        .drain(..)
+                        .chain(std::iter::from_fn(|| units.try_recv().ok()))
+                        .collect();
+                    let newest_keyframe = backlog
+                        .iter()
+                        .rposition(|unit| unit.flags.contains(Flags::KEYFRAME));
+                    let dropped = newest_keyframe.unwrap_or(backlog.len());
+                    match newest_keyframe {
+                        Some(at) => queued.extend(backlog.drain(at..)),
+                        None => {
+                            awaiting_keyframe = true;
+                            falls.recovering.store(true, Ordering::Relaxed);
+                            if asks.ask(Instant::now(), false, true) {
+                                ask_idr();
+                            }
+                        }
+                    }
+                    if dropped > 0 {
+                        falls.drops.fetch_add(1, Ordering::Relaxed);
+                        warn!(
+                            dropped,
+                            "decoding fell behind; dropped the units waiting for it"
+                        );
+                    }
+                }
+                let unit = match queued.pop_front().map_or_else(|| units.try_recv(), Ok) {
+                    Ok(unit) => Some(unit),
+                    Err(mpsc::error::TryRecvError::Empty) => {
+                        if tx.is_closed() {
+                            return;
+                        }
+                        // Units have stopped coming, so pictures still being decoded come
+                        // out now.
+                        loop {
+                            match decoder.drain() {
+                                Ok(Some(frame)) => {
+                                    if !awaiting_keyframe {
+                                        asks.answered();
+                                    }
+                                    hold(&mut held, frame);
+                                }
+                                Ok(None) => break,
+                                Err(e) => {
+                                    warn!("decoding failed: {e}");
+                                    break;
+                                }
+                            }
+                        }
+                        match (&waiter, held.is_empty()) {
+                            // The next unit wakes us at once, and the view is followed at
+                            // least every `WAITING`.
+                            (Some(waiter), true) => match next_unit(waiter, &mut units) {
+                                Ok(Some(unit)) => queued.push_back(unit),
+                                Ok(None) => return,
+                                Err(_) => {}
+                            },
+                            (None, true) => std::thread::sleep(WAITING),
+                            (_, false) => std::thread::sleep(IDLE),
+                        }
+                        None
+                    }
+                    Err(mpsc::error::TryRecvError::Disconnected) => return,
                 };
+                let unit = unit.filter(|unit| {
+                    let skipped = awaiting_keyframe && !unit.flags.contains(Flags::KEYFRAME);
+                    if skipped && asks.ask(Instant::now(), false, true) {
+                        ask_idr();
+                    }
+                    !skipped
+                });
                 if let Some(unit) = &unit {
                     let decoded = decoder.decode(&unit.data, unit.timestamp);
                     let flushed = decoder.take_flushed();
+                    // Only a keyframe that came out as a picture shows the references whole.
+                    let keyframe_shown =
+                        unit.flags.contains(Flags::KEYFRAME) && matches!(decoded, Ok(Some(_)));
+                    awaiting_keyframe = flushed && !keyframe_shown;
+                    if !awaiting_keyframe {
+                        falls.recovering.store(false, Ordering::Relaxed);
+                    }
                     let engine_changed = *engine_tx.borrow() != decoder.engine();
                     if engine_changed {
                         engine_tx.send_replace(decoder.engine());
@@ -563,8 +744,7 @@ pub fn receive(
                             if !flushed {
                                 asks.answered();
                             }
-                            make_room(&mut held, frame_bytes(&frame));
-                            held.push_back(Arc::new(frame));
+                            hold(&mut held, frame);
                         }
                         Ok(None) => {}
                         Err(DecodeError::TooLarge(width, height)) => {
@@ -597,40 +777,29 @@ pub fn receive(
                 if let Some(frame) = unused.and_then(Frame::into_planes) {
                     decoder.recycle(frame);
                 }
+                decoder.present(&newest);
                 replaced = tx.send_replace(Some(newest));
+                if let Some(first_picture) = first_picture.take() {
+                    first_picture();
+                }
             }
         })
         .map_err(|e| e.to_string())?;
-    Ok((picture, engine))
+    Ok(Receiving {
+        picture,
+        engine,
+        fell_behind,
+    })
 }
 
-#[cfg(all(test, target_os = "linux"))]
-mod refusal_tests {
-    use super::super::video::vaapi::VaError;
-    use super::*;
-
-    #[test]
-    fn a_layout_that_fails_to_import_is_refused_alone() {
-        let import = EncodeError::Import(VaError::Format(0));
-        assert_eq!(refusal(&import, 7), Some(Refusal::Modifier(7)));
-    }
-
-    #[test]
-    fn an_encoder_or_gpu_that_cant_take_them_refuses_all() {
-        let processing = EncodeError::Gpu(VaError::Call {
-            call: "vaEndPicture",
-            status: 1,
-        });
-        assert_eq!(refusal(&processing, 7), Some(Refusal::All));
-        assert_eq!(refusal(&EncodeError::NoGpuInput, 7), Some(Refusal::All));
-    }
-
-    #[test]
-    fn a_passing_error_costs_only_the_frame() {
-        assert_eq!(refusal(&EncodeError::NoSurfaces, 7), None);
-        let send = EncodeError::Ffmpeg(rsmpeg::error::RsmpegError::SendFrameAgainError);
-        assert_eq!(refusal(&send, 7), None);
-    }
+/// Waits on `waiter`, a decode thread's own runtime, up to [`WAITING`] for the next unit.
+/// `Ok(None)` once the sender is gone.
+fn next_unit(
+    waiter: &tokio::runtime::Runtime,
+    units: &mut mpsc::Receiver<Received>,
+) -> Result<Option<Received>, tokio::time::error::Elapsed> {
+    // Made inside the runtime: a timeout made outside one panics.
+    waiter.block_on(async { tokio::time::timeout(WAITING, units.recv()).await })
 }
 
 #[cfg(test)]
@@ -657,6 +826,30 @@ mod receive_tests {
     use throcc_proto::messages::Codec;
 
     use super::*;
+
+    #[test]
+    fn a_decode_thread_waits_for_units_without_a_runtime_of_its_own() {
+        std::thread::spawn(|| {
+            let waiter = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap();
+            let (tx, mut units) = mpsc::channel(4);
+            assert!(next_unit(&waiter, &mut units).is_err());
+            let unit = Received {
+                timestamp: 7,
+                flags: Flags::KEYFRAME,
+                data: vec![1],
+            };
+            tx.try_send(unit).unwrap();
+            let got = next_unit(&waiter, &mut units).unwrap().unwrap();
+            assert_eq!(got.timestamp, 7);
+            drop(tx);
+            assert!(next_unit(&waiter, &mut units).unwrap().is_none());
+        })
+        .join()
+        .unwrap();
+    }
 
     #[test]
     fn failures_ask_again_only_once_a_keyframe_is_overdue() {
@@ -687,16 +880,15 @@ mod receive_tests {
 
     #[test]
     fn decoded_pictures_are_bounded_by_the_announced_size() {
+        let sides = |width, height| max_size(&config(width, height)).sides();
+        assert_eq!(sides(1280, 720), (1280 + 64, 720 + 64));
         assert_eq!(
-            max_size(&config(1280, 720)),
-            MaxSize::new(1280 + 64, 720 + 64)
+            sides(u16::MAX, 16),
+            MaxSize::new(usize::MAX, 16 + 64).sides()
         );
-        assert_eq!(
-            max_size(&config(u16::MAX, 16)),
-            MaxSize::new(usize::MAX, 16 + 64)
-        );
-        assert_eq!(max_size(&config(u16::MAX, u16::MAX)), MaxSize::ANY);
-        assert_eq!(max_size(&config(0, 0)), MaxSize::new(64, 64));
+        assert_eq!(sides(u16::MAX, u16::MAX), MaxSize::ANY.sides());
+        assert_eq!(sides(0, 0), (64, 64));
+        assert_eq!(max_size(&config(1920, 1080)).announced(), (1920, 1080));
     }
 
     #[test]

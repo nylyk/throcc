@@ -1,5 +1,3 @@
-#![cfg(feature = "ffmpeg")]
-
 mod common;
 
 use std::sync::Arc;
@@ -8,8 +6,9 @@ use std::time::{Duration, Instant};
 use throcc_client_core::call::Call;
 use throcc_client_core::media::capture::{self, CaptureConfig, TestPattern};
 use throcc_client_core::media::engine::Kind;
-use throcc_client_core::media::share::{self, ShareSender};
+use throcc_client_core::media::share::{self, Receiving, ShareSender};
 use throcc_client_core::media::share_audio::audio_to_video;
+use throcc_client_core::media::video::Output;
 use throcc_proto::frame::VIDEO_CLOCK_HZ;
 use throcc_proto::messages::{Codec, Request, Response, ShareConfig, ShareTracks};
 
@@ -63,7 +62,8 @@ async fn a_shared_picture_arrives_within_a_few_frames() {
         return;
     };
     let units = watch(&bob, tracks.video, WATCH_UNITS).await;
-    let (mut picture, _) = share::receive(units, sender.config, None, || {}).unwrap();
+    let Receiving { mut picture, .. } =
+        share::receive(units, sender.config, None, Output::default(), || {}, || {}).unwrap();
 
     let mut latencies = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -154,8 +154,8 @@ async fn a_sixteen_by_ten_screen_is_sent_at_its_own_shape() {
     let capture = Box::new(TestPattern::new(screen, Instant::now()));
     let sender = match ShareSender::start(alice.engine.clone(), tracks, WANTED, capture) {
         Ok(sender) => sender,
-        // Every macOS has VideoToolbox, and the encoder ladder ends in software libvpx,
-        // which Homebrew's ffmpeg carries, so CI's macOS run always gets an encoder.
+        // Every macOS has VideoToolbox, and the encoder ladder ends in libvpx, which macOS
+        // links, so CI's macOS run always gets an encoder.
         Err(e) if cfg!(target_os = "macos") => panic!("no encoder started: {e}"),
         Err(e) => {
             skip(format_args!("no encoder: {e}"));

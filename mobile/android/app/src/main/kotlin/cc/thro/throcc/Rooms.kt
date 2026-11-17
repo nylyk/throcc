@@ -1,7 +1,9 @@
 package cc.thro.throcc
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -10,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ScreenShare
@@ -24,6 +27,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -38,14 +42,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cc.thro.throcc.core.Command
 import cc.thro.throcc.core.CoreState
+import cc.thro.throcc.core.JoinAction
+import cc.thro.throcc.core.KeyTrust
 import cc.thro.throcc.core.Person
 import cc.thro.throcc.core.Room
 import cc.thro.throcc.core.isValidPassword
-import cc.thro.throcc.core.limits
+import cc.thro.throcc.core.passwordProblem
 import java.io.Serializable
 
 private sealed interface RoomDialog : Serializable {
@@ -69,19 +74,19 @@ fun Rooms(model: AppModel, state: CoreState) {
         "Privacy and Keys" to Screen.Keys,
     )
     fun join(room: Room) {
-        when {
-            state.current?.room == room.id -> model.roomInFront = true
-            room.locked && !managesRooms -> {
+        when (room.join) {
+            JoinAction.ALREADY_IN -> model.roomInFront = true
+            JoinAction.ASK_PASSWORD -> {
                 model.passwordRefused = null
                 dialog = RoomDialog.Password(room.id)
             }
-            else -> model.join(Command.Join(room.id))
+            JoinAction.JOIN -> model.join(Command.Join(room.id))
         }
     }
     Page(
         model,
         server,
-        subtitle = state.server?.address.takeIf { state.server?.name != null },
+        largeTitle = false,
         actions = {
             if (managesRooms) IconButton({ dialog = RoomDialog.New }) { Icon(Icons.Default.Add, "New room") }
             OverflowMenu { close ->
@@ -117,15 +122,6 @@ fun Rooms(model: AppModel, state: CoreState) {
                                 dialog = RoomDialog.Delete(room.id)
                             }
                         }
-                    }
-                }
-            }
-            val lobby = state.people.filter { person -> state.rooms.none { it.id == person.room } }
-            if (lobby.isNotEmpty()) {
-                item("lobby") {
-                    GroupTitle("Lobby")
-                    Card(shape = MaterialTheme.shapes.extraLarge, colors = panelColors()) {
-                        Column(Modifier.padding(vertical = 8.dp)) { lobby.forEach { PersonRow(model, state, it) } }
                     }
                 }
             }
@@ -179,14 +175,15 @@ private fun RoomCard(model: AppModel, state: CoreState, room: Room, onJoin: () -
             Arrangement.spacedBy(16.dp),
             Alignment.CenterVertically,
         ) {
-            Icon(if (room.locked) Icons.Default.Lock else Icons.AutoMirrored.Filled.VolumeUp, null)
+            Box(Modifier.size(24.dp), Alignment.Center) {
+                if (room.locked) {
+                    Icon(Icons.Default.Lock, null)
+                } else {
+                    Box(Modifier.size(8.dp).background(LocalContentColor.current, CircleShape))
+                }
+            }
             Column(Modifier.weight(1f).heightIn(min = 48.dp), Arrangement.Center) {
-                Text(
-                    room.name,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.titleMediumEmphasized,
-                )
+                OneLineText(room.name, style = MaterialTheme.typography.titleMediumEmphasized)
                 Text(
                     facts.joinToString(" · "),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -195,12 +192,12 @@ private fun RoomCard(model: AppModel, state: CoreState, room: Room, onJoin: () -
             }
             menu()
         }
-        Column(Modifier.padding(bottom = 8.dp)) { people.forEach { PersonRow(model, state, it) } }
+        Column(Modifier.padding(bottom = 8.dp)) { people.forEach { PersonRow(model, it) } }
     }
 }
 
 @Composable
-private fun PersonRow(model: AppModel, state: CoreState, person: Person) {
+private fun PersonRow(model: AppModel, person: Person) {
     val scheme = MaterialTheme.colorScheme
     val quiet = scheme.onSurfaceVariant
     val small = Modifier.size(20.dp)
@@ -214,18 +211,12 @@ private fun PersonRow(model: AppModel, state: CoreState, person: Person) {
         Alignment.CenterVertically,
     ) {
         PersonPicture(model, person, 32.dp)
-        Text(
-            person.name,
-            Modifier.weight(1f),
-            if (person.blocked) quiet else scheme.onSurface,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        OneLineText(person.name, Modifier.weight(1f), if (person.blocked) quiet else scheme.onSurface)
         if (!person.blocked) {
-            when (state.trust(person)) {
-                Trust.KeyChanged -> Icon(Icons.Default.Warning, "Key changed", small, scheme.error)
-                Trust.Unverified -> Icon(Icons.Outlined.GppMaybe, "Not verified", small, quiet)
-                Trust.Verified -> {}
+            when (person.trust) {
+                KeyTrust.KEY_CHANGED -> Icon(Icons.Default.Warning, "Key changed", small, scheme.error)
+                KeyTrust.UNVERIFIED -> Icon(Icons.Outlined.GppMaybe, "Not verified", small, quiet)
+                KeyTrust.VERIFIED -> {}
             }
         }
         if (person.sharing != null) Icon(Icons.AutoMirrored.Filled.ScreenShare, "Sharing", small, quiet)
@@ -235,8 +226,8 @@ private fun PersonRow(model: AppModel, state: CoreState, person: Person) {
 
 @Composable
 private fun PasswordField(password: String, hint: String, refused: String? = null, onChange: (String) -> Unit) {
-    val tooLong = password.isNotEmpty() && !isValidPassword(password)
-    val error = refused ?: "Passwords can be at most ${limits().passwordChars} characters.".takeIf { tooLong }
+    // An empty password is no problem here: it leaves the room open, or waits to be typed.
+    val error = refused ?: password.takeIf { it.isNotEmpty() }?.let(::passwordProblem)
     OutlinedTextField(
         password,
         onChange,

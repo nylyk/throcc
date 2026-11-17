@@ -1,55 +1,153 @@
 mod messages;
+mod safety;
 mod state;
 mod voice;
 
+use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 
 use anyhow::{Context, Result, anyhow};
-use throcc_client_core::avatars;
+use throcc_client_core::account::SignInError;
 use throcc_client_core::blocked::BlockedStore;
-use throcc_client_core::client::{self, Client, ClientApi, MockClient, UiCommand, UiEvent};
+use throcc_client_core::client::{
+    self, Client, ClientApi, Entry, MockClient, SignIns, UiCommand, UiEvent,
+};
+use throcc_client_core::install;
 use throcc_client_core::keystore::{self, Keystore};
+use throcc_client_core::media::video::View;
 use throcc_client_core::media::voice::AudioEngine;
-use throcc_client_core::profile::Profile as CoreProfile;
-use throcc_client_core::server_look::ServerLook;
+use throcc_client_core::picture;
+use throcc_client_core::profile::{
+    self as core_profile, NameCheck as NameCheckCore, Profile as CoreProfile,
+};
+use throcc_client_core::safety as core_safety;
 use throcc_client_core::settings::{QUIETEST_GATE_DBFS, Settings};
-use throcc_client_core::state::BLOCKED_NAME;
+use throcc_client_core::state::{self as core_state, BLOCKED_NAME, State as CoreStateInner};
 use throcc_client_core::theme;
 use throcc_client_core::verified::VerifiedStore;
-use throcc_proto::Fingerprint;
 use throcc_proto::ids::{Hash, UserId};
 use throcc_proto::invite::InviteCode;
-use throcc_proto::messages::{
-    MAX_AVATAR_BYTES, MAX_NAME_CHARS, MAX_PASSWORD_CHARS, shows_something, valid_name,
-    valid_password,
-};
+use throcc_proto::messages::{MAX_AVATAR_BYTES, MAX_NAME_CHARS, MAX_PASSWORD_CHARS};
 use throcc_proto::permissions;
+use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{broadcast, watch};
 
 pub use messages::{Command, Event, NameChange, PictureChange, User};
+pub use safety::SafetyCheck;
 pub use state::{
-    Connection, CoreState, CurrentRoom, Health, KeyWarning, Person, Role, Room, Server, Share,
-    Sound, SoundLevel,
+    Connection, ConnectionNotice, CoreState, CurrentRoom, Health, JoinAction, KeyTrust, KeyWarning,
+    NoticeAction, Person, Role, Room, Server, Share, Sound, SoundLevel,
 };
 pub use voice::{MicLevel, NoiseSuppression, Voice};
 
+/// `ShareView.nativeWindow` in the Android app: the `ANativeWindow` behind a `Surface`, with a
+/// reference the caller hands on to `Core::show_share`. 0 if it has none.
+///
+/// # Safety
+/// Only the JVM calls this, with its environment and a `Surface`.
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_cc_thro_throcc_ShareView_nativeWindow(
+    env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    surface: *mut std::ffi::c_void,
+) -> i64 {
+    #[link(name = "android")]
+    unsafe extern "C" {
+        fn ANativeWindow_fromSurface(
+            env: *mut std::ffi::c_void,
+            surface: *mut std::ffi::c_void,
+        ) -> *mut std::ffi::c_void;
+    }
+    // SAFETY: the JVM calls this with its environment and a live `Surface`, and the window
+    // comes back with a reference of its own.
+    unsafe { ANativeWindow_fromSurface(env, surface) as usize as i64 }
+}
+
 uniffi::setup_scaffolding!();
 
-/// Why the core couldn't do what an app asked, in words for the user.
+/// Why the core couldn't do what an app asked.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
-#[uniffi(flat_error)]
 pub enum CoreError {
-    #[error("{0:#}")]
-    Failed(anyhow::Error),
+    /// The server's key isn't the one this install trusted for its address: it was
+    /// reinstalled, or something pretends to be it. A fresh invite proves the new key;
+    /// `Core::trust_server_key` takes it on the user's word.
+    #[error("the server's key changed")]
+    PinMismatch { expected: Vec<u8>, actual: Vec<u8> },
+    /// Our identity is gone from the keychain, so no server we joined knows us.
+    /// `Core::start_over` makes a new one once the user agrees.
+    #[error("your identity is missing from this device")]
+    IdentityMissing,
+    /// Anything else, in words for the user.
+    #[error("{reason}")]
+    Failed { reason: String },
+    /// A newer `connect`, `cancel_connect` or `disconnect` took over from this `connect`.
+    #[error("connecting was cancelled")]
+    Cancelled,
 }
 
 impl From<anyhow::Error> for CoreError {
     fn from(error: anyhow::Error) -> Self {
-        Self::Failed(error)
+        Self::Failed {
+            reason: format!("{error:#}"),
+        }
     }
+}
+
+impl CoreError {
+    /// A failed sign-in to `address`, explained as every client explains it.
+    fn sign_in(error: &SignInError, address: &str) -> Self {
+        if let Some((expected, actual)) = error.pin_mismatch() {
+            return Self::PinMismatch {
+                expected: expected.0.to_vec(),
+                actual: actual.0.to_vec(),
+            };
+        }
+        if error.identity_missing() {
+            return Self::IdentityMissing;
+        }
+        Self::Failed {
+            reason: error.explain(address),
+        }
+    }
+}
+
+/// What starting over did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum StartedOver {
+    /// The keychain had the identity after all; the servers stay on the list.
+    Recovered,
+    /// A new identity, and no servers on the list.
+    NewIdentity,
+}
+
+/// Why something this install keeps couldn't be read, so the app started without it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
+pub struct StoreProblems {
+    pub settings: Option<String>,
+    pub verified: Option<String>,
+    pub blocked: Option<String>,
+}
+
+/// The colours every client mixes from a theme's eight, each as 0xRRGGBB. The muted, accent
+/// and status colours read as text on every surface here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ThemeColors {
+    pub bg: u32,
+    pub panel: u32,
+    pub raised: u32,
+    pub control: u32,
+    pub line: u32,
+    pub selected: u32,
+    pub danger: u32,
+    pub text: u32,
+    pub muted: u32,
+    pub accent: u32,
+    pub warning: u32,
+    pub good: u32,
+    pub bad: u32,
 }
 
 /// Hears of every change while connected. Calls arrive in order, one at a time, on a
@@ -141,6 +239,7 @@ pub struct VerifiedPerson {
     pub key: Vec<u8>,
     /// The name they had when verified.
     pub name: String,
+    pub picture: Option<Vec<u8>>,
     /// The servers they were seen on, by address where the server is still known.
     pub servers: Vec<String>,
 }
@@ -193,8 +292,11 @@ pub struct Core {
     settings: Mutex<Settings>,
     verified: VerifiedStore,
     blocked: BlockedStore,
+    problems: Mutex<StoreProblems>,
     /// The servers the mock has joined.
-    sample_servers: Mutex<Vec<KnownServer>>,
+    sample_servers: Mutex<Vec<install::KnownServer>>,
+    share_views: Mutex<ShareViews>,
+    next_view: AtomicU64,
     listener: Arc<Mutex<Option<Arc<dyn Listener>>>>,
     /// Queues what the listener hears, each with the number of the connection it is from.
     told: mpsc::Sender<(u64, Told)>,
@@ -202,6 +304,7 @@ pub struct Core {
     connection: Arc<AtomicU64>,
     /// Held while the connection is made or ended, so that happens one at a time.
     switching: Mutex<()>,
+    sign_ins: SignIns,
     connected: Mutex<Option<Connected>>,
 }
 
@@ -211,25 +314,59 @@ enum Told {
     Event(Event),
 }
 
+#[derive(Default)]
+struct ShareViews {
+    /// The views each share is shown in, newest last: the newest shows it, and the one before
+    /// takes over when it goes.
+    shown: HashMap<u64, Vec<(u64, View)>>,
+    /// Whether the app is out of sight, which takes every share off its views.
+    hidden: bool,
+}
+
+impl ShareViews {
+    fn current(&self, user: u64) -> Option<View> {
+        if self.hidden {
+            return None;
+        }
+        self.shown.get(&user)?.last().map(|(_, view)| view.clone())
+    }
+
+    /// Gives `client` the view each share shows in now.
+    fn show_all(&self, client: &dyn ClientApi) {
+        for &user in self.shown.keys() {
+            client.set_share_view(UserId(user), self.current(user));
+        }
+    }
+}
+
 struct Connected {
     address: String,
     client: Arc<dyn ClientApi>,
     /// What the room's sound runs through. The mock has none.
     audio: Option<Arc<AudioEngine>>,
-    /// Carries a profile saved while the client runs to its session.
-    profile: watch::Sender<CoreProfile>,
 }
 
 #[uniffi::export]
 impl Core {
     /// The core over what this install keeps in the directories set with `set_app_dirs`.
+    /// A file it can't read is left out, and `store_problems` says why.
     #[uniffi::constructor]
-    pub fn new() -> Result<Arc<Self>, CoreError> {
-        let dir = keystore::config_dir()?;
-        let settings = Settings::load(&dir).context("reading the settings")?;
-        let verified = VerifiedStore::load(&dir).context("reading who you verified")?;
-        let blocked = BlockedStore::load(&dir).context("reading who you blocked")?;
-        Ok(Self::with(false, settings, verified, blocked))
+    pub fn new() -> Arc<Self> {
+        let (settings, settings_problem) = install::load_settings();
+        let (verified, verified_problem) = install::load_verified();
+        let (blocked, blocked_problem) = install::load_blocked();
+        let core = Self::with(false, settings, verified, blocked);
+        *lock(&core.problems) = StoreProblems {
+            settings: settings_problem,
+            verified: verified_problem,
+            blocked: blocked_problem,
+        };
+        core
+    }
+
+    /// Why what this install keeps couldn't be read or kept, where it couldn't.
+    pub fn store_problems(&self) -> StoreProblems {
+        lock(&self.problems).clone()
     }
 
     /// A core that keeps nothing and connects to sample servers, with our profile set once
@@ -261,22 +398,25 @@ impl Core {
     }
 
     /// Keeps our name and picture, and gives them to the server we are connected to. The
-    /// picture is an image file of at most 64 KiB.
+    /// picture is one `prepare_picture` made.
     pub fn set_profile(&self, profile: Profile) -> Result<(), CoreError> {
-        let name = valid_name(&profile.name).context("that name can't be used")?;
-        if profile
+        let name = core_profile::check_name(&profile.name)
+            .into_result()
+            .map_err(anyhow::Error::msg)?
+            .context("Names need at least one visible character.")?;
+        if let Some(problem) = profile
             .picture
-            .as_ref()
-            .is_some_and(|picture| picture.len() > MAX_AVATAR_BYTES)
+            .as_deref()
+            .and_then(core_profile::picture_problem)
         {
-            return Err(anyhow!("the picture is larger than 64 KiB").into());
+            return Err(anyhow!(problem).into());
         }
         let profile = CoreProfile {
-            name: name.to_owned(),
+            name,
             picture: profile.picture.map(Arc::from),
         };
-        self.change_settings(|settings| settings.profile = Some(profile.clone()))?;
-        self.pass_on(profile);
+        self.change_settings(|settings| settings.profile = Some(profile.clone()));
+        self.tell_client(UiCommand::SetProfile(profile));
         Ok(())
     }
 
@@ -296,42 +436,58 @@ impl Core {
         theme::custom(&lock(&self.settings).appearance).into()
     }
 
-    /// Picks the preset theme called `name`.
+    /// Picks the preset theme called `name`, keeping the Custom theme's colours as they
+    /// stand.
     pub fn set_theme(&self, name: String) -> Result<(), CoreError> {
         let (name, _) =
             theme::preset(&name).with_context(|| format!("there is no theme called {name}"))?;
-        self.change_settings(|settings| settings.appearance.theme = Some(name.to_owned()))
+        self.change_settings(|settings| theme::pick(&mut settings.appearance, name));
+        Ok(())
     }
 
     /// Picks the Custom theme with `palette` as its colours.
     pub fn set_custom_theme(&self, palette: Palette) -> Result<(), CoreError> {
-        let colors = theme::to_hex(palette.colors().map(|rgb| rgb & 0xFF_FFFF));
         self.change_settings(|settings| {
-            settings.appearance.theme = Some(theme::CUSTOM.to_owned());
-            settings.appearance.palette = Some(colors);
-        })
+            theme::pick_custom(&mut settings.appearance, palette.colors());
+        });
+        Ok(())
     }
 
     /// The servers this install has joined.
-    pub fn servers(&self) -> Result<Vec<KnownServer>, CoreError> {
-        if self.mock {
-            return Ok(lock(&self.sample_servers).clone());
+    pub fn servers(&self) -> Vec<KnownServer> {
+        self.known_servers()
+            .into_iter()
+            .map(|server| KnownServer {
+                address: server.address,
+                fingerprint: server.fingerprint.0.to_vec(),
+                name: server.name,
+                picture: showable(server.picture),
+            })
+            .collect()
+    }
+
+    /// Trusts `actual` as the key of the server at `address` from now on, as the user chose
+    /// to when it changed.
+    pub fn trust_server_key(&self, address: String, actual: Vec<u8>) -> Result<(), CoreError> {
+        let actual = messages::fingerprint(&actual).context("that is no server key")?;
+        if !self.mock {
+            Keystore::default_known_servers()?.trust(&address, actual)?;
         }
-        let (dir, cache) = (keystore::config_dir()?, keystore::cache_dir()?);
-        let known = Keystore::default_known_servers()?;
-        let servers = known.iter().map(|(address, fingerprint)| {
-            let look = ServerLook::load(&dir, &fingerprint).unwrap_or_default();
-            KnownServer {
-                address: address.to_owned(),
-                fingerprint: fingerprint.0.to_vec(),
-                name: look.name,
-                picture: look
-                    .avatar
-                    .and_then(|hash| avatars::load(&cache, hash))
-                    .map(|bytes| bytes.to_vec()),
-            }
-        });
-        Ok(servers.collect())
+        Ok(())
+    }
+
+    /// Makes a new identity and forgets every server, as the user chose to after the keychain
+    /// lost the old one, unless the keychain holds it again by now. It blocks until done.
+    pub fn start_over(&self) -> Result<StartedOver, CoreError> {
+        if self.mock {
+            lock(&self.sample_servers).clear();
+            return Ok(StartedOver::NewIdentity);
+        }
+        let (_, started) = Keystore::start_over()?;
+        Ok(match started {
+            keystore::StartedOver::Recovered => StartedOver::Recovered,
+            keystore::StartedOver::NewIdentity => StartedOver::NewIdentity,
+        })
     }
 
     /// Takes the server at `address` off the list without leaving it. It blocks as
@@ -350,49 +506,63 @@ impl Core {
     }
 
     /// Signs in to the server at `address`, joining it first with `invite`, and waits for
-    /// its answer. It takes the place of any connection there was.
+    /// its answer. It takes the place of any connection there was, and of any `connect` under
+    /// way, which fails with [`CoreError::Cancelled`].
     pub fn connect(&self, address: String, invite: Option<String>) -> Result<(), CoreError> {
-        let Some(profile) = lock(&self.settings).profile.clone() else {
-            return Err(anyhow!("set your name first").into());
-        };
+        let attempt = self.sign_ins.start();
         let invite = invite.map(|code| parse_invite(&code)).transpose()?;
         let _switching = lock(&self.switching);
         self.end_connection();
-        let (kept_profile, profile_changes) = watch::channel(profile.clone());
+        let Some(profile) = lock(&self.settings).profile.clone() else {
+            return Err(anyhow!("set your name first").into());
+        };
         let (verified, blocked) = (self.verified.clone(), self.blocked.clone());
         let mut audio = None;
         let client: Arc<dyn ClientApi> = if self.mock {
             Arc::new(MockClient::at(&address, verified, blocked))
         } else {
-            let keystore = Keystore::open_default()?;
+            let keystore = Keystore::open_default()
+                .map_err(|e| CoreError::sign_in(&SignInError::Store(e), &address))?;
             let voice = lock(&self.settings).audio.voice;
             let engine = Arc::new(AudioEngine::start(voice).context("starting the audio")?);
             audio = Some(engine.clone());
+            let entry = match &invite {
+                Some(code) => Entry::Enroll(code),
+                None => Entry::SignIn {
+                    cancelled: attempt.superseded(),
+                },
+            };
             let connected = Client::connect(
                 &address,
                 keystore,
-                invite.as_ref(),
-                profile_changes,
+                entry,
+                profile.clone(),
                 Some(engine),
                 verified,
                 blocked,
             );
-            Arc::new(connected.map_err(anyhow::Error::from)?)
+            if !attempt.is_newest() {
+                return Err(CoreError::Cancelled);
+            }
+            Arc::new(connected.map_err(|e| CoreError::sign_in(&e, &address))?)
         };
         let events = client.events();
         let state = CoreState::from(&*client.state());
         let connection = self.connection.load(Ordering::SeqCst);
+        // Held until the client is in place, so a view shown or hidden meanwhile reaches it.
+        let views = lock(&self.share_views);
+        views.show_all(&*client);
         *lock(&self.connected) = Some(Connected {
             address,
             client,
             audio,
-            profile: kept_profile,
         });
+        drop(views);
         let _ = self.told.send((connection, Told::State(Box::new(state))));
         self.forward(events, connection);
         let saved = lock(&self.settings).profile.clone();
         if let Some(saved_meanwhile) = saved.filter(|saved| *saved != profile) {
-            self.pass_on(saved_meanwhile);
+            self.tell_client(UiCommand::SetProfile(saved_meanwhile));
         }
         if let Some(audio) = self.audio() {
             audio.apply(lock(&self.settings).audio.voice);
@@ -400,11 +570,18 @@ impl Core {
         Ok(())
     }
 
-    /// Ends the connection, staying a member of the server. It waits for a `connect` under
-    /// way, and then up to three seconds for the goodbye to the server.
+    /// Ends the connection, staying a member of the server. It cancels a `connect` signing in,
+    /// waits for one enrolling, and then up to three seconds for the goodbye to the server.
     pub fn disconnect(&self) {
+        self.cancel_connect();
         let _switching = lock(&self.switching);
         self.end_connection();
+    }
+
+    /// Cancels every `connect` under way, which then fails with [`CoreError::Cancelled`]. One
+    /// signing in gives up at once; one enrolling with an invite finishes first.
+    pub fn cancel_connect(&self) {
+        self.sign_ins.cancel();
     }
 
     /// Opens the speaker, and the mic `with_mic`, for the room we are in. The app sets up
@@ -437,7 +614,7 @@ impl Core {
     /// once let go.
     pub fn set_voice(&self, voice: Voice, keep: bool) -> Result<(), CoreError> {
         if keep {
-            self.change_settings(|settings| voice.apply_to(&mut settings.audio.voice))?;
+            self.change_settings(|settings| voice.apply_to(&mut settings.audio.voice));
         } else {
             voice.apply_to(&mut lock(&self.settings).audio.voice);
         }
@@ -459,47 +636,121 @@ impl Core {
     }
 
     pub fn command(&self, command: Command) {
-        if let Some(command) = command.into_core() {
-            self.tell_client(command);
+        self.tell_client(command.into_core());
+    }
+
+    /// Watches `user`'s share in place of any other: a phone shows one share at a time.
+    pub fn watch_only(&self, user: u64) {
+        let Some(state) = self.client_state() else {
+            return;
+        };
+        let watching = state.current.iter().flat_map(|c| &c.watching);
+        for &watched in watching.filter(|watched| watched.0 != user) {
+            self.tell_client(UiCommand::Unwatch(watched));
+        }
+        self.tell_client(UiCommand::Watch(UserId(user)));
+    }
+
+    /// Shows `user`'s share in a view of the app's from now on, in place of the one it showed
+    /// in, until `hide_share` with the number this returns. On Android `view` is the
+    /// `ANativeWindow*` that `ShareView.nativeWindow` returns for a surface, on iOS an
+    /// `AVSampleBufferDisplayLayer` passed retained. Either way the core takes over that
+    /// reference. The view may come before the share is watched; the share shows once it is.
+    // Desktops have no views, so there the rest never runs.
+    #[cfg_attr(
+        not(any(target_os = "android", target_os = "ios")),
+        allow(unreachable_code, unused_variables)
+    )]
+    pub fn show_share(&self, user: u64, view: u64) -> u64 {
+        // SAFETY: the app hands over a live view and gives up its reference, as documented.
+        let Some(view) = (unsafe { View::from_raw(view) }) else {
+            return 0;
+        };
+        let number = self.next_view.fetch_add(1, Ordering::Relaxed) + 1;
+        let current = {
+            let mut views = lock(&self.share_views);
+            views.shown.entry(user).or_default().push((number, view));
+            views.current(user)
+        };
+        self.with_client(|client| client.set_share_view(UserId(user), current));
+        number
+    }
+
+    /// Stops showing `user`'s share in the view `show_share` numbered `number`, which is going
+    /// away. The view shown before it takes over, if there is one still.
+    // Desktops have no views, so there the rest never runs.
+    #[cfg_attr(
+        not(any(target_os = "android", target_os = "ios")),
+        allow(unreachable_code, unused_variables)
+    )]
+    pub fn hide_share(&self, user: u64, number: u64) {
+        let mut views = lock(&self.share_views);
+        let Some(shown) = views.shown.get_mut(&user) else {
+            return;
+        };
+        let Some(index) = shown.iter().position(|(n, _)| *n == number) else {
+            return;
+        };
+        let was_newest = index + 1 == shown.len();
+        shown.remove(index);
+        if shown.is_empty() {
+            views.shown.remove(&user);
+        }
+        let current = views.current(user);
+        drop(views);
+        if was_newest {
+            self.with_client(|client| client.set_share_view(UserId(user), current));
         }
     }
 
-    pub fn state(&self) -> CoreState {
-        match &*lock(&self.connected) {
-            Some(connected) => CoreState::from(&*connected.client.state()),
-            None => CoreState::default(),
+    /// Takes every share off the app's views while `hidden`, so none is decoded while the app
+    /// is out of sight, and puts them back once it is not.
+    pub fn set_views_hidden(&self, hidden: bool) {
+        let mut views = lock(&self.share_views);
+        if views.hidden == hidden {
+            return;
         }
+        views.hidden = hidden;
+        self.with_client(|client| views.show_all(client));
+    }
+
+    /// The safety-number comparison with `user`, as their profile shows it.
+    pub fn safety_check(self: Arc<Self>, user: u64) -> Arc<SafetyCheck> {
+        Arc::new(SafetyCheck {
+            core: self,
+            check: Mutex::new(core_safety::SafetyCheck::new(UserId(user))),
+        })
+    }
+
+    pub fn state(&self) -> CoreState {
+        self.client_state()
+            .map_or_else(CoreState::default, |state| CoreState::from(&*state))
     }
 
     /// The 60-digit safety number with whoever holds the identity key `key`.
     pub fn safety_number(&self, key: Vec<u8>) -> Option<String> {
         let key = key.as_slice().try_into().ok()?;
-        let connected = lock(&self.connected);
-        Some(connected.as_ref()?.client.safety_number(&key))
+        self.with_client(|client| client.safety_number(&key))
     }
 
-    /// The picture behind `hash`. One the core lacks is fetched, and `Event::AvatarReady`
-    /// says when it has arrived.
+    /// The picture behind `hash`, if it is one a phone may show. One the core lacks is
+    /// fetched, and `Event::AvatarReady` says when it has arrived.
     pub fn avatar(&self, hash: Vec<u8>) -> Option<Vec<u8>> {
         let hash = Hash(hash.as_slice().try_into().ok()?);
-        let connected = lock(&self.connected);
-        let picture = connected.as_ref()?.client.avatar(hash)?;
-        Some(picture.to_vec())
+        showable(self.with_client(|client| client.avatar(hash))?)
     }
 
     /// Everyone verified on this install.
     pub fn verified(&self) -> Vec<VerifiedPerson> {
-        let addresses = self.addresses();
-        let people = self.verified.list().into_iter().map(|person| {
-            let servers = person
-                .servers
-                .iter()
-                .map(|server| address_of(&addresses, server));
-            VerifiedPerson {
-                key: person.key.0.to_vec(),
-                name: person.name,
-                servers: servers.collect(),
-            }
+        let servers = self.known_servers();
+        let connected = lock(&self.connected);
+        let fetched = |hash| connected.as_ref()?.client.avatar(hash);
+        let people = install::verified_people(&self.verified, &self.blocked, &servers, fetched);
+        let people = people.into_iter().map(|person| VerifiedPerson {
+            key: person.key.0.to_vec(),
+            name: person.name,
+            picture: showable(person.picture),
+            servers: person.servers,
         });
         people.collect()
     }
@@ -514,22 +765,15 @@ impl Core {
 
     /// Everyone blocked on this install.
     pub fn blocked(&self) -> Vec<BlockedPerson> {
-        let addresses = self.addresses();
-        let cache = keystore::cache_dir().ok().filter(|_| !self.mock);
+        let servers = self.known_servers();
         let connected = lock(&self.connected);
         let fetched = |hash| connected.as_ref()?.client.avatar(hash);
-        let people = self.blocked.list().into_iter().map(|person| {
-            let cached = person
-                .avatar
-                .zip(cache.as_ref())
-                .and_then(|(hash, cache)| avatars::load(cache, hash))
-                .or_else(|| person.avatar.and_then(fetched));
-            BlockedPerson {
-                key: person.key.0.to_vec(),
-                name: person.name,
-                picture: cached.map(|bytes| bytes.to_vec()),
-                server: person.server.map(|server| address_of(&addresses, &server)),
-            }
+        let people = install::blocked_people(&self.blocked, &servers, fetched);
+        let people = people.into_iter().map(|listed| BlockedPerson {
+            key: listed.person.key.0.to_vec(),
+            name: listed.person.name,
+            picture: showable(listed.picture),
+            server: listed.server,
         });
         people.collect()
     }
@@ -562,11 +806,19 @@ impl Core {
             settings: Mutex::new(settings),
             verified,
             blocked,
-            sample_servers: Mutex::new(if mock { sample_servers() } else { Vec::new() }),
+            problems: Mutex::default(),
+            sample_servers: Mutex::new(if mock {
+                install::sample_servers()
+            } else {
+                Vec::new()
+            }),
+            share_views: Mutex::default(),
+            next_view: AtomicU64::new(0),
             listener,
             told,
             connection,
             switching: Mutex::new(()),
+            sign_ins: SignIns::default(),
             connected: Mutex::new(None),
         })
     }
@@ -581,27 +833,18 @@ impl Core {
         let _ = self.told.send((next, Told::State(Box::default())));
     }
 
-    /// Gives `profile` to the server we are connected to, and to the session for later
-    /// sign-ins.
-    fn pass_on(&self, profile: CoreProfile) {
-        if let Some(connected) = &*lock(&self.connected) {
-            connected.profile.send_replace(profile.clone());
-            connected.client.command(UiCommand::SetProfile(profile));
-        }
-    }
-
-    /// Changes the settings and keeps them, in memory only for the mock.
-    fn change_settings(&self, change: impl FnOnce(&mut Settings)) -> Result<(), CoreError> {
+    /// Changes the settings and keeps them, in memory only for the mock. A change that
+    /// can't be kept still holds until the app ends, and `store_problems` says why.
+    fn change_settings(&self, change: impl FnOnce(&mut Settings)) {
         let mut settings = lock(&self.settings);
-        let mut changed = settings.clone();
-        change(&mut changed);
-        if !self.mock {
-            changed
-                .save(&keystore::config_dir()?)
-                .context("saving the settings")?;
+        change(&mut settings);
+        if self.mock {
+            return;
         }
-        *settings = changed;
-        Ok(())
+        let saved = keystore::config_dir().and_then(|dir| settings.save(&dir));
+        lock(&self.problems).settings = saved
+            .err()
+            .map(|e| format!("Couldn't keep your settings: {e}"));
     }
 
     fn audio(&self) -> Option<Arc<AudioEngine>> {
@@ -614,30 +857,25 @@ impl Core {
     }
 
     fn tell_client(&self, command: UiCommand) {
-        if let Some(connected) = &*lock(&self.connected) {
-            connected.client.command(command);
+        self.with_client(|client| client.command(command));
+    }
+
+    /// The servers this install has joined, or the sample ones.
+    fn known_servers(&self) -> Vec<install::KnownServer> {
+        if self.mock {
+            lock(&self.sample_servers).clone()
+        } else {
+            install::known_servers()
         }
     }
 
-    /// The known servers' addresses by fingerprint.
-    fn addresses(&self) -> Vec<(String, Fingerprint)> {
-        if self.mock {
-            let servers = lock(&self.sample_servers);
-            let known = servers.iter().filter_map(|server| {
-                Some((
-                    server.address.clone(),
-                    messages::fingerprint(&server.fingerprint)?,
-                ))
-            });
-            return known.collect();
-        }
-        let Ok(known) = Keystore::default_known_servers() else {
-            return Vec::new();
-        };
-        known
-            .iter()
-            .map(|(address, fingerprint)| (address.to_owned(), fingerprint))
-            .collect()
+    /// Runs `f` on the client of the connection there is, under the lock on it.
+    pub(crate) fn with_client<T>(&self, f: impl FnOnce(&dyn ClientApi) -> T) -> Option<T> {
+        Some(f(&*lock(&self.connected).as_ref()?.client))
+    }
+
+    fn client_state(&self) -> Option<Arc<CoreStateInner>> {
+        self.with_client(|client| client.state())
     }
 
     /// Queues what the client behind `events` says, as news of `connection`, until that
@@ -730,23 +968,99 @@ pub fn is_light_theme(palette: Palette) -> bool {
 /// What `typed` is as a name, as every server judges it.
 #[uniffi::export]
 pub fn check_name(typed: String) -> NameCheck {
-    if typed.trim().is_empty() {
-        return NameCheck::Empty;
+    match core_profile::check_name(&typed) {
+        NameCheckCore::Empty => NameCheck::Empty,
+        NameCheckCore::Fine(name) => NameCheck::Fine { name },
+        NameCheckCore::TooLong => NameCheck::TooLong,
+        NameCheckCore::ShowsNothing => NameCheck::ShowsNothing,
+        NameCheckCore::HidesText => NameCheck::HidesText,
     }
-    match valid_name(&typed) {
-        Some(name) => NameCheck::Fine {
-            name: name.to_owned(),
-        },
-        None if typed.trim().chars().count() > MAX_NAME_CHARS => NameCheck::TooLong,
-        None if !shows_something(&typed) => NameCheck::ShowsNothing,
-        None => NameCheck::HidesText,
+}
+
+/// Why a server would refuse `typed` as a name, in words for the user, if it would.
+#[uniffi::export]
+pub fn name_problem(typed: String) -> Option<String> {
+    core_profile::check_name(&typed).problem()
+}
+
+/// Why a server would refuse `typed` as a room password, in words for the user, if it would.
+#[uniffi::export]
+pub fn password_problem(typed: String) -> Option<String> {
+    core_profile::password_problem(&typed)
+}
+
+/// Turns a picture the user chose into one any server takes: a small centred square. The app
+/// first turns formats only it reads, such as HEIC, into PNG.
+#[uniffi::export]
+pub fn prepare_picture(file: Vec<u8>) -> Result<Vec<u8>, CoreError> {
+    picture::prepare(&file).map_err(|reason| CoreError::Failed { reason })
+}
+
+/// The gain for a volume slider at `loudness`, from 0 (silent) to 2 where 1 plays the sound
+/// as it arrives, the same curve on every client.
+#[uniffi::export]
+pub fn loudness_to_gain(loudness: f32) -> f32 {
+    core_state::loudness_to_gain(loudness)
+}
+
+/// Where a volume slider sits for `gain`.
+#[uniffi::export]
+pub fn gain_to_loudness(gain: f32) -> f32 {
+    core_state::gain_to_loudness(gain)
+}
+
+/// The colours mixed from `palette`, as every client mixes them.
+#[uniffi::export]
+pub fn theme_colors(palette: Palette) -> ThemeColors {
+    let c = theme::Colors::of(palette.colors().map(|rgb| rgb & 0xFF_FFFF));
+    ThemeColors {
+        bg: c.bg,
+        panel: c.panel,
+        raised: c.raised,
+        control: c.control,
+        line: c.line,
+        selected: c.selected,
+        danger: c.danger,
+        text: c.text,
+        muted: c.muted,
+        accent: c.accent,
+        warning: c.warning,
+        good: c.good,
+        bad: c.bad,
     }
+}
+
+/// `color`, as 0xRRGGBB, from typed hex: `#rrggbb`, `rrggbb` or `#rgb`.
+#[uniffi::export]
+pub fn parse_color(typed: String) -> Option<u32> {
+    theme::parse_hex(&typed)
+}
+
+/// `color`, as 0xRRGGBB, as `#RRGGBB`.
+#[uniffi::export]
+pub fn format_color(color: u32) -> String {
+    theme::format_hex(color & 0xFF_FFFF)
+}
+
+/// What to tell the user about `connection`, as `CoreState::notice` says it. For samples
+/// that show a connection of their own.
+#[uniffi::export]
+pub fn connection_notice(connection: Connection) -> Option<ConnectionNotice> {
+    core_state::ConnectionStatus::from(connection)
+        .notice()
+        .map(ConnectionNotice::from)
+}
+
+/// The letter a picture stands in with for `name`.
+#[uniffi::export]
+pub fn initial(name: String) -> String {
+    core_state::initial(&name)
 }
 
 /// Whether a server takes `typed` as a room password.
 #[uniffi::export]
 pub fn is_valid_password(typed: String) -> bool {
-    valid_password(&typed)
+    !typed.is_empty() && core_profile::password_problem(&typed).is_none()
 }
 
 /// Whether `typed` has the shape of an invite code.
@@ -797,29 +1111,12 @@ fn parse_invite(code: &str) -> Result<InviteCode> {
     code.trim().parse().ok().context("that is no invite code")
 }
 
-fn address_of(addresses: &[(String, Fingerprint)], server: &Fingerprint) -> String {
-    let known = addresses.iter().find(|(_, known)| known == server);
-    known.map_or_else(|| server.short(), |(address, _)| address.clone())
-}
-
-/// The servers the mock has joined.
-fn sample_servers() -> Vec<KnownServer> {
-    let server = |address: &str, key: u8, name: &str, picture: Option<&[u8]>| KnownServer {
-        address: address.to_owned(),
-        fingerprint: vec![key; 32],
-        name: Some(name.to_owned()),
-        picture: picture.map(<[u8]>::to_vec),
-    };
-    vec![
-        server(
-            "owls.thro.cc",
-            0x2c,
-            "Night Owls",
-            Some(client::SAMPLE_SERVER_PICTURE),
-        ),
-        server("192.168.1.20", 0x5e, "LAN Party", None),
-        server("192.0.2.40", 0x91, "Survival SMP", None),
-    ]
+/// `picture`, if it is one a phone may show: a PNG or JPEG as profiles are made, read by
+/// the platform's own decoder.
+fn showable(picture: Option<Arc<[u8]>>) -> Option<Vec<u8>> {
+    picture
+        .filter(|bytes| picture::showable(bytes))
+        .map(|bytes| bytes.to_vec())
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -925,7 +1222,7 @@ mod tests {
 
         core.forget_server("owls.thro.cc".into()).unwrap();
         next(&states, "no connection", |s| s.server.is_none());
-        let listed = core.servers().unwrap();
+        let listed = core.servers();
         assert!(listed.iter().all(|server| server.address != "owls.thro.cc"));
         assert_eq!(listed.len(), 2);
     }
@@ -973,7 +1270,8 @@ mod tests {
         assert_eq!(core.theme(), core.themes()[0]);
         core.set_theme("tide".into()).unwrap();
         assert_eq!(core.theme().name, "Tide");
-        assert_eq!(core.custom_palette().accent, 0x5CC8E8);
+        // Picking a preset keeps Custom's colours as they stood: the default theme's here.
+        assert_eq!(core.custom_palette(), core.themes()[0].palette);
         let own = Palette {
             accent: 0x12_3456,
             ..core.theme().palette

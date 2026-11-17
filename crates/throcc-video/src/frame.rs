@@ -129,8 +129,39 @@ impl VideoFrame {
     }
 }
 
+/// Copies an NV12 picture of `width`×`height`, given as (plane, stride) pairs, into `into`.
+pub fn copy_nv12(
+    into: &mut VideoFrame,
+    (y, y_stride): (&[u8], usize),
+    (uv, uv_stride): (&[u8], usize),
+    (width, height): (usize, usize),
+) {
+    resize(into, width, height);
+    copy_rows(y, y_stride, width, &mut into.y);
+    copy_rows(uv, uv_stride, width, &mut into.uv);
+}
+
+/// Makes `frame` `width`×`height`, keeping its buffers when it already is.
+pub fn resize(frame: &mut VideoFrame, width: usize, height: usize) {
+    if frame.width != width || frame.height != height {
+        *frame = VideoFrame::blank(width, height);
+    }
+}
+
+/// Copies rows of `row_bytes` from `src`, `stride` apart, into the tightly packed `dst`.
+fn copy_rows(src: &[u8], stride: usize, row_bytes: usize, dst: &mut [u8]) {
+    if stride < row_bytes || row_bytes == 0 {
+        return;
+    }
+    for (src, dst) in src.chunks(stride).zip(dst.chunks_exact_mut(row_bytes)) {
+        if let Some(src) = src.get(..row_bytes) {
+            dst.copy_from_slice(src);
+        }
+    }
+}
+
 /// Converts 4-byte pixels to full-range BT.709 NV12; `rgb` picks red, green and blue.
-pub(crate) fn rgb_to_nv12(
+pub fn rgb_to_nv12(
     src: &[u8],
     stride: usize,
     into: &mut VideoFrame,

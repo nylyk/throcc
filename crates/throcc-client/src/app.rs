@@ -11,26 +11,29 @@ use gpui_component::input::{InputEvent, InputState};
 use gpui_component::notification::Notification;
 use gpui_component::slider::{SliderEvent, SliderState};
 use gpui_component::{Root, WindowExt};
-use throcc_client_core::account::SignInError;
-use throcc_client_core::avatars;
+use throcc_client_core::account::{self, SignInError};
 use throcc_client_core::blocked::BlockedStore;
-use throcc_client_core::client::{self, Client, ClientApi, MockClient, UiCommand, UiEvent};
+use throcc_client_core::client::{
+    self, Client, ClientApi, Entry, MockClient, SignIns, UiCommand, UiEvent,
+};
+use throcc_client_core::install::{self, KnownServer};
 use throcc_client_core::keystore::{self, Keystore, StartedOver};
 use throcc_client_core::media::devices;
 use throcc_client_core::media::video::frame::VideoFrame;
 use throcc_client_core::media::voice::AudioEngine;
-use throcc_client_core::profile::Profile;
-use throcc_client_core::server_look::ServerLook;
+use throcc_client_core::profile::{self, Profile};
+use throcc_client_core::safety::SafetyCheck;
 use throcc_client_core::settings::{Appearance, AudioSettings, Settings, Transmit};
 use throcc_client_core::state::{
-    BlockedPerson, ConnectionStatus, KeyWarning, ServerView, ShareChoice, Sound, SoundLevel, State,
+    BlockedPerson, ConnectionStatus, JoinAction, KeyWarning, ServerView, ShareChoice, Sound,
+    SoundLevel, State, VerifiedIdentity,
 };
+use throcc_client_core::theme as core_theme;
 use throcc_client_core::verified::VerifiedStore;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
 use throcc_proto::invite::{self, InviteCode};
-use throcc_proto::messages::{MAX_NAME_CHARS, User, shows_something, valid_name, valid_password};
+use throcc_proto::messages::User;
 use throcc_proto::{Fingerprint, permissions};
-use tokio::sync::watch;
 
 use crate::keep_display_awake::KeepDisplayAwake;
 use crate::theme;
@@ -239,15 +242,8 @@ pub struct SoundLevelControl {
 pub enum Dialog {
     Share,
     Connection,
-    /// `user`'s profile, with our safety number for them. `shown` is the identity key the
-    /// number on screen is for, with the number, once they presented one; `key_changed` once
-    /// another key replaced it while open, until the user goes on to compare the new number.
-    /// Marking waits for that, so a click meant for one number can't land on the next.
-    Profile {
-        user: UserId,
-        shown: Option<(Fingerprint, String)>,
-        key_changed: bool,
-    },
+    /// Someone's profile, with our safety number for them as the check keeps it on screen.
+    Profile(SafetyCheck),
     Remove {
         user: UserId,
         name: String,
@@ -297,6 +293,12 @@ pub struct BlockedLook {
     pub picture: Option<Arc<RenderImage>>,
 }
 
+/// Someone verified, with the picture they had when verified, decoded.
+pub struct VerifiedLook {
+    pub person: VerifiedIdentity,
+    pub picture: Option<Arc<RenderImage>>,
+}
+
 /// A known server's name and picture as last seen, for while we aren't connected to it.
 pub struct CachedLook {
     pub name: Option<String>,
@@ -336,133 +338,66 @@ fn with_sample_share(client: MockClient) -> Arc<MockClient> {
     Arc::new(client)
 }
 
-/// The kept looks of `known` servers, by address.
-fn cached_looks(known: &[(String, Fingerprint)]) -> HashMap<String, CachedLook> {
-    let (Ok(dir), Ok(cache)) = (keystore::config_dir(), keystore::cache_dir()) else {
-        return HashMap::new();
-    };
-    known
+/// The servers this computer has joined, by address, and how each last looked.
+fn split_known(
+    known: Vec<KnownServer>,
+) -> (Vec<(String, Fingerprint)>, HashMap<String, CachedLook>) {
+    let addresses = known
         .iter()
-        .filter_map(|(address, fingerprint)| {
-            let look = ServerLook::load(&dir, fingerprint).ok()?;
-            let picture = look
-                .avatar
-                .and_then(|hash| avatars::load(&cache, hash))
-                .as_deref()
-                .and_then(crate::avatar::decode);
-            Some((
-                address.clone(),
-                CachedLook {
-                    name: look.name,
-                    picture,
-                },
-            ))
-        })
-        .collect()
-}
-
-/// The verified people kept on this computer, with why they couldn't be read if they
-/// couldn't, in which case nobody counts as verified.
-fn load_verified() -> (VerifiedStore, Option<String>) {
-    match keystore::config_dir() {
-        Ok(dir) => {
-            let verified = VerifiedStore::empty(&dir);
-            let problem = read_verified(&verified);
-            (verified, problem)
-        }
-        Err(e) => (VerifiedStore::in_memory(), Some(e.to_string())),
-    }
-}
-
-/// Reads `verified` from its file again, returning why it couldn't be read if it couldn't.
-fn read_verified(verified: &VerifiedStore) -> Option<String> {
-    let e = verified.reload().err()?;
-    tracing::warn!("no verified keys: {e:#}");
-    Some(format!(
-        "Couldn't read who you verified ({e}), so everyone shows as not verified."
-    ))
-}
-
-/// The blocked people kept on this computer, with why they couldn't be read if they
-/// couldn't, in which case nobody counts as blocked.
-fn load_blocked() -> (BlockedStore, Option<String>) {
-    let dir = match keystore::config_dir() {
-        Ok(dir) => dir,
-        Err(e) => return (BlockedStore::in_memory(), Some(e.to_string())),
-    };
-    match BlockedStore::load(&dir) {
-        Ok(blocked) => (blocked, None),
-        Err(e) => {
-            tracing::warn!("no blocked people: {e:#}");
-            let problem = format!("Couldn't read who you blocked ({e}), so nobody is blocked.");
-            (BlockedStore::empty(&dir), Some(problem))
-        }
-    }
+        .map(|k| (k.address.clone(), k.fingerprint))
+        .collect();
+    let looks = known.into_iter().map(|k| {
+        let picture = k.picture.as_deref().and_then(crate::avatar::decode);
+        (
+            k.address,
+            CachedLook {
+                name: k.name,
+                picture,
+            },
+        )
+    });
+    (addresses, looks.collect())
 }
 
 /// Everyone in `blocked` with the picture they had when blocked, where it is still cached.
 fn blocked_people(blocked: &BlockedStore) -> Vec<BlockedLook> {
-    let cache = keystore::cache_dir().ok();
-    let look = |person: BlockedPerson| BlockedLook {
-        picture: person
-            .avatar
-            .zip(cache.as_ref())
-            .and_then(|(hash, cache)| avatars::load(cache, hash))
+    let listed = install::blocked_people(blocked, &[], |_| None);
+    let look = |listed: install::ListedBlocked| BlockedLook {
+        picture: listed.picture.as_deref().and_then(crate::avatar::decode),
+        person: listed.person,
+    };
+    listed.into_iter().map(look).collect()
+}
+
+/// Everyone in `verified` with the picture they had when verified, where it is still cached
+/// or `client` has it.
+fn verified_people(
+    verified: &VerifiedStore,
+    blocked: &BlockedStore,
+    client: Option<&dyn ClientApi>,
+) -> Vec<VerifiedLook> {
+    let fetched = |hash| client?.avatar(hash);
+    let look = |person: VerifiedIdentity| VerifiedLook {
+        picture: install::verified_picture(&person, blocked, fetched)
             .as_deref()
             .and_then(crate::avatar::decode),
         person,
     };
-    blocked.list().into_iter().map(look).collect()
-}
-
-fn known_servers() -> Vec<(String, Fingerprint)> {
-    Keystore::default_known_servers()
-        .map(|k| k.iter().map(|(a, f)| (a.to_owned(), f)).collect())
-        .unwrap_or_default()
+    verified.list().into_iter().map(look).collect()
 }
 
 /// Decoded pictures kept before the ones nothing shown uses are dropped.
 const PICTURES_KEPT: usize = 256;
-const NAME_TOO_LONG: &str = "Names can be at most 32 characters.";
-const NAME_HIDES_TEXT: &str = "Names can’t contain control or invisible characters.";
-const NAME_SHOWS_NOTHING: &str = "Names need at least one visible character.";
-const PASSWORD_TOO_LONG: &str = "Passwords can be at most 128 characters.";
-
-/// A typed name: `Ok(None)` when empty, and why the server would refuse it if it would.
-fn checked_name(typed: &str) -> Result<Option<String>, &'static str> {
-    if typed.trim().is_empty() {
-        return Ok(None);
-    }
-    match valid_name(typed) {
-        Some(name) => Ok(Some(name.to_owned())),
-        None if typed.trim().chars().count() > MAX_NAME_CHARS => Err(NAME_TOO_LONG),
-        None if !shows_something(typed) => Err(NAME_SHOWS_NOTHING),
-        None => Err(NAME_HIDES_TEXT),
-    }
+/// A name field's text: `Ok(None)` when empty, and why the server would refuse it if it
+/// would.
+pub fn typed_name(field: &Entity<InputState>, cx: &App) -> Result<Option<String>, String> {
+    profile::check_name(&field.read(cx).value()).into_result()
 }
 
-/// A typed password: `Ok(None)` when empty, and why the server would refuse it if it would.
-fn checked_password(typed: &str) -> Result<Option<String>, &'static str> {
-    if typed.is_empty() {
-        Ok(None)
-    } else if valid_password(typed) {
-        Ok(Some(typed.to_owned()))
-    } else {
-        Err(PASSWORD_TOO_LONG)
-    }
-}
-
-/// A name field's text, checked as [`checked_name`] does.
-pub fn typed_name(field: &Entity<InputState>, cx: &App) -> Result<Option<String>, &'static str> {
-    checked_name(&field.read(cx).value())
-}
-
-/// A password field's text, checked as [`checked_password`] does.
-pub fn typed_password(
-    field: &Entity<InputState>,
-    cx: &App,
-) -> Result<Option<String>, &'static str> {
-    checked_password(&field.read(cx).value())
+/// A password field's text: `Ok(None)` when empty, and why the server would refuse it if it
+/// would.
+pub fn typed_password(field: &Entity<InputState>, cx: &App) -> Result<Option<String>, String> {
+    profile::check_password(&field.read(cx).value())
 }
 
 /// Puts `value` in `field`, and focuses it when `focus`.
@@ -522,19 +457,18 @@ pub struct ThroccApp {
     /// Pictures by hash, `None` while one decodes in the background or if it can't be shown.
     pub pictures: HashMap<Hash, Option<Arc<RenderImage>>>,
     pub joining: bool,
-    /// Our profile as the join in progress pushes it, updated by saves until the join ends.
-    joining_profile: Option<watch::Sender<Profile>>,
     /// Whether the join in progress was asked for on a settings page, so it leaves them.
     join_asked_in_settings: bool,
     pub mascot: views::mascot::Shown,
-    /// Counts joins started, so a join that was overtaken by a newer one is ignored.
-    join_attempt: u64,
+    sign_ins: SignIns,
     pub join_error: Option<String>,
     pub start_over: StartOver,
     pub profile_avatar: Option<Hash>,
     pub profile_form: PictureForm,
     pub known_servers: Vec<(String, Fingerprint)>,
     pub verified: VerifiedStore,
+    /// The verified people as the settings page lists them.
+    pub verified_people: Vec<VerifiedLook>,
     pub blocked: BlockedStore,
     /// The blocked people as the settings page lists them.
     pub blocked_people: Vec<BlockedLook>,
@@ -663,47 +597,18 @@ impl ThroccApp {
         let (verified, verified_problem) = if mock {
             (VerifiedStore::in_memory(), None)
         } else {
-            load_verified()
+            install::load_verified()
         };
         let (blocked, blocked_problem) = if mock {
             (BlockedStore::in_memory(), None)
         } else {
-            load_blocked()
+            install::load_blocked()
         };
-        let known_servers = if mock {
-            vec![
-                ("owls.thro.cc".into(), Fingerprint([0x2c; 32])),
-                ("192.168.1.20".into(), Fingerprint([0x5e; 32])),
-                ("192.0.2.40".into(), Fingerprint([0x91; 32])),
-            ]
+        let (known_servers, server_looks) = split_known(if mock {
+            install::sample_servers()
         } else {
-            known_servers()
-        };
-        let server_looks = if mock {
-            let look = |name: &str, picture: &[u8]| CachedLook {
-                name: Some(name.into()),
-                picture: crate::avatar::decode(picture),
-            };
-            HashMap::from([
-                (
-                    "owls.thro.cc".to_owned(),
-                    look("Night Owls", client::SAMPLE_SERVER_PICTURE),
-                ),
-                (
-                    "192.168.1.20".to_owned(),
-                    look("LAN Party", include_bytes!("../assets/mock/lan-party.jpg")),
-                ),
-                (
-                    "192.0.2.40".to_owned(),
-                    look(
-                        "Survival SMP",
-                        include_bytes!("../assets/mock/survival-smp.jpg"),
-                    ),
-                ),
-            ])
-        } else {
-            cached_looks(&known_servers)
-        };
+            install::known_servers()
+        });
         let share_choice = ShareChoice::default();
         let (bitrate, bitrate_changes) = Self::bitrate_slider(share_choice, cx);
         let audio = views::settings::AudioControls::new(&settings.audio.voice, window, cx);
@@ -723,15 +628,15 @@ impl ThroccApp {
             palette_fields,
             pictures: HashMap::new(),
             joining: false,
-            joining_profile: None,
             join_asked_in_settings: false,
             mascot: views::mascot::Shown::default(),
-            join_attempt: 0,
+            sign_ins: SignIns::default(),
             join_error: None,
             start_over: StartOver::NotStarted,
             profile_avatar: None,
             profile_form: PictureForm::default(),
             known_servers,
+            verified_people: verified_people(&verified, &blocked, None),
             verified,
             blocked_people: blocked_people(&blocked),
             blocked,
@@ -874,7 +779,6 @@ impl ThroccApp {
         let mut events = client.events();
         self.client = Some(client);
         self.joining = false;
-        self.joining_profile = None;
         self.join_error = None;
         self.dialog = None;
         if self.join_asked_in_settings || !matches!(self.screen, Screen::Settings(_)) {
@@ -934,10 +838,13 @@ impl ThroccApp {
                 self.end_session(window, cx);
                 self.join_error = Some(reason);
             }
+            // The verified list is a snapshot, so a picture fetched for it needs a relist.
+            UiEvent::AvatarReady(_) if self.screen == Screen::Settings(SettingsPage::Verified) => {
+                self.list_verified()
+            }
             UiEvent::AvatarReady(_) => {}
             UiEvent::ProfileSaved => {}
-            UiEvent::ProfileRefused(reason) => {
-                let notice = format!("This server refused your profile: {reason}");
+            UiEvent::ProfileRefused(notice) => {
                 window.push_notification(Notification::new().message(notice), cx)
             }
             UiEvent::ServerProfileSaved => {
@@ -1052,11 +959,7 @@ impl ThroccApp {
 
     /// Switches every window to the theme called `name`, a preset or Custom, and keeps it.
     pub fn use_theme(&mut self, name: &'static str, cx: &mut Context<Self>) {
-        let custom = theme::custom(&self.settings.appearance).to_hex();
-        self.change_appearance(cx, |appearance| {
-            appearance.theme = Some(name.into());
-            appearance.palette = Some(custom);
-        });
+        self.change_appearance(cx, |appearance| core_theme::pick(appearance, name));
     }
 
     /// Changes the appearance, keeps it and shows it in every window.
@@ -1071,7 +974,13 @@ impl ThroccApp {
             tracing::warn!("could not save who is verified: {e:#}");
             self.verified_problem = Some(format!("Couldn't save who you verified: {e}"));
         }
+        self.list_verified();
         self.command(UiCommand::VerifiedChanged);
+    }
+
+    fn list_verified(&mut self) {
+        let client = self.client.as_deref();
+        self.verified_people = verified_people(&self.verified, &self.blocked, client);
     }
 
     /// Lists the blocked people again. A list with someone on it was read, whatever went
@@ -1437,11 +1346,7 @@ impl ThroccApp {
         self.dialog = Some(if self.state.me == Some(user) {
             Dialog::OwnProfile
         } else {
-            Dialog::Profile {
-                user,
-                shown: None,
-                key_changed: false,
-            }
+            Dialog::Profile(SafetyCheck::new(user))
         });
         self.follow_presented_key();
         cx.notify();
@@ -1450,8 +1355,8 @@ impl ThroccApp {
     /// Lets the user mark the person in the profile again, now comparing the number
     /// that replaced the one they had.
     pub fn compare_again(&mut self, cx: &mut Context<Self>) {
-        if let Some(Dialog::Profile { key_changed, .. }) = &mut self.dialog {
-            *key_changed = false;
+        if let Some(Dialog::Profile(check)) = &mut self.dialog {
+            check.compare_again();
             cx.notify();
         }
     }
@@ -1460,25 +1365,10 @@ impl ThroccApp {
     /// arrives with a room state, and the server may present another at any time, so this
     /// follows every event.
     fn follow_presented_key(&mut self) {
-        let Some(Dialog::Profile {
-            user,
-            shown,
-            key_changed,
-        }) = &mut self.dialog
-        else {
+        let (Some(Dialog::Profile(check)), Some(client)) = (&mut self.dialog, &self.client) else {
             return;
         };
-        let Some(key) = self.state.person(*user).and_then(|p| p.identity_key) else {
-            return;
-        };
-        let Some(client) = &self.client else {
-            return;
-        };
-        if shown.as_ref().is_some_and(|(shown, _)| shown.0 == key) {
-            return;
-        }
-        *key_changed |= shown.is_some();
-        *shown = Some((Fingerprint(key), client.safety_number(&key)));
+        check.follow(&self.state, |key| client.safety_number(key));
     }
 
     fn on_room_field(
@@ -1504,15 +1394,14 @@ impl ThroccApp {
     /// Joins `room`, asking for its password first when it is locked and we don't manage
     /// rooms.
     pub fn join_room(&mut self, room: RoomId, window: &mut Window, cx: &mut Context<Self>) {
-        if self.state.current.as_ref().is_some_and(|c| c.room == room) {
-            return;
+        match self.state.join_action(room) {
+            JoinAction::AlreadyIn => {}
+            JoinAction::AskPassword => {
+                set_field(&self.room_password, "", true, window, cx);
+                self.set_dialog(Some(Dialog::RoomPassword { room, error: None }), cx);
+            }
+            JoinAction::Join => self.command(UiCommand::Join(Some(room))),
         }
-        if self.state.room(room).is_some_and(|r| r.locked) && !self.manages_rooms() {
-            set_field(&self.room_password, "", true, window, cx);
-            self.set_dialog(Some(Dialog::RoomPassword { room, error: None }), cx);
-            return;
-        }
-        self.command(UiCommand::Join(Some(room)));
     }
 
     pub fn join_with_password(&mut self, cx: &mut Context<Self>) {
@@ -1645,9 +1534,6 @@ impl ThroccApp {
     fn keep_profile(&mut self, profile: Profile, window: &mut Window, cx: &mut Context<Self>) {
         self.profile_form.outdate_pick();
         self.profile_form.edit = None;
-        if let Some(joining) = &self.joining_profile {
-            joining.send_replace(profile.clone());
-        }
         self.set_profile(profile, cx);
         self.save_settings();
         if let Some(problem) = self.settings_problem.clone() {
@@ -1682,7 +1568,7 @@ impl ThroccApp {
 
     /// The name Save on the server page would give the server, if it differs, and why the
     /// server would refuse it if it would.
-    fn server_name_change(&self, cx: &App) -> Result<Option<Option<String>>, &'static str> {
+    fn server_name_change(&self, cx: &App) -> Result<Option<Option<String>>, String> {
         let typed = typed_name(&self.server_name, cx)?;
         let current = self.state.server.as_ref().and_then(|s| s.name.clone());
         Ok((typed != current).then_some(typed))
@@ -1758,6 +1644,7 @@ impl ThroccApp {
             {
                 self.command(UiCommand::ListUsers);
             }
+            Screen::Settings(SettingsPage::Verified) => self.list_verified(),
             Screen::Settings(SettingsPage::Blocked) => {
                 self.list_blocked();
             }
@@ -1907,31 +1794,25 @@ impl ThroccApp {
         let Some(profile) = self.settings.profile.clone() else {
             return;
         };
-        self.verified_problem = read_verified(&self.verified);
+        self.verified_problem = install::read_verified(&self.verified);
         self.joining = true;
-        self.join_attempt += 1;
-        let attempt = self.join_attempt;
+        let attempt = self.sign_ins.start();
+        let cancelled = attempt.superseded();
         self.join_error = None;
         let audio = Some(self.audio_engine.clone());
         let window_handle = window.window_handle();
         let joined_as = profile.clone();
-        let (joining_profile, profile) = watch::channel(profile);
-        self.joining_profile = Some(joining_profile);
         let connecting = cx.background_executor().spawn({
             let address = address.clone();
             let verified = self.verified.clone();
             let blocked = self.blocked.clone();
             async move {
                 let keystore = Keystore::open_default().map_err(SignInError::Store)?;
-                Client::connect(
-                    &address,
-                    keystore,
-                    invite.as_ref(),
-                    profile,
-                    audio,
-                    verified,
-                    blocked,
-                )
+                let entry = match &invite {
+                    Some(code) => Entry::Enroll(code),
+                    None => Entry::SignIn { cancelled },
+                };
+                Client::connect(&address, keystore, entry, profile, audio, verified, blocked)
             }
         });
         cx.spawn(async move |this, cx| {
@@ -1939,9 +1820,11 @@ impl ThroccApp {
             cx.update_window(window_handle, |_, window, cx| {
                 this.update(cx, |app, cx| {
                     if result.is_ok() {
+                        // A cancelled enrollment still finishes and adds the server.
                         app.reload_known_servers();
+                        cx.notify();
                     }
-                    if app.join_attempt != attempt {
+                    if !attempt.is_newest() {
                         return;
                     }
                     match result {
@@ -1955,7 +1838,6 @@ impl ThroccApp {
                         }
                         Err(e) => {
                             app.joining = false;
-                            app.joining_profile = None;
                             match e.pin_mismatch() {
                                 Some((expected, actual)) => {
                                     app.dialog = Some(Dialog::PinMismatch {
@@ -1965,7 +1847,7 @@ impl ThroccApp {
                                     });
                                 }
                                 None if e.identity_missing() => app.show_identity_missing(),
-                                None => app.join_error = Some(views::join::explain(&e, &address)),
+                                None => app.join_error = Some(e.explain(&address)),
                             }
                         }
                     }
@@ -2064,12 +1946,18 @@ impl ThroccApp {
         self.reload_known_servers();
     }
 
+    /// Gives up the join under way.
+    pub fn cancel_join(&mut self, cx: &mut Context<Self>) {
+        self.sign_ins.cancel();
+        self.joining = false;
+        cx.notify();
+    }
+
     /// Takes the server at `address` off our list without leaving it, abandoning a join to
     /// it and a session that gave up on it.
     pub fn remove_server(&mut self, address: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.joining && self.address.read(cx).value() == address {
-            self.joining = false;
-            self.join_attempt += 1;
+            self.cancel_join(cx);
         }
         if self.mock {
             self.known_servers.retain(|(known, _)| known != address);
@@ -2089,8 +1977,7 @@ impl ThroccApp {
         if self.mock {
             return;
         }
-        self.known_servers = known_servers();
-        self.server_looks = cached_looks(&self.known_servers);
+        (self.known_servers, self.server_looks) = split_known(install::known_servers());
     }
 
     /// The name of the server at `address`: the live one while connected to it, else the
@@ -2105,7 +1992,7 @@ impl ThroccApp {
     /// Opens a screen of the mock client by name, for screenshots: onboarding, onboardingerror,
     /// welcome, join, joinfailed, lost, personmenu, addserver, removeserver, room, testpattern,
     /// unwatched, alone, emptylobby, focus, fullscreen, popout, slow, slowpopout, slowfullscreen,
-    /// share, connection, person, personverified, personchanged, keychange, ownprofile,
+    /// lagging, share, connection, person, personverified, personchanged, keychange, ownprofile,
     /// pinmismatch, settings, appearance, verified, blocked, blockedmenu, blockedpeople, about,
     /// update, reconnect, elsewhere, newroom, editroom, roompassword, deleteroom, profile,
     /// profileerror, server, keys, members, invites, removeuser, leaveserver, identitymissing,
@@ -2160,7 +2047,7 @@ impl ThroccApp {
             "join" => offline(self),
             "joinfailed" => {
                 offline(self);
-                self.join_error = Some(views::join::unreachable_hint("owls.thro.cc"));
+                self.join_error = Some(account::unreachable_hint("owls.thro.cc"));
             }
             "lost" => {
                 joined(self);
@@ -2251,6 +2138,16 @@ impl ThroccApp {
                     make_slow(app);
                 });
             }
+            "lagging" => {
+                joined(self);
+                after_a_moment(cx, move |app, _| {
+                    show_overlay(app);
+                    Arc::make_mut(&mut app.state)
+                        .health
+                        .lagging_shares
+                        .insert(UserId(4));
+                });
+            }
             "share" => {
                 joined(self);
                 self.dialog = Some(Dialog::Share);
@@ -2263,8 +2160,8 @@ impl ThroccApp {
             "personverified" => self.open_profile(UserId(2), cx),
             "personchanged" => {
                 self.open_profile(UserId(4), cx);
-                if let Some(Dialog::Profile { key_changed, .. }) = &mut self.dialog {
-                    *key_changed = true;
+                if let Some(Dialog::Profile(check)) = &mut self.dialog {
+                    check.mark_changed_for_sample();
                 }
             }
             "keychange" => {
@@ -2295,7 +2192,7 @@ impl ThroccApp {
             }
             "settings" => self.screen = Screen::Settings(SettingsPage::Audio),
             "appearance" => self.screen = Screen::Settings(SettingsPage::Appearance),
-            "verified" => self.screen = Screen::Settings(SettingsPage::Verified),
+            "verified" => self.show_screen(Screen::Settings(SettingsPage::Verified), window, cx),
             "blocked" | "blockedmenu" | "blockedpeople" => {
                 joined(self);
                 self.command(UiCommand::Block(UserId(3)));
@@ -2595,44 +2492,7 @@ impl Render for ThroccApp {
 
 #[cfg(test)]
 mod tests {
-    use throcc_proto::messages::MAX_PASSWORD_CHARS;
-
     use super::*;
-
-    #[test]
-    fn names_are_checked_with_a_reason() {
-        assert_eq!(checked_name(""), Ok(None));
-        assert_eq!(checked_name("   "), Ok(None));
-        assert_eq!(checked_name("  Lobby "), Ok(Some("Lobby".into())));
-        let longest = "é".repeat(MAX_NAME_CHARS);
-        assert_eq!(checked_name(&longest), Ok(Some(longest.clone())));
-        assert_eq!(checked_name(&format!("{longest}x")), Err(NAME_TOO_LONG));
-        assert_eq!(checked_name("a\tb"), Err(NAME_HIDES_TEXT));
-        assert_eq!(checked_name("adm\u{202E}nimda"), Err(NAME_HIDES_TEXT));
-        assert_eq!(checked_name("\u{200B}"), Err(NAME_HIDES_TEXT));
-        for blank in [
-            "\u{2800}",
-            "\u{200D}",
-            "\u{FE0F}\u{FE0F}",
-            "\u{2800} \u{200C}",
-        ] {
-            assert_eq!(checked_name(blank), Err(NAME_SHOWS_NOTHING), "{blank:?}");
-        }
-        assert!(NAME_TOO_LONG.contains(&MAX_NAME_CHARS.to_string()));
-    }
-
-    #[test]
-    fn passwords_are_checked_with_a_reason() {
-        assert_eq!(checked_password(""), Ok(None));
-        assert_eq!(checked_password(" "), Ok(Some(" ".into())));
-        let longest = "p".repeat(MAX_PASSWORD_CHARS);
-        assert_eq!(checked_password(&longest), Ok(Some(longest.clone())));
-        assert_eq!(
-            checked_password(&format!("{longest}p")),
-            Err(PASSWORD_TOO_LONG)
-        );
-        assert!(PASSWORD_TOO_LONG.contains(&MAX_PASSWORD_CHARS.to_string()));
-    }
 
     #[test]
     fn only_a_pick_nothing_overtook_is_applied() {

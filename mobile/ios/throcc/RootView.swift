@@ -5,6 +5,7 @@ struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.horizontalSizeClass) private var sizeClass
     let sample: Sample?
+    @State private var sampleShown = false
 
     var body: some View {
         @Bindable var model = model
@@ -42,12 +43,16 @@ struct RootView: View {
             Text(alert.message)
         }
         .modifier(Themed())
-        .task {
-            if let sample {
+        .onGeometryChange(for: CGSize.self, of: \.size) { _ in Turning.screenChanged() }
+        // An iPad leaves changes made before the scene is first active off the screen.
+        .task(id: scenePhase == .active) {
+            if scenePhase == .active, !sampleShown, let sample {
+                sampleShown = true
                 await model.show(sample)
             }
         }
         .onChange(of: scenePhase) {
+            model.inBackground = scenePhase == .background
             if scenePhase == .active {
                 model.core.command(command: .reconnect)
             }
@@ -57,12 +62,15 @@ struct RootView: View {
     @ViewBuilder
     private func content(of sheet: Sheet) -> some View {
         switch sheet {
-        case .addServer: AddServerView()
+        case .addServer(let address): AddServerView(address: address)
         case .settings: SettingsView()
         case .newRoom: RoomEditor(room: nil)
         case .editRoom(let room): RoomEditor(room: room)
         case .person(let user): NavigationStack { PersonView(user: user).toolbar { CloseButton() } }
         case .server(let page): NavigationStack { ServerPageView(page: page) }
+        case .pinMismatch(let address, let code, let expected, let actual):
+            PinMismatchView(address: address, code: code, expected: expected, actual: actual)
+        case .identityMissing(let address, let code): IdentityMissingView(address: address, code: code)
         }
     }
 }

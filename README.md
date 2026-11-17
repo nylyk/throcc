@@ -61,9 +61,9 @@ cargo build --release -p throcc-client --features ffmpeg
 cargo build --release -p throcc-server
 ```
 
-Screen share needs ffmpeg 8; without `--features ffmpeg` the client does voice only.
+Screen share on Linux and Windows needs ffmpeg 8; without `--features ffmpeg` the client does voice only there. macOS needs no ffmpeg.
 
-- **macOS:** `brew install ffmpeg@8` and set `FFMPEG_PKG_CONFIG_PATH=/opt/homebrew/opt/ffmpeg@8/lib/pkgconfig`.
+- **macOS:** VideoToolbox does the video, with dav1d and libvpx linked statically: `brew install meson ninja`, `packaging/codecs/build.sh deps/codecs aarch64-apple-darwin`, then `set -a; eval "$(packaging/codecs/env.sh deps/codecs)"; set +a` before `cargo build --release -p throcc-client`.
 - **Linux:** install the packages listed in `.github/workflows/ci.yml` and ffmpeg 8's development files. With clang 21 or newer, generate ffmpeg's bindings with `packaging/ffmpeg/bindings.sh <ffmpeg prefix> binding.rs` and build with `FFMPEG_DLL_PATH=<prefix>/lib FFMPEG_BINDING_PATH=binding.rs`.
 - **Windows:** ffmpeg 8's development files, found through `FFMPEG_PKG_CONFIG_PATH` or vcpkg.
 

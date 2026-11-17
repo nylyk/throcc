@@ -24,7 +24,7 @@ pub(crate) struct People {
 }
 
 impl json_file::Format for People {
-    const MIGRATIONS: &'static [json_file::Migration] = &[add_blocked];
+    const MIGRATIONS: &'static [json_file::Migration] = &[add_blocked, add_verified_pictures];
 }
 
 /// Moves version 1 to 2, which has the blocked people. The new version keeps a throcc that
@@ -32,6 +32,10 @@ impl json_file::Format for People {
 fn add_blocked(v1: &mut Map<String, Value>) {
     v1.entry("blocked").or_insert_with(|| Map::new().into());
 }
+
+/// Moves version 2 to 3, whose verified people keep their picture. The new version keeps a
+/// throcc that knows no such pictures from writing the file back without them.
+fn add_verified_pictures(_: &mut Map<String, Value>) {}
 
 impl People {
     pub fn load(dir: &Path) -> Result<Self> {

@@ -11,7 +11,7 @@ use objc2_audio_toolbox::{
     kAudioOutputUnitProperty_EnableIO, kAudioOutputUnitProperty_SetInputCallback,
     kAudioUnitManufacturer_Apple, kAudioUnitProperty_SetRenderCallback,
     kAudioUnitProperty_StreamFormat, kAudioUnitScope_Global, kAudioUnitScope_Input,
-    kAudioUnitScope_Output, kAudioUnitSubType_VoiceProcessingIO, kAudioUnitType_Output,
+    kAudioUnitScope_Output, kAudioUnitType_Output,
 };
 use objc2_core_audio_types::{
     AudioBuffer, AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp,
@@ -73,15 +73,14 @@ struct Speaker {
 }
 
 /// Opens the phone's speaker, and its mic `with_mic`, through one audio unit at
-/// [`SAMPLE_RATE`]. With the mic it is the voice-processing unit, which cancels echo. The
-/// app sets up and activates its audio session first.
+/// [`SAMPLE_RATE`]. The app sets up and activates its audio session first.
 pub fn open(with_mic: bool) -> Result<Devices, DeviceError> {
     let counters = Arc::new(DeviceCounters::default());
     let (capture_ring, capture) = rtrb::RingBuffer::new((SAMPLE_RATE * RING_SECONDS) as usize);
     let (playback, playback_ring) =
         rtrb::RingBuffer::new((SAMPLE_RATE * PLAYBACK_RING_MS / 1000) as usize * 2);
 
-    let unit = new_unit(with_mic)?;
+    let unit = new_unit()?;
     let speaker = Box::into_raw(Box::new(Speaker {
         ring: playback_ring,
         counters: counters.clone(),
@@ -164,15 +163,10 @@ pub fn open(with_mic: bool) -> Result<Devices, DeviceError> {
     })
 }
 
-fn new_unit(with_mic: bool) -> Result<AudioUnit, DeviceError> {
-    let subtype = if with_mic {
-        kAudioUnitSubType_VoiceProcessingIO
-    } else {
-        REMOTE_IO
-    };
+fn new_unit() -> Result<AudioUnit, DeviceError> {
     let mut wanted = AudioComponentDescription {
         componentType: kAudioUnitType_Output,
-        componentSubType: subtype,
+        componentSubType: REMOTE_IO,
         componentManufacturer: kAudioUnitManufacturer_Apple,
         componentFlags: 0,
         componentFlagsMask: 0,

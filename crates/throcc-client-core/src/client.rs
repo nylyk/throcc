@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use throcc_crypto::safety;
@@ -16,7 +17,7 @@ use crate::blocked::BlockedStore;
 use crate::call::Call;
 use crate::keystore::Keystore;
 use crate::media::video::frame::VideoFrame;
-use crate::media::video::{Frame, Picture};
+use crate::media::video::{Frame, Picture, View};
 use crate::media::voice::AudioEngine;
 use crate::profile::Profile;
 use crate::session::{AvatarSlot, Lists, Session, Shared};
@@ -113,7 +114,7 @@ pub enum UiEvent {
     AvatarReady(Hash),
     /// The server has our profile as kept on this computer.
     ProfileSaved,
-    /// The server refused our profile, for this reason.
+    /// The server refused our profile: a sentence for the user saying why.
     ProfileRefused(String),
     /// The server took the server's new name or picture.
     ServerProfileSaved,
@@ -134,6 +135,9 @@ pub trait ClientApi: Send + Sync {
     fn safety_number(&self, key: &PublicKey) -> String;
     /// The newest picture of `user`'s share while watched, or of ours while sharing.
     fn picture(&self, user: UserId) -> Option<Picture>;
+    /// Shows `user`'s share in `view` from now on, or nowhere, on the phones, whose decoders
+    /// show their pictures themselves. The view may come before the share is watched.
+    fn set_share_view(&self, _user: UserId, _view: Option<View>) {}
     /// Tells the core `user`'s picture is on screen. Our own share builds its preview only
     /// while this keeps being called.
     fn picture_drawn(&self, _user: UserId) {}
@@ -144,6 +148,73 @@ pub trait ClientApi: Send + Sync {
 const COMMANDS: usize = 64;
 /// How long dropping a client waits for its session to say goodbye to the server.
 const CLOSE_WAIT: Duration = Duration::from_secs(2);
+
+/// Sign-ins where the newest wins: starting one gives up every older one, and only the
+/// newest one's result counts.
+pub struct SignIns {
+    started: watch::Sender<u64>,
+}
+
+impl Default for SignIns {
+    fn default() -> Self {
+        Self {
+            started: watch::Sender::new(0),
+        }
+    }
+}
+
+impl SignIns {
+    /// Starts a sign-in, giving up every older one.
+    pub fn start(&self) -> SignInAttempt {
+        let started = self.started.subscribe();
+        // Read in the same step that counts it, so a start or cancel on another thread can't
+        // slip in between and leave two attempts both newest.
+        let mut mine = 0;
+        self.started.send_modify(|count| {
+            *count += 1;
+            mine = *count;
+        });
+        SignInAttempt { started, mine }
+    }
+
+    /// Gives up every sign-in started so far.
+    pub fn cancel(&self) {
+        self.started.send_modify(|count| *count += 1);
+    }
+}
+
+/// One sign-in from [`SignIns::start`].
+pub struct SignInAttempt {
+    started: watch::Receiver<u64>,
+    mine: u64,
+}
+
+impl SignInAttempt {
+    /// Whether no newer sign-in started and nothing cancelled this one, so its result counts.
+    pub fn is_newest(&self) -> bool {
+        *self.started.borrow() == self.mine
+    }
+
+    /// Resolves once this sign-in is no longer the newest.
+    pub fn superseded(&self) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        let mut started = self.started.clone();
+        let mine = self.mine;
+        Box::pin(async move {
+            let _ = started.wait_for(|count| *count != mine).await;
+        })
+    }
+}
+
+/// How [`Client::connect`] gets onto a server.
+pub enum Entry<'a> {
+    /// Signs in with a key the server knows, giving up once `cancelled` resolves.
+    SignIn {
+        cancelled: Pin<Box<dyn Future<Output = ()> + Send>>,
+    },
+    /// Joins with an invite. It runs to its end, since the server may make the account
+    /// before telling us.
+    Enroll(&'a InviteCode),
+}
 
 /// A live client: tokio runs on its own threads, and a session task keeps [`State`]
 /// current, drives media and reconnects with the room it was in.
@@ -156,13 +227,13 @@ pub struct Client {
 }
 
 impl Client {
-    /// Signs in, or enrolls with `invite`, and blocks until the server has answered. The
-    /// server gets the newest `profile` unless it has it already.
+    /// Gets onto the server through `entry`, giving it `profile`, and blocks until it has
+    /// answered.
     pub fn connect(
         address: &str,
         mut keystore: Keystore,
-        invite: Option<&InviteCode>,
-        profile: watch::Receiver<Profile>,
+        entry: Entry<'_>,
+        profile: Profile,
         audio: Option<Arc<AudioEngine>>,
         verified: VerifiedStore,
         blocked: BlockedStore,
@@ -174,11 +245,15 @@ impl Client {
             .build()
             .map_err(|e| SignInError::Store(e.into()))?;
         keystore.renew_encryption_key_if_due()?;
-        let name = profile.borrow().name.clone();
         let link = runtime.block_on(async {
-            match invite {
-                Some(code) => account::enroll(&mut keystore, address, code, &name).await,
-                None => account::sign_in(&keystore, address, None).await,
+            match entry {
+                Entry::Enroll(code) => {
+                    account::enroll(&mut keystore, address, code, &profile).await
+                }
+                Entry::SignIn { cancelled } => tokio::select! {
+                    link = account::sign_in(&keystore, address, &profile, None) => link,
+                    () = cancelled => Err(SignInError::Cancelled),
+                },
             }
         })?;
         let identity = keystore.identity().public();
@@ -253,6 +328,10 @@ impl ClientApi for Client {
         self.shared.picture(user)
     }
 
+    fn set_share_view(&self, user: UserId, view: Option<View>) {
+        self.shared.set_view(user, view);
+    }
+
     fn picture_drawn(&self, user: UserId) {
         self.shared.picture_drawn(user);
     }
@@ -278,6 +357,8 @@ pub struct MockClient {
     blocked: BlockedStore,
     /// The sample people as they are when not blocked.
     sample_people: BTreeMap<UserId, Person>,
+    /// Our name and picture as last set, which we keep out of a room too.
+    own_profile: Mutex<Option<(String, Option<Hash>)>>,
     /// The picture every share shows.
     picture: watch::Sender<Option<Arc<Frame>>>,
 }
@@ -304,6 +385,7 @@ impl MockClient {
                     shown.speaking = false;
                     if let Some(current) = s.current.as_mut() {
                         current.watching.retain(|watched| watched != user);
+                        current.showing.retain(|shown| shown != user);
                     }
                 } else {
                     shown.name = sample.name.clone();
@@ -327,9 +409,13 @@ impl MockClient {
     pub fn new(verified: VerifiedStore, blocked: BlockedStore) -> Self {
         let frame = VideoFrame::test_pattern(1280, 720, 1, 0);
         add_sample_verified(&verified);
-        let state = sample_state();
+        let mut state = sample_state();
+        let sample_people = state.people.clone();
+        // As on a server, nobody outside a room is shown.
+        state.people.retain(|_, p| p.room.is_some());
         let client = Self {
-            sample_people: state.people.clone(),
+            sample_people,
+            own_profile: Mutex::new(None),
             shared: Shared::new(state),
             verified,
             blocked,
@@ -375,16 +461,34 @@ impl ClientApi for MockClient {
         match command {
             UiCommand::Join(room) => self.update(|s| {
                 let (mic, deafened) = (s.mic, s.deafened);
-                if let Some(person) = s.people.get_mut(&me) {
-                    person.room = room;
-                    person.mic = mic;
-                    person.deafened = deafened;
-                    person.sharing = None;
+                match room {
+                    Some(room) => {
+                        let shown = s.people.get(&me).or_else(|| self.sample_people.get(&me));
+                        if let Some(person) = shown.cloned() {
+                            let (name, avatar) = crate::lock(&self.own_profile)
+                                .clone()
+                                .unwrap_or((person.name.clone(), person.avatar));
+                            let person = Person {
+                                name,
+                                avatar,
+                                room: Some(room),
+                                mic,
+                                deafened,
+                                sharing: None,
+                                ..person
+                            };
+                            s.people.insert(me, person);
+                        }
+                    }
+                    None => {
+                        s.people.remove(&me);
+                    }
                 }
                 s.current = room.map(|room| CurrentRoom {
                     room,
                     sharing: None,
                     watching: vec![],
+                    showing: vec![],
                 });
             }),
             UiCommand::JoinWithPassword(room, _) => self.command(UiCommand::Join(Some(room))),
@@ -417,6 +521,7 @@ impl ClientApi for MockClient {
                     && !c.watching.contains(&user)
                 {
                     c.watching.push(user);
+                    c.showing.push(user);
                     if let Some(p) = s.people.get_mut(&user) {
                         p.audience += 1;
                     }
@@ -427,6 +532,7 @@ impl ClientApi for MockClient {
                     && c.watching.contains(&user)
                 {
                     c.watching.retain(|u| *u != user);
+                    c.showing.retain(|u| *u != user);
                     if let Some(p) = s.people.get_mut(&user) {
                         p.audience = p.audience.saturating_sub(1);
                     }
@@ -441,6 +547,7 @@ impl ClientApi for MockClient {
                 let hash = profile
                     .picture
                     .map(|bytes| self.keep_avatar(bytes.to_vec()));
+                *crate::lock(&self.own_profile) = Some((profile.name.clone(), hash));
                 self.update(|s| {
                     if let Some(p) = s.people.get_mut(&me) {
                         p.name = profile.name;
@@ -483,16 +590,13 @@ impl ClientApi for MockClient {
                 }
             }),
             UiCommand::KickFromRoom { user, room } => self.update(|s| {
-                if let Some(p) = s.people.get_mut(&user).filter(|p| p.room == Some(room)) {
-                    p.room = None;
-                    p.sharing = None;
+                if s.person(user).is_some_and(|p| p.room == Some(room)) {
+                    s.people.remove(&user);
                 }
             }),
             UiCommand::DeleteRoom(room) => self.update(|s| {
                 s.rooms.retain(|r| r.id != room);
-                for p in s.people.values_mut().filter(|p| p.room == Some(room)) {
-                    p.room = None;
-                }
+                s.people.retain(|_, p| p.room != Some(room));
                 if s.current.as_ref().is_some_and(|c| c.room == room) {
                     s.current = None;
                 }
@@ -516,11 +620,12 @@ impl ClientApi for MockClient {
                     return;
                 }
                 p.verified = verified;
-                let name = p.name.clone();
+                p.verified_name = verified.then(|| p.name.clone());
+                let (name, avatar) = (p.name.clone(), p.avatar);
                 let mut keys = self.verified.lock();
                 if verified {
                     if let Some(server) = s.server.as_ref().map(|s| s.fingerprint) {
-                        let _ = keys.verify(&server, user, &key.0, &name);
+                        let _ = keys.verify(&server, user, &key.0, &name, avatar);
                     }
                     s.key_warnings.retain(|w| w.user != user);
                 } else {
@@ -548,6 +653,7 @@ impl ClientApi for MockClient {
                     s.key_warnings.retain(|w| verified.contains(&w.verified.0));
                     for p in s.people.values_mut() {
                         p.verified = p.identity_key.is_some_and(|k| verified.contains(&k));
+                        p.verified_name = p.verified.then(|| p.verified_name.clone()).flatten();
                     }
                 });
             }
@@ -594,6 +700,14 @@ impl ClientApi for MockClient {
         "482139057716024733195580241196087436295031487266089415270031".into()
     }
 
+    fn set_share_view(&self, user: UserId, view: Option<View>) {
+        let shows = view.is_some();
+        self.shared.set_view(user, view);
+        if shows && let Some(frame) = self.picture.borrow().as_deref().and_then(Frame::planes) {
+            self.shared.output(user).show(frame);
+        }
+    }
+
     fn picture(&self, _user: UserId) -> Option<Picture> {
         Some(self.picture.subscribe())
     }
@@ -621,6 +735,7 @@ fn person(name: &str, room: Option<u64>) -> Person {
         speaking: false,
         playback: Playback::default(),
         verified: false,
+        verified_name: None,
         identity_key: None,
         role: Role::User,
         blocked: false,
@@ -722,6 +837,7 @@ fn sample_state() -> State {
             download_loss: 0.3,
             dropped_for_you: 0,
             slow_shares: Default::default(),
+            lagging_shares: Default::default(),
             receiving: vec![
                 TrackHealth {
                     label: "pixelmoth, screen".into(),
@@ -773,7 +889,8 @@ fn add_sample_verified(verified: &VerifiedStore) {
         (here, 5, sample_key(5), "sleepyfox"),
         (here, 6, sample_key(6), "Juno"),
     ] {
-        let _ = keys.verify(&server, UserId(user), &key, name);
+        let avatar = sample_picture(UserId(user)).map(Hash::of);
+        let _ = keys.verify(&server, UserId(user), &key, name, avatar);
     }
 }
 
@@ -806,6 +923,19 @@ fn sample_users() -> Vec<User> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_newest_sign_in_wins_and_a_cancel_ends_it_too() {
+        let sign_ins = SignIns::default();
+        let first = sign_ins.start();
+        let second = sign_ins.start();
+        assert!(!first.is_newest());
+        assert!(second.is_newest());
+        first.superseded().await;
+        sign_ins.cancel();
+        assert!(!second.is_newest());
+        second.superseded().await;
+    }
 
     #[test]
     fn mock_reacts_to_commands() {

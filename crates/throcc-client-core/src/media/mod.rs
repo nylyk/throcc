@@ -6,7 +6,6 @@ pub mod engine;
 pub mod fragment;
 pub mod jitter;
 pub mod reorder;
-#[cfg(feature = "ffmpeg")]
 pub mod share;
 pub mod share_audio;
 pub mod video;

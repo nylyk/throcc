@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use throcc_video::frame::{VideoFrame, copy_nv12, share_size};
 use windows::Foundation::{TimeSpan, TypedEventHandler};
 use windows::Graphics::Capture::{
     Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureAccess,
@@ -56,6 +57,7 @@ use windows::Win32::System::Com::StructuredStorage::{
     PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
 };
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
+use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use windows::Win32::System::Variant::VT_BLOB;
 use windows::Win32::System::WinRT::Direct3D11::{
@@ -66,11 +68,10 @@ use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThre
 use windows::core::{HRESULT, IInspectable, Interface, Owned, Ref, implement};
 
 use super::audio_ring::{AudioConsumer, AudioProducer, audio_ring};
-use super::clock::{FrameLimiter, ShareClock};
-use super::{Capture, CaptureConfig, CaptureError, copy_nv12, failed};
+use super::clock::ShareClock;
+use super::{Capture, CaptureConfig, CaptureError, FrameLimiter, failed};
 use crate::media::audio::SAMPLE_RATE;
 use crate::media::share_audio::STEREO_FRAME;
-use crate::media::video::frame::{VideoFrame, share_size};
 use throcc_proto::frame::VIDEO_CLOCK_HZ;
 
 /// Captured frames waiting for the share thread. A full ring drops the newest frame.
@@ -189,7 +190,7 @@ fn capture(item: &GraphicsCaptureItem, config: CaptureConfig) -> windows::core::
     Ok(WinCapture {
         frames,
         audio,
-        clock: ShareClock::new(TIME_SPAN_HZ as i64),
+        clock: ShareClock::new(TIME_SPAN_HZ as i64, performance_counter_now),
         dropped,
         ended,
         converter,
@@ -274,7 +275,22 @@ impl Feed {
     }
 }
 
+/// The performance counter now, in the 100 ns units `SystemRelativeTime` counts in.
+fn performance_counter_now() -> i64 {
+    let (mut count, mut hz) = (0, 0);
+    // SAFETY: each call only writes the integer it is given.
+    unsafe {
+        let _ = QueryPerformanceCounter(&mut count);
+        let _ = QueryPerformanceFrequency(&mut hz);
+    }
+    (i128::from(count) * TIME_SPAN_HZ / i128::from(hz.max(1))) as i64
+}
+
 impl Capture for WinCapture {
+    fn repeat_timestamp(&mut self) -> Option<u32> {
+        self.clock.repeat()
+    }
+
     fn next_frame(&mut self, into: &mut VideoFrame) -> bool {
         let Ok((frame, time)) = self.frames.pop() else {
             return false;

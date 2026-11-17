@@ -2,18 +2,22 @@ import SwiftUI
 
 @main
 struct ThroccApp: App {
+    @UIApplicationDelegateAdaptor private var delegate: AppDelegate
     private let launch: Result<AppModel, Error>
     private let sample: Sample?
 
     init() {
         let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("--software-decode") {
+            setenv("THROCC_SOFTWARE_DECODE", "1", 1)
+        }
         let mock = arguments.contains("--mock")
         let value = { (flag: String) in arguments.drop { $0 != flag }.dropFirst().first }
         let sample = value("--screen").flatMap(Sample.init(rawValue:))
         self.sample = mock ? sample : nil
         launch = Result {
             try setAppDirs()
-            let model = AppModel(core: mock ? .mock(onboarded: sample != .onboarding) : try Core(), mock: mock)
+            let model = AppModel(core: mock ? .mock(onboarded: sample != .onboarding) : Core(), mock: mock)
             if mock, let theme = value("--theme") {
                 model.useTheme(named: theme)
             }
@@ -48,4 +52,94 @@ private func setAppDirs() throws {
     values.isExcludedFromBackup = true
     try data.setResourceValues(values)
     setAppDirs(data: data.path, cache: cache.path)
+}
+
+final class AppDelegate: NSObject, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        supportedInterfaceOrientationsFor window: UIWindow?
+    ) -> UIInterfaceOrientationMask {
+        Turning.allowed(in: window?.windowScene)
+    }
+}
+
+/// Which ways the window may turn: a phone-sized screen stays upright except while a share fills it.
+@MainActor
+enum Turning {
+    private static var sharing = false
+    private static var phoneSized: Bool?
+    /// Follows the phone's turns while the window may turn.
+    private static var following: NSObjectProtocol?
+
+    static func allowed(in scene: UIWindowScene?) -> UIInterfaceOrientationMask {
+        guard isPhoneSized(scene) else { return .all }
+        return sharing ? .allButUpsideDown : .portrait
+    }
+
+    /// Lets a phone-sized window turn with the phone, or turns it back upright.
+    static func allow(_ turning: Bool) {
+        sharing = turning
+        apply()
+    }
+
+    /// Applies the lock again when the screen folds or unfolds across the phone size.
+    static func screenChanged() {
+        let now = isPhoneSized(keyScene)
+        guard now != phoneSized else { return }
+        phoneSized = now
+        apply()
+    }
+
+    private static func apply() {
+        if let following {
+            NotificationCenter.default.removeObserver(following)
+        }
+        following = nil
+        guard isPhoneSized(keyScene) else { return turn(to: nil) }
+        if sharing {
+            UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+            following = NotificationCenter.default.addObserver(
+                forName: UIDevice.orientationDidChangeNotification,
+                object: nil,
+                queue: .main
+            ) { _ in
+                MainActor.assumeIsolated { turn(to: deviceMask()) }
+            }
+        }
+        turn(to: sharing ? deviceMask() : .portrait)
+    }
+
+    private static var keyScene: UIWindowScene? {
+        UIApplication.shared.connectedScenes.first { $0 is UIWindowScene } as? UIWindowScene
+    }
+
+    private static func isPhoneSized(_ scene: UIWindowScene?) -> Bool {
+        guard let bounds = scene?.screen.bounds else { return UIDevice.current.userInterfaceIdiom == .phone }
+        return min(bounds.width, bounds.height) < 600
+    }
+
+    /// The window orientation that matches how the phone is held, or `nil` when flat or upside down.
+    private static func deviceMask() -> UIInterfaceOrientationMask? {
+        // A device turned left shows its interface turned right.
+        switch UIDevice.current.orientation {
+        case .portrait: .portrait
+        case .landscapeLeft: .landscapeRight
+        case .landscapeRight: .landscapeLeft
+        default: nil
+        }
+    }
+
+    /// Updates what each window may show and turns it to `mask`, if given.
+    private static func turn(to mask: UIInterfaceOrientationMask?) {
+        for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+            var controller = scene.keyWindow?.rootViewController
+            while let shown = controller {
+                shown.setNeedsUpdateOfSupportedInterfaceOrientations()
+                controller = shown.presentedViewController
+            }
+            if let mask {
+                scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask))
+            }
+        }
+    }
 }

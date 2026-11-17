@@ -75,7 +75,7 @@ fn control_messages_encode_to_pinned_bytes() {
                 }),
             }),
         },
-        "00ac020601000101c03e038014a00b3c01",
+        "00ac020501000101c03e038014a00b3c01",
     );
     pinned(
         ClientMessage::Request {
@@ -85,7 +85,7 @@ fn control_messages_encode_to_pinned_bytes() {
                 kind: Recovery::Idr,
             },
         },
-        "0001080501",
+        "0001070501",
     );
     pinned(
         ClientMessage::Request {
@@ -95,7 +95,21 @@ fn control_messages_encode_to_pinned_bytes() {
                 room: RoomId(3),
             },
         },
-        "0001140203",
+        "0001130203",
+    );
+    pinned(
+        ClientMessage::Request {
+            id: 1,
+            request: Request::SetProfile(SignedProfile {
+                name: "a".into(),
+                picture: None,
+                sig: [3; 64],
+            }),
+        },
+        concat!(
+            "000102016100400303030303030303030303030303030303030303030303030303030303030303",
+            "0303030303030303030303030303030303030303030303030303030303030303",
+        ),
     );
     pinned(
         ServerMessage::Response {
@@ -118,12 +132,12 @@ fn control_messages_encode_to_pinned_bytes() {
             sharing: true,
             role: Role::Admin,
             identity_key: [3; 32],
-            profile_sig: Some([5; 64]),
+            profile_sig: [5; 64],
         })),
         concat!(
             "01000201610106060606060606060606060606060606060606060606060606060606060606060001000102",
             "0303030303030303030303030303030303030303030303030303030303030303",
-            "0140",
+            "40",
             "05050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505",
         ),
     );
@@ -136,6 +150,19 @@ fn control_messages_encode_to_pinned_bytes() {
         "01100102",
     );
     pinned(AuthResult::Err(AuthError::RateLimited), "0105");
+    pinned::<AccountStep>(Ok(UserId(7)), "0007");
+    pinned::<AccountStep>(Err(AuthError::BadProfile), "0108");
+    pinned(
+        SignedProfile {
+            name: "a".into(),
+            picture: Some(vec![1, 2]),
+            sig: [3; 64],
+        },
+        concat!(
+            "0161010201024003030303030303030303030303030303030303030303030303030303030303030303",
+            "030303030303030303030303030303030303030303030303030303030303",
+        ),
+    );
     pinned(
         Event::PeersChanged {
             room: RoomId(1),

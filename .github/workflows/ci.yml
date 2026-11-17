@@ -36,18 +36,30 @@ jobs:
         include:
           - os: ubuntu-latest
           - os: macos-26
-            features: --features throcc-client/ffmpeg,throcc-cli/ffmpeg
-            ffmpeg_pkg_config: /opt/homebrew/opt/ffmpeg@8/lib/pkgconfig
           - os: windows-2022
     runs-on: ${{ matrix.os }}
-    env:
-      FFMPEG_PKG_CONFIG_PATH: ${{ matrix.ffmpeg_pkg_config }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # macOS links dav1d and libvpx statically, built from source.
       - if: runner.os == 'macOS'
-        run: brew update && brew install ffmpeg@8
+        id: codecs
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: deps/codecs
+          key: codecs-macos-${{ hashFiles('packaging/codecs/*') }}
+      - if: runner.os == 'macOS' && steps.codecs.outputs.cache-hit != 'true'
+        run: |
+          brew install meson ninja
+          packaging/codecs/build.sh deps/codecs aarch64-apple-darwin
+      - if: runner.os == 'macOS' && steps.codecs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: deps/codecs
+          key: ${{ steps.codecs.outputs.cache-primary-key }}
+      - if: runner.os == 'macOS'
+        run: packaging/codecs/env.sh deps/codecs >>"$GITHUB_ENV"
       - if: runner.os == 'Linux'
         run: |
           sudo apt-get update
@@ -55,6 +67,9 @@ jobs:
             libvulkan-dev libfontconfig-dev libfreetype-dev libx11-xcb-dev libxcb1-dev libxcb-randr0-dev \
             libxcb-shm0-dev libxcb-xfixes0-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev libgbm-dev \
             libegl-dev libssl-dev libzstd-dev pkg-config mesa-vulkan-drivers
+      # The test relays ask for 4 MiB receive buffers, which Linux caps at rmem_max.
+      - if: runner.os == 'Linux'
+        run: sudo sysctl -w net.core.rmem_max=4194304
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
@@ -111,9 +126,15 @@ jobs:
         with:
           path: deps/ffmpeg-lgpl
           key: ${{ steps.ffmpeg.outputs.cache-primary-key }}
-      - run: ./scripts/ci-run.sh cargo clippy -p throcc-client-core --features ffmpeg --all-targets -- -D warnings
+      - run: ./scripts/ci-run.sh cargo clippy -p throcc-video -p throcc-client-core --features throcc-client-core/ffmpeg --all-targets -- -D warnings
         shell: bash
-      - run: ./scripts/ci-run.sh cargo test -p throcc-client-core --features ffmpeg --lib -- media::video media::share
+      - run: ./scripts/ci-run.sh cargo test -p throcc-video --features ffmpeg --lib
+        shell: bash
+      - run: ./scripts/ci-run.sh cargo clippy -p throcc-video --features software --all-targets -- -D warnings
+        shell: bash
+      - run: ./scripts/ci-run.sh cargo test -p throcc-video --features software --lib
+        shell: bash
+      - run: ./scripts/ci-run.sh cargo test -p throcc-client-core --features ffmpeg --lib -- media::share
         shell: bash
 
   mobile:
@@ -125,11 +146,14 @@ jobs:
           - platform: ios
             os: macos-26
             targets: aarch64-apple-ios aarch64-apple-ios-sim
+            # uniffi-bindgen builds the core for the Mac too.
+            codec_targets: aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-darwin
             cargo: cargo
             target_flags: --target aarch64-apple-ios --target aarch64-apple-ios-sim
           - platform: android
             os: ubuntu-latest
             targets: aarch64-linux-android x86_64-linux-android
+            codec_targets: aarch64-linux-android x86_64-linux-android
             cargo: cargo ndk -t arm64-v8a -t x86_64 -P 31
     runs-on: ${{ matrix.os }}
     env:
@@ -142,13 +166,52 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/develop' }}
+      # The NDK the app's Gradle build pins, which the codecs are built with too.
       - if: matrix.platform == 'android'
         run: |
           cargo install cargo-ndk --version 4.1.2 --locked
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >>"$GITHUB_ENV"
+          ndk=$(sed -n 's/^ *ndkVersion = "\(.*\)"$/\1/p' mobile/android/app/build.gradle.kts)
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$ndk" >/dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ndk" >>"$GITHUB_ENV"
+      - id: codecs
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: deps/codecs
+          key: codecs-${{ matrix.platform }}-${{ hashFiles('packaging/codecs/*', 'mobile/android/app/build.gradle.kts') }}
+      - if: steps.codecs.outputs.cache-hit != 'true'
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            brew install meson ninja
+          else
+            sudo apt-get update && sudo apt-get install -y meson ninja-build nasm
+          fi
+          packaging/codecs/build.sh deps/codecs ${{ matrix.codec_targets }}
+      - if: steps.codecs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: deps/codecs
+          key: ${{ steps.codecs.outputs.cache-primary-key }}
+      - run: packaging/codecs/env.sh deps/codecs >>"$GITHUB_ENV"
       - run: ./scripts/ci-run.sh ${{ matrix.cargo }} clippy --locked -p throcc-mobile ${{ matrix.target_flags }} -- -D warnings
         shell: bash
       - run: ./scripts/ci-run.sh ${{ matrix.cargo }} build --locked -p throcc-mobile ${{ matrix.target_flags }}
+        shell: bash
+      # The apps themselves, for the simulator and the emulator's ABI: Swift and Kotlin compile.
+      - if: matrix.platform == 'ios'
+        run: |
+          ./scripts/ci-run.sh mobile/ios/build-core.sh simulator
+          ./scripts/ci-run.sh xcodebuild -quiet -project mobile/ios/throcc.xcodeproj -scheme throcc \
+            -configuration Debug -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath mobile/ios/build CODE_SIGNING_ALLOWED=NO build
+        shell: bash
+      - if: matrix.platform == 'android'
+        run: |
+          # uniffi-bindgen runs on the host and links what the core links there.
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev
+          export JAVA_HOME=$JAVA_HOME_21_X64
+          ./scripts/ci-run.sh mobile/android/gradlew -p mobile/android compileDebugKotlin \
+            -Pandroid.injected.build.abi=x86_64
         shell: bash
 
   surface:

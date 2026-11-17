@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 use gpui::{App, FontWeight, Hsla, Pixels, SharedString, px, rgb};
 use gpui_component::{Theme, ThemeMode};
 use throcc_client_core::settings::Appearance;
-use throcc_client_core::theme::{self as core, oklab};
+use throcc_client_core::theme::{self as core, Colors, mix};
 pub use throcc_client_core::theme::{CUSTOM, format_hex, parse_hex};
 
 /// The eight colours a theme is made of. Every other colour is mixed from them.
@@ -81,11 +81,19 @@ pub const PRESETS: [(&str, Palette); 7] = {
 
 thread_local! {
     static PALETTE: Cell<Palette> = const { Cell::new(PRESETS[0].1) };
+    static COLORS: Cell<Option<Colors>> = const { Cell::new(None) };
     static TRANSLUCENT_SIDEBAR: Cell<bool> = const { Cell::new(false) };
 }
 
 fn palette() -> Palette {
     PALETTE.with(Cell::get)
+}
+
+/// The colours mixed from the palette, as every client mixes them.
+fn colors() -> Colors {
+    COLORS
+        .with(Cell::get)
+        .unwrap_or_else(|| Colors::of(palette().colors()))
 }
 
 pub fn translucent_sidebar() -> bool {
@@ -111,7 +119,9 @@ pub fn custom(appearance: &Appearance) -> Palette {
 
 /// Makes every window show the theme and sidebar `appearance` picks.
 pub fn apply(appearance: &Appearance, cx: &mut App) {
-    PALETTE.with(|p| p.set(picked(appearance).1));
+    let palette = picked(appearance).1;
+    PALETTE.with(|p| p.set(palette));
+    COLORS.with(|c| c.set(Some(Colors::of(palette.colors()))));
     let translucent = appearance
         .translucent_sidebar
         .unwrap_or(cfg!(target_os = "macos"));
@@ -127,32 +137,6 @@ fn hex(value: u32) -> Hsla {
 /// One palette colour as shown in the theme settings.
 pub fn swatch(color: u32) -> Hsla {
     hex(color)
-}
-
-fn linear_to_srgb(c: f32) -> u32 {
-    let c = c.clamp(0.0, 1.0);
-    let c = if c <= 0.003_130_8 {
-        c * 12.92
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    };
-    (c * 255.0).round() as u32
-}
-
-fn from_oklab([l, a, b]: [f32; 3]) -> u32 {
-    let l_ = (l + 0.396_337_78 * a + 0.215_803_76 * b).powi(3);
-    let m_ = (l - 0.105_561_346 * a - 0.063_854_17 * b).powi(3);
-    let s_ = (l - 0.089_484_18 * a - 1.291_485_5 * b).powi(3);
-    let r = 4.076_741_7 * l_ - 3.307_711_6 * m_ + 0.230_969_94 * s_;
-    let g = -1.268_438 * l_ + 2.609_757_4 * m_ - 0.341_319_38 * s_;
-    let b = -0.004_196_086_3 * l_ - 0.703_418_6 * m_ + 1.707_614_7 * s_;
-    (linear_to_srgb(r) << 16) | (linear_to_srgb(g) << 8) | linear_to_srgb(b)
-}
-
-/// `share` of `top` over `base`, mixed in Oklab like CSS `color-mix(in oklab, …)`.
-fn mix(top: u32, share: f32, base: u32) -> u32 {
-    let (t, b) = (oklab(top), oklab(base));
-    from_oklab(std::array::from_fn(|i| t[i] * share + b[i] * (1.0 - share)))
 }
 
 fn mixed(top: u32, share: f32, base: u32) -> Hsla {
@@ -186,47 +170,43 @@ pub fn surface() -> Hsla {
     hex(palette().panel)
 }
 pub fn raised() -> Hsla {
-    let p = palette();
-    mixed(p.text, 0.06, p.panel)
+    hex(colors().raised)
 }
 pub fn selected() -> Hsla {
-    let p = palette();
-    mixed(p.accent, 0.18, p.panel)
+    hex(colors().selected)
 }
 pub fn control() -> Hsla {
-    let p = palette();
-    mixed(p.text, 0.10, p.panel)
+    hex(colors().control)
 }
 pub fn border_strong() -> Hsla {
-    let p = palette();
-    mixed(p.text, 0.16, p.panel)
+    hex(colors().line)
 }
 pub fn text() -> Hsla {
     hex(palette().text)
 }
 pub fn text_2() -> Hsla {
-    let p = palette();
-    mixed(p.text, 0.7, p.muted)
+    let c = colors();
+    mixed(c.text, 0.7, c.muted)
 }
 pub fn text_2_muted() -> Hsla {
-    let p = palette();
-    mixed(p.text, 0.3, p.muted)
+    let c = colors();
+    mixed(c.text, 0.3, c.muted)
 }
 pub fn text_3() -> Hsla {
-    hex(palette().muted)
+    hex(colors().muted)
 }
 pub fn accent() -> Hsla {
-    hex(palette().accent)
+    hex(colors().accent)
 }
 pub fn on_accent() -> Hsla {
     hex(palette().bg)
 }
 pub fn link() -> Hsla {
-    let p = palette();
-    mixed(p.accent, 0.8, p.text)
+    let c = colors();
+    mixed(c.accent, 0.8, c.text)
 }
 pub fn speaking() -> Hsla {
-    hex(palette().good)
+    hex(colors().good)
 }
 pub fn transparent() -> Hsla {
     gpui::transparent_black()
@@ -236,7 +216,7 @@ pub fn ok_bg() -> Hsla {
     mixed(p.good, 0.15, p.panel)
 }
 pub fn ok_text() -> Hsla {
-    hex(palette().good)
+    hex(colors().good)
 }
 pub fn warn_bg() -> Hsla {
     let p = palette();
@@ -247,18 +227,17 @@ pub fn warn_border() -> Hsla {
     mixed(p.warning, 0.35, p.panel)
 }
 pub fn warn_text() -> Hsla {
-    hex(palette().warning)
+    hex(colors().warning)
 }
 pub fn danger_bg() -> Hsla {
-    let p = palette();
-    mixed(p.bad, 0.18, p.panel)
+    hex(colors().danger)
 }
 pub fn danger_border() -> Hsla {
     let p = palette();
     mixed(p.bad, 0.35, p.panel)
 }
 pub fn danger_text() -> Hsla {
-    hex(palette().bad)
+    hex(colors().bad)
 }
 fn danger_hover() -> Hsla {
     let p = palette();

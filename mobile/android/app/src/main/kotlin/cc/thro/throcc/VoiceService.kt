@@ -29,18 +29,8 @@ private const val CHANNEL = "room"
 private const val NOTIFICATION = 1
 private const val LEAVE = "cc.thro.throcc.LEAVE"
 
-/** The kinds of device the room's sound goes to, the most wanted first. */
-private val WANTED_DEVICES = listOf(
-    AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
-    AudioDeviceInfo.TYPE_BLE_HEADSET,
-    AudioDeviceInfo.TYPE_WIRED_HEADSET,
-    AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
-    AudioDeviceInfo.TYPE_USB_HEADSET,
-    AudioDeviceInfo.TYPE_BUILTIN_SPEAKER,
-)
-
 /** The name of the room `state` has us in and of its server, or null outside a room. */
-private fun described(state: CoreState): Pair<String, String>? = state.voiceRoom()?.let { room ->
+private fun described(state: CoreState): Pair<String, String>? = state.liveRoom?.let { room ->
     state.rooms.find { it.id == room }?.name.orEmpty() to state.server?.title.orEmpty()
 }
 
@@ -60,7 +50,7 @@ class VoiceService : Service() {
     private val focus = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
         .setAudioAttributes(
             AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                .setUsage(AudioAttributes.USAGE_MEDIA)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                 .build(),
         )
@@ -78,14 +68,12 @@ class VoiceService : Service() {
         }
         .build()
 
+    // AAudio streams stay on the device they were opened on.
     private val devices = object : AudioDeviceCallback() {
-        override fun onAudioDevicesAdded(added: Array<AudioDeviceInfo>) = route()
+        override fun onAudioDevicesAdded(added: Array<AudioDeviceInfo>) = open()
 
-        override fun onAudioDevicesRemoved(removed: Array<AudioDeviceInfo>) = route()
+        override fun onAudioDevicesRemoved(removed: Array<AudioDeviceInfo>) = open()
     }
-
-    // AAudio streams stay on the device they were opened on, and the system applies a picked device later.
-    private val routed = AudioManager.OnCommunicationDeviceChangedListener { open() }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -126,11 +114,8 @@ class VoiceService : Service() {
         scope.cancel()
         if (withMic == null) return
         audio.unregisterAudioDeviceCallback(devices)
-        audio.removeOnCommunicationDeviceChangedListener(routed)
         model.closeAudio()
-        audio.clearCommunicationDevice()
         audio.abandonAudioFocusRequest(focus)
-        audio.mode = AudioManager.MODE_NORMAL
     }
 
     /** Whether the system let the service into the foreground, for the mic too where `mic` is granted. */
@@ -150,11 +135,8 @@ class VoiceService : Service() {
     /** The service takes the phone's audio for the room, and follows the room and the audio devices. */
     private fun setUp(model: AppModel) {
         this.model = model
-        audio.mode = AudioManager.MODE_IN_COMMUNICATION
         interrupted = audio.requestAudioFocus(focus) != AudioManager.AUDIOFOCUS_REQUEST_GRANTED
-        audio.addOnCommunicationDeviceChangedListener(mainExecutor, routed)
         audio.registerAudioDeviceCallback(devices, null)
-        route()
         scope.launch {
             model.state.map(::described).distinctUntilChanged().collect { room ->
                 if (room == null) stopSelf() else notifications.notify(NOTIFICATION, notification(room))
@@ -170,16 +152,11 @@ class VoiceService : Service() {
         }
     }
 
-    /** The room's sound goes to a Bluetooth headset, else to a wired or USB one, else to the speaker. */
-    private fun route() {
-        val available = audio.availableCommunicationDevices
-        WANTED_DEVICES.firstNotNullOfOrNull { type -> available.find { it.type == type } }
-            ?.let(audio::setCommunicationDevice)
-    }
-
-    /** The room's sound opens anew on the device in use, unless a phone call holds the audio. */
+    /** The room's sound opens anew as media, whose volume goes down to silence, on the device the system picks,
+     *  once set up and unless a phone call holds the audio. */
     private fun open() {
-        if (!interrupted) model.openAudio(withMic == true)
+        val withMic = withMic ?: return
+        if (!interrupted) model.openAudio(withMic)
     }
 
     private fun notification(room: Pair<String, String>?): Notification {

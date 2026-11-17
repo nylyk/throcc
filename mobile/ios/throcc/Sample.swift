@@ -6,6 +6,8 @@ enum Sample: String {
     case profile, voice, settings, appearance, customtheme, verified, blockedpeople
     case server, members, invites, keys
     case reconnect, elsewhere
+    case share, sharefull
+    case pinmismatch, identitymissing
 }
 
 extension AppModel {
@@ -14,7 +16,7 @@ extension AppModel {
         case .onboarding, .servers:
             break
         case .addserver:
-            sheet = .addServer
+            sheet = .addServer(address: "")
         case .rooms:
             await connectToSample()
         case .room:
@@ -60,6 +62,26 @@ extension AppModel {
         case .elsewhere:
             sampleConnection = .signedInElsewhere
             await connectToSample()
+        case .share:
+            await joinSampleRoom()
+            core.watchOnly(user: 4)
+        case .sharefull:
+            await joinSampleRoom()
+            core.watchOnly(user: 4)
+            // Once the mock shows the share watched, which fullscreen goes with.
+            while !(state.current?.watching.contains(4) ?? false) {
+                try? await Task.sleep(for: .milliseconds(20))
+            }
+            fullscreenShare = 4
+        case .pinmismatch:
+            sheet = .pinMismatch(
+                address: "owls.thro.cc",
+                code: nil,
+                expected: Data(repeating: 0x2c, count: 32),
+                actual: Data(repeating: 0xb8, count: 32)
+            )
+        case .identitymissing:
+            sheet = .identityMissing(address: "owls.thro.cc", code: nil)
         }
     }
 

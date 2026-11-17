@@ -16,7 +16,7 @@ cargo deny check
 throcc-server admin-invite --data <dir>   # single-use admin invite, works while the server runs
 throcc-client --mock --screen <name>   # sample data, no server; names in `ThroccApp::show_sample`
 ./scripts/screens.sh                   # macOS: README screenshots into docs/screens/
-packaging/licenses/notices.sh client   # third-party notices the packages ship (also `server`, `android`); needs cargo-about
+packaging/licenses/notices.sh client   # third-party notices the packages ship (also `client-macos`, `server`, `android`); needs cargo-about
 packaging/macos/bundle.sh              # macOS: target/macos/throcc.dmg
 packaging/flatpak/cargo-sources.sh     # the flatpak's offline crates, before flatpak-builder
 mobile/ios/build-core.sh [device] [simulator]   # iOS: ThroccCore.xcframework and the Swift bindings, before Xcode builds; both slices by default
@@ -24,9 +24,11 @@ just                                   # lists the recipes that build and run th
 mobile/android/gradlew -p mobile/android assembleDebug   # Android: builds the core with cargo-ndk, then the APK
 xcrun simctl launch booted cc.thro.throcc --mock --screen <name>   # iOS sample screens; names in `Sample.swift`
 adb shell am start -S -n cc.thro.throcc/.MainActivity --ez mock true --es screen <name>   # Android sample screens; names in `AppModel.kt`
+THROCC_SOFTWARE_DECODE=1 THROCC_CODEC=vp9 just desktop   # testing: software decoders, and one codec to share in (av1, hevc, h264, vp9)
+just android --ez software_decode true                   # the same software switch on Android; `--software-decode` as an iOS launch argument
 ```
 
-On macOS, building with `--features ffmpeg` needs `FFMPEG_PKG_CONFIG_PATH=$PWD/deps/ffmpeg-lgpl/lib/pkgconfig` (built by `packaging/ffmpeg/build.sh deps/ffmpeg-lgpl`).
+macOS, iOS and Android link dav1d and libvpx statically: `packaging/codecs/build.sh deps/codecs <rust-target>...` builds them, then `set -a; eval "$(packaging/codecs/env.sh deps/codecs)"; set +a` before cargo. macOS needs no ffmpeg; Linux and Windows video needs `--features ffmpeg`.
 
 ## Crates
 
@@ -35,6 +37,7 @@ On macOS, building with `--features ffmpeg` needs `FFMPEG_PKG_CONFIG_PATH=$PWD/d
 | `throcc-proto` | Messages, ids, the media header, framing, fingerprints. No async runtime, no media, no I/O |
 | `throcc-crypto` | PAKE, identity signatures, HPKE wrapping, media AEAD, safety numbers. No I/O. Feature `media` is off in the server |
 | `throcc-server` | Sessions, auth, rooms, SFU, key relay, SQLite storage |
+| `throcc-video` | Video encoders and decoders, a backend per platform, and the NV12 frames between them. No sessions, keys or wire |
 | `throcc-client-core` | Connection, keystore, key manager, voice and share pipelines. `Client` and `MockClient` behind `ClientApi` |
 | `throcc-client` | gpui UI and the video surface |
 | `throcc-cli` | Headless client for scripts and integration tests |
@@ -48,9 +51,10 @@ Each crate's `README.md` explains its modules and how they fit together. Update 
 
 - Only the main agent changes `throcc-proto`. From 0.1 on, any change to messages bumps `PROTOCOL` in `messages.rs`; new enum variants go last. 0.1 ships protocol 1.
 - Limits that server and client share live in `throcc_proto::limits` and nowhere else; anything sized by a room or a server derives from them.
-- The server never depends on codecs, capture, audio or media crypto. `check-server-deps.sh` enforces this.
+- The server never depends on codecs, capture, audio, media crypto or `throcc-video`. `check-server-deps.sh` enforces this.
 - The server never reads media past the 13-byte header and holds no media key.
 - **Security-critical:** the media header, the media AEAD and track-key derivation, HPKE sender-key wrapping and its info, the signed encryption key, and the safety-number construction. Fix real issues here with great care and without changing the protocol; a fix that needs a protocol change needs a human decision.
+- Signed profiles carry no freshness, so a server can replay an old one. Accepted: in our own room only key peers present a key, and elsewhere the badge means the key signed that name, not that they are online. If a protocol bump comes anyway, add a version counter that clients track per user, not a `not_after`.
 - Never weaken a security property to make a test pass. Stop and ask instead.
 - Audio and capture callbacks never block, allocate, lock, await or panic. Cross into tokio only with a bounded channel, `try_send`, drop on full and a counter.
   The one exception is outside our code: screencapturekit's own dispatcher on macOS takes a lock and allocates before our handler runs. Our handler itself stays lock-free (`try_lock` only).
@@ -63,7 +67,7 @@ Each crate's `README.md` explains its modules and how they fit together. Update 
 
 - `main` only holds releases. Work happens on `develop`, and PRs target `develop`. `main` takes changes only through a PR with green `ci`; neither branch accepts force pushes, and release tags can't be moved or deleted.
 - `throcc-server` and `throcc-client` have their own semver `version` in their `Cargo.toml`; the other crates keep the workspace version. Patch for fixes, minor for features or a protocol bump while 0.x.
-- `PROTOCOL` alone decides compatibility. A server accepts `MIN_PROTOCOL..=PROTOCOL`, and a client checks its `PROTOCOL` is in the server's range. Both hellos stay decodable by every version. Every server version supports the current protocol and the one before it, except protocol 2, which dropped protocol 1. A protocol bump is a breaking server release.
+- `PROTOCOL` alone decides compatibility. A server accepts `MIN_PROTOCOL..=PROTOCOL`, and a client checks its `PROTOCOL` is in the server's range. Both hellos stay decodable by every version. Every server version supports the current protocol and the one before it, except protocols 2 and 3, which each dropped the protocol before them. A protocol bump is a breaking server release.
 - Docker is the only supported server distribution. The app id is `cc.thro.throcc` everywhere.
 
 A release, for each side that changed since its last tag (`git log <side>-vX.Y.Z..develop -- crates/`):
@@ -91,4 +95,4 @@ A release, for each side that changed since its last tag (`git log <side>-vX.Y.Z
 
 ## Review baseline
 
-The whole workspace was simplified, deep-reviewed line by line and security-reviewed through commit `2f1a0d3d58cfe2666f561a161ca8f36e14e9ec71` (2026-11-12). Later deep reviews start from there: `git diff 2f1a0d3..HEAD`. Run them with the `deep-review` skill, which moves this baseline when it finishes.
+The whole workspace was simplified, deep-reviewed line by line and security-reviewed through commit `68051a42593136e065d42ceccafc1f48e30111fe` (2026-11-17). Later deep reviews start from there: `git diff 68051a4..HEAD`. Run them with the `deep-review` skill, which moves this baseline when it finishes.

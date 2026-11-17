@@ -17,7 +17,6 @@ use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, point, px, size
 use gpui_component::Root;
 use std::sync::Arc;
 
-use throcc_client_core::keystore;
 use throcc_client_core::media::voice::AudioEngine;
 use throcc_client_core::settings::Settings;
 use views::common;
@@ -49,7 +48,7 @@ fn main() {
         settings.appearance.translucent_sidebar = Some(false);
         (settings, None)
     } else {
-        saved_settings()
+        throcc_client_core::install::load_settings()
     };
     if mock && let Some((name, _)) = value_of("--theme").and_then(|name| theme::preset(&name)) {
         settings.appearance.theme = Some(name.into());
@@ -104,16 +103,4 @@ fn main() {
             }
             cx.activate(true);
         });
-}
-
-/// This computer's settings, or the defaults with why they couldn't be read.
-fn saved_settings() -> (Settings, Option<String>) {
-    match keystore::config_dir().and_then(|dir| Settings::load(&dir)) {
-        Ok(settings) => (settings, None),
-        Err(e) => {
-            tracing::warn!("no saved settings: {e:#}");
-            let problem = format!("Couldn't read your settings ({e}), so changes aren't kept.");
-            (Settings::default(), Some(problem))
-        }
-    }
 }

@@ -16,7 +16,7 @@ struct RoomsView: View {
             LostConnectionSection()
             ForEach(state.rooms, id: \.id) { room in
                 Section {
-                    Button { enter(room, unasked: managesRooms) } label: { label(for: room) }
+                    Button { enter(room) } label: { label(for: room) }
                         .swipeActions {
                             if managesRooms {
                                 Button("Delete", systemImage: "trash") { deleted = room }
@@ -31,13 +31,6 @@ struct RoomsView: View {
                 Text("No rooms yet.").foregroundStyle(.muted)
                 if managesRooms {
                     Button("New Room") { model.sheet = .newRoom }
-                }
-            }
-            if state.people.contains(where: { $0.room == nil }) {
-                Section {
-                    people(in: nil)
-                } header: {
-                    Text("Lobby").foregroundStyle(.muted)
                 }
             }
         }
@@ -108,14 +101,22 @@ struct RoomsView: View {
 
     private func label(for room: Room) -> some View {
         HStack {
-            Image(systemName: room.locked ? "lock.fill" : "speaker.wave.2.fill")
-                .foregroundStyle(.muted)
-                .frame(width: 28)
-                .accessibilityLabel("Locked")
-                .accessibilityHidden(!room.locked)
+            Group {
+                if room.locked {
+                    Image(systemName: "lock.fill")
+                        .accessibilityLabel("Locked")
+                } else {
+                    Circle()
+                        .frame(width: 8, height: 8)
+                        .accessibilityHidden(true)
+                }
+            }
+            .foregroundStyle(.muted)
+            .frame(width: 28)
             Text(room.name)
                 .font(.headline)
                 .foregroundStyle(.text)
+                .lineLimit(1)
             Spacer()
             if model.state.current?.room == room.id {
                 Image(systemName: "checkmark")
@@ -125,23 +126,24 @@ struct RoomsView: View {
         }
     }
 
-    private func people(in room: UInt64?) -> some View {
+    private func people(in room: UInt64) -> some View {
         ForEach(model.state.people.filter { $0.room == room }, id: \.user) { person in
             Button { model.sheet = .person(person.user) } label: { PersonRow(person: person) }
         }
     }
 
-    /// Joins `room` or, where we are in it, shows it. A locked room asks for its password
-    /// first unless we join it `unasked`.
-    private func enter(_ room: Room, unasked: Bool) {
-        if model.state.current?.room == room.id {
+    /// Joins `room`, asking for its password first where it needs one, or shows it where we
+    /// are in it.
+    private func enter(_ room: Room) {
+        switch room.join {
+        case .alreadyIn:
             model.column = .detail
-        } else if room.locked && !unasked {
+        case .askPassword:
             model.passwordRefusal = nil
             password = ""
             lockedRoom = room
             asksPassword = true
-        } else {
+        case .join:
             model.core.command(command: .join(room: room.id))
         }
     }
@@ -151,39 +153,35 @@ private struct LostConnectionSection: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        switch model.state.connection {
-        case .connected:
-            EmptyView()
-        case .disconnected:
-            if model.connecting != nil {
-                Section { ProgressView() }
-            }
-        case .reconnecting(let attempt, let reason):
+        if let notice = model.state.notice {
             Section {
-                Label {
-                    Text("Reconnecting, attempt \(attempt). You’ll be put back in your room.")
-                } icon: {
-                    ProgressView()
+                if notice.busy {
+                    Label { Text(notice.hint) } icon: { ProgressView() }
+                        .foregroundStyle(.text)
+                } else {
+                    Text(notice.hint).foregroundStyle(.text)
                 }
-                .foregroundStyle(.text)
-                Text("Lost the connection: \(reason).").foregroundStyle(.muted)
+                if let problem = notice.problem {
+                    Text(problem).foregroundStyle(.muted)
+                }
+                if let action = notice.action {
+                    button(for: action)
+                }
             }
-        case .awaitingReconnect:
-            Section {
-                Text("The connection was down for a while. Reconnecting here signs you out on any other device.")
-                    .foregroundStyle(.text)
-                Button("Reconnect") { model.core.command(command: .reconnect) }
-            }
-        case .signedInElsewhere:
-            Section {
-                Text("Signed in on another device.").foregroundStyle(.text)
-                connectAgain(titled: "Sign In Here")
-            }
-        case .failed(let reason):
-            Section {
-                Text(reason).foregroundStyle(.text)
-                connectAgain(titled: "Try Again")
-            }
+        } else if model.state.connection == .disconnected, model.connecting != nil {
+            Section { ProgressView() }
+        }
+    }
+
+    @ViewBuilder
+    private func button(for action: NoticeAction) -> some View {
+        switch action {
+        case .reconnect:
+            Button("Reconnect") { model.core.command(command: .reconnect) }
+        case .signInHere:
+            connectAgain(titled: "Sign In Here")
+        case .tryAgain:
+            connectAgain(titled: "Try Again")
         }
     }
 
@@ -193,7 +191,7 @@ private struct LostConnectionSection: View {
             ProgressView()
         } else {
             Button(title) {
-                if let address = model.connectedAddress {
+                if let address = model.state.server?.address {
                     model.open(address)
                 }
             }
@@ -206,14 +204,13 @@ private struct PersonRow: View {
     let person: Person
 
     var body: some View {
-        let trust = model.state.trust(of: person)
         HStack(spacing: 12) {
             PersonPicture(person: person, size: 28)
             Text(person.name)
                 .foregroundStyle(person.blocked ? ThemeColor.muted : .text)
                 .lineLimit(1)
-            if trust != .verified, !person.blocked {
-                TrustLabel(trust: trust).font(.caption)
+            if person.trust != .verified, !person.blocked {
+                TrustLabel(trust: person.trust).font(.caption)
             }
             Spacer()
             Group {
@@ -252,13 +249,13 @@ struct RoomEditor: View {
 
     var body: some View {
         let check = checkName(typed: name)
-        let passwordFits = password.isEmpty || isValidPassword(typed: password)
+        let refusedPassword = password.isEmpty ? nil : passwordProblem(typed: password)
         NavigationStack {
             ThemedForm {
                 Section {
                     ThemedField("Name", text: $name)
                 } footer: {
-                    if let problem = check.problem {
+                    if let problem = nameProblem(typed: name) {
                         Text(problem).foregroundStyle(.bad)
                     }
                 }
@@ -271,10 +268,10 @@ struct RoomEditor: View {
                         }
                     }
                 } footer: {
-                    if passwordFits {
-                        Text(passwordHint).foregroundStyle(.muted)
+                    if let refusedPassword {
+                        Text(refusedPassword).foregroundStyle(.bad)
                     } else {
-                        Text("Passwords can be at most \(limits().passwordChars) characters.").foregroundStyle(.bad)
+                        Text(passwordHint).foregroundStyle(.muted)
                     }
                 }
             }
@@ -290,7 +287,7 @@ struct RoomEditor: View {
                         save(name: check.name)
                         dismiss()
                     }
-                    .disabled(!passwordFits || check.name == nil)
+                    .disabled(refusedPassword != nil || check.name == nil)
                 }
             }
             .onAppear { name = room?.name ?? "" }

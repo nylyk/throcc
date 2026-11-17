@@ -1,7 +1,7 @@
 use std::ffi::{c_int, c_uint, c_void};
 use std::os::fd::AsRawFd;
 
-use crate::media::capture::DmaBuf;
+use crate::DmaBuf;
 
 pub type Display = *mut c_void;
 pub type SurfaceId = c_uint;
@@ -230,7 +230,7 @@ pub(crate) fn export(
         .enumerate()
         .take(layer.num_planes as usize)
     {
-        *plane = Some(crate::media::capture::DmaBufPlane {
+        *plane = Some(crate::DmaBufPlane {
             fd: objects[layer.object_index[index] as usize].try_clone()?,
             offset: layer.offset[index],
             stride: layer.pitch[index],
@@ -283,8 +283,7 @@ pub struct Vpp {
 }
 
 // SAFETY: a VA display has no thread affinity. A Vpp is used only through the Encoder that
-// owns it, which lives on the share thread, and it is not Sync, so its display is never
-// used from two threads at once.
+// owns it, and it is not Sync, so its display is never used from two threads at once.
 unsafe impl Send for Vpp {}
 
 impl Vpp {

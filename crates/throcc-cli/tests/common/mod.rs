@@ -16,7 +16,7 @@ use tempfile::TempDir;
 use throcc_client_core::account::{self, SignInError};
 use throcc_client_core::blocked::BlockedStore;
 use throcc_client_core::call::{Call, CallEvent};
-use throcc_client_core::client::{Client, ClientApi};
+use throcc_client_core::client::{Client, ClientApi, Entry};
 use throcc_client_core::connection::{self, Connected};
 use throcc_client_core::control::ControlLink;
 use throcc_client_core::keystore::Keystore;
@@ -30,9 +30,9 @@ use throcc_proto::framing;
 use throcc_proto::ids::{MediaId, RoomId};
 use throcc_proto::invite::InviteCode;
 use throcc_proto::messages::{
-    AuthResult, ClientHello, Codec, ErrorCode, Event, MediaState, PROTOCOL, PakeFinish, PakeReply,
-    PakeStep, Placement, Recovery, Request, Response, ServerHello, ShareConfig, ShareTracks,
-    SignIn, Tracks, Welcome,
+    AccountStep, AuthResult, ClientHello, Codec, ErrorCode, Event, MediaState, PROTOCOL,
+    PakeFinish, PakeReply, PakeStep, Placement, Recovery, Request, Response, ServerHello,
+    ShareConfig, ShareTracks, SignIn, Tracks, Welcome,
 };
 use throcc_server::database::Database;
 use throcc_server::identity::ServerIdentity;
@@ -210,10 +210,13 @@ impl TestClient {
         self.link.connected.connection.close(0u32.into(), b"");
     }
 
-    /// Drops the current connection and signs in again at `addr`, asking for `room`.
+    /// Drops the current connection and signs in again at `addr` as [`ilse`], asking for
+    /// `room`.
     pub async fn reconnect(&mut self, addr: &str, room: Option<RoomId>) {
         self.disconnect();
-        self.link = account::sign_in(&self.keystore, addr, room).await.unwrap();
+        self.link = account::sign_in(&self.keystore, addr, &ilse(), room)
+            .await
+            .unwrap();
     }
 }
 
@@ -225,10 +228,26 @@ pub async fn enroll_at(addr: &str, code: &InviteCode) -> TestClient {
     try_enroll_at(addr, code).await.unwrap()
 }
 
+/// The profile test clients sign in with.
+pub fn ilse() -> Profile {
+    Profile {
+        name: "Ilse".into(),
+        picture: None,
+    }
+}
+
 pub async fn try_enroll_at(addr: &str, code: &InviteCode) -> Result<TestClient, SignInError> {
+    enroll_as(addr, code, &ilse()).await
+}
+
+pub async fn enroll_as(
+    addr: &str,
+    code: &InviteCode,
+    profile: &Profile,
+) -> Result<TestClient, SignInError> {
     let dir = tempfile::tempdir().unwrap();
     let mut keystore = Keystore::open_in(dir.path()).unwrap();
-    let link = account::enroll(&mut keystore, addr, code, "Ilse").await?;
+    let link = account::enroll(&mut keystore, addr, code, profile).await?;
     Ok(TestClient {
         keystore,
         link,
@@ -293,7 +312,6 @@ pub async fn wait_for_keys(sender: &Call, viewer: &Call, track: MediaId) {
 }
 
 /// Has every keyframe request the server sends `call` recover `sender`'s share.
-#[cfg(feature = "ffmpeg")]
 pub fn forward_keyframe_requests(
     call: &mut Call,
     sender: Arc<throcc_client_core::media::share::ShareSender>,
@@ -333,8 +351,13 @@ pub fn client_as(
     let keystore = Keystore::open_in(dir).unwrap();
     let verified = VerifiedStore::load(dir).unwrap();
     let blocked = BlockedStore::load(dir).unwrap();
-    let profile = tokio::sync::watch::channel(profile).1;
-    Client::connect(address, keystore, invite, profile, None, verified, blocked).unwrap()
+    let entry = match invite {
+        Some(code) => Entry::Enroll(code),
+        None => Entry::SignIn {
+            cancelled: Box::pin(std::future::pending()),
+        },
+    };
+    Client::connect(address, keystore, entry, profile, None, verified, blocked).unwrap()
 }
 
 pub fn wait_for_state_within(
@@ -459,12 +482,21 @@ pub enum Toward {
 
 /// A UDP relay in front of `server` for one client. Returns its address; it passes on each
 /// packet that `forward` accepts.
+/// Room for bursts such as a keyframe and its copy back to back: with the default buffer the
+/// kernel drops what the relay can't read in time, on top of any loss a test asks for.
+const RELAY_BUFFER: usize = 4 * 1024 * 1024;
+
 pub async fn relay(
     server: &str,
     mut forward: impl FnMut(Toward, &[u8]) -> bool + Send + 'static,
 ) -> String {
     let front = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let back = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    for socket in [&front, &back] {
+        if let Err(e) = socket2::SockRef::from(socket).set_recv_buffer_size(RELAY_BUFFER) {
+            eprintln!("the relay keeps its default receive buffer: {e}");
+        }
+    }
     back.connect(server).await.unwrap();
     let addr = front.local_addr().unwrap().to_string();
     tokio::spawn(async move {
@@ -713,6 +745,12 @@ impl PendingEnroll {
         };
         self.send
             .write_all(&framing::encode(&finish).unwrap())
+            .await
+            .unwrap();
+        let me = read_message::<AccountStep>(&mut self.recv).await.unwrap();
+        let profile = ilse().signed(&self.identity, &self.connected.fingerprint, me);
+        self.send
+            .write_all(&framing::encode(&profile).unwrap())
             .await
             .unwrap();
         match read_message(&mut self.recv).await {

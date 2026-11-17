@@ -1,7 +1,5 @@
 use gpui::{Div, ParentElement, Styled, div};
 
-use throcc_client_core::state::ConnectionStatus;
-
 use super::common::Typeset;
 use crate::app::{Screen, ThroccApp};
 use crate::theme;
@@ -11,28 +9,11 @@ pub fn render(app: &ThroccApp) -> Option<Div> {
     if matches!(app.screen, Screen::Join | Screen::Main) {
         return None;
     }
-    let (text, bg, fg) = match &app.state.connection {
-        ConnectionStatus::Reconnecting { attempt, reason } => (
-            format!("Reconnecting (attempt {attempt}): {reason}. You’ll be put back in your room."),
-            theme::warn_bg(),
-            theme::warn_text(),
-        ),
-        ConnectionStatus::AwaitingReconnect => (
-            "Disconnected after a while away. Reconnect from the room.".to_owned(),
-            theme::warn_bg(),
-            theme::warn_text(),
-        ),
-        ConnectionStatus::SignedInElsewhere => (
-            "Disconnected: signed in on another device".to_owned(),
-            theme::danger_bg(),
-            theme::danger_text(),
-        ),
-        ConnectionStatus::Failed(reason) => (
-            format!("Disconnected: {reason}"),
-            theme::danger_bg(),
-            theme::danger_text(),
-        ),
-        ConnectionStatus::Disconnected | ConnectionStatus::Connected => return None,
+    let notice = app.state.connection.notice()?;
+    let (bg, fg) = if notice.serious {
+        (theme::danger_bg(), theme::danger_text())
+    } else {
+        (theme::warn_bg(), theme::warn_text())
     };
     Some(
         div()
@@ -45,6 +26,6 @@ pub fn render(app: &ThroccApp) -> Option<Div> {
             .bg(bg)
             .text_color(fg)
             .typeset(theme::CALLOUT)
-            .child(text),
+            .child(notice.summary),
     )
 }

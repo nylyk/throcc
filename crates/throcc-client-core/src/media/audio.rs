@@ -76,7 +76,8 @@ impl CaptureChain {
             .capture_config(StreamConfig::new(SAMPLE_RATE, 1))
             .render_config(StreamConfig::new(SAMPLE_RATE, 1))
             .build();
-        apm.apply_config(processing_config(settings));
+        let processing = processing_choice(settings);
+        apm.apply_config(processing_config(processing));
         let encoder = Encoder::builder(SAMPLE_RATE, Channels::Mono, Application::Voip)
             .frame_duration(FrameDuration::Ms20)
             .bitrate(Bitrate::Bits(MIC_KBPS * 1000))
@@ -95,7 +96,7 @@ impl CaptureChain {
                 SAMPLE_RATE as i32,
             ),
             input_volume: settings.input_volume,
-            processing: processing_choice(settings),
+            processing,
             processed: [0.0; PULL],
             frame: [0.0; FRAME],
             frame_len: 0,
@@ -113,7 +114,7 @@ impl CaptureChain {
     pub fn apply(&mut self, settings: &VoiceSettings) {
         let processing = processing_choice(settings);
         if processing != self.processing {
-            self.apm.apply_config(processing_config(settings));
+            self.apm.apply_config(processing_config(processing));
             self.processing = processing;
         }
         self.transmit = settings.transmit;
@@ -236,21 +237,17 @@ fn sonora_level(choice: NoiseSuppression) -> NoiseSuppressionLevel {
     }
 }
 
-/// Whether the capture chain cancels echo. On a phone the platform's voice processing
-/// does, between the mic and the speaker it opens together.
-const CANCELS_ECHO: bool = cfg!(not(any(target_os = "ios", target_os = "android")));
-
-fn processing_config(settings: &VoiceSettings) -> Config {
+fn processing_config(
+    (echo_cancellation, noise_suppression, automatic_gain): (bool, Option<NoiseSuppression>, bool),
+) -> Config {
     Config {
         high_pass_filter: Some(HighPassFilter::default()),
-        echo_canceller: (CANCELS_ECHO && settings.echo_cancellation).then(EchoCanceller::default),
-        noise_suppression: settings.noise_suppression.map(|choice| {
-            sonora::config::NoiseSuppression {
-                level: sonora_level(choice),
-                ..Default::default()
-            }
+        echo_canceller: echo_cancellation.then(EchoCanceller::default),
+        noise_suppression: noise_suppression.map(|choice| sonora::config::NoiseSuppression {
+            level: sonora_level(choice),
+            ..Default::default()
         }),
-        gain_controller2: settings.automatic_gain.then(|| GainController2 {
+        gain_controller2: automatic_gain.then(|| GainController2 {
             adaptive_digital: Some(AdaptiveDigital::default()),
             ..Default::default()
         }),
