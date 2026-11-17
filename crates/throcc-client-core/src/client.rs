@@ -166,9 +166,14 @@ impl Default for SignIns {
 impl SignIns {
     /// Starts a sign-in, giving up every older one.
     pub fn start(&self) -> SignInAttempt {
-        let mut started = self.started.subscribe();
-        self.cancel();
-        let mine = *started.borrow_and_update();
+        let started = self.started.subscribe();
+        // Read in the same step that counts it, so a start or cancel on another thread can't
+        // slip in between and leave two attempts both newest.
+        let mut mine = 0;
+        self.started.send_modify(|count| {
+            *count += 1;
+            mine = *count;
+        });
         SignInAttempt { started, mine }
     }
 

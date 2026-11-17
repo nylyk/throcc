@@ -876,17 +876,18 @@ impl Session {
         self.audiences = Audiences::default();
         let fingerprint = self.call.server();
         let me = welcome.me;
+        let room = welcome.placement.room;
         let proven: Vec<(UserId, PublicKey)> = welcome
             .presence
             .iter()
-            .filter(|p| p.user != me && proves_identity(p, &fingerprint))
+            .filter(|p| p.user != me && presents_by_presence(p.room, room))
+            .filter(|p| proves_identity(p, &fingerprint))
             .map(|p| (p.user, p.identity_key))
             .collect();
         self.note_identities(&proven);
         self.remember_server(welcome.server.name.clone(), welcome.server.avatar);
         let address = self.address.clone();
         let media = self.media;
-        let room = welcome.placement.room;
         let people: Vec<Person> = welcome
             .presence
             .iter()
@@ -986,6 +987,7 @@ impl Session {
         let changed = current != self.peers;
         self.note_trusted(earlier);
         self.note_identities(&presented_by(&current));
+        self.forget_presences_in_our_room(&current);
         let arrived: Vec<UserId> = current
             .iter()
             .filter(|(user, peer)| {
@@ -1032,6 +1034,27 @@ impl Session {
         self.peers = current;
         self.show_shares();
         changed
+    }
+
+    /// Forgets the keys that presences elsewhere proved for people now shown in our room who
+    /// are not room peers, so the badge there stays with who hears us.
+    fn forget_presences_in_our_room(&mut self, peers: &BTreeMap<UserId, Peer>) {
+        let me = self.call.me();
+        let state = self.shared.state();
+        let unkeyed: Vec<UserId> = state
+            .people
+            .iter()
+            .filter(|(user, _)| **user != me && !peers.contains_key(user))
+            .filter(|(_, p)| !presents_by_presence(p.room, self.room))
+            .map(|(user, _)| *user)
+            .collect();
+        let mut forgot = false;
+        for user in unkeyed {
+            forgot |= self.trust.forget(user);
+        }
+        if forgot {
+            self.refresh_trust();
+        }
     }
 
     /// Notes every identity key our secret was wrapped to, oldest first, including one the
@@ -2008,7 +2031,9 @@ impl Session {
                 // A room peer presents its key with a fresh signed encryption key, which a
                 // replayed presence must not displace, not even for a moment.
                 if p.user != self.call.me() && !self.peers.contains_key(&p.user) {
-                    if proves_identity(&p, &self.call.server()) {
+                    if presents_by_presence(p.room, self.room)
+                        && proves_identity(&p, &self.call.server())
+                    {
                         self.note_identities(&[(p.user, p.identity_key)]);
                     } else {
                         self.trust.forget(p.user);
@@ -2079,11 +2104,30 @@ impl Session {
                     self.shared.notice("The room you were in was deleted.");
                 }
                 // The server moves everyone out before it says, so nobody should be left
-                // in it; nobody is ever shown in a room that isn't there.
+                // in it; nobody is ever shown in a room that isn't there. Whoever is left goes
+                // as if their presence ended, so the key manager never trusts someone the
+                // state no longer shows.
+                let left: Vec<UserId> = self
+                    .shared
+                    .state()
+                    .people
+                    .iter()
+                    .filter(|(_, p)| p.room == Some(room))
+                    .map(|(user, _)| *user)
+                    .collect();
+                for user in &left {
+                    self.shown.remove(user);
+                    self.trust.forget(*user);
+                    let notices = self.call.engine.end_presence(*user);
+                    self.notices(notices);
+                }
                 self.shared.update(|s| {
                     s.rooms.retain(|r| r.id != room);
                     s.people.retain(|_, p| p.room != Some(room));
                 });
+                if !left.is_empty() {
+                    self.follow_room().await;
+                }
             }
             ServerEvent::PeersChanged { room, .. } => {
                 if Some(room) == self.room {
@@ -2289,6 +2333,13 @@ fn shown_as(presence: &Presence, person: &Person, server: &Fingerprint) -> Shown
         avatar: presence.avatar,
         blocked: person.blocked,
     }
+}
+
+/// Whether a presence that places someone in `their_room` may present their identity key,
+/// with us in `our_room`. Not in our own room: a signed presence can be replayed, so there
+/// only a room peer's fresh signed encryption key presents one.
+fn presents_by_presence(their_room: Option<RoomId>, our_room: Option<RoomId>) -> bool {
+    our_room.is_none() || their_room != our_room
 }
 
 /// The identity key each of `peers` presents.
@@ -2680,6 +2731,16 @@ mod tests {
         assert!(proves_whom_we_hear(&shown(true), Some(&peer([3; 32]))));
         assert!(!proves_whom_we_hear(&shown(true), Some(&peer([4; 32]))));
         assert!(!proves_whom_we_hear(&shown(false), None));
+    }
+
+    #[test]
+    fn a_presence_presents_a_key_only_for_someone_outside_our_room() {
+        let (ours, other) = (Some(RoomId(1)), Some(RoomId(2)));
+        assert!(!presents_by_presence(ours, ours));
+        assert!(presents_by_presence(other, ours));
+        assert!(presents_by_presence(None, ours));
+        assert!(presents_by_presence(ours, None));
+        assert!(presents_by_presence(None, None));
     }
 
     #[test]

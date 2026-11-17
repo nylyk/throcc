@@ -28,7 +28,8 @@ const IDLE: Duration = Duration::from_millis(2);
 /// A share whose screen stands still sends its last picture again this often, so viewers
 /// keep getting pictures and a keyframe asked for comes out with the next one.
 const STILL_REPEAT: Duration = Duration::from_millis(500);
-/// How long a share's decode thread sleeps between looks while it holds no picture.
+/// How long a share's decode thread waits for a unit before it looks at the view again while
+/// it holds no picture.
 const WAITING: Duration = Duration::from_millis(10);
 /// Units waiting to be decoded past which decoding has fallen behind, half a second at
 /// 60 fps. They are dropped, and decoding goes on from the newest keyframe among them or
@@ -615,6 +616,13 @@ pub fn receive(
         .name("throcc-decode".into())
         .spawn(move || {
             let mut first_picture = Some(first_picture);
+            // Waits for the next unit without polling while no picture is held. Without it,
+            // the loop polls at `WAITING`.
+            let waiter = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .inspect_err(|e| warn!("no timer for the decode thread, so it polls: {e}"))
+                .ok();
             let mut held: VecDeque<Arc<Frame>> = VecDeque::new();
             let mut replaced: Option<Arc<Frame>> = None;
             let mut asks = KeyframeAsks::default();
@@ -689,7 +697,20 @@ pub fn receive(
                                 }
                             }
                         }
-                        std::thread::sleep(if held.is_empty() { WAITING } else { IDLE });
+                        match (&waiter, held.is_empty()) {
+                            // The next unit wakes us at once, and the view is followed at
+                            // least every `WAITING`.
+                            (Some(waiter), true) => {
+                                let next = tokio::time::timeout(WAITING, units.recv());
+                                match waiter.block_on(next) {
+                                    Ok(Some(unit)) => queued.push_back(unit),
+                                    Ok(None) => return,
+                                    Err(_) => {}
+                                }
+                            }
+                            (None, true) => std::thread::sleep(WAITING),
+                            (_, false) => std::thread::sleep(IDLE),
+                        }
                         None
                     }
                     Err(mpsc::error::TryRecvError::Disconnected) => return,

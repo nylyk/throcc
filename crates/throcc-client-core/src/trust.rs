@@ -36,9 +36,9 @@ impl Trust {
         self.presented.clear();
     }
 
-    /// Forgets the key `user` presented, once they are no longer shown.
-    pub fn forget(&mut self, user: UserId) {
-        self.presented.remove(&user);
+    /// Forgets the key `user` presented, once they are no longer shown. True if there was one.
+    pub fn forget(&mut self, user: UserId) -> bool {
+        self.presented.remove(&user).is_some()
     }
 
     /// Notes the identity keys `peers` present. True if any is new. Once [`MAX_SIGNED_IN`] are
