@@ -1,6 +1,7 @@
 mod messages;
 mod safety;
 mod state;
+mod transfer;
 mod voice;
 
 use std::collections::HashMap;
@@ -40,6 +41,7 @@ pub use state::{
     Connection, ConnectionNotice, CoreState, CurrentRoom, Health, JoinAction, KeyTrust, KeyWarning,
     NoticeAction, Person, Role, Room, Server, Share, Sound, SoundLevel,
 };
+pub use transfer::{IdentityExport, IdentityScanner, QrFrame, ScanProgress};
 pub use voice::{MicLevel, NoiseSuppression, Voice};
 
 /// `ShareView.nativeWindow` in the Android app: the `ANativeWindow` behind a `Surface`, with a
