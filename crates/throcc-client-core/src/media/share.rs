@@ -533,6 +533,12 @@ fn frame_bytes(frame: &Frame) -> usize {
     width * height + 2 * width.div_ceil(2) * height.div_ceil(2)
 }
 
+/// Holds `frame` back for the share audio, dropping the oldest held frames to make room.
+fn hold(held: &mut VecDeque<Arc<Frame>>, frame: Frame) {
+    make_room(held, frame_bytes(&frame));
+    held.push_back(Arc::new(frame));
+}
+
 /// Drops the oldest held frames until one of `incoming` bytes fits both bounds.
 fn make_room(held: &mut VecDeque<Arc<Frame>>, incoming: usize) {
     let mut bytes: usize = held.iter().map(|f| frame_bytes(f)).sum();
@@ -674,8 +680,7 @@ pub fn receive(
                                     if !awaiting_keyframe {
                                         asks.answered();
                                     }
-                                    make_room(&mut held, frame_bytes(&frame));
-                                    held.push_back(Arc::new(frame));
+                                    hold(&mut held, frame);
                                 }
                                 Ok(None) => break,
                                 Err(e) => {
@@ -721,8 +726,7 @@ pub fn receive(
                             if !flushed {
                                 asks.answered();
                             }
-                            make_room(&mut held, frame_bytes(&frame));
-                            held.push_back(Arc::new(frame));
+                            hold(&mut held, frame);
                         }
                         Ok(None) => {}
                         Err(DecodeError::TooLarge(width, height)) => {

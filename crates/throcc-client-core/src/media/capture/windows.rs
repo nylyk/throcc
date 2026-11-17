@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use throcc_video::frame::{VideoFrame, copy_nv12, share_size};
 use windows::Foundation::{TimeSpan, TypedEventHandler};
 use windows::Graphics::Capture::{
     Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureAccess,
@@ -68,10 +69,9 @@ use windows::core::{HRESULT, IInspectable, Interface, Owned, Ref, implement};
 
 use super::audio_ring::{AudioConsumer, AudioProducer, audio_ring};
 use super::clock::ShareClock;
-use super::{Capture, CaptureConfig, CaptureError, FrameLimiter, copy_nv12, failed};
+use super::{Capture, CaptureConfig, CaptureError, FrameLimiter, failed};
 use crate::media::audio::SAMPLE_RATE;
 use crate::media::share_audio::STEREO_FRAME;
-use crate::media::video::frame::{VideoFrame, share_size};
 use throcc_proto::frame::VIDEO_CLOCK_HZ;
 
 /// Captured frames waiting for the share thread. A full ring drops the newest frame.

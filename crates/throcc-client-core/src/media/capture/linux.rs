@@ -38,12 +38,12 @@ use pw::spa::utils::{
     Choice, ChoiceEnum, ChoiceFlags, Direction, Fraction, Id, Rectangle, SpaTypes,
 };
 use pw::stream::{Stream, StreamBox, StreamFlags};
-use throcc_video::frame::{VideoFrame, rgb_to_nv12};
+use throcc_video::frame::{VideoFrame, copy_nv12, resize, rgb_to_nv12};
 use throcc_video::{DmaBuf, DmaBufPlane, MAX_PLANES};
 use tracing::warn;
 
 use super::clock::{ShareClock, clock_nanos};
-use super::{Capture, CaptureConfig, CaptureError, copy_nv12, failed, resize};
+use super::{Capture, CaptureConfig, CaptureError, failed};
 use crate::media::share_audio::STEREO_FRAME;
 use desktop_audio::DesktopAudio;
 
@@ -453,7 +453,7 @@ fn run(
             (1 << spa::sys::SPA_DATA_MemPtr) | (1 << spa::sys::SPA_DATA_MemFd),
         ))?,
     };
-    let offers = if encoder_takes_dmabufs() {
+    let offers = if throcc_video::tries_gpu_input_first() {
         dmabuf_offers(egl::dmabuf_modifiers)
     } else {
         Vec::new()
@@ -514,10 +514,6 @@ fn run(
     ready.send(Ok(())).ok();
     mainloop.run();
     Ok(())
-}
-
-fn encoder_takes_dmabufs() -> bool {
-    throcc_video::tries_gpu_input_first()
 }
 
 fn renegotiate(

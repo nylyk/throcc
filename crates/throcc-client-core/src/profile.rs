@@ -92,12 +92,9 @@ pub fn password_problem(typed: &str) -> Option<String> {
 
 /// A typed password: `Ok(None)` when empty, and why the server would refuse it if it would.
 pub fn check_password(typed: &str) -> Result<Option<String>, String> {
-    if typed.is_empty() {
-        return Ok(None);
-    }
     match password_problem(typed) {
         Some(problem) => Err(problem),
-        None => Ok(Some(typed.to_owned())),
+        None => Ok((!typed.is_empty()).then(|| typed.to_owned())),
     }
 }
 

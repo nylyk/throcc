@@ -17,10 +17,6 @@ use throcc_proto::messages::ShareConfig;
 #[cfg(target_os = "macos")]
 pub use throcc_video::PixelBuffer;
 use throcc_video::frame::VideoFrame;
-#[cfg(any(windows, target_os = "linux"))]
-use throcc_video::frame::copy_nv12;
-#[cfg(target_os = "linux")]
-use throcc_video::frame::resize;
 #[cfg(target_os = "linux")]
 pub use throcc_video::{DmaBuf, DmaBufPlane};
 

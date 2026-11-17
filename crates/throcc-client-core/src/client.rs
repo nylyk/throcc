@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use throcc_crypto::safety;
@@ -353,7 +353,7 @@ pub struct MockClient {
     /// The sample people as they are when not blocked.
     sample_people: BTreeMap<UserId, Person>,
     /// Our name and picture as last set, which we keep out of a room too.
-    own_profile: std::sync::Mutex<Option<(String, Option<Hash>)>>,
+    own_profile: Mutex<Option<(String, Option<Hash>)>>,
     /// The picture every share shows.
     picture: watch::Sender<Option<Arc<Frame>>>,
 }
@@ -410,7 +410,7 @@ impl MockClient {
         state.people.retain(|_, p| p.room.is_some());
         let client = Self {
             sample_people,
-            own_profile: std::sync::Mutex::new(None),
+            own_profile: Mutex::new(None),
             shared: Shared::new(state),
             verified,
             blocked,
@@ -456,10 +456,10 @@ impl ClientApi for MockClient {
         match command {
             UiCommand::Join(room) => self.update(|s| {
                 let (mic, deafened) = (s.mic, s.deafened);
-                let sample = self.sample_people.get(&me).cloned();
                 match room {
                     Some(room) => {
-                        if let Some(person) = s.people.get(&me).cloned().or(sample) {
+                        let shown = s.people.get(&me).or_else(|| self.sample_people.get(&me));
+                        if let Some(person) = shown.cloned() {
                             let (name, avatar) = crate::lock(&self.own_profile)
                                 .clone()
                                 .unwrap_or((person.name.clone(), person.avatar));
