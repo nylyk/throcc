@@ -421,7 +421,7 @@ private fun Turning() {
 
 /** Keeps the screen from turning off while shown. */
 @Composable
-private fun KeepScreenOn() {
+fun KeepScreenOn() {
     val view = LocalView.current
     DisposableEffect(view) {
         view.keepScreenOn = true

@@ -117,6 +117,7 @@ fun ExportQr(model: AppModel) {
             delay(millis)
         }
     }
+    KeepScreenOn()
     Page(model, EXPORT_TITLE) { padding ->
         Form(padding) {
             val square = Modifier.widthIn(max = 480.dp).fillMaxWidth().aspectRatio(1f).align(Alignment.CenterHorizontally)

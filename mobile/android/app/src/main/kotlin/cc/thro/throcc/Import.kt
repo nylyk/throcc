@@ -73,7 +73,7 @@ fun ImportChoice(model: AppModel, problem: String?) {
     Page(model, "Import Identity", model::importBack) { padding ->
         Form(padding) {
             Text(
-                "Bring your identity from a device that has throcc. On that device, open Settings, then Identity.",
+                "Bring your identity from a device that has throcc. On that device, open Settings, then Profile.",
                 Modifier.padding(horizontal = 16.dp),
                 MaterialTheme.colorScheme.onSurfaceVariant,
             )
