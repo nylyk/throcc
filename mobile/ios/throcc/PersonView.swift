@@ -91,8 +91,8 @@ struct PersonView: View {
         Section {
             HStack(spacing: 8) {
                 TrustLabel(trust: person.trust)
-                if let verifiedAs = person.verifiedAs {
-                    Text("Verified as \(verifiedAs)")
+                if let note = person.verifiedNote {
+                    Text(note)
                         .lineLimit(1)
                         .font(.caption)
                         .foregroundStyle(.muted)

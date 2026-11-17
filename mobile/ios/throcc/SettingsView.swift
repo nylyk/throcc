@@ -363,7 +363,7 @@ private struct VerifiedPage: View {
                     if let problem = model.storeProblems.verified {
                         StoreProblem(text: problem)
                     }
-                    Text("People that you have verified").foregroundStyle(.muted)
+                    Text("People you verified on this device").foregroundStyle(.muted)
                 }
             } footer: {
                 if people.isEmpty {
@@ -427,7 +427,7 @@ private struct BlockedPage: View {
                     if let problem = model.storeProblems.blocked {
                         StoreProblem(text: problem)
                     }
-                    Text("People that you have blocked").foregroundStyle(.muted)
+                    Text("People you blocked on this device").foregroundStyle(.muted)
                 }
             } footer: {
                 if people.isEmpty {

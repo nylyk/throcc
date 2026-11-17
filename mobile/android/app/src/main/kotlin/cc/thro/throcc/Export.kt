@@ -87,7 +87,7 @@ fun ExportSection(model: AppModel) {
     Column {
         GroupTitle(EXPORT_TITLE)
         Text(
-            "Use your identity on another device. Anyone who gets the export and its code can sign in as you.",
+            "Use your identity on another device. It gets a copy of the people you verified or blocked, then keeps its own lists. Anyone who gets the export and its code can sign in as you.",
             Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
             MaterialTheme.colorScheme.onSurfaceVariant,
         )

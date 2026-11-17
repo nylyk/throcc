@@ -9,7 +9,7 @@ struct ExportIdentitySection: View {
 
     var body: some View {
         Section {
-            Text("Use your identity on another device. Anyone who gets the export and its code can sign in as you.")
+            Text("Use your identity on another device. It gets a copy of the people you verified or blocked, then keeps its own lists. Anyone who gets the export and its code can sign in as you.")
                 .foregroundStyle(.text)
             Button("Show QR Code") { model.settingsPath.append(.exportQR) }
                 .disabled(exporting)

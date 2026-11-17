@@ -355,6 +355,7 @@ fun VerifiedPeople(model: AppModel, state: CoreState) {
         }
         LazyColumn(Modifier.pageWidth(), contentPadding = padding) {
             model.storeProblems.verified?.let { item { StoreProblem(it) } }
+            if (people.isNotEmpty()) item { GroupTitle("People you verified on this device") }
             itemsIndexed(people) { index, person ->
                 GroupRow(
                     index,
@@ -395,6 +396,7 @@ fun BlockedPeople(model: AppModel, state: CoreState) {
         }
         LazyColumn(Modifier.pageWidth(), contentPadding = padding) {
             model.storeProblems.blocked?.let { item { StoreProblem(it) } }
+            if (people.isNotEmpty()) item { GroupTitle("People you blocked on this device") }
             itemsIndexed(people) { index, person ->
                 GroupRow(
                     index,

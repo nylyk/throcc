@@ -145,7 +145,8 @@ fn keys(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                                     .flex_col()
                                     .child(div().truncate().child(person.name.clone()))
                                     .children(verified_as.map(|name| {
-                                        caption(format!("Verified as {name}")).truncate()
+                                        caption(format!("Verified as {name} on this device"))
+                                            .truncate()
                                     })),
                             )
                             .child(match state.trust(user) {

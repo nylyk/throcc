@@ -491,9 +491,7 @@ fn profile(app: &mut ThroccApp, check: SafetyCheck, cx: &mut Context<ThroccApp>)
     let person = state.person(user);
     let name = person.map_or(format!("User {}", user.0), |p| p.name.clone());
     let verified = person.is_some_and(|p| p.verified);
-    let verified_as = person
-        .and_then(|p| p.verified_as())
-        .map(|name| caption(format!("Verified as {name}")));
+    let verified_note = person.and_then(|p| p.verified_note()).map(caption);
     let change = state
         .key_warnings
         .iter()
@@ -512,7 +510,7 @@ fn profile(app: &mut ThroccApp, check: SafetyCheck, cx: &mut Context<ThroccApp>)
                 } else {
                     chip("Not verified", theme::raised(), theme::text_3())
                 })
-                .children(verified_as),
+                .children(verified_note),
         ),
     );
     let key = |label: &'static str, key: String| {

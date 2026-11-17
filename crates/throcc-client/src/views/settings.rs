@@ -528,7 +528,7 @@ fn export_card(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> Div {
         .gap_4()
         .child(section("Use on Another Device"))
         .child(description(
-            "Bring your identity, servers and the people you verified or blocked to another device. Scan the QR code with a phone, or save a file for any device. Anyone who gets the export and its code can sign in as you.",
+            "Bring your identity, servers and the people you verified or blocked to another device, which keeps its own lists from then on. Scan the QR code with a phone, or save a file for any device. Anyone who gets the export and its code can sign in as you.",
         ))
         .children(app.transfer_problem.clone().map(error_box))
         .child(
@@ -649,7 +649,7 @@ fn verified(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .flex()
         .flex_col()
         .gap_1()
-        .child(section("People that you have verified"))
+        .child(section("People you verified on this device"))
         .children(rows)
         .children(
             app.verified_people.is_empty().then(|| {
@@ -712,7 +712,7 @@ fn blocked(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .flex()
         .flex_col()
         .gap_1()
-        .child(section("People that you have blocked"))
+        .child(section("People you blocked on this device"))
         .children(rows)
         .children(
             app.blocked_people
