@@ -70,6 +70,7 @@ private fun Panes(model: AppModel, state: CoreState) {
     val roomInFront = !wide && model.roomInFront && state.current != null
     val pagesEnd = WindowInsets.safeDrawing.only(WindowInsetsSides.End)
     val roomStart = WindowInsets.safeDrawing.only(WindowInsetsSides.Start)
+    if (Screen.ExportQr in model.stack || Screen.ExportCode in model.stack) SecureScreen()
     Row(Modifier.fillMaxSize()) {
         val scheme = MaterialTheme.colorScheme
         MaterialTheme(colorScheme = if (wide) raised(scheme) else scheme) {

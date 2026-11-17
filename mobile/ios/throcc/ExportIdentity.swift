@@ -6,7 +6,6 @@ struct ExportIdentitySection: View {
     @State private var exporting = false
     @State private var sharedCode: String?
     @State private var problem: String?
-    @State private var sealing: Task<Void, Never>?
 
     var body: some View {
         Section {
@@ -41,16 +40,14 @@ struct ExportIdentitySection: View {
         } header: {
             Text("Use on Another Device").foregroundStyle(.muted)
         }
-        .onDisappear { sealing?.cancel() }
     }
 
     private func shareFile() {
-        sealing = Task {
+        Task {
             exporting = true
             defer { exporting = false }
             do {
                 let export = try await model.exportIdentity()
-                guard !Task.isCancelled else { return }
                 try export.file().write(to: exportFile, options: [.atomic, .completeFileProtection])
                 problem = nil
                 sharedCode = export.code()

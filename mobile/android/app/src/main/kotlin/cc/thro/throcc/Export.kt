@@ -106,7 +106,6 @@ fun ExportSection(model: AppModel) {
 /** The export's QR codes, one after the other, until the user asks for its code. */
 @Composable
 fun ExportQr(model: AppModel) {
-    SecureScreen()
     val export = remember { model.export } ?: return
     var frame by remember { mutableStateOf<QrFrame?>(null) }
     LaunchedEffect(export) {
@@ -136,7 +135,6 @@ fun ExportQr(model: AppModel) {
 /** The code that opens the export, which the QR codes never show beside. */
 @Composable
 fun ExportCode(model: AppModel) {
-    SecureScreen()
     val export = remember { model.export } ?: return
     val code = remember(export) { export.code() }
     val context = LocalContext.current
@@ -195,7 +193,7 @@ private fun sendIntent(context: Context, file: File) = Intent(Intent.ACTION_SEND
 
 /** Keeps the window out of screenshots, recordings, casts and the recents thumbnail while shown. */
 @Composable
-private fun SecureScreen() {
+fun SecureScreen() {
     val window = LocalActivity.current?.window ?: return
     DisposableEffect(window) {
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
