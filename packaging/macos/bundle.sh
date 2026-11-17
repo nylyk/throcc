@@ -7,8 +7,10 @@ notices=packaging/licenses/client-macos-notices.txt
 codecs=${THROCC_CODECS:-deps/codecs}
 target=$(rustc -vV | sed -n 's/^host: //p')
 [ -f "$codecs/$target/lib/libvpx.a" ] || packaging/codecs/build.sh "$codecs" "$target"
+# Captured first, so a failing env.sh stops the script: eval of nothing would not.
+codec_env=$(packaging/codecs/env.sh "$codecs")
 set -a
-eval "$(packaging/codecs/env.sh "$codecs")"
+eval "$codec_env"
 set +a
 cargo build --release -p throcc-client
 

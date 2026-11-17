@@ -18,7 +18,8 @@ desktop *args:
     if [ "$(uname)" = Darwin ]; then
         host=$(rustc -vV | sed -n 's/^host: //p')
         [ -f "deps/codecs/$host/lib/libvpx.a" ] || packaging/codecs/build.sh deps/codecs "$host"
-        set -a; eval "$(packaging/codecs/env.sh deps/codecs)"; set +a
+        codec_env=$(packaging/codecs/env.sh deps/codecs)
+        set -a; eval "$codec_env"; set +a
         cargo run --release -p throcc-client -- {{ args }}
     else
         [ -f deps/ffmpeg-lgpl/lib/pkgconfig/libavcodec.pc ] || packaging/ffmpeg/build.sh deps/ffmpeg-lgpl

@@ -33,8 +33,10 @@ for triple in "${triples[@]}" "$(rustc -vV | sed -n 's/^host: //p')"; do
     [ -f "deps/codecs/$triple/lib/libvpx.a" ] || missing+=("$triple")
 done
 [ ${#missing[@]} -eq 0 ] || packaging/codecs/build.sh deps/codecs "${missing[@]}"
+# Captured first, so a failing env.sh stops the script: eval of nothing would not.
+codec_env=$(packaging/codecs/env.sh deps/codecs)
 set -a
-eval "$(packaging/codecs/env.sh deps/codecs)"
+eval "$codec_env"
 set +a
 
 cargo build --locked -p throcc-mobile --release "${targets[@]}"
