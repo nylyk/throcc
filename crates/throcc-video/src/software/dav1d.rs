@@ -56,6 +56,10 @@ impl Decoder {
         timestamp: u32,
         mut spare: Option<VideoFrame>,
     ) -> Result<Option<VideoFrame>, DecodeError> {
+        // dav1d refuses empty data without releasing it, so it never gets any.
+        if unit.is_empty() {
+            return Err(DecodeError::Dav1d(-libc::EINVAL));
+        }
         // SAFETY: an all-zero Dav1dData is dav1d's empty data.
         let mut data: Dav1dData = unsafe { std::mem::zeroed() };
         // SAFETY: dav1d_data_create allocates `len` bytes for `data` and returns them.
@@ -242,5 +246,23 @@ mod tests {
             decoder.decode(unit, 0, None),
             Err(DecodeError::TooLarge(320, 180) | DecodeError::Dav1d(_))
         ));
+    }
+
+    #[test]
+    fn an_empty_unit_is_refused_and_decoding_goes_on() {
+        let mut decoder = Decoder::new(MaxSize::ANY).unwrap();
+        assert!(matches!(
+            decoder.decode(&[], 0, None),
+            Err(DecodeError::Dav1d(e)) if e == -libc::EINVAL
+        ));
+        let mut timestamps = Vec::new();
+        for (n, unit) in ivf_units(PATTERN).into_iter().enumerate() {
+            let decoded = decoder.decode(unit, n as u32 * 3000, None).unwrap();
+            timestamps.extend(decoded.map(|frame| frame.timestamp));
+        }
+        while let Some(frame) = decoder.drain(None).unwrap() {
+            timestamps.push(frame.timestamp);
+        }
+        assert_eq!(timestamps, (0..12).map(|n| n * 3000).collect::<Vec<u32>>());
     }
 }
