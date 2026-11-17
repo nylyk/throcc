@@ -1806,7 +1806,8 @@ impl ThroccApp {
             self.join_error = Some("Enter the server’s address.".into());
             return;
         }
-        let invite = if !self.needs_invite {
+        let asks_invite = self.needs_invite && self.dialog == Some(Dialog::AddServer);
+        let invite = if !asks_invite {
             None
         } else if code_text.trim().is_empty() {
             self.join_error = Some("Enter the invite code.".into());
@@ -1889,6 +1890,7 @@ impl ThroccApp {
                                 None if e.needs_invite() => {
                                     app.needs_invite = true;
                                     app.join_error = None;
+                                    app.dialog = Some(Dialog::AddServer);
                                     app.code.update(cx, |s, cx| s.focus(window, cx));
                                 }
                                 None => app.join_error = Some(e.explain(&address)),

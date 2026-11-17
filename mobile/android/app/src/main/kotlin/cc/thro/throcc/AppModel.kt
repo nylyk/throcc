@@ -426,7 +426,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
                     is CoreException.Failed -> notices.trySend(failure.reason)
                     is CoreException.Cancelled -> {}
                 }
-                if (failure != null && Screen.Rooms in stack) showPages()
+                if (failure != null && failure !is CoreException.NeedsInvite && Screen.Rooms in stack) showPages()
             }
         }
     }

@@ -140,7 +140,7 @@ fun AddServer(model: AppModel) {
             Panel {
                 if (needsInvite) {
                     Text(
-                        "${model.addingAddress} doesn’t know you yet. Join with an invite code from someone there.",
+                        "Join ${model.addingAddress} with an invite code from someone there.",
                         color = MaterialTheme.colorScheme.onSurface,
                     )
                     OutlinedTextField(

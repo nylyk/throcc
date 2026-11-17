@@ -41,9 +41,13 @@ impl SignInError {
         }
     }
 
-    /// Whether the server doesn't know our identity, so joining it takes an invite.
+    /// Whether joining the server takes an invite: it doesn't know our identity, or couldn't
+    /// prove it does.
     pub fn needs_invite(&self) -> bool {
-        matches!(self, Self::NotEnrolled(_))
+        matches!(
+            self,
+            Self::NotEnrolled(_) | Self::Login(LoginError::Unproven)
+        )
     }
 
     /// Whether the identity the known servers know us by is gone from the keychain.

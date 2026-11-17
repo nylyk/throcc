@@ -691,7 +691,7 @@ fn add_server(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         let address = app.address.read(cx).value().trim().to_owned();
         body("Add Server")
             .child(description(format!(
-                "{address} doesn’t know you yet. Join with an invite code from someone there."
+                "Join {address} with an invite code from someone there."
             )))
             .child(
                 field(

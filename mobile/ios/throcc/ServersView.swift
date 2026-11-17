@@ -94,7 +94,7 @@ struct AddServerView: View {
             ThemedForm {
                 if needsInvite {
                     Section {
-                        Text("\(address) doesn’t know you yet. Join with an invite code from someone there.")
+                        Text("Join \(address) with an invite code from someone there.")
                             .foregroundStyle(.text)
                         ThemedField("Invite code", text: $code)
                             .monospaced()
