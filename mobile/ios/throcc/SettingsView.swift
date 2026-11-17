@@ -42,6 +42,8 @@ struct SettingsView: View {
                 case .appearance: AppearancePage()
                 case .verified: VerifiedPage()
                 case .blocked: BlockedPage()
+                case .exportQR: ExportQRPage()
+                case .exportCode(let code): ExportCodePage(code: code)
                 case .about: AboutPage()
                 }
             }
@@ -82,6 +84,7 @@ private struct ProfilePage: View {
             } footer: {
                 SaveStatusText(status: changed ? nil : status)
             }
+            ExportIdentitySection()
         }
         .navigationTitle("Profile")
         .onAppear {

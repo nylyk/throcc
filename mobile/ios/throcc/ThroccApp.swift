@@ -17,7 +17,7 @@ struct ThroccApp: App {
         self.sample = mock ? sample : nil
         launch = Result {
             try setAppDirs()
-            let model = AppModel(core: mock ? .mock(onboarded: sample != .onboarding) : Core(), mock: mock)
+            let model = AppModel(core: mock ? .mock(onboarded: !(sample?.isOnboarding ?? false)) : Core(), mock: mock)
             if mock, let theme = value("--theme") {
                 model.useTheme(named: theme)
             }

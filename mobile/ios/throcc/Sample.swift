@@ -8,6 +8,11 @@ enum Sample: String {
     case reconnect, elsewhere
     case share, sharefull
     case pinmismatch, identitymissing
+    case identity, exportqr, exportcode, importidentity, importcode
+
+    var isOnboarding: Bool {
+        [.onboarding, .importidentity, .importcode].contains(self)
+    }
 }
 
 extension AppModel {
@@ -82,6 +87,18 @@ extension AppModel {
             )
         case .identitymissing:
             sheet = .identityMissing(address: "owls.thro.cc", code: nil)
+        case .identity:
+            await showSampleSettings([.profile])
+        case .exportqr:
+            await showSampleSettings([.profile, .exportQR])
+        case .exportcode:
+            guard let export = try? await exportIdentity() else { return }
+            await showSampleSettings([.profile, .exportCode(export.code())])
+        case .importidentity:
+            onboardingPath = [.importIdentity]
+        case .importcode:
+            guard let export = try? await exportIdentity() else { return }
+            onboardingPath = [.importIdentity, .enterCode(export.file())]
         }
     }
 

@@ -24,13 +24,23 @@ enum ServerPage {
     case keys
 }
 
-enum SettingsPage {
+enum SettingsPage: Hashable {
     case profile
     case voice
     case appearance
     case verified
     case blocked
+    case exportQR
+    /// The code that opens an export just shown or sent.
+    case exportCode(String)
     case about
+}
+
+enum OnboardingPage: Hashable {
+    case importIdentity
+    case scan
+    /// Asks for the code that opens the export in the file.
+    case enterCode(Data)
 }
 
 enum SaveStatus: Equatable {
@@ -79,6 +89,7 @@ final class AppModel {
     var column = NavigationSplitViewColumn.sidebar
     var sheet: Sheet?
     var settingsPath: [SettingsPage] = []
+    var onboardingPath: [OnboardingPage] = []
     /// The connection that the samples of a lost connection show in place of the state's.
     var sampleConnection: Connection?
     /// The share shown over the whole screen, if any.
@@ -181,6 +192,22 @@ final class AppModel {
                 }
             }
         }
+    }
+
+    /// Seals the identity under a new code, off the main actor, as sealing takes about a second.
+    func exportIdentity() async throws -> IdentityExport {
+        let core = core
+        return try await Task.detached(priority: .userInitiated) { try core.exportIdentity() }.value
+    }
+
+    /// Makes the identity in `file`, opened with `code`, this device's, and loads its profile and
+    /// servers. Opening it runs off the main actor, as it takes about a second.
+    func importIdentity(file: Data, code: String) async throws {
+        let core = core
+        try await Task.detached(priority: .userInitiated) { try core.importIdentity(file: file, code: code) }.value
+        profile = core.profile()
+        loadServers()
+        onboardingPath = []
     }
 
     /// Signs in to the server at `address`, joining it first with the invite `code`, and opens

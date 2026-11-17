@@ -7,8 +7,9 @@ struct OnboardingView: View {
     @State private var refusal: String?
 
     var body: some View {
+        @Bindable var model = model
         let check = checkName(typed: name)
-        NavigationStack {
+        NavigationStack(path: $model.onboardingPath) {
             ThemedForm {
                 Section {
                     PictureEditor(picture: $picture, name: name)
@@ -32,8 +33,18 @@ struct OnboardingView: View {
                     }
                     .disabled(check.name == nil)
                 }
+                Section {
+                    Button("Import from Another Device") { model.onboardingPath.append(.importIdentity) }
+                }
             }
             .navigationTitle("Welcome to throcc")
+            .navigationDestination(for: OnboardingPage.self) { page in
+                switch page {
+                case .importIdentity: ImportIdentityPage()
+                case .scan: ScanPage()
+                case .enterCode(let file): EnterCodePage(file: file)
+                }
+            }
         }
     }
 }
