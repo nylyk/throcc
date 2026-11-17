@@ -74,8 +74,7 @@ uniffi::setup_scaffolding!();
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum CoreError {
     /// The server's key isn't the one this install trusted for its address: it was
-    /// reinstalled, or something pretends to be it. A fresh invite proves the new key;
-    /// `Core::trust_server_key` takes it on the user's word.
+    /// reinstalled, or something pretends to be it. Only a fresh invite proves the new key.
     #[error("the server's key changed")]
     PinMismatch { expected: Vec<u8>, actual: Vec<u8> },
     /// Our identity is gone from the keychain, so no server we joined knows us.
@@ -472,16 +471,6 @@ impl Core {
                 picture: showable(server.picture),
             })
             .collect()
-    }
-
-    /// Trusts `actual` as the key of the server at `address` from now on, as the user chose
-    /// to when it changed.
-    pub fn trust_server_key(&self, address: String, actual: Vec<u8>) -> Result<(), CoreError> {
-        let actual = messages::fingerprint(&actual).context("that is no server key")?;
-        if !self.mock {
-            Keystore::default_known_servers()?.trust(&address, actual)?;
-        }
-        Ok(())
     }
 
     /// Makes a new identity and forgets every server, as the user chose to after the keychain

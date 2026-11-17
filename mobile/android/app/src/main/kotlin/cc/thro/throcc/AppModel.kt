@@ -369,16 +369,6 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
         open(Screen.AddServer)
     }
 
-    /** Trusts the key the server at the problem's address has now, as the user chose to, and signs in again. */
-    fun trustNewKey(problem: SignInProblem.KeyChanged) {
-        signInProblem = null
-        scope.launch {
-            if (ask { core.trustServerKey(problem.address, problem.actual) } != null) {
-                connect(problem.address, problem.invite)
-            }
-        }
-    }
-
     /** Signs in again where the last sign-in failed. */
     fun tryAgain(problem: SignInProblem) {
         signInProblem = null

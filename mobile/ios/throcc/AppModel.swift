@@ -258,13 +258,6 @@ final class AppModel {
         }
     }
 
-    /// Trusts `actual` as the key of the server at `address` on the user's word, and signs in
-    /// to it again with the invite `code`, if any, as `connect(to:code:)` does.
-    func trustServerKey(at address: String, actual: Data, code: String?) async throws {
-        try core.trustServerKey(address: address, actual: actual)
-        try await connect(to: address, code: code)
-    }
-
     /// Makes a new identity and forgets every server, unless the keychain holds the old
     /// identity again by now. It runs off the main actor, as the keychain may ask the user.
     func startOver() async throws -> StartedOver {

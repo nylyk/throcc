@@ -1888,11 +1888,7 @@ impl ThroccApp {
                                 }
                                 None if e.identity_missing() => app.show_identity_missing(),
                                 None if e.needs_invite() => {
-                                    app.needs_invite = true;
-                                    app.join_error = None;
-                                    set_field(&app.address, address.clone(), false, window, cx);
-                                    app.set_dialog(Some(Dialog::AddServer), cx);
-                                    app.code.update(cx, |s, cx| s.focus(window, cx));
+                                    app.ask_for_invite(&address, window, cx)
                                 }
                                 None => app.join_error = Some(e.explain(&address)),
                             }
@@ -1907,22 +1903,13 @@ impl ThroccApp {
         .detach();
     }
 
-    /// Trusts a server's new key after a pin mismatch, as the human chose to.
-    pub fn trust_new_key(
-        &mut self,
-        address: &str,
-        actual: Fingerprint,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.mock
-            || Keystore::default_known_servers()
-                .and_then(|mut known| known.trust(address, actual))
-                .is_ok()
-        {
-            self.set_dialog(None, cx);
-            self.join(window, cx);
-        }
+    /// Opens Add Server at its invite step for `address`.
+    pub fn ask_for_invite(&mut self, address: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.join_error = None;
+        self.needs_invite = true;
+        set_field(&self.address, address, false, window, cx);
+        set_field(&self.code, "", true, window, cx);
+        self.set_dialog(Some(Dialog::AddServer), cx);
     }
 
     /// Looks for the identity again after the keychain seemed to have lost it, as the human

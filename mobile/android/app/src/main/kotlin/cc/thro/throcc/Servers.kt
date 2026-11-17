@@ -209,7 +209,7 @@ private fun KeyChangedDialog(model: AppModel, problem: SignInProblem.KeyChanged)
                 model.addServer(problem.address, needsInvite = true)
             }) { Text("Use a Fresh Invite") }
         },
-        dismissButton = { DangerButton("Trust the New Key") { model.trustNewKey(problem) } },
+        dismissButton = { TextButton(close) { Text("Cancel") } },
         title = { Text("This server’s key changed") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -221,8 +221,7 @@ private fun KeyChangedDialog(model: AppModel, problem: SignInProblem.KeyChanged)
                 }
                 Text(
                     "This happens when the server was reinstalled, and also when someone is pretending to be it. " +
-                        "The safe way back is a fresh invite code: add the server again with it, " +
-                        "and the code proves the new key.",
+                        "The way back is a fresh invite code from someone there: it proves the new key.",
                 )
             }
         },

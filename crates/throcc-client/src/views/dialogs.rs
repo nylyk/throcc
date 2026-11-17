@@ -915,22 +915,12 @@ fn pin_mismatch(
                 .child(mono(actual.to_string()).typeset(theme::CAPTION)),
         )
         .child(description(
-            "This happens when the server was reinstalled, and also when someone is pretending to be it. The safe way back is a fresh invite code: add the server again with it, and the code proves the new key.",
+            "This happens when the server was reinstalled, and also when someone is pretending to be it. The way back is a fresh invite code from someone there: it proves the new key.",
         ))
-        .child(
-            div()
-                .flex()
-                .justify_end()
-                .gap_2()
-                .child(primary("use-invite", "Use a Fresh Invite").on_click(cx.listener(|app, _, window, cx| {
-                    app.needs_invite = true;
-                    app.code.update(cx, |s, cx| s.focus(window, cx));
-                    app.set_dialog(Some(Dialog::AddServer), cx);
-                })))
-                .child(danger("trust-anyway", "Trust the New Key").on_click(cx.listener(move |app, _, window, cx| {
-                    app.trust_new_key(&address, actual, window, cx);
-                    cx.notify();
-                }))),
-        )
+        .child(actions("Cancel", cx).child(
+            primary("use-invite", "Use a Fresh Invite").on_click(cx.listener(
+                move |app, _, window, cx| app.ask_for_invite(&address, window, cx),
+            )),
+        ))
         .into_any_element()
 }

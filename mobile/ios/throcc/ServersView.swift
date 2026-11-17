@@ -163,11 +163,8 @@ struct PinMismatchView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.theme) private var theme
     let address: String
-    let code: String?
     let expected: Data
     let actual: Data
-    @State private var trusting = false
-    @State private var problem: String?
 
     var body: some View {
         NavigationStack {
@@ -177,17 +174,11 @@ struct PinMismatchView: View {
                     key("It now has", actual)
                 }
                 Section {
-                    Text("This happens when the server was reinstalled, and also when someone is pretending to be it. The safe way back is a fresh invite code: add the server again with it, and the code proves the new key.")
+                    Text("This happens when the server was reinstalled, and also when someone is pretending to be it. The way back is a fresh invite code from someone there: it proves the new key.")
                         .foregroundStyle(.text)
-                }
-                if let problem {
-                    Text(problem).foregroundStyle(.bad)
                 }
                 Section {
                     Button("Use a Fresh Invite") { model.sheet = .addServer(address: address, needsInvite: true) }
-                        .disabled(trusting)
-                    DestructiveButton(trusting ? "Connecting…" : "Trust the New Key") { trust() }
-                        .disabled(trusting)
                 }
             }
             .navigationTitle("This server’s key changed")
@@ -196,22 +187,7 @@ struct PinMismatchView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(role: .close) { model.sheet = nil }
                         .tint(theme.text)
-                        .disabled(trusting)
                 }
-            }
-            .interactiveDismissDisabled(trusting)
-        }
-    }
-
-    private func trust() {
-        Task {
-            trusting = true
-            defer { trusting = false }
-            do {
-                // The model closes this dialog once signed in.
-                try await model.trustServerKey(at: address, actual: actual, code: code)
-            } catch {
-                problem = error.explanation
             }
         }
     }
