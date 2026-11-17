@@ -31,14 +31,13 @@ const CHOSEN_FORMATS: &[ImageFormat] = &[
 /// Turns a picture the user chose, in one of [`CHOSEN_FORMATS`], into a centred 128 px PNG
 /// or JPEG square that fits the server's size cap.
 pub fn prepare(file: &[u8]) -> Result<Vec<u8>, String> {
-    let picture = decode_within(file, MAX_CHOSEN_SIDE, MAX_CHOSEN_BYTES, CHOSEN_FORMATS).map_err(|e| {
-        match e {
+    let picture = decode_within(file, MAX_CHOSEN_SIDE, MAX_CHOSEN_BYTES, CHOSEN_FORMATS)
+        .map_err(|e| match e {
             ImageError::Limits(_) => format!(
                 "That picture is too large. Pick one up to {MAX_CHOSEN_SIDE}×{MAX_CHOSEN_SIDE} pixels."
             ),
             _ => "That file isn’t a picture throcc can read.".into(),
-        }
-    })?;
+        })?;
     let side = picture.width().min(picture.height());
     let square = picture.crop_imm(
         (picture.width() - side) / 2,

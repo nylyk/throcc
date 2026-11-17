@@ -35,9 +35,9 @@ impl SafetyCheck {
     }
 
     /// Keeps the number on the key the person presents in `state`, with `number` giving
-    /// the safety number of a key. Their key arrives with a room state and the server may
-    /// present another at any time, so the app calls this on every state. True if what
-    /// shows changed.
+    /// the safety number of a key. Their key arrives with a signed presence or a room state
+    /// and the server may present another at any time, so the app calls this on every state.
+    /// True if what shows changed.
     pub fn follow(&mut self, state: &State, number: impl FnOnce(&PublicKey) -> String) -> bool {
         let Some(key) = state.person(self.user).and_then(|p| p.identity_key) else {
             return false;
@@ -71,7 +71,7 @@ impl SafetyCheck {
         self.shown.as_ref().map(|(key, _)| *key)
     }
 
-    /// The 60-digit number on screen, until the person presents a key in a room with us.
+    /// The 60-digit number on screen, once the person presents a key.
     pub fn number(&self) -> Option<&str> {
         self.shown.as_ref().map(|(_, number)| number.as_str())
     }
