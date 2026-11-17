@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum Sheet: Hashable, Identifiable {
-    case addServer(address: String)
+    case addServer(address: String, needsInvite: Bool = false)
     case settings
     case newRoom
     case editRoom(Room)
@@ -239,7 +239,7 @@ final class AppModel {
                 sheet = .pinMismatch(address: address, code: code, expected: expected, actual: actual)
             case .IdentityMissing:
                 sheet = .identityMissing(address: address, code: code)
-            case .Failed, .Cancelled, nil:
+            case .Failed, .Cancelled, .NeedsInvite, nil:
                 throw error
             }
             return

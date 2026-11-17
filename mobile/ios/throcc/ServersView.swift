@@ -80,28 +80,41 @@ struct AddServerView: View {
     @State private var code = ""
     @State private var problem: String?
     @State private var joining = false
+    @State private var needsInvite: Bool
 
-    init(address: String) {
+    init(address: String, needsInvite: Bool) {
         _address = State(initialValue: address)
+        _needsInvite = State(initialValue: needsInvite)
     }
 
     var body: some View {
         let address = address.trimmingCharacters(in: .whitespaces)
-        let joinable = !address.isEmpty && (code.isEmpty || isInviteCode(typed: code))
+        let joinable = !address.isEmpty && (!needsInvite || isInviteCode(typed: code))
         NavigationStack {
             ThemedForm {
-                Section {
-                    ThemedField("Address", text: $address)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                    ThemedField("Invite code", text: $code)
-                        .monospaced()
-                        .textInputAutocapitalization(.characters)
-                } footer: {
-                    Text("The code also proves you reached the real server. Leave it empty for a server you joined on any of your devices.")
-                        .foregroundStyle(.muted)
+                if needsInvite {
+                    Section {
+                        Text("\(address) doesn’t know you yet. Join with an invite code from someone there.")
+                            .foregroundStyle(.text)
+                        ThemedField("Invite code", text: $code)
+                            .monospaced()
+                            .textInputAutocapitalization(.characters)
+                    } footer: {
+                        Text("The code also proves you reached the real server.")
+                            .foregroundStyle(.muted)
+                    }
+                    .autocorrectionDisabled()
+                } else {
+                    Section {
+                        ThemedField("Address", text: $address)
+                            .keyboardType(.URL)
+                            .textInputAutocapitalization(.never)
+                    } footer: {
+                        Text("An invite code is asked for only if the server doesn’t know you yet.")
+                            .foregroundStyle(.muted)
+                    }
+                    .autocorrectionDisabled()
                 }
-                .autocorrectionDisabled()
                 if let problem {
                     Text(problem).foregroundStyle(.bad)
                 }
@@ -133,7 +146,10 @@ struct AddServerView: View {
             defer { joining = false }
             do {
                 // The model closes this sheet once joined.
-                try await model.connect(to: address, code: code.isEmpty ? nil : code)
+                try await model.connect(to: address, code: needsInvite ? code : nil)
+            } catch CoreError.NeedsInvite {
+                needsInvite = true
+                problem = nil
             } catch {
                 problem = error.explanation
             }
@@ -168,7 +184,7 @@ struct PinMismatchView: View {
                     Text(problem).foregroundStyle(.bad)
                 }
                 Section {
-                    Button("Use a Fresh Invite") { model.sheet = .addServer(address: address) }
+                    Button("Use a Fresh Invite") { model.sheet = .addServer(address: address, needsInvite: true) }
                         .disabled(trusting)
                     DestructiveButton(trusting ? "Connecting…" : "Trust the New Key") { trust() }
                         .disabled(trusting)

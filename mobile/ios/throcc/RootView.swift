@@ -62,7 +62,7 @@ struct RootView: View {
     @ViewBuilder
     private func content(of sheet: Sheet) -> some View {
         switch sheet {
-        case .addServer(let address): AddServerView(address: address)
+        case .addServer(let address, let needsInvite): AddServerView(address: address, needsInvite: needsInvite)
         case .settings: SettingsView()
         case .newRoom: RoomEditor(room: nil)
         case .editRoom(let room): RoomEditor(room: room)

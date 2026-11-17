@@ -2,7 +2,7 @@ import Foundation
 
 /// A screen that `--mock --screen <name>` opens directly.
 enum Sample: String {
-    case onboarding, servers, addserver, rooms, room, blocked, person, personblocked
+    case onboarding, servers, addserver, addserverinvite, rooms, room, blocked, person, personblocked
     case profile, voice, settings, appearance, customtheme, verified, blockedpeople
     case server, members, invites, keys
     case reconnect, elsewhere
@@ -22,6 +22,8 @@ extension AppModel {
             break
         case .addserver:
             sheet = .addServer(address: "")
+        case .addserverinvite:
+            sheet = .addServer(address: "owls.thro.cc", needsInvite: true)
         case .rooms:
             await connectToSample()
         case .room:

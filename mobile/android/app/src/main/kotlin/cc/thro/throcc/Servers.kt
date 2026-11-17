@@ -133,41 +133,54 @@ private fun Connected() {
 fun AddServer(model: AppModel) {
     var address by rememberSaveable { mutableStateOf(model.addingAddress) }
     var code by rememberSaveable { mutableStateOf("") }
+    val needsInvite = model.addingNeedsInvite
     val wrongCode = code.isNotBlank() && !isInviteCode(code)
     Page(model, "Add Server") { padding ->
         Form(padding) {
             Panel {
-                OutlinedTextField(
-                    address,
-                    { address = it },
-                    Modifier.fillMaxWidth(),
-                    label = { Text("Address") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
-                    singleLine = true,
-                )
-                OutlinedTextField(
-                    code,
-                    { code = it },
-                    Modifier.fillMaxWidth(),
-                    textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace),
-                    label = { Text("Invite code") },
-                    supportingText = {
-                        Text(
-                            if (wrongCode) {
-                                "An invite code looks like K7Q-M2XPD."
-                            } else {
-                                "The code also proves you reached the real server. " +
-                                    "Leave it empty for a server you joined on any of your devices."
-                            },
-                        )
-                    },
-                    isError = wrongCode,
-                    keyboardOptions = KeyboardOptions(KeyboardCapitalization.Characters, autoCorrectEnabled = false),
-                    singleLine = true,
-                )
+                if (needsInvite) {
+                    Text(
+                        "${model.addingAddress} doesn’t know you yet. Join with an invite code from someone there.",
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    OutlinedTextField(
+                        code,
+                        { code = it },
+                        Modifier.fillMaxWidth(),
+                        textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace),
+                        label = { Text("Invite code") },
+                        supportingText = {
+                            Text(
+                                if (wrongCode) {
+                                    "An invite code looks like K7Q-M2XPD."
+                                } else {
+                                    "The code also proves you reached the real server."
+                                },
+                            )
+                        },
+                        isError = wrongCode,
+                        keyboardOptions = KeyboardOptions(KeyboardCapitalization.Characters, autoCorrectEnabled = false),
+                        singleLine = true,
+                    )
+                } else {
+                    OutlinedTextField(
+                        address,
+                        { address = it },
+                        Modifier.fillMaxWidth(),
+                        label = { Text("Address") },
+                        supportingText = { Text("An invite code is asked for only if the server doesn’t know you yet.") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                        singleLine = true,
+                    )
+                }
             }
-            MainButton("Join", address.isNotBlank() && !wrongCode, model.connectingTo != null) {
-                model.connect(address.trim(), code.trim().ifEmpty { null })
+            val joinable = if (needsInvite) isInviteCode(code) else address.isNotBlank()
+            MainButton("Join", joinable, model.connectingTo != null) {
+                if (needsInvite) {
+                    model.connect(model.addingAddress, code.trim())
+                } else {
+                    model.connect(address.trim())
+                }
             }
         }
     }
@@ -193,7 +206,7 @@ private fun KeyChangedDialog(model: AppModel, problem: SignInProblem.KeyChanged)
         confirmButton = {
             Button({
                 close()
-                model.addServer(problem.address)
+                model.addServer(problem.address, needsInvite = true)
             }) { Text("Use a Fresh Invite") }
         },
         dismissButton = { DangerButton("Trust the New Key") { model.trustNewKey(problem) } },

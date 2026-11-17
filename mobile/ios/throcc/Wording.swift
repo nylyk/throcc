@@ -32,6 +32,7 @@ extension Error {
         case .PinMismatch: "The server’s key changed."
         case .IdentityMissing: "Your identity is missing from this device."
         case .Cancelled: "Connecting was cancelled."
+        case .NeedsInvite: "This server needs an invite code."
         case nil: localizedDescription
         }
     }

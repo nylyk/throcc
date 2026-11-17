@@ -101,6 +101,7 @@ val CoreException.explained
         is CoreException.PinMismatch -> "This server’s key changed."
         is CoreException.IdentityMissing -> "Your identity is missing."
         is CoreException.Cancelled -> "Connecting was cancelled."
+        is CoreException.NeedsInvite -> "This server needs an invite code."
     }
 
 /** Whether `address`, a host with or without a port, is on the local network. */
@@ -187,6 +188,10 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
 
     /** The address the Add Server page starts with. */
     var addingAddress by mutableStateOf("")
+        private set
+
+    /** Whether the Add Server page asks for an invite code, as its server doesn't know us. */
+    var addingNeedsInvite by mutableStateOf(false)
         private set
 
     /** The identity export the export pages show, while they are open. */
@@ -357,9 +362,10 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
         core.cancelConnect()
     }
 
-    /** Opens the Add Server page, with `address` typed in. */
-    fun addServer(address: String = "") {
+    /** Opens the Add Server page, with `address` typed in, at the invite code when `needsInvite`. */
+    fun addServer(address: String = "", needsInvite: Boolean = false) {
         addingAddress = address
+        addingNeedsInvite = needsInvite
         open(Screen.AddServer)
     }
 
@@ -411,6 +417,11 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
                     is CoreException.IdentityMissing -> {
                         startingOver = null
                         signInProblem = SignInProblem.IdentityMissing(address, invite)
+                    }
+                    is CoreException.NeedsInvite -> {
+                        addingAddress = address
+                        addingNeedsInvite = true
+                        if (Screen.AddServer !in stack) open(Screen.AddServer)
                     }
                     is CoreException.Failed -> notices.trySend(failure.reason)
                     is CoreException.Cancelled -> {}
@@ -640,6 +651,11 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
     private fun showSample(name: String) {
         stack += when (name) {
             "addserver" -> listOf(Screen.AddServer)
+            "addserverinvite" -> {
+                addingAddress = "owls.thro.cc"
+                addingNeedsInvite = true
+                listOf(Screen.AddServer)
+            }
             "rooms", "room", "blocked", "person", "personblocked", "reconnect", "elsewhere", "share", "sharefull" ->
                 listOf(Screen.Rooms)
             "settings" -> listOf(Screen.Settings)
@@ -667,7 +683,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
                 stack += listOf(Screen.Settings, Screen.Profile, shown)
             }
         }
-        if (name in ONBOARDING_SAMPLES + listOf("servers", "addserver", "pinmismatch", "identitymissing")) return
+        if (name in ONBOARDING_SAMPLES + listOf("servers", "addserver", "addserverinvite", "pinmismatch", "identitymissing")) return
         scope.launch {
             signIn("owls.thro.cc", null)
             if (name in listOf("room", "blocked", "person", "personblocked", "share", "sharefull")) {
