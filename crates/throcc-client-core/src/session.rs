@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::ControlFlow;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -27,6 +27,7 @@ use crate::keystore::Keystore;
 use crate::lock;
 use crate::media::cues::Cue;
 use crate::media::engine::Kind;
+use crate::media::share::FellBehind;
 use crate::media::share_audio::Playout;
 use crate::media::video::{Output, Picture, PreviewDemand, View};
 use crate::media::voice::{AudioEngine, CallAudio, CallCommand};
@@ -44,8 +45,8 @@ use crate::verified::VerifiedStore;
 const LEVELS_EVERY: Duration = Duration::from_millis(100);
 const HEALTH_EVERY: Duration = Duration::from_secs(2);
 /// Health refreshes a share counts as one this device can't keep up with after its decoder
-/// last dropped a backlog.
-const LAGGING_REFRESHES: u32 = 3;
+/// last dropped a backlog or waited for a keyframe after one.
+const LAGGING_REFRESHES: u32 = 5;
 /// The shortest time between two cues for others joining or leaving an audience.
 const AUDIENCE_CUE_GAP: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(15);
@@ -224,8 +225,9 @@ impl Watched {
         self.reports_with_drops >= 2
     }
 
-    /// Whether this device decodes the share too slowly: its decoder dropped a backlog in
-    /// the last [`LAGGING_REFRESHES`] health refreshes. Called once per refresh.
+    /// Whether this device decodes the share too slowly: its decoder dropped a backlog or
+    /// waited for a keyframe after one in the last [`LAGGING_REFRESHES`] health refreshes.
+    /// Called once per refresh.
     fn lagging(&mut self) -> bool {
         let Carries::ShareVideo {
             fell_behind: Some(fell_behind),
@@ -234,9 +236,10 @@ impl Watched {
         else {
             return false;
         };
-        let count = fell_behind.load(Ordering::Relaxed);
-        if count != self.fell_behind_seen {
-            self.fell_behind_seen = count;
+        let drops = fell_behind.drops.load(Ordering::Relaxed);
+        let recovering = fell_behind.recovering.load(Ordering::Relaxed);
+        if drops != self.fell_behind_seen || recovering {
+            self.fell_behind_seen = drops;
             self.lagging_for = LAGGING_REFRESHES;
         } else {
             self.lagging_for = self.lagging_for.saturating_sub(1);
@@ -252,7 +255,7 @@ enum Carries {
     ShareVideo {
         config: ShareConfig,
         decoder: Option<watch::Receiver<&'static str>>,
-        fell_behind: Option<Arc<AtomicU64>>,
+        fell_behind: Option<Arc<FellBehind>>,
     },
 }
 
@@ -2541,8 +2544,8 @@ mod tests {
     }
 
     #[test]
-    fn a_share_lags_for_three_refreshes_after_its_decoder_drops_a_backlog() {
-        let fell_behind = Arc::new(AtomicU64::new(0));
+    fn a_share_lags_while_its_decoder_recovers_and_five_refreshes_after_a_drop() {
+        let fell_behind = Arc::new(FellBehind::default());
         let mut track = Watched {
             user: UserId(4),
             carries: Carries::ShareVideo {
@@ -2566,11 +2569,26 @@ mod tests {
             lagging_for: 0,
         };
         let mut refreshes = Vec::new();
-        for drops in [0, 1, 0, 0, 0, 2, 0] {
-            fell_behind.fetch_add(drops, Ordering::Relaxed);
+        for (drops, recovering) in [
+            (0, false),
+            (1, true),
+            (0, true),
+            (0, true),
+            (0, false),
+            (0, false),
+            (0, false),
+            (0, false),
+            (0, false),
+            (2, false),
+        ] {
+            fell_behind.drops.fetch_add(drops, Ordering::Relaxed);
+            fell_behind.recovering.store(recovering, Ordering::Relaxed);
             refreshes.push(track.lagging());
         }
-        assert_eq!(refreshes, [false, true, true, true, false, true, true]);
+        assert_eq!(
+            refreshes,
+            [false, true, true, true, true, true, true, true, false, true]
+        );
     }
 
     #[test]

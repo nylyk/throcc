@@ -575,8 +575,16 @@ pub struct Receiving {
     pub picture: Picture,
     /// What decodes the share, as people see it named.
     pub engine: watch::Receiver<&'static str>,
+    pub fell_behind: Arc<FellBehind>,
+}
+
+/// How a share's decoding falls behind the units arriving for it.
+#[derive(Default)]
+pub struct FellBehind {
     /// How many times decoding fell so far behind that units waiting for it were dropped.
-    pub fell_behind: Arc<AtomicU64>,
+    pub drops: AtomicU64,
+    /// Whether decoding waits for a keyframe after such a drop.
+    pub recovering: AtomicBool,
 }
 
 /// Decodes a share's `units` on its own thread into its newest picture due by `playout`,
@@ -595,7 +603,7 @@ pub fn receive(
         Decoder::new(config.codec, max_size(&config), output).map_err(|e| e.to_string())?;
     let (tx, picture) = watch::channel(None);
     let (engine_tx, engine) = watch::channel(decoder.engine());
-    let fell_behind = Arc::new(AtomicU64::new(0));
+    let fell_behind = Arc::new(FellBehind::default());
     let falls = fell_behind.clone();
     std::thread::Builder::new()
         .name("throcc-decode".into())
@@ -638,13 +646,14 @@ pub fn receive(
                         Some(at) => queued.extend(backlog.drain(at..)),
                         None => {
                             awaiting_keyframe = true;
+                            falls.recovering.store(true, Ordering::Relaxed);
                             if asks.ask(Instant::now(), false, true) {
                                 ask_idr();
                             }
                         }
                     }
                     if dropped > 0 {
-                        falls.fetch_add(1, Ordering::Relaxed);
+                        falls.drops.fetch_add(1, Ordering::Relaxed);
                         warn!(
                             dropped,
                             "decoding fell behind; dropped the units waiting for it"
@@ -694,6 +703,9 @@ pub fn receive(
                     let keyframe_shown =
                         unit.flags.contains(Flags::KEYFRAME) && matches!(decoded, Ok(Some(_)));
                     awaiting_keyframe = flushed && !keyframe_shown;
+                    if !awaiting_keyframe {
+                        falls.recovering.store(false, Ordering::Relaxed);
+                    }
                     let engine_changed = *engine_tx.borrow() != decoder.engine();
                     if engine_changed {
                         engine_tx.send_replace(decoder.engine());
