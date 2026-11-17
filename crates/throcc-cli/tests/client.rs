@@ -469,7 +469,8 @@ fn only_admins_name_the_server_and_everyone_sees_it() {
     let (bob, _b) = client(&address, &code);
     assert_eq!(bob.state().server.clone().unwrap().title(), "Moss Co-op");
 
-    let picture: Vec<u8> = (0..1500u32).map(|i| (i * 3) as u8).collect();
+    let mut picture: Vec<u8> = (0..1500u32).map(|i| (i * 3) as u8).collect();
+    picture[..3].copy_from_slice(&[0xff, 0xd8, 0xff]);
     alice.command(UiCommand::SetServerProfile {
         name: None,
         picture: Some(Some(picture.clone())),
@@ -501,7 +502,8 @@ fn only_admins_name_the_server_and_everyone_sees_it() {
             .is_some_and(|s| s.name.is_none() && s.avatar == Some(hash))
     });
 
-    let other: Vec<u8> = (0..900u32).map(|i| (i * 5) as u8).collect();
+    let mut other: Vec<u8> = (0..900u32).map(|i| (i * 5) as u8).collect();
+    other[..3].copy_from_slice(&[0xff, 0xd8, 0xff]);
     alice.command(UiCommand::SetServerProfile {
         name: Some(Some("Fern".into())),
         picture: Some(Some(other)),

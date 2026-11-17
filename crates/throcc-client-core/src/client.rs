@@ -746,7 +746,7 @@ const SAMPLE_PICTURES: [(u64, &[u8]); 7] = [
     (1, include_bytes!("../assets/mock/nori.jpg")),
     (2, include_bytes!("../assets/mock/kiwi.jpg")),
     (3, include_bytes!("../assets/mock/mochi.jpg")),
-    (4, include_bytes!("../assets/mock/pixelmoth.png")),
+    (4, include_bytes!("../assets/mock/pixelmoth.jpg")),
     (5, include_bytes!("../assets/mock/sleepyfox.jpg")),
     (6, include_bytes!("../assets/mock/juno.jpg")),
     (8, include_bytes!("../assets/mock/rook.jpg")),

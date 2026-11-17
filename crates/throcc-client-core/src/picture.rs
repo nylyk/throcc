@@ -1,13 +1,15 @@
 //! Profile pictures: the one we choose, made small enough for any server, and the ones
-//! others chose, read only in the formats we make.
+//! others chose, read only as the JPEG we make.
 
 use std::io::Cursor;
 
 use image::codecs::jpeg::JpegEncoder;
 use image::error::{ImageFormatHint, UnsupportedError};
 use image::imageops::FilterType;
-use image::{DynamicImage, ImageError, ImageFormat, ImageReader, ImageResult, Limits, RgbaImage};
-use throcc_proto::messages::MAX_AVATAR_BYTES;
+use image::{
+    DynamicImage, ImageError, ImageFormat, ImageReader, ImageResult, Limits, Rgb, RgbImage,
+    RgbaImage,
+};
 
 const SIDE: u32 = 128;
 const JPEG_QUALITY: u8 = 85;
@@ -15,9 +17,11 @@ const MAX_CHOSEN_SIDE: u32 = 8192;
 const MAX_CHOSEN_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_SHOWN_SIDE: u32 = 512;
 const MAX_SHOWN_BYTES: u64 = 4 * 1024 * 1024;
-/// The formats [`prepare`] writes, and so the only ones pictures from others are read in.
-/// The platforms' own decoders read many more.
-const STORED_FORMATS: &[ImageFormat] = &[ImageFormat::Png, ImageFormat::Jpeg];
+/// The format [`prepare`] writes, and so the only one pictures are read in. The platforms'
+/// own decoders read many more.
+const STORED_FORMATS: &[ImageFormat] = &[ImageFormat::Jpeg];
+/// What a transparent part of a chosen picture becomes.
+const BACKDROP: Rgb<u8> = Rgb([255, 255, 255]);
 /// The everyday formats a chosen picture may come in. Rarer decoders stay unused, so a stray
 /// file can't reach them.
 const CHOSEN_FORMATS: &[ImageFormat] = &[
@@ -28,8 +32,8 @@ const CHOSEN_FORMATS: &[ImageFormat] = &[
     ImageFormat::WebP,
 ];
 
-/// Turns a picture the user chose, in one of [`CHOSEN_FORMATS`], into a centred 128 px PNG
-/// or JPEG square that fits the server's size cap.
+/// Turns a picture the user chose, in one of [`CHOSEN_FORMATS`], into a centred 128 px JPEG
+/// square, which fits the server's size cap.
 pub fn prepare(file: &[u8]) -> Result<Vec<u8>, String> {
     let picture = decode_within(file, MAX_CHOSEN_SIDE, MAX_CHOSEN_BYTES, CHOSEN_FORMATS)
         .map_err(|e| match e {
@@ -45,19 +49,31 @@ pub fn prepare(file: &[u8]) -> Result<Vec<u8>, String> {
         side,
         side,
     );
-    let small = square.resize_exact(SIDE, SIDE, FilterType::Lanczos3);
-    let mut png = Vec::new();
-    small
-        .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
-        .map_err(|e| e.to_string())?;
-    if png.len() <= MAX_AVATAR_BYTES {
-        return Ok(png);
-    }
+    let small = on_backdrop(
+        &square
+            .resize_exact(SIDE, SIDE, FilterType::Lanczos3)
+            .into_rgba8(),
+    );
     let mut jpeg = Vec::new();
     JpegEncoder::new_with_quality(&mut jpeg, JPEG_QUALITY)
-        .encode_image(&DynamicImage::ImageRgb8(small.into_rgb8()))
+        .encode_image(&small)
         .map_err(|e| e.to_string())?;
     Ok(jpeg)
+}
+
+fn on_backdrop(picture: &RgbaImage) -> RgbImage {
+    RgbImage::from_fn(picture.width(), picture.height(), |x, y| {
+        let [r, g, b, a] = picture.get_pixel(x, y).0;
+        let mix = |c: u8, under: u8| {
+            ((u16::from(c) * u16::from(a) + u16::from(under) * u16::from(255 - a) + 127) / 255)
+                as u8
+        };
+        Rgb([
+            mix(r, BACKDROP[0]),
+            mix(g, BACKDROP[1]),
+            mix(b, BACKDROP[2]),
+        ])
+    })
 }
 
 /// Decodes a stored picture from someone else. A picture over 512 px a side is refused
@@ -71,8 +87,8 @@ pub fn decode(bytes: &[u8]) -> Option<RgbaImage> {
     Some(picture.into_rgba8())
 }
 
-/// Whether `bytes` is a picture as [`prepare`] makes them, which may be shown: a PNG or JPEG
-/// of at most 512 px a side. Only its header is read, so a platform's own decoder can show
+/// Whether `bytes` is a picture as [`prepare`] makes them, which may be shown: a JPEG of at
+/// most 512 px a side. Only its header is read, so a platform's own decoder can show
 /// it without any rarer format reaching that decoder.
 pub fn showable(bytes: &[u8]) -> bool {
     let Ok(reader) = ImageReader::new(Cursor::new(bytes)).with_guessed_format() else {
@@ -113,7 +129,8 @@ fn decode_within(
 
 #[cfg(test)]
 mod tests {
-    use image::{ImageBuffer, Rgb};
+    use image::{ImageBuffer, Rgba};
+    use throcc_proto::messages::MAX_AVATAR_BYTES;
 
     use super::*;
 
@@ -148,6 +165,18 @@ mod tests {
     }
 
     #[test]
+    fn transparency_becomes_white() {
+        let clear = RgbaImage::from_pixel(32, 32, Rgba([10, 200, 30, 0]));
+        let mut png = Vec::new();
+        DynamicImage::ImageRgba8(clear)
+            .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
+            .unwrap();
+        let prepared = decode(&prepare(&png).unwrap()).unwrap();
+        let [r, g, b, a] = prepared.get_pixel(SIDE / 2, SIDE / 2).0;
+        assert!(r > 250 && g > 250 && b > 250 && a == 255, "{r} {g} {b} {a}");
+    }
+
+    #[test]
     fn something_else_is_refused() {
         assert!(prepare(b"not a picture").is_err());
     }
@@ -172,6 +201,17 @@ mod tests {
         png.extend_from_slice(&crc.to_be_bytes());
     }
 
+    /// A JPEG of a few dozen bytes whose header claims a 20000 × 20000 greyscale picture.
+    fn huge_header_jpeg() -> Vec<u8> {
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08];
+        jpeg.extend_from_slice(&20_000u16.to_be_bytes());
+        jpeg.extend_from_slice(&20_000u16.to_be_bytes());
+        jpeg.extend_from_slice(&[0x01, 0x01, 0x11, 0x00]);
+        jpeg.extend_from_slice(&[0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00]);
+        jpeg.extend_from_slice(&[0x00, 0xff, 0xd9]);
+        jpeg
+    }
+
     /// A PNG of a few dozen bytes whose header claims a 1-bit 20000 × 20000 picture.
     fn huge_header_png() -> Vec<u8> {
         let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
@@ -187,31 +227,31 @@ mod tests {
 
     #[test]
     fn a_huge_declared_size_is_refused_before_decoding() {
-        let bomb = huge_header_png();
-        assert!(bomb.len() < 100);
+        let (png, jpeg) = (huge_header_png(), huge_header_jpeg());
+        assert!(png.len() < 100);
         let started = std::time::Instant::now();
         assert!(matches!(
-            decode_within(&bomb, MAX_SHOWN_SIDE, MAX_SHOWN_BYTES, STORED_FORMATS),
+            decode_within(&jpeg, MAX_SHOWN_SIDE, MAX_SHOWN_BYTES, STORED_FORMATS),
             Err(ImageError::Limits(_))
         ));
-        assert!(matches!(
-            decode_within(&bomb, MAX_CHOSEN_SIDE, MAX_CHOSEN_BYTES, CHOSEN_FORMATS),
-            Err(ImageError::Limits(_))
-        ));
-        assert!(decode(&bomb).is_none());
-        assert!(prepare(&bomb).unwrap_err().contains("too large"));
+        for bomb in [&png, &jpeg] {
+            assert!(matches!(
+                decode_within(bomb, MAX_CHOSEN_SIDE, MAX_CHOSEN_BYTES, CHOSEN_FORMATS),
+                Err(ImageError::Limits(_))
+            ));
+            assert!(decode(bomb).is_none());
+            assert!(prepare(bomb).unwrap_err().contains("too large"));
+        }
         // Decoding 20000×20000 pixels would take far longer, even in a debug build.
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
     #[test]
     fn a_stored_picture_decodes() {
-        for format in [ImageFormat::Png, ImageFormat::Jpeg] {
-            let stored = encoded(SIDE, SIDE, format);
-            let picture = decode(&stored).unwrap();
-            assert_eq!(picture.dimensions(), (SIDE, SIDE));
-            assert!(showable(&stored));
-        }
+        let stored = encoded(SIDE, SIDE, ImageFormat::Jpeg);
+        let picture = decode(&stored).unwrap();
+        assert_eq!(picture.dimensions(), (SIDE, SIDE));
+        assert!(showable(&stored));
     }
 
     #[test]
@@ -219,15 +259,15 @@ mod tests {
         let picture = decode(&encoded(
             MAX_SHOWN_SIDE,
             MAX_SHOWN_SIDE / 2,
-            ImageFormat::Png,
+            ImageFormat::Jpeg,
         ))
         .unwrap();
         assert_eq!(picture.dimensions(), (SIDE, SIDE / 2));
     }
 
     #[test]
-    fn only_png_and_jpeg_are_read_from_others_and_everyday_formats_can_be_chosen() {
-        for format in [ImageFormat::Bmp, ImageFormat::Gif] {
+    fn only_jpeg_is_read_and_everyday_formats_can_be_chosen() {
+        for format in [ImageFormat::Png, ImageFormat::Bmp, ImageFormat::Gif] {
             let other = encoded(16, 16, format);
             assert!(
                 image::load_from_memory(&other).is_ok(),
@@ -244,10 +284,10 @@ mod tests {
 
     #[test]
     fn a_picture_wider_than_shown_pictures_is_refused() {
-        let wide = encoded(MAX_SHOWN_SIDE + 1, 16, ImageFormat::Png);
+        let wide = encoded(MAX_SHOWN_SIDE + 1, 16, ImageFormat::Jpeg);
         assert!(decode(&wide).is_none());
         assert!(!showable(&wide));
-        assert!(!showable(&huge_header_png()));
+        assert!(!showable(&huge_header_jpeg()));
         assert!(!showable(b"not a picture"));
     }
 }

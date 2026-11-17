@@ -23,7 +23,7 @@ async fn concurrent_requests_match_by_id() {
     let server = start_server();
     let alice = Arc::new(admin(&server).await);
     let bob = Arc::new(invited(&server, &alice).await);
-    let pictures: Vec<Vec<u8>> = (0..40u8).map(|i| vec![i, 7]).collect();
+    let pictures: Vec<Vec<u8>> = (0..40u8).map(|i| vec![0xff, 0xd8, 0xff, i]).collect();
     for picture in &pictures {
         let set = alice
             .request(Request::SetServerAvatar(Some(picture.clone())))

@@ -22,7 +22,7 @@ use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tracing::{info, warn};
 
 use crate::auth::InviteRuns;
-use crate::database::{Database, InviteRow, UserRow};
+use crate::database::{Database, InviteRow, UserRow, is_jpeg};
 use crate::egress::{EgressHandle, TrackKind};
 use crate::limits::Buckets;
 use crate::room_password::{self, Wait};
@@ -1018,6 +1018,12 @@ impl Hub {
         let avatar = match picture {
             Some(bytes) => {
                 check_picture(&bytes)?;
+                if !is_jpeg(&bytes) {
+                    return Err(Refusal::new(
+                        ErrorCode::Invalid,
+                        "server pictures must be JPEG",
+                    ));
+                }
                 let hash = Hash::of(&bytes);
                 if !self
                     .keep_picture(user, hash, &bytes)

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use throcc_proto::messages::valid_name;
 
 use crate::json_file;
+use crate::picture;
 use crate::profile::Profile;
 use crate::state::MAX_VOLUME;
 
@@ -108,13 +109,14 @@ impl json_file::Format for Settings {
 
 impl Settings {
     /// The settings kept in `dir`, the defaults where there are none. A name a server would
-    /// refuse counts as no profile, and volumes are kept in range.
+    /// refuse counts as no profile, a picture other clients wouldn't show as none, and
+    /// volumes are kept in range.
     pub fn load(dir: &Path) -> Result<Self> {
         let mut settings: Self = json_file::load(&dir.join(FILE))?;
         settings.profile = settings.profile.and_then(|profile| {
             Some(Profile {
                 name: valid_name(&profile.name)?.to_owned(),
-                ..profile
+                picture: profile.picture.filter(|bytes| picture::showable(bytes)),
             })
         });
         let voice = &mut settings.audio.voice;
@@ -145,7 +147,7 @@ mod tests {
         Settings {
             profile: Some(Profile {
                 name: "Ilse".into(),
-                picture: Some(Arc::from(&b"\x89PNG picture"[..])),
+                picture: Some(Arc::from(&include_bytes!("../assets/mock/nori.jpg")[..])),
             }),
             appearance: Appearance {
                 theme: Some("Custom".into()),
@@ -236,5 +238,20 @@ mod tests {
         assert_eq!(loaded.profile, None);
         assert_eq!(loaded.audio.voice.output_volume, MAX_VOLUME);
         assert_eq!(loaded.audio.voice.cue_volume, 0.0);
+    }
+
+    #[test]
+    fn a_picture_that_is_no_jpeg_counts_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = everything_changed();
+        let mut png = Vec::new();
+        image::RgbImage::new(16, 16)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        settings.profile.as_mut().unwrap().picture = Some(Arc::from(png));
+        settings.save(dir.path()).unwrap();
+        let loaded = Settings::load(dir.path()).unwrap().profile.unwrap();
+        assert_eq!(loaded.name, "Ilse");
+        assert_eq!(loaded.picture, None);
     }
 }

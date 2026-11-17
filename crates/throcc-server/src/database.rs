@@ -579,12 +579,17 @@ impl Database {
                 },
             )
             .optional()?;
-        Ok(
-            row.map_or_else(ServerProfile::default, |(name, avatar)| ServerProfile {
-                name,
-                avatar: hash_column(avatar),
-            }),
-        )
+        let Some((name, avatar)) = row else {
+            return Ok(ServerProfile::default());
+        };
+        let avatar = match hash_column(avatar) {
+            Some(hash) => self
+                .blob(&hash)?
+                .is_some_and(|bytes| is_jpeg(&bytes))
+                .then_some(hash),
+            None => None,
+        };
+        Ok(ServerProfile { name, avatar })
     }
 
     pub fn set_server_name(&self, name: Option<&str>) -> Result<()> {
@@ -627,6 +632,11 @@ impl Database {
             )
             .optional()?)
     }
+}
+
+/// Whether `bytes` start the way every JPEG does.
+pub(crate) fn is_jpeg(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0xff, 0xd8, 0xff])
 }
 
 fn check_private_files(database: &Path) -> Result<()> {
@@ -751,6 +761,8 @@ mod tests {
             name: Some("Moss".into()),
             avatar: Some(Hash([7; 32])),
         };
+        db.put_blob(&Hash([7; 32]), b"\xff\xd8\xff\xe0 jpeg", 100)
+            .unwrap();
         db.set_server_avatar(profile.avatar).unwrap();
         db.set_server_name(profile.name.as_deref()).unwrap();
         drop(db);
@@ -758,6 +770,17 @@ mod tests {
             Database::open(&path).unwrap().server_profile().unwrap(),
             profile
         );
+    }
+
+    #[test]
+    fn a_server_picture_that_is_no_jpeg_counts_as_none() {
+        let db = Database::open_in_memory().unwrap();
+        db.put_blob(&Hash([7; 32]), b"\x89PNG\r\n\x1a\n", 100)
+            .unwrap();
+        db.set_server_avatar(Some(Hash([7; 32]))).unwrap();
+        assert_eq!(db.server_profile().unwrap().avatar, None);
+        db.set_server_avatar(Some(Hash([8; 32]))).unwrap();
+        assert_eq!(db.server_profile().unwrap().avatar, None);
     }
 
     #[cfg(unix)]

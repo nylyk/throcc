@@ -540,7 +540,8 @@ async fn picture_uploads_are_rate_limited() {
     let alice = admin(&server).await;
     let mut uploaded = 0;
     let last = loop {
-        let picture = vec![uploaded as u8; MAX_AVATAR_BYTES];
+        let mut picture = vec![uploaded as u8; MAX_AVATAR_BYTES];
+        picture[..3].copy_from_slice(&[0xff, 0xd8, 0xff]);
         match alice.request(Request::SetServerAvatar(Some(picture))).await {
             Response::Ok if uploaded < 100 => uploaded += 1,
             other => break other,
@@ -548,6 +549,15 @@ async fn picture_uploads_are_rate_limited() {
     };
     assert_error(&last, ErrorCode::RateLimited);
     assert!((16..=17).contains(&uploaded), "{uploaded}");
+}
+
+#[tokio::test]
+async fn a_server_picture_must_be_a_jpeg() {
+    let server = start_server();
+    let alice = admin(&server).await;
+    let png = b"\x89PNG\r\n\x1a\n".to_vec();
+    let set = alice.request(Request::SetServerAvatar(Some(png))).await;
+    assert_error(&set, ErrorCode::Invalid);
 }
 
 #[tokio::test]
@@ -833,7 +843,8 @@ async fn a_member_who_stops_reading_pictures_stops_being_read() {
     const FETCHES: u32 = 40;
     let server = start_server();
     let alice = admin(&server).await;
-    let picture: Vec<u8> = (0..MAX_AVATAR_BYTES).map(|i| (i % 251) as u8).collect();
+    let mut picture: Vec<u8> = (0..MAX_AVATAR_BYTES).map(|i| (i % 251) as u8).collect();
+    picture[..3].copy_from_slice(&[0xff, 0xd8, 0xff]);
     let hash = Hash::of(&picture);
     let set = alice.request(Request::SetServerAvatar(Some(picture))).await;
     assert_eq!(set, Response::Ok);
