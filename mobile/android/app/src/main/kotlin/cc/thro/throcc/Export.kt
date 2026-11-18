@@ -115,7 +115,7 @@ fun ExportQr(model: AppModel) {
         }
     }
     KeepScreenOn()
-    Page(model, "Scan with the New Device") { padding ->
+    Page(model, "Scan on New Device") { padding ->
         Form(padding) {
             val square = Modifier.widthIn(max = 480.dp).fillMaxWidth().aspectRatio(1f).align(Alignment.CenterHorizontally)
             frame?.let { QrCode(it, square) }
@@ -139,7 +139,7 @@ fun ExportCode(model: AppModel) {
     DisposableEffect(Unit) {
         onDispose { exportFile(context).delete() }
     }
-    Page(model, "Type This Code on the New Device") { padding ->
+    Page(model, "Type on New Device") { padding ->
         Form(padding) {
             Panel {
                 Text(

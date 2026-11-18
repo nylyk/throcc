@@ -133,7 +133,7 @@ struct ExportQRPage: View {
         }
         .modifier(HiddenWhileCaptured())
         .background(.bg)
-        .navigationTitle("Scan with the New Device")
+        .navigationTitle("Scan on New Device")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
@@ -207,7 +207,7 @@ struct ExportCodePage: View {
         }
         .modifier(HiddenWhileCaptured())
         .background(.bg)
-        .navigationTitle("Type This Code on the New Device")
+        .navigationTitle("Type on New Device")
         .navigationBarTitleDisplayMode(.inline)
     }
 }
