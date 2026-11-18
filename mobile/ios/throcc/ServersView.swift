@@ -151,8 +151,7 @@ struct AddServerView: View {
     }
 }
 
-/// The server at `address` showed another key than the one this install trusted for it, on a
-/// sign-in with the invite `code`, if any.
+/// The server at `address` showed another key than the one this install trusted for it.
 struct PinMismatchView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.theme) private var theme

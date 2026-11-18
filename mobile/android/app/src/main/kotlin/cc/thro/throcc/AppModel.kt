@@ -78,7 +78,7 @@ sealed interface Importing {
 }
 
 /** The samples that show onboarding, so the mock starts without a profile. */
-val ONBOARDING_SAMPLES = setOf("onboarding", "import", "importscan", "importcode")
+val ONBOARDING_SAMPLES = setOf("onboarding", "importidentity", "importscan", "importcode")
 
 /** The name of the theme made of the user's own colours. */
 val CUSTOM = customThemeName()
@@ -658,7 +658,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
             "pinmismatch" -> signInProblem =
                 SignInProblem.KeyChanged("owls.thro.cc", ByteArray(32) { 0x2c }, ByteArray(32) { 0xb8.toByte() })
             "identitymissing" -> signInProblem = SignInProblem.IdentityMissing("owls.thro.cc", null)
-            "import" -> startImport()
+            "importidentity" -> startImport()
             "importscan" -> scanImport()
             "importcode" -> scope.launch { ask { core.exportIdentity().file() }?.let(::openImport) }
             "exportqr", "exportcode" -> scope.launch {

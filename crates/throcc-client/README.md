@@ -12,7 +12,7 @@ The desktop app, built with gpui and gpui-component on top of `throcc-client-cor
 | `theme.rs` | The 8-colour palette and everything mixed from it: the colours every client shares from the core's `theme::Colors`, the desktop's own mixed here. The presets and the picked theme come from the core's `theme.rs`. The only place the desktop's colours live |
 | `video.rs` | Share pictures handed to gpui as NV12 surfaces, or on macOS as the pixel buffers they were captured or decoded into. Each share on screen is a view of its own that redraws when its picture changes. The only place frames meet gpui |
 | `popout.rs` | A watched share in a window of its own |
-| `avatar.rs` | Profile pictures for gpui: the core's `picture` module prepares one to send and decodes one to draw (PNG and JPEG only, shrunk to 128 px), and this hands the decoded pixels to gpui in BGRA order; also the mock's generated picture |
+| `avatar.rs` | Profile pictures for gpui: the core's `picture` module prepares one to send and decodes one to draw (JPEG only, shrunk to 128 px), and this hands the decoded pixels to gpui in BGRA order; also the mock's generated picture |
 | `hotkey.rs` | The global push-to-talk key |
 | `updates.rs` | The update check: the newest `client-v` release on GitHub, if newer than this build. It is off in a flatpak, which flatpak updates, until the user turns it on |
 | `keep_display_awake.rs` | Keeps the display on while someone else's share is watched: the power APIs on macOS and Windows; on Linux the desktop portal, plus `idle_inhibit.rs` on each window showing a share |

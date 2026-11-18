@@ -62,9 +62,6 @@ impl SignInError {
     /// What went wrong signing in to `address`, in a sentence for the user.
     pub fn explain(&self, address: &str) -> String {
         match self {
-            Self::NotEnrolled(address) => {
-                format!("You haven’t joined {address} yet. Ask someone there for an invite code.")
-            }
             Self::Login(LoginError::Refused(AuthError::BadInvite) | LoginError::Pake(_)) => {
                 "That code didn’t work. It may be mistyped, used up or expired, or something between you and the server isn’t the server. Ask for a fresh one.".into()
             }
@@ -76,9 +73,6 @@ impl SignInError {
             }
             Self::KnownAs(known) => {
                 format!("{address} is the server you already have as {known}. Use that one, or remove it to add the server under this address. If they aren’t the same server, something between you and {address} is pretending to be it.")
-            }
-            Self::Login(LoginError::Unproven) => {
-                "Couldn’t confirm this is a server you joined, so it may not be the real one. Join with an invite code instead.".into()
             }
             Self::Login(LoginError::Refused(AuthError::UnknownKey)) => {
                 "This server doesn’t know you anymore. Join again with a fresh invite code.".into()

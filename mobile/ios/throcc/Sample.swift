@@ -8,7 +8,7 @@ enum Sample: String {
     case reconnect, elsewhere
     case share, sharefull
     case pinmismatch, identitymissing
-    case identity, exportqr, exportcode, importidentity, importscan, importcode
+    case exportqr, exportcode, importidentity, importscan, importcode
 
     var isOnboarding: Bool {
         [.onboarding, .importidentity, .importscan, .importcode].contains(self)
@@ -88,8 +88,6 @@ extension AppModel {
             )
         case .identitymissing:
             sheet = .identityMissing(address: "owls.thro.cc", code: nil)
-        case .identity:
-            await showSampleSettings([.profile])
         case .exportqr:
             await showSampleSettings([.profile, .exportQR])
         case .exportcode:
