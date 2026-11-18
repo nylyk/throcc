@@ -70,8 +70,7 @@ fun Servers(model: AppModel, state: CoreState) {
     model.servers.find { it.address == removing }?.let { server ->
         Confirm(
             "Remove “${server.title}”?",
-            "It leaves your list, but you stay a member. Adding it again needs only its address. " +
-                "To end your membership, connect and choose Leave Server.",
+            "The server is removed from your list, but you stay a member. Adding it again needs only its address. To end your membership, connect and choose Leave Server.",
             "Remove",
             onDismiss = { removing = null },
         ) { model.forgetServer(server.address) }
@@ -140,7 +139,7 @@ fun AddServer(model: AppModel) {
             Panel {
                 if (needsInvite) {
                     Text(
-                        "Join ${model.addingAddress} with an invite code from someone there.",
+                        "Join ${model.addingAddress} with an invite code.",
                         color = MaterialTheme.colorScheme.onSurface,
                     )
                     OutlinedTextField(
@@ -149,14 +148,10 @@ fun AddServer(model: AppModel) {
                         Modifier.fillMaxWidth(),
                         textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace),
                         label = { Text("Invite code") },
-                        supportingText = {
-                            Text(
-                                if (wrongCode) {
-                                    "An invite code looks like K7Q-M2XPD."
-                                } else {
-                                    "The code also proves you reached the real server."
-                                },
-                            )
+                        supportingText = if (wrongCode) {
+                            { Text("An invite code looks like K7Q-M2XPD.") }
+                        } else {
+                            null
                         },
                         isError = wrongCode,
                         keyboardOptions = KeyboardOptions(KeyboardCapitalization.Characters, autoCorrectEnabled = false),
@@ -168,7 +163,6 @@ fun AddServer(model: AppModel) {
                         { address = it },
                         Modifier.fillMaxWidth(),
                         label = { Text("Address") },
-                        supportingText = { Text("An invite code is asked for only if the server doesn’t know you yet.") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                         singleLine = true,
                     )
@@ -207,7 +201,7 @@ private fun KeyChangedDialog(model: AppModel, problem: SignInProblem.KeyChanged)
             Button({
                 close()
                 model.addServer(problem.address, needsInvite = true)
-            }) { Text("Use a Fresh Invite") }
+            }) { Text("Use a New Invite") }
         },
         dismissButton = { TextButton(close) { Text("Cancel") } },
         title = { Text("This server’s key changed") },
@@ -219,10 +213,7 @@ private fun KeyChangedDialog(model: AppModel, problem: SignInProblem.KeyChanged)
                         Text(fingerprintText(key), fontFamily = FontFamily.Monospace)
                     }
                 }
-                Text(
-                    "This happens when the server was reinstalled, and also when someone is pretending to be it. " +
-                        "The way back is a fresh invite code from someone there: it proves the new key.",
-                )
+                Text("This happens when the server was reinstalled, and when someone is pretending to be it.")
             }
         },
     )

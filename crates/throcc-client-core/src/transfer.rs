@@ -188,7 +188,7 @@ fn seal_dropping_server_pictures(payload: &mut Payload) -> Result<Export> {
         match largest {
             Some(server) => server.picture = None,
             None => bail!(
-                "it would take more than the {} KiB another device takes",
+                "its size would be greater than {} KiB",
                 MAX_EXPORT_BYTES / 1024
             ),
         }

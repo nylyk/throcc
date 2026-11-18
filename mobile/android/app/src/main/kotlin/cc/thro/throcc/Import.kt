@@ -56,7 +56,6 @@ import com.journeyapps.barcodescanner.BarcodeResult
 import com.journeyapps.barcodescanner.BarcodeView
 import com.journeyapps.barcodescanner.DefaultDecoderFactory
 import java.io.IOException
-import kotlin.math.ceil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -71,7 +70,7 @@ fun ImportChoice(model: AppModel, problem: String?) {
     Page(model, "Import Identity", model::importBack) { padding ->
         Form(padding) {
             Text(
-                "Bring your identity from a device that has throcc. On that device, open Settings, then Profile.",
+                "Bring your identity from another device that has throcc: open Settings, then Profile.",
                 Modifier.padding(horizontal = 16.dp),
                 MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -113,8 +112,7 @@ fun ImportScan(model: AppModel) {
                 ScanStatus(progress)
             } else if (refused) {
                 Text(
-                    "throcc needs the camera to scan the QR code. Allow it in the system settings, " +
-                        "or open the exported file instead.",
+                    "throcc needs the camera to scan the QR code. Allow it in the settings, or open the exported file instead.",
                     Modifier.padding(horizontal = 16.dp),
                     MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -128,14 +126,14 @@ fun ImportScan(model: AppModel) {
 private fun ScanStatus(progress: ScanProgress?) {
     Column(Modifier.padding(horizontal = 16.dp)) {
         Text(
-            "Point the camera at the QR code on the other device.",
+            "Point the camera at the QR code on your other device.",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         if (progress != null) {
             LinearProgressIndicator({ progress.fraction }, Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 8.dp))
-            progress.remainingSeconds?.let {
+            progress.timeLeft?.let {
                 Text(
-                    "About ${ceil(it).toInt()} s left",
+                    it,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )

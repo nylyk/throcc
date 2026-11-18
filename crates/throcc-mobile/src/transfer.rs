@@ -13,12 +13,12 @@ pub struct QrFrame {
 }
 
 /// How far scanning an identity has come.
-#[derive(Clone, Copy, Debug, PartialEq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct ScanProgress {
     /// The share of the identity received, from 0 to 1.
     pub fraction: f32,
-    /// How many seconds the rest should take, once there is a rate to tell.
-    pub remaining_seconds: Option<f64>,
+    /// How long the rest should take, in words, once there is a rate to tell.
+    pub time_left: Option<String>,
     /// Whether the whole identity is in, ready for its code.
     pub done: bool,
 }
@@ -69,7 +69,9 @@ impl IdentityScanner {
         let progress = collector.progress();
         ScanProgress {
             fraction: progress.fraction,
-            remaining_seconds: progress.remaining.map(|r| r.as_secs_f64()),
+            time_left: progress
+                .remaining
+                .map(|left| format!("About {} s left", left.as_secs_f64().ceil())),
             done: collector.blob().is_some(),
         }
     }

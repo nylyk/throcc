@@ -44,7 +44,7 @@ struct ServersView: View {
         ) { server in
             Button("Remove from List", role: .destructive) { model.forget(server.address) }
         } message: { _ in
-            Text("It leaves your list, but you stay a member. Adding it again needs only its address. To end your membership, connect and choose Leave Server.")
+            Text("The server is removed from your list, but you stay a member. Adding it again needs only its address. To end your membership, connect and choose Leave Server.")
         }
     }
 
@@ -94,14 +94,11 @@ struct AddServerView: View {
             ThemedForm {
                 if needsInvite {
                     Section {
-                        Text("Join \(address) with an invite code from someone there.")
+                        Text("Join \(address) with an invite code.")
                             .foregroundStyle(.text)
                         ThemedField("Invite code", text: $code)
                             .monospaced()
                             .textInputAutocapitalization(.characters)
-                    } footer: {
-                        Text("The code also proves you reached the real server.")
-                            .foregroundStyle(.muted)
                     }
                     .autocorrectionDisabled()
                 } else {
@@ -109,9 +106,6 @@ struct AddServerView: View {
                         ThemedField("Address", text: $address)
                             .keyboardType(.URL)
                             .textInputAutocapitalization(.never)
-                    } footer: {
-                        Text("An invite code is asked for only if the server doesn’t know you yet.")
-                            .foregroundStyle(.muted)
                     }
                     .autocorrectionDisabled()
                 }
@@ -174,11 +168,11 @@ struct PinMismatchView: View {
                     key("It now has", actual)
                 }
                 Section {
-                    Text("This happens when the server was reinstalled, and also when someone is pretending to be it. The way back is a fresh invite code from someone there: it proves the new key.")
+                    Text("This happens when the server was reinstalled, and when someone is pretending to be it.")
                         .foregroundStyle(.text)
                 }
                 Section {
-                    Button("Use a Fresh Invite") { model.sheet = .addServer(address: address, needsInvite: true) }
+                    Button("Use a New Invite") { model.sheet = .addServer(address: address, needsInvite: true) }
                 }
             }
             .navigationTitle("This server’s key changed")

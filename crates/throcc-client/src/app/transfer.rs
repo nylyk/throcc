@@ -161,7 +161,10 @@ impl ThroccApp {
                         app.set_dialog(Some(Dialog::ImportIdentity), cx);
                     }
                     Ok(_) => app.transfer_problem = Some(ImportError::NotAnExport.to_string()),
-                    Err(e) => app.transfer_problem = Some(format!("Couldn’t read that file: {e}")),
+                    Err(e) => {
+                        tracing::warn!("reading an identity export: {e}");
+                        app.transfer_problem = Some("Couldn’t read that file.".into());
+                    }
                 }
                 cx.notify();
             })

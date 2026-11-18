@@ -52,8 +52,6 @@ import kotlinx.coroutines.withContext
 
 private enum class ExportWay { Qr, File }
 
-private const val EXPORT_TITLE = "Use on Another Device"
-
 /** The ways to take this identity to another device, at the bottom of the profile page. */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -85,9 +83,9 @@ fun ExportSection(model: AppModel) {
         Triple(ExportWay.File, Icons.Default.Share, "Share File"),
     )
     Column {
-        GroupTitle(EXPORT_TITLE)
+        GroupTitle("Use on Another Device")
         Text(
-            "Use your identity on another device. It gets a copy of the people you verified or blocked, then keeps its own lists. Anyone who gets the export and its code can sign in as you.",
+            "Bring your identity, servers and the people you verified or blocked to another device. Scan the QR code with a phone, or import the file on any device. Anyone with the file and its code can sign in as you.",
             Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
             MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -117,17 +115,17 @@ fun ExportQr(model: AppModel) {
         }
     }
     KeepScreenOn()
-    Page(model, EXPORT_TITLE) { padding ->
+    Page(model, "Scan with the New Device") { padding ->
         Form(padding) {
             val square = Modifier.widthIn(max = 480.dp).fillMaxWidth().aspectRatio(1f).align(Alignment.CenterHorizontally)
             frame?.let { QrCode(it, square) }
             Text(
-                "Scan this with throcc on the new device.",
+                "On the new device, choose Import from Another Device and scan this QR code. Once it’s done, choose Next.",
                 Modifier.fillMaxWidth(),
                 MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
             )
-            MainButton("Show Code", onClick = model::showExportCode)
+            MainButton("Next", onClick = model::showExportCode)
         }
     }
 }
@@ -141,7 +139,7 @@ fun ExportCode(model: AppModel) {
     DisposableEffect(Unit) {
         onDispose { exportFile(context).delete() }
     }
-    Page(model, EXPORT_TITLE) { padding ->
+    Page(model, "Type This Code on the New Device") { padding ->
         Form(padding) {
             Panel {
                 Text(
@@ -152,7 +150,7 @@ fun ExportCode(model: AppModel) {
                     style = MaterialTheme.typography.headlineLarge,
                 )
                 Text(
-                    "Type this code on the new device.",
+                    "The code unlocks the export. Do not share it with anyone else.",
                     Modifier.fillMaxWidth(),
                     MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,

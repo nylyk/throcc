@@ -690,20 +690,13 @@ fn add_server(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let step = if app.needs_invite {
         let address = app.address.read(cx).value().trim().to_owned();
         body("Add Server")
-            .child(description(format!(
-                "Join {address} with an invite code from someone there."
-            )))
-            .child(
-                field(
-                    "Invite code",
-                    Input::new(&app.code).font_family(theme::mono_font()),
-                )
-                .child(caption("The code also proves you reached the real server.")),
-            )
+            .child(description(format!("Join {address} with an invite code.")))
+            .child(field(
+                "Invite code",
+                Input::new(&app.code).font_family(theme::mono_font()),
+            ))
     } else {
-        body("Add Server").child(field("Address", Input::new(&app.address)).child(caption(
-            "An invite code is asked for only if the server doesn’t know you yet.",
-        )))
+        body("Add Server").child(field("Address", Input::new(&app.address)))
     };
     step.children(app.join_error.clone().map(error_box))
         .child(
@@ -740,15 +733,11 @@ fn leave_server(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
 fn remove_server(app: &ThroccApp, address: String, cx: &mut Context<ThroccApp>) -> AnyElement {
     let server = app.server_name(&address).unwrap_or_else(|| address.clone());
     body(format!("Remove “{server}”?"))
-        .child(description(
-            "It leaves your list, but you stay a member. Adding it again needs only its address. To end your membership, connect and choose Leave Server.",
-        ))
+        .child(description("The server is removed from your list, but you stay a member. Adding it again needs only its address. To end your membership, connect and choose Leave Server."))
         .child(
-            actions("Cancel", cx).child(
-                danger("confirm-remove-server", "Remove").on_click(cx.listener(
-                    move |app, _, window, cx| app.remove_server(&address, window, cx),
-                )),
-            ),
+            actions("Cancel", cx).child(danger("confirm-remove-server", "Remove").on_click(
+                cx.listener(move |app, _, window, cx| app.remove_server(&address, window, cx)),
+            )),
         )
         .into_any_element()
 }
@@ -761,19 +750,17 @@ fn export_identity(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         return body("Type This Code on the New Device")
             .child(mono(exporting.export.code()).typeset(theme::LARGE_TITLE))
             .child(description(
-                "The code opens the export. Keep both to yourself: anyone with the two can sign in as you.",
+                "The code unlocks the export. Do not share it with anyone else.",
             ))
             .child(div().flex().justify_end().child(close_button("Done", cx)))
             .into_any_element();
     };
     body("Scan with the New Device")
-        .child(description(
-            "On the new device, choose Import from Another Device and scan this code. Once it says the export is in, show the code.",
-        ))
+        .child(description("On the new device, choose Import from Another Device and scan this QR code. Once it’s done, choose Next."))
         .child(div().flex().justify_center().child(qr_code(qr)))
         .child(
             actions("Cancel", cx).child(
-                primary("show-export-code", "Show Code")
+                primary("show-export-code", "Next")
                     .on_click(cx.listener(|app, _, _, cx| app.show_export_code(cx))),
             ),
         )
@@ -812,10 +799,8 @@ fn import_identity(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         return div().into_any_element();
     };
     let running = importing.running;
-    body("Import Your Identity")
-        .child(description(
-            "Type the code the other device showed when it made the export.",
-        ))
+    body("Import Identity")
+        .child(description("Type the code the other device shows."))
         .child(field(
             "Code",
             Input::new(&app.transfer_code).font_family(theme::mono_font()),
@@ -914,13 +899,11 @@ fn pin_mismatch(
                 .child(caption("It now has"))
                 .child(mono(actual.to_string()).typeset(theme::CAPTION)),
         )
-        .child(description(
-            "This happens when the server was reinstalled, and also when someone is pretending to be it. The way back is a fresh invite code from someone there: it proves the new key.",
-        ))
+        .child(description("This happens when the server was reinstalled, and when someone is pretending to be it."))
         .child(actions("Cancel", cx).child(
-            primary("use-invite", "Use a Fresh Invite").on_click(cx.listener(
-                move |app, _, window, cx| app.ask_for_invite(&address, window, cx),
-            )),
+            primary("use-invite", "Use a New Invite").on_click(
+                cx.listener(move |app, _, window, cx| app.ask_for_invite(&address, window, cx)),
+            ),
         ))
         .into_any_element()
 }

@@ -120,7 +120,7 @@ fn profile(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .gap_4()
                 .child(picture)
                 .child(field("Name", Input::new(&app.name)).children(name_error.map(field_error)))
-                .child(caption("Kept on this device. Each server shows the name and picture from the device that last signed in there."))
+                .child(caption("Your profile is stored per device. Each server shows the name and picture from the device that last signed in there."))
                 .child(save),
         )
         .child(export_card(app, cx))
@@ -528,9 +528,7 @@ fn export_card(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> Div {
         .flex_col()
         .gap_4()
         .child(section("Use on Another Device"))
-        .child(description(
-            "Bring your identity, servers and the people you verified or blocked to another device, which keeps its own lists from then on. Scan the QR code with a phone, or save a file for any device. Anyone who gets the export and its code can sign in as you.",
-        ))
+        .child(description("Bring your identity, servers and the people you verified or blocked to another device. Scan the QR code with a phone, or import the file on any device. Anyone with the file and its code can sign in as you."))
         .children(app.transfer_problem.clone().map(error_box))
         .child(
             div()
@@ -542,7 +540,7 @@ fn export_card(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> Div {
                         .on_click(cx.listener(|app, _, _, cx| app.export_identity(false, cx))),
                 )
                 .child(
-                    secondary("export-file", "Save to File…")
+                    secondary("export-file", "Share File")
                         .disabled(busy)
                         .on_click(cx.listener(|app, _, _, cx| app.export_identity(true, cx))),
                 ),

@@ -88,7 +88,7 @@ pub enum CoreError {
     #[error("connecting was cancelled")]
     Cancelled,
     /// The server doesn't know our identity, so joining it takes an invite code.
-    #[error("this server needs an invite code")]
+    #[error("This server needs an invite code.")]
     NeedsInvite,
 }
 

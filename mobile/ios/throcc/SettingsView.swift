@@ -70,7 +70,7 @@ private struct ProfilePage: View {
                 if let problem = nameProblem(typed: name) {
                     Text(problem).foregroundStyle(.bad)
                 } else {
-                    Text("Kept on this device. Each server shows the name and picture from the device that last signed in there.").foregroundStyle(.muted)
+                    Text("Your profile is stored per device. Each server shows the name and picture from the device that last signed in there.").foregroundStyle(.muted)
                 }
             }
             Section {

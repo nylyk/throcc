@@ -176,7 +176,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = throcc;
-				INFOPLIST_KEY_NSCameraUsageDescription = "throcc scans the QR codes that bring your identity over from another device.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "throcc scans QR codes to bring your identity over from another device.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "throcc connects to voice servers on your local network.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "throcc uses the microphone so people in your room hear you.";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -206,7 +206,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = throcc;
-				INFOPLIST_KEY_NSCameraUsageDescription = "throcc scans the QR codes that bring your identity over from another device.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "throcc scans QR codes to bring your identity over from another device.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "throcc connects to voice servers on your local network.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "throcc uses the microphone so people in your room hear you.";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

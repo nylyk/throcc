@@ -9,7 +9,7 @@ struct ExportIdentitySection: View {
 
     var body: some View {
         Section {
-            Text("Use your identity on another device. It gets a copy of the people you verified or blocked, then keeps its own lists. Anyone who gets the export and its code can sign in as you.")
+            Text("Bring your identity, servers and the people you verified or blocked to another device. Scan the QR code with a phone, or import the file on any device. Anyone with the file and its code can sign in as you.")
                 .foregroundStyle(.text)
             Button("Show QR Code") { model.settingsPath.append(.exportQR) }
                 .disabled(exporting)
@@ -115,10 +115,10 @@ struct ExportQRPage: View {
             VStack(spacing: 16) {
                 if let export {
                     AnimatedQR(export: export)
-                    Text("Scan this with throcc on the new device.")
+                    Text("On the new device, choose Import from Another Device and scan this QR code. Once it’s done, choose Next.")
                         .foregroundStyle(.text)
                         .multilineTextAlignment(.center)
-                    ConfirmButton("Show Code") {
+                    ConfirmButton("Next") {
                         model.settingsPath.removeLast()
                         model.settingsPath.append(.exportCode(export.code()))
                     }
@@ -133,7 +133,7 @@ struct ExportQRPage: View {
         }
         .modifier(HiddenWhileCaptured())
         .background(.bg)
-        .navigationTitle("QR Code")
+        .navigationTitle("Scan with the New Device")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
@@ -196,7 +196,7 @@ struct ExportCodePage: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.5)
                     .foregroundStyle(.text)
-                Text("Type this code on the new device.")
+                Text("The code unlocks the export. Do not share it with anyone else.")
                     .foregroundStyle(.muted)
                     .multilineTextAlignment(.center)
                 ConfirmButton("Done") { model.settingsPath.removeLast() }
@@ -207,7 +207,7 @@ struct ExportCodePage: View {
         }
         .modifier(HiddenWhileCaptured())
         .background(.bg)
-        .navigationTitle("Code")
+        .navigationTitle("Type This Code on the New Device")
         .navigationBarTitleDisplayMode(.inline)
     }
 }

@@ -116,7 +116,7 @@ fun Profile(model: AppModel) {
                 NameField(name) { name = it }
             }
             Text(
-                "Kept on this device. Each server shows the name and picture from the device that last signed in there.",
+                "Your profile is stored per device. Each server shows the name and picture from the device that last signed in there.",
                 Modifier.padding(horizontal = 16.dp),
                 MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodyMedium,

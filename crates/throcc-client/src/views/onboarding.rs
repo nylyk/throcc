@@ -18,7 +18,7 @@ pub fn render(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> impl IntoElem
         .disabled(!matches!(typed, Ok(Some(_))))
         .on_click(cx.listener(|app, _, window, cx| app.finish_onboarding(window, cx)));
     let finish = save_line(app.profile_form.status.as_ref(), finish);
-    let import = secondary("import-identity", "Import from Another Device…")
+    let import = secondary("import-identity", "Import from Another Device")
         .on_click(cx.listener(|app, _, window, cx| app.choose_import_file(window, cx)));
     frame(app.mascot.pick(mascot::WELCOMERS))
         .child(div().typeset(theme::LARGE_TITLE).child("Welcome to throcc"))

@@ -9,7 +9,7 @@ struct ImportIdentityPage: View {
     var body: some View {
         ThemedForm {
             Section {
-                Text("Bring the identity you use on another device to this one. On that device, open Settings, then Profile.")
+                Text("Bring your identity from another device that has throcc: open Settings, then Profile.")
                     .foregroundStyle(.text)
             }
             Section {
@@ -42,7 +42,7 @@ private struct OpenFileButton: View {
                     problem = nil
                     open(file)
                 } catch {
-                    problem = error.explanation
+                    problem = "Couldn’t read that file."
                 }
             }
     }
@@ -99,8 +99,8 @@ struct ScanPage: View {
                 Section {
                     ProgressView(value: progress?.fraction ?? 0)
                 } footer: {
-                    if let seconds = progress?.remainingSeconds {
-                        Text("About \(Int(seconds.rounded(.up))) s left").foregroundStyle(.muted)
+                    if let timeLeft = progress?.timeLeft {
+                        Text(timeLeft).foregroundStyle(.muted)
                     }
                 }
             }
@@ -114,7 +114,7 @@ struct ScanPage: View {
 
     private func scan() async {
         guard await AVCaptureDevice.requestAccess(for: .video) else {
-            cameraProblem = "throcc may not use the camera. Allow it in the Settings app, or open the exported file instead."
+            cameraProblem = "throcc needs the camera to scan the QR code. Allow it in the settings, or open the exported file instead."
             return
         }
         guard let camera = QRCamera(device: .default(for: .video)) else {
@@ -230,7 +230,7 @@ struct EnterCodePage: View {
                     .autocorrectionDisabled()
                     .onSubmit(importIdentity)
             } footer: {
-                Text("Type the code your other device shows.").foregroundStyle(.muted)
+                Text("Type the code the other device shows.").foregroundStyle(.muted)
             }
             if let problem {
                 Text(problem).foregroundStyle(.bad)
@@ -248,7 +248,7 @@ struct EnterCodePage: View {
                 .disabled(!canImport)
             }
         }
-        .navigationTitle("Enter Code")
+        .navigationTitle("Import Identity")
         .navigationBarBackButtonHidden(importing)
     }
 

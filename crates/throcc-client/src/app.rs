@@ -1810,7 +1810,7 @@ impl ThroccApp {
         let invite = if !asks_invite {
             None
         } else if code_text.trim().is_empty() {
-            self.join_error = Some("Enter the invite code.".into());
+            self.join_error = Some("This server needs an invite code.".into());
             return;
         } else {
             match code_text.parse::<InviteCode>() {
