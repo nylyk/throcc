@@ -207,8 +207,8 @@ impl SignInAttempt {
 
 /// How [`Client::connect`] gets onto a server.
 pub enum Entry<'a> {
-    /// Signs in with a key the server knows, giving up once `cancelled` resolves. A server
-    /// this install hasn't pinned must prove it holds our account first.
+    /// Signs in with a key the server knows, giving up once `cancelled` resolves, as
+    /// [`account::sign_in_or_prove`] does.
     SignIn {
         cancelled: Pin<Box<dyn Future<Output = ()> + Send>>,
     },
@@ -251,20 +251,10 @@ impl Client {
                 Entry::Enroll(code) => {
                     account::enroll(&mut keystore, address, code, &profile).await
                 }
-                Entry::SignIn { cancelled } => {
-                    let pinned = keystore.known_servers.get(address).is_some();
-                    let signing_in = async {
-                        if pinned {
-                            account::sign_in(&keystore, address, &profile, None).await
-                        } else {
-                            account::sign_in_unpinned(&mut keystore, address, &profile).await
-                        }
-                    };
-                    tokio::select! {
-                        link = signing_in => link,
-                        () = cancelled => Err(SignInError::Cancelled),
-                    }
-                }
+                Entry::SignIn { cancelled } => tokio::select! {
+                    link = account::sign_in_or_prove(&mut keystore, address, &profile) => link,
+                    () = cancelled => Err(SignInError::Cancelled),
+                },
             }
         })?;
         let identity = keystore.identity().public();
