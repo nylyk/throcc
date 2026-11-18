@@ -4,9 +4,17 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.util.Size
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts.OpenDocument
 import androidx.activity.result.contract.ActivityResultContracts.RequestPermission
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -43,22 +51,16 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import cc.thro.throcc.core.IdentityScanner
 import cc.thro.throcc.core.ScanProgress
 import cc.thro.throcc.core.maxExportBytes
-import com.google.zxing.BarcodeFormat
-import com.google.zxing.ResultPoint
-import com.journeyapps.barcodescanner.BarcodeCallback
-import com.journeyapps.barcodescanner.BarcodeResult
-import com.journeyapps.barcodescanner.BarcodeView
-import com.journeyapps.barcodescanner.DefaultDecoderFactory
 import java.io.IOException
+import java.util.concurrent.Executors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import zxingcpp.BarcodeReader
 
 @Composable
 fun ImportChoice(model: AppModel, problem: String?) {
@@ -146,35 +148,44 @@ private fun ScanStatus(progress: ScanProgress?) {
 @Composable
 private fun QrScanner(modifier: Modifier, onScan: (String) -> Unit) {
     val context = LocalContext.current
-    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val lifecycleOwner = LocalLifecycleOwner.current
     val scanned by rememberUpdatedState(onScan)
-    val camera = remember {
-        BarcodeView(context).apply {
-            setUseTextureView(true)
-            decoderFactory = DefaultDecoderFactory(listOf(BarcodeFormat.QR_CODE))
-            decodeContinuous(object : BarcodeCallback {
-                override fun barcodeResult(result: BarcodeResult) = scanned(result.text)
-
-                override fun possibleResultPoints(resultPoints: List<ResultPoint>) {}
-            })
+    val view = remember { PreviewView(context).apply { scaleType = PreviewView.ScaleType.FILL_CENTER } }
+    DisposableEffect(lifecycleOwner) {
+        val main = context.mainExecutor
+        val decoding = Executors.newSingleThreadExecutor()
+        val reader = BarcodeReader(BarcodeReader.Options(formats = setOf(BarcodeReader.Format.QR_CODE)))
+        val preview = Preview.Builder().build().apply { setSurfaceProvider(view.surfaceProvider) }
+        val analysis = ImageAnalysis.Builder()
+            .setResolutionSelector(
+                ResolutionSelector.Builder()
+                    .setResolutionStrategy(
+                        ResolutionStrategy(ANALYSIS_SIZE, ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER),
+                    )
+                    .build(),
+            )
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .build()
+        analysis.setAnalyzer(decoding) { image ->
+            val texts = image.use { reader.read(it) }.mapNotNull { it.text }
+            if (texts.isNotEmpty()) main.execute { texts.forEach(scanned) }
         }
-    }
-    DisposableEffect(lifecycle) {
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_RESUME -> camera.resume()
-                Lifecycle.Event.ON_PAUSE -> camera.pause()
-                else -> {}
-            }
-        }
-        lifecycle.addObserver(observer)
+        val cameras = ProcessCameraProvider.getInstance(context)
+        cameras.addListener({
+            cameras.get().bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+        }, main)
         onDispose {
-            lifecycle.removeObserver(observer)
-            camera.pause()
+            cameras.addListener({
+                cameras.get().unbind(preview, analysis)
+                decoding.shutdown()
+            }, main)
         }
     }
-    AndroidView({ camera }, modifier)
+    AndroidView({ view }, modifier)
 }
+
+/** The camera frame size decoded for QR codes. */
+private val ANALYSIS_SIZE = Size(1920, 1080)
 
 @Composable
 fun ImportCode(model: AppModel, entering: Importing.EnteringCode) {

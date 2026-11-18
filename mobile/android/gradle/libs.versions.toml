@@ -7,7 +7,8 @@ activity-compose = "1.13.0"
 jna = "5.19.1"
 lifecycle = "2.11.0"
 navigation3 = "1.2.1"
-zxing-android-embedded = "4.3.0"
+camerax = "1.6.2"
+zxing-cpp = "3.1.1"
 
 [libraries]
 compose-bom = { module = "androidx.compose:compose-bom", version.ref = "compose-bom" }
@@ -19,7 +20,10 @@ lifecycle-runtime-compose = { module = "androidx.lifecycle:lifecycle-runtime-com
 navigation3-runtime = { module = "androidx.navigation3:navigation3-runtime", version.ref = "navigation3" }
 navigation3-ui = { module = "androidx.navigation3:navigation3-ui", version.ref = "navigation3" }
 jna = { module = "net.java.dev.jna:jna", version.ref = "jna" }
-zxing-android-embedded = { module = "com.journeyapps:zxing-android-embedded", version.ref = "zxing-android-embedded" }
+camerax-camera2 = { module = "androidx.camera:camera-camera2", version.ref = "camerax" }
+camerax-lifecycle = { module = "androidx.camera:camera-lifecycle", version.ref = "camerax" }
+camerax-view = { module = "androidx.camera:camera-view", version.ref = "camerax" }
+zxing-cpp = { module = "io.github.zxing-cpp:android", version.ref = "zxing-cpp" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

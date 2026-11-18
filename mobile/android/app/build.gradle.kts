@@ -50,7 +50,10 @@ dependencies {
     implementation(libs.navigation3.runtime)
     implementation(libs.navigation3.ui)
     implementation(libs.activity.compose)
-    implementation(libs.zxing.android.embedded)
+    implementation(libs.camerax.camera2)
+    implementation(libs.camerax.lifecycle)
+    implementation(libs.camerax.view)
+    implementation(libs.zxing.cpp)
     implementation(libs.jna) {
         artifact { type = "aar" }
     }
