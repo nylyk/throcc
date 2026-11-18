@@ -57,16 +57,10 @@ sealed interface ServerSave {
 /** Why signing in to a server failed where the user has a choice to make. */
 sealed interface SignInProblem {
     val address: String
-    val invite: String?
 
-    class KeyChanged(
-        override val address: String,
-        override val invite: String?,
-        val expected: ByteArray,
-        val actual: ByteArray,
-    ) : SignInProblem
+    class KeyChanged(override val address: String, val expected: ByteArray, val actual: ByteArray) : SignInProblem
 
-    data class IdentityMissing(override val address: String, override val invite: String?) : SignInProblem
+    data class IdentityMissing(override val address: String, val invite: String?) : SignInProblem
 }
 
 /** How starting over with a new identity goes. */
@@ -370,7 +364,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
     }
 
     /** Signs in again where the last sign-in failed. */
-    fun tryAgain(problem: SignInProblem) {
+    fun tryAgain(problem: SignInProblem.IdentityMissing) {
         signInProblem = null
         connect(problem.address, problem.invite)
     }
@@ -403,7 +397,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
                 when (failure) {
                     null -> showPages(Screen.Rooms)
                     is CoreException.PinMismatch ->
-                        signInProblem = SignInProblem.KeyChanged(address, invite, failure.expected, failure.actual)
+                        signInProblem = SignInProblem.KeyChanged(address, failure.expected, failure.actual)
                     is CoreException.IdentityMissing -> {
                         startingOver = null
                         signInProblem = SignInProblem.IdentityMissing(address, invite)
@@ -662,7 +656,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
         }
         when (name) {
             "pinmismatch" -> signInProblem =
-                SignInProblem.KeyChanged("owls.thro.cc", null, ByteArray(32) { 0x2c }, ByteArray(32) { 0xb8.toByte() })
+                SignInProblem.KeyChanged("owls.thro.cc", ByteArray(32) { 0x2c }, ByteArray(32) { 0xb8.toByte() })
             "identitymissing" -> signInProblem = SignInProblem.IdentityMissing("owls.thro.cc", null)
             "import" -> startImport()
             "importscan" -> scanImport()

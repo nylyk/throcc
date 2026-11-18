@@ -70,7 +70,7 @@ fun Servers(model: AppModel, state: CoreState) {
     model.servers.find { it.address == removing }?.let { server ->
         Confirm(
             "Remove “${server.title}”?",
-            "It leaves your list, but you stay a member. Adding it again needs an invite. " +
+            "It leaves your list, but you stay a member. Adding it again needs only its address. " +
                 "To end your membership, connect and choose Leave Server.",
             "Remove",
             onDismiss = { removing = null },

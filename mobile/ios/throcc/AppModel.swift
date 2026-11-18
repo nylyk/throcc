@@ -7,9 +7,8 @@ enum Sheet: Hashable, Identifiable {
     case editRoom(Room)
     case person(UInt64)
     case server(ServerPage)
-    /// The server at `address` showed another key than the one this install trusted for it,
-    /// on a sign-in with the invite `code`, if any.
-    case pinMismatch(address: String, code: String?, expected: Data, actual: Data)
+    /// The server at `address` showed another key than the one this install trusted for it.
+    case pinMismatch(address: String, expected: Data, actual: Data)
     /// Signing in to the server at `address`, with the invite `code` if any, found our identity
     /// gone from the keychain.
     case identityMissing(address: String, code: String?)
@@ -236,7 +235,7 @@ final class AppModel {
             showsRooms = false
             switch error as? CoreError {
             case .PinMismatch(let expected, let actual):
-                sheet = .pinMismatch(address: address, code: code, expected: expected, actual: actual)
+                sheet = .pinMismatch(address: address, expected: expected, actual: actual)
             case .IdentityMissing:
                 sheet = .identityMissing(address: address, code: code)
             case .Failed, .Cancelled, .NeedsInvite, nil:

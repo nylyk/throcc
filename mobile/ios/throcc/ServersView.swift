@@ -44,7 +44,7 @@ struct ServersView: View {
         ) { server in
             Button("Remove from List", role: .destructive) { model.forget(server.address) }
         } message: { _ in
-            Text("It leaves your list, but you stay a member. Adding it again needs an invite. To end your membership, connect and choose Leave Server.")
+            Text("It leaves your list, but you stay a member. Adding it again needs only its address. To end your membership, connect and choose Leave Server.")
         }
     }
 

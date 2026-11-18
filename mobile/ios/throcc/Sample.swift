@@ -83,7 +83,6 @@ extension AppModel {
         case .pinmismatch:
             sheet = .pinMismatch(
                 address: "owls.thro.cc",
-                code: nil,
                 expected: Data(repeating: 0x2c, count: 32),
                 actual: Data(repeating: 0xb8, count: 32)
             )
