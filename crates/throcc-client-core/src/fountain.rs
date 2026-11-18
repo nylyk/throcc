@@ -1,5 +1,4 @@
-use std::collections::{BTreeSet, HashSet};
-use std::time::{Duration, Instant};
+use std::collections::HashSet;
 
 use sha2::{Digest, Sha256};
 
@@ -11,8 +10,6 @@ const BLOCK_BYTES: usize = 480;
 const HEADER_BYTES: usize = 1 + 4 + 4 + 4;
 /// The largest blob a collector takes, which bounds what a frame can make it hold.
 pub const MAX_BLOB_BYTES: usize = 1 << 20;
-/// How many frames past the block count a transfer is expected to need, for the estimate.
-const EXPECTED_OVERHEAD: f64 = 1.15;
 /// The QR code alphanumeric mode's characters, which base 45 writes in.
 const BASE45: &[u8; 45] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
 
@@ -58,15 +55,6 @@ impl Fountain {
     }
 }
 
-/// How far a [`Collector`] has come.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Progress {
-    /// The share of the blob known, from 0 to 1.
-    pub fraction: f32,
-    /// How long the rest should take at the rate frames arrived so far, once there is a rate.
-    pub remaining: Option<Duration>,
-}
-
 /// Collects a [`Fountain`]'s frames, in any order and with repeats, until the blob is whole.
 #[derive(Default)]
 pub struct Collector {
@@ -76,11 +64,11 @@ pub struct Collector {
 struct Transfer {
     id: [u8; 4],
     len: usize,
-    blocks: Vec<Option<Vec<u8>>>,
-    /// Frames that mix blocks not all known yet, as the unknown blocks and their XOR.
-    pending: Vec<(BTreeSet<usize>, Vec<u8>)>,
+    /// The frames taken, reduced so that the one at index `i` mixes block `i` and only
+    /// blocks after it.
+    rows: Vec<Option<Row>>,
+    rank: usize,
     seen: HashSet<u32>,
-    started: Instant,
     blob: Option<Vec<u8>>,
 }
 
@@ -105,30 +93,27 @@ impl Collector {
         transfer.add(seq, body)
     }
 
-    pub fn progress(&self) -> Progress {
+    /// How much of the blob is in, from 0 to 1, rising by one block's share with every frame
+    /// that tells something new.
+    pub fn progress(&self) -> f32 {
         let Some(transfer) = &self.transfer else {
-            return Progress {
-                fraction: 0.0,
-                remaining: None,
-            };
+            return 0.0;
         };
-        let known = transfer.blocks.iter().filter(|b| b.is_some()).count();
-        let total = transfer.blocks.len();
-        let frames = transfer.seen.len();
-        let elapsed = transfer.started.elapsed().as_secs_f64();
-        let remaining = (frames >= 3 && elapsed > 0.0).then(|| {
-            let per_second = (frames - 1) as f64 / elapsed;
-            let needed = (total - known) as f64 * EXPECTED_OVERHEAD;
-            Duration::from_secs_f64(needed / per_second)
-        });
-        Progress {
-            fraction: known as f32 / total as f32,
-            remaining: if known == total {
-                Some(Duration::ZERO)
-            } else {
-                remaining
-            },
+        if transfer.blob.is_some() {
+            return 1.0;
         }
+        transfer.rank as f32 / transfer.rows.len() as f32
+    }
+
+    /// How many bytes of the blob are in, and how long it is, once a frame has named it.
+    pub fn bytes(&self) -> Option<(usize, usize)> {
+        let transfer = self.transfer.as_ref()?;
+        let received = if transfer.blob.is_some() {
+            transfer.len
+        } else {
+            (transfer.rank * BLOCK_BYTES).min(transfer.len)
+        };
+        Some((received, transfer.len))
     }
 
     /// The whole blob, once every block is known.
@@ -142,10 +127,9 @@ impl Transfer {
         Self {
             id,
             len,
-            blocks: vec![None; block_count(len) as usize],
-            pending: Vec::new(),
+            rows: (0..block_count(len)).map(|_| None).collect(),
+            rank: 0,
             seen: HashSet::new(),
-            started: Instant::now(),
             blob: None,
         }
     }
@@ -154,58 +138,83 @@ impl Transfer {
         if self.blob.is_some() || !self.seen.insert(seq) {
             return false;
         }
-        let mut unknown = BTreeSet::new();
-        let mut body = body.to_vec();
-        for index in mixed_blocks(&self.id, seq, self.blocks.len() as u32) {
-            match &self.blocks[index] {
-                Some(block) => xor_into(&mut body, block),
-                None => {
-                    unknown.insert(index);
-                }
+        let blocks = self.rows.len();
+        let mut row = Row::new(blocks, &mixed_blocks(&self.id, seq, blocks as u32), body);
+        while let Some(first) = row.first() {
+            if let Some(reduced) = &self.rows[first] {
+                row.xor(reduced);
+            } else {
+                self.rows[first] = Some(row);
+                self.rank += 1;
+                break;
             }
         }
-        self.take(unknown, body);
-        if self.blocks.iter().all(Option::is_some) {
-            let mut blob: Vec<u8> = self.blocks.iter().flatten().flatten().copied().collect();
-            blob.truncate(self.len);
-            if blob_id(&blob) == self.id {
-                self.blob = Some(blob);
-            } else {
-                *self = Self::new(self.id, self.len);
-            }
+        if self.rank == blocks {
+            self.solve();
         }
         true
     }
 
-    /// Notes a frame mixing `unknown` blocks into `body`, then solves every pending frame
-    /// left with a single unknown block.
-    fn take(&mut self, unknown: BTreeSet<usize>, body: Vec<u8>) {
-        let mut solved = Vec::new();
-        match unknown.len() {
-            0 => return,
-            1 => solved.push((*unknown.first().unwrap(), body)),
-            _ => self.pending.push((unknown, body)),
-        }
-        while let Some((index, block)) = solved.pop() {
-            if self.blocks[index].is_some() {
-                continue;
-            }
-            for (unknown, body) in &mut self.pending {
-                if unknown.remove(&index) {
-                    xor_into(body, &block);
+    /// Solves every block from the rows, the last first, and keeps the blob if it is the one
+    /// the frames name, or starts over.
+    fn solve(&mut self) {
+        let mut blocks: Vec<Vec<u8>> = vec![Vec::new(); self.rows.len()];
+        for (index, row) in self.rows.iter().enumerate().rev() {
+            let row = row.as_ref().expect("a full rank has a row for every block");
+            let mut block = row.body.clone();
+            for (later, solved) in blocks.iter().enumerate().skip(index + 1) {
+                if row.mixes(later) {
+                    xor_into(&mut block, solved);
                 }
             }
-            self.pending
-                .retain_mut(|(unknown, body)| match unknown.len() {
-                    0 => false,
-                    1 => {
-                        solved.push((*unknown.first().unwrap(), std::mem::take(body)));
-                        false
-                    }
-                    _ => true,
-                });
-            self.blocks[index] = Some(block);
+            blocks[index] = block;
         }
+        let mut blob = blocks.concat();
+        blob.truncate(self.len);
+        if blob_id(&blob) == self.id {
+            self.blob = Some(blob);
+        } else {
+            *self = Self::new(self.id, self.len);
+        }
+    }
+}
+
+/// A frame as the blocks it mixes, a bit each, and their XOR.
+struct Row {
+    mixed: Vec<u64>,
+    body: Vec<u8>,
+}
+
+impl Row {
+    fn new(blocks: usize, mixed: &[usize], body: &[u8]) -> Self {
+        let mut bits = vec![0; blocks.div_ceil(64)];
+        for index in mixed {
+            bits[index / 64] |= 1 << (index % 64);
+        }
+        Self {
+            mixed: bits,
+            body: body.to_vec(),
+        }
+    }
+
+    fn first(&self) -> Option<usize> {
+        let (word, bits) = self
+            .mixed
+            .iter()
+            .enumerate()
+            .find(|(_, bits)| **bits != 0)?;
+        Some(word * 64 + bits.trailing_zeros() as usize)
+    }
+
+    fn mixes(&self, block: usize) -> bool {
+        self.mixed[block / 64] & (1 << (block % 64)) != 0
+    }
+
+    fn xor(&mut self, other: &Row) {
+        for (bits, other) in self.mixed.iter_mut().zip(&other.mixed) {
+            *bits ^= other;
+        }
+        xor_into(&mut self.body, &other.body);
     }
 }
 
@@ -374,7 +383,7 @@ mod tests {
                 assert!(collector.add(&fountain.frame(seq)));
             }
             assert_eq!(collector.blob(), Some(blob(len).as_slice()), "{len}");
-            assert_eq!(collector.progress().fraction, 1.0);
+            assert_eq!(collector.progress(), 1.0);
         }
     }
 
@@ -404,7 +413,7 @@ mod tests {
         assert!(!collector.add(&fountain.frame(0)));
         assert!(!collector.add("HELLO"));
         assert!(!collector.add("not even base 45"));
-        assert!(collector.progress().fraction > 0.0);
+        assert!(collector.progress() > 0.0);
 
         let other = Fountain::new(blob(3_000));
         assert!(collector.add(&other.frame(1)));
@@ -424,22 +433,33 @@ mod tests {
     }
 
     #[test]
-    fn the_estimate_shrinks_to_nothing() {
+    fn bytes_count_up_to_the_blob_length() {
+        let fountain = Fountain::new(blob(1_000));
+        let mut collector = Collector::new();
+        assert_eq!(collector.bytes(), None);
+        collector.add(&fountain.frame(0));
+        assert_eq!(collector.bytes(), Some((BLOCK_BYTES, 1_000)));
+        for seq in 1..fountain.blocks() {
+            collector.add(&fountain.frame(seq));
+        }
+        assert_eq!(collector.bytes(), Some((1_000, 1_000)));
+    }
+
+    #[test]
+    fn progress_rises_with_every_new_frame_and_reaches_one_only_when_whole() {
         let fountain = Fountain::new(blob(5_000));
         let mut collector = Collector::new();
-        assert_eq!(collector.progress().remaining, None);
-        for seq in 0..fountain.blocks() {
-            std::thread::sleep(Duration::from_millis(2));
+        assert_eq!(collector.progress(), 0.0);
+        let mut seq = fountain.blocks();
+        let mut last = 0.0;
+        while collector.blob().is_none() {
             collector.add(&fountain.frame(seq));
-            if seq == 3 {
-                assert!(
-                    collector
-                        .progress()
-                        .remaining
-                        .is_some_and(|r| r > Duration::ZERO)
-                );
-            }
+            let now = collector.progress();
+            assert!(now >= last, "{now} after {last}");
+            assert!(collector.blob().is_some() || now < 1.0);
+            last = now;
+            seq += 1;
         }
-        assert_eq!(collector.progress().remaining, Some(Duration::ZERO));
+        assert_eq!(collector.progress(), 1.0);
     }
 }

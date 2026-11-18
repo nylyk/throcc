@@ -98,9 +98,10 @@ struct ScanPage: View {
                 }
                 Section {
                     ProgressView(value: progress?.fraction ?? 0)
+                        .animation(.easeOut(duration: 0.3), value: progress?.fraction)
                 } footer: {
-                    if let timeLeft = progress?.timeLeft {
-                        Text(timeLeft).foregroundStyle(.muted)
+                    if let size = progress?.size {
+                        Text(size).monospacedDigit().foregroundStyle(.muted)
                     }
                 }
             }

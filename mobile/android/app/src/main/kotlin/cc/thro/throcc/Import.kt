@@ -15,6 +15,7 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -126,18 +127,19 @@ fun ImportScan(model: AppModel) {
 
 @Composable
 private fun ScanStatus(progress: ScanProgress?) {
+    val shown by animateFloatAsState(progress?.fraction ?: 0f, label = "scan progress")
     Column(Modifier.padding(horizontal = 16.dp)) {
         Text(
             "Point the camera at the QR code on your other device.",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         if (progress != null) {
-            LinearProgressIndicator({ progress.fraction }, Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 8.dp))
-            progress.timeLeft?.let {
+            LinearProgressIndicator({ shown }, Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 8.dp))
+            progress.size?.let {
                 Text(
                     it,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
+                    style = MaterialTheme.typography.bodySmall.copy(fontFeatureSettings = "tnum"),
                 )
             }
         }

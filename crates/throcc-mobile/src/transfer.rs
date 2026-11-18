@@ -17,8 +17,8 @@ pub struct QrFrame {
 pub struct ScanProgress {
     /// The share of the identity received, from 0 to 1.
     pub fraction: f32,
-    /// How long the rest should take, in words, once there is a rate to tell.
-    pub time_left: Option<String>,
+    /// How much of the identity is in, of how much, as "5 / 15 KiB".
+    pub size: Option<String>,
     /// Whether the whole identity is in, ready for its code.
     pub done: bool,
 }
@@ -66,12 +66,11 @@ impl IdentityScanner {
     pub fn add(&self, text: String) -> ScanProgress {
         let mut collector = lock(&self.0);
         collector.add(&text);
-        let progress = collector.progress();
         ScanProgress {
-            fraction: progress.fraction,
-            time_left: progress
-                .remaining
-                .map(|left| format!("About {} s left", left.as_secs_f64().ceil())),
+            fraction: collector.progress(),
+            size: collector.bytes().map(|(received, total)| {
+                format!("{} / {} KiB", received.div_ceil(1024), total.div_ceil(1024))
+            }),
             done: collector.blob().is_some(),
         }
     }

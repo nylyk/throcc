@@ -24,7 +24,7 @@ use crate::verified::{KeyChange, SeenAs, VerifiedEntry, VerifiedRecords, Verifie
 /// The largest export, as a file or as QR codes, that an import takes.
 pub const MAX_EXPORT_BYTES: usize = fountain::MAX_BLOB_BYTES;
 /// How long the source shows each QR code.
-pub const FRAME_INTERVAL: Duration = Duration::from_millis(150);
+pub const FRAME_INTERVAL: Duration = Duration::from_millis(50);
 /// How old an export may be when it is imported.
 const MAX_AGE: Duration = Duration::from_secs(60 * 60);
 /// How far ahead of this device's clock an export's creation time may be.
