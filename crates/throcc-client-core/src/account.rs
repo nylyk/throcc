@@ -109,27 +109,6 @@ fn port_of(address: &str) -> u16 {
     }
 }
 
-/// Signs in to the server at `address`. One this install hasn't pinned, or whose pinned key
-/// changed, is taken only at a key that proves our account at this address; a changed key
-/// that can't keeps its pin mismatch.
-pub async fn sign_in_or_prove(
-    keystore: &mut Keystore,
-    address: &str,
-    profile: &Profile,
-) -> Result<ControlLink, SignInError> {
-    if keystore.known_servers.get(address).is_none() {
-        return sign_in_unpinned(keystore, address, profile).await;
-    }
-    match sign_in(keystore, address, profile, None).await {
-        Err(mismatch) if mismatch.pin_mismatch().is_some() => {
-            sign_in_unpinned(keystore, address, profile)
-                .await
-                .map_err(|_| mismatch)
-        }
-        signed_in => signed_in,
-    }
-}
-
 /// Signs in to a server this install has enrolled with, giving it `profile`, then publishes
 /// the encryption key.
 pub async fn sign_in(

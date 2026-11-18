@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use throcc_client_core::account::{self, SignInError};
 use throcc_client_core::keystore::Keystore;
-use throcc_proto::Fingerprint;
 use throcc_proto::messages::Event;
 use throcc_proto::transport::close;
 
@@ -54,38 +53,6 @@ async fn another_device_of_a_member_signs_in_without_an_invite_and_pins_the_serv
     let refused = account::sign_in_unpinned(&mut keystore, &server.addr, &ilse()).await;
     assert!(matches!(refused, Err(SignInError::NotEnrolled(_))));
     assert_eq!(keystore.known_servers.get(&server.addr), None);
-}
-
-#[tokio::test]
-async fn a_changed_key_that_proves_the_address_replaces_the_pin_and_others_stay_a_mismatch() {
-    let server = start_server();
-    let alice = admin(&server).await;
-    let bob = invited(&server, &alice).await;
-    let fingerprint = bob.link.connected.fingerprint;
-    let stale = Fingerprint([9; 32]);
-
-    let phone = tempfile::tempdir().unwrap();
-    std::fs::copy(
-        bob.keystore.dir().join("identity_key"),
-        phone.path().join("identity_key"),
-    )
-    .unwrap();
-    let mut keystore = Keystore::open_in(phone.path()).unwrap();
-    keystore.known_servers.trust(&server.addr, stale).unwrap();
-    account::sign_in_or_prove(&mut keystore, &server.addr, &ilse())
-        .await
-        .unwrap();
-    assert_eq!(keystore.known_servers.get(&server.addr), Some(fingerprint));
-
-    let stranger = tempfile::tempdir().unwrap();
-    let mut keystore = Keystore::open_in(stranger.path()).unwrap();
-    keystore.known_servers.trust(&server.addr, stale).unwrap();
-    let refused = account::sign_in_or_prove(&mut keystore, &server.addr, &ilse()).await;
-    assert_eq!(
-        refused.err().and_then(|e| e.pin_mismatch()),
-        Some((stale, fingerprint))
-    );
-    assert_eq!(keystore.known_servers.get(&server.addr), Some(stale));
 }
 
 #[tokio::test]
