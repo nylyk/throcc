@@ -84,6 +84,7 @@ A release, for each side that changed since its last tag (`git log <side>-vX.Y.Z
 - Quiet and minimal: one accent, no gradients, no shadows beyond focus rings, no emoji.
 - Geist and Geist Mono; mono only for keys, fingerprints, safety numbers and invite codes. Spacing on a 4 px grid.
 - Match the existing screens. Add a `--mock --screen` sample for any new screen or dialog.
+- Text the user sees reads the same on the desktop, iOS and Android, word for word. A platform words something its own way only where its controls differ.
 - The phone apps in `mobile/` use native components and the system font, coloured by the same themes. A new screen there gets a sample on both platforms.
 
 ## Style
