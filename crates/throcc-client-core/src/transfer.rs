@@ -124,19 +124,36 @@ impl Export {
         let text = self.fountain.frame(seq);
         let code = qrcode::QrCode::with_version(text, self.version, qrcode::EcLevel::L)
             .expect("a frame fits the version its length needs");
-        let width = code.width() + 2 * QUIET_ZONE;
-        let mut dark = vec![false; width * width];
-        for (row, colors) in code.to_colors().chunks(code.width()).enumerate() {
-            let start = (row + QUIET_ZONE) * width + QUIET_ZONE;
-            for (module, color) in dark[start..].iter_mut().zip(colors) {
-                *module = *color == qrcode::Color::Dark;
-            }
-        }
-        QrCode {
-            width: width as u32,
-            dark,
+        modules(&code)
+    }
+
+    /// [`Self::code`] as a QR code, for a device that scanned the export.
+    pub fn code_qr(&self) -> QrCode {
+        let code = qrcode::QrCode::with_error_correction_level(self.code(), qrcode::EcLevel::M)
+            .expect("a code fits a QR code");
+        modules(&code)
+    }
+}
+
+/// `code`'s modules with the quiet zone around them.
+fn modules(code: &qrcode::QrCode) -> QrCode {
+    let width = code.width() + 2 * QUIET_ZONE;
+    let mut dark = vec![false; width * width];
+    for (row, colors) in code.to_colors().chunks(code.width()).enumerate() {
+        let start = (row + QUIET_ZONE) * width + QUIET_ZONE;
+        for (module, color) in dark[start..].iter_mut().zip(colors) {
+            *module = *color == qrcode::Color::Dark;
         }
     }
+    QrCode {
+        width: width as u32,
+        dark,
+    }
+}
+
+/// Whether scanned `text` is the code that opens an export, rather than one of its frames.
+pub fn is_code(text: &str) -> bool {
+    TransferCode::parse(text).is_some()
 }
 
 /// Seals this install's identity, `profile`, servers, and verified and blocked people for
@@ -629,6 +646,15 @@ mod tests {
         let grids = image.detect_grids();
         assert_eq!(grids.len(), 1);
         grids[0].decode().unwrap().1
+    }
+
+    #[test]
+    fn the_code_scans_back_as_a_code_and_frames_do_not() {
+        let export = sample_export();
+        let scanned_code = scanned(&export.code_qr());
+        assert_eq!(scanned_code, export.code());
+        assert!(is_code(&scanned_code));
+        assert!(!is_code(&scanned(&export.frame(0))));
     }
 
     #[test]

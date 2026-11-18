@@ -17,6 +17,8 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -24,6 +26,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material3.FilledTonalButton
@@ -45,7 +48,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -101,15 +106,19 @@ fun ImportScan(model: AppModel) {
     val openFile = rememberExportPicker(model)
     val scanner = remember { IdentityScanner() }
     var progress by remember { mutableStateOf<ScanProgress?>(null) }
+    var finished by remember { mutableStateOf(false) }
     Page(model, "Scan QR Code", model::importBack) { padding ->
         Form(padding) {
             if (allowed) {
                 val square = Modifier.widthIn(max = 480.dp).fillMaxWidth().aspectRatio(1f)
                 QrScanner(square.align(Alignment.CenterHorizontally).clip(MaterialTheme.shapes.extraLarge)) { text ->
-                    if (progress?.done != true) {
+                    if (!finished) {
                         val added = scanner.add(text)
                         progress = added
-                        if (added.done) model.openImport(scanner.export())
+                        if (added.done && added.code != null) {
+                            finished = true
+                            model.openImport(scanner.export(), added.code)
+                        }
                     }
                 }
                 ScanStatus(progress)
@@ -128,12 +137,29 @@ fun ImportScan(model: AppModel) {
 @Composable
 private fun ScanStatus(progress: ScanProgress?) {
     val shown by animateFloatAsState(progress?.fraction ?: 0f, label = "scan progress")
+    val done = progress?.done == true
     Column(Modifier.padding(horizontal = 16.dp)) {
         Text(
-            "Point the camera at the QR code on your other device.",
+            if (done) {
+                "Choose Next on your other device, then scan the code."
+            } else {
+                "Point the camera at the QR code on your other device."
+            },
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        if (progress != null) {
+        if (done) {
+            val haptics = LocalHapticFeedback.current
+            LaunchedEffect(Unit) { haptics.performHapticFeedback(HapticFeedbackType.Confirm) }
+            Row(Modifier.padding(top = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.CheckCircle, null, Modifier.size(28.dp), MaterialTheme.colorScheme.tertiary)
+                Text(
+                    "Export received",
+                    Modifier.padding(start = 12.dp),
+                    MaterialTheme.colorScheme.tertiary,
+                    style = MaterialTheme.typography.titleMedium,
+                )
+            }
+        } else if (progress != null) {
             LinearProgressIndicator({ shown }, Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 8.dp))
             progress.size?.let {
                 Text(
@@ -191,8 +217,9 @@ private val ANALYSIS_SIZE = Size(1920, 1080)
 
 @Composable
 fun ImportCode(model: AppModel, entering: Importing.EnteringCode) {
-    var code by rememberSaveable { mutableStateOf("") }
+    var code by rememberSaveable { mutableStateOf(entering.scanned ?: "") }
     val submit = { if (code.isNotBlank()) model.importIdentity(code) }
+    LaunchedEffect(Unit) { if (entering.scanned != null && entering.failure == null) submit() }
     Page(model, "Import Identity", model::importBack) { padding ->
         Form(padding) {
             Text(

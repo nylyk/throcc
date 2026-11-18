@@ -746,6 +746,21 @@ fn export_identity(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let Some(exporting) = &app.exporting else {
         return div().into_any_element();
     };
+    if let Some(code_qr) = exporting.code_qr.clone() {
+        return body("Scan This Code on the New Device")
+            .child(div().flex().justify_center().child(qr_code(code_qr)))
+            .child(
+                div()
+                    .flex()
+                    .justify_center()
+                    .child(mono(exporting.export.code()).typeset(theme::TITLE_1)),
+            )
+            .child(description(
+                "The code unlocks the export. Do not share it with anyone else.",
+            ))
+            .child(div().flex().justify_end().child(close_button("Done", cx)))
+            .into_any_element();
+    }
     let Some(qr) = exporting.qr.clone() else {
         return body("Type This Code on the New Device")
             .child(mono(exporting.export.code()).typeset(theme::LARGE_TITLE))
@@ -767,10 +782,12 @@ fn export_identity(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .into_any_element()
 }
 
-/// `code` drawn four pixels a module, a quad for each run of dark modules in a row.
+/// `code` drawn in whole pixels a module, about 340 px a side, a quad for each run of dark
+/// modules in a row.
 fn qr_code(code: QrCode) -> impl IntoElement {
-    const MODULE: f32 = 4.;
-    let side = px(code.width as f32 * MODULE);
+    const SIDE: f32 = 340.;
+    let module = (SIDE / code.width as f32).floor().max(1.);
+    let side = px(code.width as f32 * module);
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
@@ -782,8 +799,8 @@ fn qr_code(code: QrCode) -> impl IntoElement {
                     let run = modules[column..].iter().take_while(|dark| **dark).count();
                     if run > 0 {
                         let origin = bounds.origin
-                            + point(px(column as f32 * MODULE), px(row as f32 * MODULE));
-                        let run_size = size(px(run as f32 * MODULE), px(MODULE));
+                            + point(px(column as f32 * module), px(row as f32 * module));
+                        let run_size = size(px(run as f32 * module), px(module));
                         window.paint_quad(fill(Bounds::new(origin, run_size), theme::qr_dark()));
                     }
                     column += run.max(1);

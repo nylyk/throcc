@@ -59,7 +59,7 @@ fun ExportSection(model: AppModel) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var preparing by remember { mutableStateOf<ExportWay?>(null) }
-    val share = rememberLauncherForActivityResult(StartActivityForResult()) { model.showExportCode() }
+    val share = rememberLauncherForActivityResult(StartActivityForResult()) { model.showExportCode(scannable = false) }
     val export = { way: ExportWay ->
         if (preparing == null) {
             preparing = way
@@ -125,7 +125,7 @@ fun ExportQr(model: AppModel) {
                 MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
             )
-            MainButton("Next", onClick = model::showExportCode)
+            MainButton("Next") { model.showExportCode(scannable = true) }
         }
     }
 }
@@ -139,9 +139,13 @@ fun ExportCode(model: AppModel) {
     DisposableEffect(Unit) {
         onDispose { exportFile(context).delete() }
     }
-    Page(model, "Type on New Device") { padding ->
+    val qr = model.exportCodeQr
+    Page(model, if (qr == null) "Type on New Device" else "Scan on New Device") { padding ->
         Form(padding) {
             Panel {
+                qr?.let {
+                    QrCode(it, Modifier.widthIn(max = 280.dp).fillMaxWidth().aspectRatio(1f).align(Alignment.CenterHorizontally))
+                }
                 Text(
                     code,
                     Modifier.fillMaxWidth(),

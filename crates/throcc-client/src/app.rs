@@ -2028,7 +2028,7 @@ impl ThroccApp {
     /// unwatched, alone, emptylobby, focus, fullscreen, popout, slow, slowpopout, slowfullscreen,
     /// lagging, share, connection, person, personverified, personchanged, keychange, ownprofile,
     /// addserverinvite, pinmismatch, settings, appearance, verified, blocked, blockedmenu, blockedpeople, exportqr,
-    /// exportcode, importcode, about,
+    /// exportcode, exportcodeqr, importcode, about,
     /// update, reconnect, elsewhere, newroom, editroom, roompassword, deleteroom, profile,
     /// profileerror, server, keys, members, invites, removeuser, leaveserver, identitymissing,
     /// identityback or startedover. Any other name leaves the lobby.
@@ -2302,10 +2302,13 @@ impl ThroccApp {
                 });
             }
             "leaveserver" => self.dialog = Some(Dialog::LeaveServer),
-            "exportqr" | "exportcode" => {
+            "exportqr" | "exportcode" | "exportcodeqr" => {
                 self.screen = Screen::Settings(SettingsPage::Profile);
                 let export = Arc::new(throcc_client_core::transfer::sample_export());
                 self.show_export(export, screen == "exportcode", cx);
+                if screen == "exportcodeqr" {
+                    self.show_export_code(cx);
+                }
             }
             "importcode" => {
                 offline(self);

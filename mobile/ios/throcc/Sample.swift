@@ -8,7 +8,7 @@ enum Sample: String {
     case reconnect, elsewhere
     case share, sharefull
     case pinmismatch, identitymissing
-    case exportqr, exportcode, importidentity, importscan, importcode
+    case exportqr, exportcode, exportcodeqr, importidentity, importscan, importcode
 
     var isOnboarding: Bool {
         [.onboarding, .importidentity, .importscan, .importcode].contains(self)
@@ -92,14 +92,17 @@ extension AppModel {
             await showSampleSettings([.profile, .exportQR])
         case .exportcode:
             guard let export = try? await exportIdentity() else { return }
-            await showSampleSettings([.profile, .exportCode(export.code())])
+            await showSampleSettings([.profile, .exportCode(export.code(), qr: nil)])
+        case .exportcodeqr:
+            guard let export = try? await exportIdentity() else { return }
+            await showSampleSettings([.profile, .exportCode(export.code(), qr: export.codeQr())])
         case .importidentity:
             onboardingPath = [.importIdentity]
         case .importscan:
             onboardingPath = [.importIdentity, .scan]
         case .importcode:
             guard let export = try? await exportIdentity() else { return }
-            onboardingPath = [.importIdentity, .enterCode(export.file())]
+            onboardingPath = [.importIdentity, .enterCode(export.file(), scanned: nil)]
         }
     }
 

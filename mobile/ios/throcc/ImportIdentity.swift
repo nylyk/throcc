@@ -14,7 +14,7 @@ struct ImportIdentityPage: View {
             }
             Section {
                 Button("Scan QR Code") { model.onboardingPath.append(.scan) }
-                OpenFileButton(problem: $problem) { file in model.onboardingPath.append(.enterCode(file)) }
+                OpenFileButton(problem: $problem) { file in model.onboardingPath.append(.enterCode(file, scanned: nil)) }
                 if let problem {
                     Text(problem).foregroundStyle(.bad)
                 }
@@ -75,7 +75,7 @@ struct ScanPage: View {
                 Section {
                     Text(cameraProblem).foregroundStyle(.text)
                     OpenFileButton(problem: $fileProblem) { file in
-                        model.onboardingPath = [.importIdentity, .enterCode(file)]
+                        model.onboardingPath = [.importIdentity, .enterCode(file, scanned: nil)]
                     }
                     if let fileProblem {
                         Text(fileProblem).foregroundStyle(.bad)
@@ -94,20 +94,33 @@ struct ScanPage: View {
                         }
                         .listRowInsets(EdgeInsets())
                 } footer: {
-                    Text("Point the camera at the QR code on your other device.").foregroundStyle(.muted)
+                    if progress?.done == true {
+                        Text("Choose Next on your other device, then scan the code.").foregroundStyle(.muted)
+                    } else {
+                        Text("Point the camera at the QR code on your other device.").foregroundStyle(.muted)
+                    }
                 }
-                Section {
-                    ProgressView(value: progress?.fraction ?? 0)
-                        .animation(.easeOut(duration: 0.3), value: progress?.fraction)
-                } footer: {
-                    if let size = progress?.size {
-                        Text(size).monospacedDigit().foregroundStyle(.muted)
+                if progress?.done == true {
+                    Section {
+                        Label("Export received", systemImage: "checkmark.circle.fill")
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(.good)
+                    }
+                } else {
+                    Section {
+                        ProgressView(value: progress?.fraction ?? 0)
+                            .animation(.easeOut(duration: 0.3), value: progress?.fraction)
+                    } footer: {
+                        if let size = progress?.size {
+                            Text(size).monospacedDigit().foregroundStyle(.muted)
+                        }
                     }
                 }
             }
         }
         .navigationTitle("Scan QR Code")
         .navigationBarTitleDisplayMode(.inline)
+        .sensoryFeedback(.success, trigger: progress?.done == true)
         .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
         .task { await scan() }
@@ -126,8 +139,8 @@ struct ScanPage: View {
         for await progress in camera.scan() {
             self.progress = progress
         }
-        if let file = camera.export {
-            model.onboardingPath = [.importIdentity, .enterCode(file)]
+        if let file = camera.export, let code = progress?.code {
+            model.onboardingPath = [.importIdentity, .enterCode(file, scanned: code)]
         }
     }
 }
@@ -151,7 +164,7 @@ final class QRCamera: NSObject, AVCaptureMetadataOutputObjectsDelegate, @uncheck
     var export: Data? { scanner.export() }
 
     /// Runs the camera and tells how far the export has come with each code it reads. The
-    /// stream ends once the export is whole, and the camera stops with it.
+    /// stream ends once the export is whole and its code scanned, and the camera stops with it.
     func scan() -> AsyncStream<ScanProgress> {
         let (progress, reading) = AsyncStream.makeStream(of: ScanProgress.self)
         reading.onTermination = { [self] _ in
@@ -184,7 +197,7 @@ final class QRCamera: NSObject, AVCaptureMetadataOutputObjectsDelegate, @uncheck
             guard let text = code.stringValue, let reading else { continue }
             let progress = scanner.add(text: text)
             reading.yield(progress)
-            if progress.done {
+            if progress.done, progress.code != nil {
                 reading.finish()
                 self.reading = nil
             }
@@ -218,9 +231,16 @@ private struct CameraPreview: UIViewRepresentable {
 struct EnterCodePage: View {
     @Environment(AppModel.self) private var model
     let file: Data
-    @State private var code = ""
+    let scanned: String?
+    @State private var code: String
     @State private var importing = false
     @State private var problem: String?
+
+    init(file: Data, scanned: String?) {
+        self.file = file
+        self.scanned = scanned
+        _code = State(initialValue: scanned ?? "")
+    }
 
     var body: some View {
         ThemedForm {
@@ -251,6 +271,11 @@ struct EnterCodePage: View {
         }
         .navigationTitle("Import Identity")
         .navigationBarBackButtonHidden(importing)
+        .onAppear {
+            if scanned != nil, problem == nil {
+                importIdentity()
+            }
+        }
     }
 
     private var canImport: Bool {

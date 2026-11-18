@@ -43,7 +43,7 @@ struct SettingsView: View {
                 case .verified: VerifiedPage()
                 case .blocked: BlockedPage()
                 case .exportQR: ExportQRPage()
-                case .exportCode(let code): ExportCodePage(code: code)
+                case .exportCode(let code, let qr): ExportCodePage(code: code, qr: qr)
                 case .about: AboutPage()
                 }
             }

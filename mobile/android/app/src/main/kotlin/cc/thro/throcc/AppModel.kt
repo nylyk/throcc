@@ -21,6 +21,7 @@ import cc.thro.throcc.core.KnownServer
 import cc.thro.throcc.core.Listener
 import cc.thro.throcc.core.Palette
 import cc.thro.throcc.core.Profile
+import cc.thro.throcc.core.QrFrame
 import cc.thro.throcc.core.StartedOver
 import cc.thro.throcc.core.User
 import cc.thro.throcc.core.VerifiedPerson
@@ -74,7 +75,13 @@ sealed interface StartingOver {
 sealed interface Importing {
     data class Choosing(val problem: String? = null) : Importing
     data object Scanning : Importing
-    data class EnteringCode(val file: ByteArray, val busy: Boolean = false, val failure: String? = null) : Importing
+    data class EnteringCode(
+        val file: ByteArray,
+        val busy: Boolean = false,
+        val failure: String? = null,
+        /** A code scanned with the export, imported with at once. */
+        val scanned: String? = null,
+    ) : Importing
 }
 
 /** The samples that show onboarding, so the mock starts without a profile. */
@@ -190,6 +197,9 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
 
     /** The identity export the export pages show, while they are open. */
     var export by mutableStateOf<IdentityExport?>(null)
+
+    /** The code of [export] as a QR code, once its QR codes were shown and Next chosen. */
+    var exportCodeQr by mutableStateOf<QrFrame?>(null)
         private set
 
     var importing by mutableStateOf<Importing?>(null)
@@ -276,8 +286,9 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
         return export
     }
 
-    /** Hides the QR codes of the export and shows its code. */
-    fun showExportCode() {
+    /** Hides the QR codes of the export and shows its code, also as a QR code where `scannable`. */
+    fun showExportCode(scannable: Boolean) {
+        exportCodeQr = if (scannable) export?.codeQr() else null
         stack.remove(Screen.ExportQr)
         open(Screen.ExportCode)
     }
@@ -285,6 +296,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
     fun finishExport() {
         stack.removeAll { it == Screen.ExportQr || it == Screen.ExportCode }
         export = null
+        exportCodeQr = null
     }
 
     fun startImport() {
@@ -304,13 +316,16 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
         }
     }
 
-    /** Asks for the code of `file`, the export scanned or picked, or says why it can't be one; null for unreadable. */
-    fun openImport(file: ByteArray?) {
+    /**
+     * Asks for the code of `file`, the export scanned or picked, or imports it at once with a `scanned` code, or says
+     * why it can't be one; null for unreadable.
+     */
+    fun openImport(file: ByteArray?, scanned: String? = null) {
         importing = when {
             file == null -> Importing.Choosing("Couldn’t read that file.")
             file.size.toULong() > maxExportBytes() || !isIdentityExport(file) ->
                 Importing.Choosing("That isn’t an identity exported from throcc.")
-            else -> Importing.EnteringCode(file)
+            else -> Importing.EnteringCode(file, scanned = scanned)
         }
     }
 
@@ -661,8 +676,9 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
             "importidentity" -> startImport()
             "importscan" -> scanImport()
             "importcode" -> scope.launch { ask { core.exportIdentity().file() }?.let(::openImport) }
-            "exportqr", "exportcode" -> scope.launch {
+            "exportqr", "exportcode", "exportcodeqr" -> scope.launch {
                 startExport()
+                exportCodeQr = if (name == "exportcodeqr") export?.codeQr() else null
                 val shown = if (name == "exportqr") Screen.ExportQr else Screen.ExportCode
                 stack += listOf(Screen.Settings, Screen.Profile, shown)
             }

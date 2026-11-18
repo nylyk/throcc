@@ -30,16 +30,18 @@ enum SettingsPage: Hashable {
     case verified
     case blocked
     case exportQR
-    /// The code that opens an export just shown or sent.
-    case exportCode(String)
+    /// The code that opens an export just shown or sent, with its QR code when the export
+    /// went as QR codes.
+    case exportCode(String, qr: QrFrame?)
     case about
 }
 
 enum OnboardingPage: Hashable {
     case importIdentity
     case scan
-    /// Asks for the code that opens the export in the file.
-    case enterCode(Data)
+    /// Asks for the code that opens the export in the file, or imports it at once with a
+    /// code scanned.
+    case enterCode(Data, scanned: String?)
 }
 
 enum SaveStatus: Equatable {

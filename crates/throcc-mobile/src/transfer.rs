@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use throcc_client_core::fountain::Collector;
-use throcc_client_core::transfer::{self, Export, ImportError};
+use throcc_client_core::transfer::{self, Export, ImportError, QrCode};
 
 use crate::{Core, CoreError, lock};
 
@@ -19,8 +19,10 @@ pub struct ScanProgress {
     pub fraction: f32,
     /// How much of the identity is in, of how much, as "5 / 15 KiB".
     pub size: Option<String>,
-    /// Whether the whole identity is in, ready for its code.
+    /// Whether the whole identity is in.
     pub done: bool,
+    /// The code that opens the export, once its QR code was scanned.
+    pub code: Option<String>,
 }
 
 /// This install's identity sealed under a new code, to save as a file or show as QR codes.
@@ -42,42 +44,65 @@ impl IdentityExport {
     /// QR code `seq` of the endless run that carries the export, each shown for
     /// `qr_frame_millis`.
     pub fn frame(&self, seq: u32) -> QrFrame {
-        let frame = self.0.frame(seq);
-        QrFrame {
-            width: frame.width,
-            dark: frame.dark,
+        self.0.frame(seq).into()
+    }
+
+    /// The code as a QR code, for a device that scanned the export.
+    pub fn code_qr(&self) -> QrFrame {
+        self.0.code_qr().into()
+    }
+}
+
+impl From<QrCode> for QrFrame {
+    fn from(code: QrCode) -> Self {
+        Self {
+            width: code.width,
+            dark: code.dark,
         }
     }
 }
 
-/// Collects the QR codes of an export, in any order, until the export is whole.
+/// Collects the QR codes of an export, in any order, until the export is whole, and the QR
+/// code of the code that opens it.
 #[derive(uniffi::Object)]
-pub struct IdentityScanner(Mutex<Collector>);
+pub struct IdentityScanner(Mutex<Scan>);
+
+#[derive(Default)]
+struct Scan {
+    collector: Collector,
+    code: Option<String>,
+}
 
 #[uniffi::export]
 impl IdentityScanner {
     #[uniffi::constructor]
     pub fn new() -> Arc<Self> {
-        Arc::new(Self(Mutex::new(Collector::new())))
+        Arc::new(Self(Mutex::default()))
     }
 
     /// Takes in the text of a scanned QR code, which may be one taken already or none of an
     /// export's.
     pub fn add(&self, text: String) -> ScanProgress {
-        let mut collector = lock(&self.0);
-        collector.add(&text);
+        let mut scan = lock(&self.0);
+        if transfer::is_code(&text) {
+            scan.code = Some(text);
+        } else {
+            scan.collector.add(&text);
+        }
+        let Scan { collector, code } = &*scan;
         ScanProgress {
             fraction: collector.progress(),
             size: collector.bytes().map(|(received, total)| {
                 format!("{} / {} KiB", received.div_ceil(1024), total.div_ceil(1024))
             }),
             done: collector.blob().is_some(),
+            code: code.clone(),
         }
     }
 
     /// The whole export, as a file holds it, once every part is in.
     pub fn export(&self) -> Option<Vec<u8>> {
-        lock(&self.0).blob().map(<[u8]>::to_vec)
+        lock(&self.0).collector.blob().map(<[u8]>::to_vec)
     }
 }
 

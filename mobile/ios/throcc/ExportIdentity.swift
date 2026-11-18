@@ -29,7 +29,7 @@ struct ExportIdentitySection: View {
                 ShareSheet(showing: sharedCode != nil) { sent in
                     try? FileManager.default.removeItem(at: exportFile)
                     if let sharedCode, sent {
-                        model.settingsPath.append(.exportCode(sharedCode))
+                        model.settingsPath.append(.exportCode(sharedCode, qr: nil))
                     }
                     sharedCode = nil
                 }
@@ -120,7 +120,7 @@ struct ExportQRPage: View {
                         .multilineTextAlignment(.center)
                     ConfirmButton("Next") {
                         model.settingsPath.removeLast()
-                        model.settingsPath.append(.exportCode(export.code()))
+                        model.settingsPath.append(.exportCode(export.code(), qr: export.codeQr()))
                     }
                 } else if let problem {
                     Text(problem).foregroundStyle(.bad)
@@ -187,10 +187,16 @@ private struct QRCode: View {
 struct ExportCodePage: View {
     @Environment(AppModel.self) private var model
     let code: String
+    let qr: QrFrame?
 
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
+                if let qr {
+                    QRCode(frame: qr)
+                        .frame(maxWidth: 280)
+                        .accessibilityLabel("QR code")
+                }
                 Text(code)
                     .font(.system(.largeTitle, design: .monospaced))
                     .lineLimit(1)
@@ -207,7 +213,7 @@ struct ExportCodePage: View {
         }
         .modifier(HiddenWhileCaptured())
         .background(.bg)
-        .navigationTitle("Type on New Device")
+        .navigationTitle(qr == nil ? "Type on New Device" : "Scan on New Device")
         .navigationBarTitleDisplayMode(.inline)
     }
 }

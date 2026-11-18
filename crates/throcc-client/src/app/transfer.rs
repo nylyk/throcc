@@ -13,6 +13,8 @@ pub struct Exporting {
     pub export: Arc<Export>,
     /// The QR code on show, none once the code that opens the export shows in its place.
     pub qr: Option<QrCode>,
+    /// The code as a QR code, for a device that scanned the export.
+    pub code_qr: Option<QrCode>,
     frame: u32,
     _frames: Option<Task<()>>,
 }
@@ -90,6 +92,7 @@ impl ThroccApp {
         self.exporting = Some(Exporting {
             export,
             qr,
+            code_qr: None,
             frame: 0,
             _frames: frames,
         });
@@ -116,8 +119,8 @@ impl ThroccApp {
         })
     }
 
-    /// Hides the QR codes for good and shows the code that opens them, refused once our
-    /// screen is shared.
+    /// Hides the QR codes for good and shows the code that opens them, as text and as a QR
+    /// code, refused once our screen is shared.
     pub fn show_export_code(&mut self, cx: &mut Context<Self>) {
         if self.refuse_export_while_sharing(cx) {
             return;
@@ -125,6 +128,7 @@ impl ThroccApp {
         if let Some(exporting) = &mut self.exporting {
             exporting.qr = None;
             exporting._frames = None;
+            exporting.code_qr = Some(exporting.export.code_qr());
         }
         cx.notify();
     }

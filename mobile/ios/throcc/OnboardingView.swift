@@ -42,7 +42,7 @@ struct OnboardingView: View {
                 switch page {
                 case .importIdentity: ImportIdentityPage()
                 case .scan: ScanPage()
-                case .enterCode(let file): EnterCodePage(file: file)
+                case .enterCode(let file, let scanned): EnterCodePage(file: file, scanned: scanned)
                 }
             }
         }
