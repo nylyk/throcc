@@ -346,6 +346,7 @@ final class AppModel {
     /// Resets what the closed sheet leaves behind, and shows the alert that waited for it.
     func sheetClosed() {
         settingsPath = []
+        removeLeftoverExport()
         if let heldAlert {
             alert = heldAlert
             self.heldAlert = nil

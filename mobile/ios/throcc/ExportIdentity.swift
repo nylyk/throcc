@@ -60,7 +60,8 @@ struct ExportIdentitySection: View {
 
 private let exportFile = FileManager.default.temporaryDirectory.appending(path: "throcc-identity.throcc")
 
-/// Removes an export file a share sheet left behind when the app last ended.
+/// Removes an export file a share sheet left behind, when the app last ended or the page
+/// that shared it went away.
 func removeLeftoverExport() {
     try? FileManager.default.removeItem(at: exportFile)
 }
@@ -69,10 +70,10 @@ func removeLeftoverExport() {
 /// so no recording or app switcher snapshot holds the export.
 private struct HiddenWhileCaptured: ViewModifier {
     @Environment(\.isSceneCaptured) private var captured
-    @Environment(\.scenePhase) private var phase
+    @State private var inFocus = UIApplication.shared.applicationState == .active
 
     func body(content: Content) -> some View {
-        let hidden = captured || phase != .active
+        let hidden = captured || !inFocus
         content
             .opacity(hidden ? 0 : 1)
             .overlay {
@@ -82,6 +83,12 @@ private struct HiddenWhileCaptured: ViewModifier {
                         .multilineTextAlignment(.center)
                         .padding(16)
                 }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+                inFocus = false
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+                inFocus = true
             }
     }
 }

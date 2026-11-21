@@ -92,23 +92,20 @@ struct AddServerView: View {
         let joinable = !address.isEmpty && (!needsInvite || isInviteCode(typed: code))
         NavigationStack {
             ThemedForm {
-                if needsInvite {
-                    Section {
+                Section {
+                    if needsInvite {
                         Text("Join \(address) with an invite code.")
                             .foregroundStyle(.text)
                         ThemedField("Invite code", text: $code)
                             .monospaced()
                             .textInputAutocapitalization(.characters)
-                    }
-                    .autocorrectionDisabled()
-                } else {
-                    Section {
+                    } else {
                         ThemedField("Address", text: $address)
                             .keyboardType(.URL)
                             .textInputAutocapitalization(.never)
                     }
-                    .autocorrectionDisabled()
                 }
+                .autocorrectionDisabled()
                 if let problem {
                     Text(problem).foregroundStyle(.bad)
                 }

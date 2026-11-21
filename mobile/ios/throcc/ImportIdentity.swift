@@ -4,7 +4,6 @@ import UIKit
 
 struct ImportIdentityPage: View {
     @Environment(AppModel.self) private var model
-    @State private var problem: String?
 
     var body: some View {
         ThemedForm {
@@ -14,10 +13,7 @@ struct ImportIdentityPage: View {
             }
             Section {
                 Button("Scan QR Code") { model.onboardingPath.append(.scan) }
-                OpenFileButton(problem: $problem) { file in model.onboardingPath.append(.enterCode(file, scanned: nil)) }
-                if let problem {
-                    Text(problem).foregroundStyle(.bad)
-                }
+                OpenFileButton { file in model.onboardingPath.append(.enterCode(file, scanned: nil)) }
             }
         }
         .navigationTitle("Import Identity")
@@ -26,40 +22,47 @@ struct ImportIdentityPage: View {
 
 /// Opens an exported identity from Files and hands its bytes to `open`, or says why it can't.
 private struct OpenFileButton: View {
-    @Binding var problem: String?
     let open: (Data) -> Void
     @State private var picking = false
+    @State private var problem: String?
 
     var body: some View {
         Button("Open File") { picking = true }
             .fileImporter(isPresented: $picking, allowedContentTypes: [.data]) { picked in
-                do {
-                    let file = try read(try picked.get())
-                    guard isIdentityExport(file: file) else {
-                        problem = "That isn’t an identity exported from throcc."
-                        return
-                    }
-                    problem = nil
-                    open(file)
-                } catch {
-                    problem = "Couldn’t read that file."
-                }
+                Task { await read(picked) }
             }
+        if let problem {
+            Text(problem).foregroundStyle(.bad)
+        }
     }
 
-    private func read(_ url: URL) throws -> Data {
-        let granted = url.startAccessingSecurityScopedResource()
-        defer {
-            if granted {
-                url.stopAccessingSecurityScopedResource()
+    private func read(_ picked: Result<URL, Error>) async {
+        do {
+            let url = try picked.get()
+            let file = try await Task.detached(priority: .userInitiated) { try readExport(url) }.value
+            guard UInt64(file.count) <= maxExportBytes(), isIdentityExport(file: file) else {
+                problem = "That isn’t an identity exported from throcc."
+                return
             }
+            problem = nil
+            open(file)
+        } catch {
+            problem = "Couldn’t read that file."
         }
-        let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-        guard UInt64(size) <= maxExportBytes() else {
-            return Data()
-        }
-        return try Data(contentsOf: url)
     }
+}
+
+/// The file at `url`, cut off past `maxExportBytes`.
+private func readExport(_ url: URL) throws -> Data {
+    let granted = url.startAccessingSecurityScopedResource()
+    defer {
+        if granted {
+            url.stopAccessingSecurityScopedResource()
+        }
+    }
+    let handle = try FileHandle(forReadingFrom: url)
+    defer { try? handle.close() }
+    return try handle.read(upToCount: Int(maxExportBytes()) + 1) ?? Data()
 }
 
 struct ScanPage: View {
@@ -67,18 +70,15 @@ struct ScanPage: View {
     @State private var camera: QRCamera?
     @State private var progress: ScanProgress?
     @State private var cameraProblem: String?
-    @State private var fileProblem: String?
 
     var body: some View {
+        let received = progress?.done == true
         ThemedForm {
             if let cameraProblem {
                 Section {
                     Text(cameraProblem).foregroundStyle(.text)
-                    OpenFileButton(problem: $fileProblem) { file in
+                    OpenFileButton { file in
                         model.onboardingPath = [.importIdentity, .enterCode(file, scanned: nil)]
-                    }
-                    if let fileProblem {
-                        Text(fileProblem).foregroundStyle(.bad)
                     }
                 }
             } else {
@@ -87,20 +87,20 @@ struct ScanPage: View {
                         .aspectRatio(1, contentMode: .fit)
                         .overlay {
                             if let camera {
-                                CameraPreview(session: camera.session)
+                                CameraPreview(camera: camera)
                             } else {
                                 ProgressView()
                             }
                         }
                         .listRowInsets(EdgeInsets())
                 } footer: {
-                    if progress?.done == true {
+                    if received {
                         Text("Choose Next on your other device, then scan the code.").foregroundStyle(.muted)
                     } else {
                         Text("Point the camera at the QR code on your other device.").foregroundStyle(.muted)
                     }
                 }
-                if progress?.done == true {
+                if received {
                     Section {
                         Label("Export received", systemImage: "checkmark.circle.fill")
                             .font(.title3.weight(.semibold))
@@ -120,7 +120,7 @@ struct ScanPage: View {
         }
         .navigationTitle("Scan QR Code")
         .navigationBarTitleDisplayMode(.inline)
-        .sensoryFeedback(.success, trigger: progress?.done == true)
+        .sensoryFeedback(.success, trigger: received)
         .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
         .task { await scan() }
@@ -148,16 +148,31 @@ struct ScanPage: View {
 /// The camera, reading the QR codes of an identity export.
 final class QRCamera: NSObject, AVCaptureMetadataOutputObjectsDelegate, @unchecked Sendable {
     let session = AVCaptureSession()
-    private let input: AVCaptureDeviceInput
+    let device: AVCaptureDevice
     private let scanner = IdentityScanner()
-    /// Configures and runs the session, and receives what it reads.
+    /// Runs the session, and receives what it reads.
     private let queue = DispatchQueue(label: "cc.thro.throcc.qr-camera", qos: .userInitiated)
     /// Where `scan` tells how far it has come, touched only on `queue`.
     private var reading: AsyncStream<ScanProgress>.Continuation?
 
     init?(device: AVCaptureDevice?) {
         guard let device, let input = try? AVCaptureDeviceInput(device: device) else { return nil }
-        self.input = input
+        self.device = device
+        super.init()
+        let output = AVCaptureMetadataOutput()
+        session.beginConfiguration()
+        if session.isMultitaskingCameraAccessSupported {
+            session.isMultitaskingCameraAccessEnabled = true
+        }
+        if session.canAddInput(input) {
+            session.addInput(input)
+        }
+        if session.canAddOutput(output) {
+            session.addOutput(output)
+        }
+        session.commitConfiguration()
+        output.setMetadataObjectsDelegate(self, queue: queue)
+        output.metadataObjectTypes = [.qr]
     }
 
     /// The whole export, once scanned.
@@ -172,17 +187,6 @@ final class QRCamera: NSObject, AVCaptureMetadataOutputObjectsDelegate, @uncheck
         }
         queue.async { [self] in
             self.reading = reading
-            let output = AVCaptureMetadataOutput()
-            session.beginConfiguration()
-            if session.canAddInput(input) {
-                session.addInput(input)
-            }
-            if session.canAddOutput(output) {
-                session.addOutput(output)
-            }
-            session.commitConfiguration()
-            output.setMetadataObjectsDelegate(self, queue: queue)
-            output.metadataObjectTypes = [.qr]
             session.startRunning()
         }
         return progress
@@ -206,14 +210,32 @@ final class QRCamera: NSObject, AVCaptureMetadataOutputObjectsDelegate, @uncheck
 }
 
 private struct CameraPreview: UIViewRepresentable {
-    let session: AVCaptureSession
+    let camera: QRCamera
 
     final class PreviewView: UIView {
         override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
+        private var rotation: AVCaptureDevice.RotationCoordinator?
+        private var turning: NSKeyValueObservation?
 
         var preview: AVCaptureVideoPreviewLayer {
             // The layer class above makes this one.
             layer as! AVCaptureVideoPreviewLayer
+        }
+
+        /// Shows what `camera` sees, kept upright as the device turns.
+        func show(_ camera: QRCamera) {
+            preview.session = camera.session
+            let rotation = AVCaptureDevice.RotationCoordinator(device: camera.device, previewLayer: preview)
+            turning = rotation.observe(\.videoRotationAngleForHorizonLevelPreview, options: .initial) { [weak self] rotation, _ in
+                let angle = rotation.videoRotationAngleForHorizonLevelPreview
+                Task { @MainActor in self?.turn(to: angle) }
+            }
+            self.rotation = rotation
+        }
+
+        private func turn(to angle: CGFloat) {
+            guard let connection = preview.connection, connection.isVideoRotationAngleSupported(angle) else { return }
+            connection.videoRotationAngle = angle
         }
     }
 
@@ -221,7 +243,7 @@ private struct CameraPreview: UIViewRepresentable {
         let view = PreviewView()
         view.backgroundColor = .black
         view.preview.videoGravity = .resizeAspectFill
-        view.preview.session = session
+        view.show(camera)
         return view
     }
 
