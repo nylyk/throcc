@@ -149,11 +149,10 @@ pub async fn sign_in_unpinned(
     let known_as = keystore
         .known_servers
         .iter()
-        .find(|(_, pinned)| *pinned == connected.fingerprint)
-        .map(|(known, _)| known.to_owned());
-    if let Some(known) = known_as {
+        .find(|(_, pinned)| *pinned == connected.fingerprint);
+    if let Some((known, _)) = known_as {
         connected.connection.close(close::NORMAL.into(), b"");
-        return Err(SignInError::KnownAs(known));
+        return Err(SignInError::KnownAs(known.to_owned()));
     }
     let link = control::login_proven(connected, keystore.identity(), profile)
         .await

@@ -1,6 +1,3 @@
-//! Profile pictures: the one we choose, made small enough for any server, and the ones
-//! others chose, read only as the JPEG we make.
-
 use std::io::Cursor;
 
 use image::codecs::jpeg::JpegEncoder;

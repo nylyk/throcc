@@ -364,6 +364,12 @@ impl Opened {
         }
         let profile = self.profile();
         let payload = self.0;
+        keystore::import_identity(&IdentityKey::from_seed(&payload.identity.0)).map_err(
+            |e| match e.downcast_ref::<IdentityInUse>() {
+                Some(_) => ImportError::InUse,
+                None => ImportError::Failed(e),
+            },
+        )?;
         let dir = keystore::config_dir().map_err(failed)?;
         let cache = keystore::cache_dir().map_err(failed)?;
         let servers: Vec<(&SentServer, Option<&[u8]>)> = payload
@@ -380,12 +386,6 @@ impl Opened {
         }
         verified.merge(verified_records(&payload)).map_err(failed)?;
         blocked.merge(blocked_records(&payload)).map_err(failed)?;
-        keystore::import_identity(&IdentityKey::from_seed(&payload.identity.0)).map_err(
-            |e| match e.downcast_ref::<IdentityInUse>() {
-                Some(_) => ImportError::InUse,
-                None => ImportError::Failed(e),
-            },
-        )?;
         Servers::update(&dir, |kept| {
             for (server, picture) in &servers {
                 let look = kept.server_mut(&Fingerprint(server.fingerprint));

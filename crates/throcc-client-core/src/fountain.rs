@@ -38,19 +38,18 @@ impl Fountain {
 
     /// Frame `seq` as text.
     pub fn frame(&self, seq: u32) -> String {
-        let blocks = self.blocks();
-        let mut body = vec![0; BLOCK_BYTES];
-        for index in mixed_blocks(&self.id, seq, blocks) {
-            let start = index * BLOCK_BYTES;
-            let end = (start + BLOCK_BYTES).min(self.blob.len());
-            xor_into(&mut body, &self.blob[start..end]);
-        }
         let mut frame = Vec::with_capacity(HEADER_BYTES + BLOCK_BYTES);
         frame.push(FORMAT);
         frame.extend_from_slice(&self.id);
         frame.extend_from_slice(&(self.blob.len() as u32).to_be_bytes());
         frame.extend_from_slice(&seq.to_be_bytes());
-        frame.extend_from_slice(&body);
+        frame.resize(HEADER_BYTES + BLOCK_BYTES, 0);
+        let body = &mut frame[HEADER_BYTES..];
+        for index in mixed_blocks(&self.id, seq, self.blocks()) {
+            let start = index * BLOCK_BYTES;
+            let end = (start + BLOCK_BYTES).min(self.blob.len());
+            xor_into(body, &self.blob[start..end]);
+        }
         base45(&frame)
     }
 }
@@ -99,21 +98,16 @@ impl Collector {
         let Some(transfer) = &self.transfer else {
             return 0.0;
         };
-        if transfer.blob.is_some() {
-            return 1.0;
-        }
         transfer.rank as f32 / transfer.rows.len() as f32
     }
 
     /// How many bytes of the blob are in, and how long it is, once a frame has named it.
     pub fn bytes(&self) -> Option<(usize, usize)> {
         let transfer = self.transfer.as_ref()?;
-        let received = if transfer.blob.is_some() {
-            transfer.len
-        } else {
-            (transfer.rank * BLOCK_BYTES).min(transfer.len)
-        };
-        Some((received, transfer.len))
+        Some((
+            (transfer.rank * BLOCK_BYTES).min(transfer.len),
+            transfer.len,
+        ))
     }
 
     /// The whole blob, once every block is known.
@@ -296,13 +290,9 @@ impl Random {
             self.counter += 1;
             self.buffer.extend_from_slice(&hasher.finalize());
         }
-        let bytes: [u8; 8] = self
-            .buffer
-            .drain(..8)
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap();
-        u64::from_be_bytes(bytes)
+        let value = u64::from_be_bytes(self.buffer[..8].try_into().unwrap());
+        self.buffer.drain(..8);
+        value
     }
 
     /// A number in `[0, 1)`.
@@ -358,6 +348,21 @@ mod tests {
 
     fn blob(len: usize) -> Vec<u8> {
         (0..len).map(|i| (i * 7 + i / 251) as u8).collect()
+    }
+
+    #[test]
+    fn frames_stay_the_same_bytes_on_every_version() {
+        let fountain = Fountain::new(blob(2_000));
+        let frames: String = (0..fountain.blocks() * 3)
+            .map(|seq| fountain.frame(seq))
+            .collect();
+        assert_eq!(
+            throcc_proto::ids::Hash::of(frames.as_bytes()).0,
+            [
+                191, 100, 120, 73, 221, 201, 77, 60, 87, 231, 178, 74, 177, 222, 87, 19, 199, 184,
+                65, 150, 36, 14, 135, 222, 45, 55, 226, 17, 62, 173, 0, 119,
+            ],
+        );
     }
 
     #[test]

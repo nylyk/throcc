@@ -99,12 +99,9 @@ impl VerifiedRecords {
     /// a key here stays with it, and a warning comes only for a pair taken in.
     fn merge(&mut self, other: VerifiedRecords) {
         let mut taken = BTreeSet::new();
-        for (key, entry) in other.verified {
-            let seen = entry.seen.clone();
-            self.verified.entry(key).or_insert(VerifiedEntry {
-                seen: BTreeSet::new(),
-                ..entry
-            });
+        for (key, mut entry) in other.verified {
+            let seen = std::mem::take(&mut entry.seen);
+            self.verified.entry(key).or_insert(entry);
             for at in seen {
                 if !self.verified.values().any(|v| v.seen.contains(&at)) {
                     self.see(&key.0, at);
