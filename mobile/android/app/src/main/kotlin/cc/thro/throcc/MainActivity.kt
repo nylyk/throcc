@@ -1,6 +1,7 @@
 package cc.thro.throcc
 
 import android.app.Activity
+import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.os.Bundle
@@ -17,7 +18,13 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         uprightOnPhones()
         model = (application as ThroccApp).open(intent)
+        if (savedInstanceState == null) intent.dataString?.let(model::openInviteLink)
         setContent { App(model) }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        intent.dataString?.let(model::openInviteLink)
     }
 
     override fun onPictureInPictureModeChanged(inPictureInPicture: Boolean, newConfig: Configuration) {

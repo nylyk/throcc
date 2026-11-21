@@ -129,8 +129,8 @@ private fun Connected() {
 
 @Composable
 fun AddServer(model: AppModel) {
-    var address by rememberSaveable { mutableStateOf(model.addingAddress) }
-    var code by rememberSaveable { mutableStateOf("") }
+    var address by rememberSaveable(model.addingAddress) { mutableStateOf(model.addingAddress) }
+    var code by rememberSaveable(model.addingCode) { mutableStateOf(model.addingCode) }
     val needsInvite = model.addingNeedsInvite
     val wrongCode = code.isNotBlank() && !isInviteCode(code)
     Page(model, "Add Server") { padding ->

@@ -59,6 +59,7 @@ import cc.thro.throcc.core.canSetRole
 import cc.thro.throcc.core.fingerprintShort
 import cc.thro.throcc.core.fingerprintText
 import cc.thro.throcc.core.initial
+import cc.thro.throcc.core.inviteLink
 import cc.thro.throcc.core.nameProblem
 import kotlinx.coroutines.launch
 
@@ -219,6 +220,7 @@ fun Invites(model: AppModel, state: CoreState) {
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
     val code = model.invite
+    val link = code?.let { state.server?.address?.let { address -> inviteLink(address, code) } }
     val cap = state.permissions?.inviteCap
     val create = { model.core.command(Command.CreateInvite) }
     Page(model, "Invite People") { padding ->
@@ -246,13 +248,15 @@ fun Invites(model: AppModel, state: CoreState) {
                             scope.launch { clipboard.setClipEntry(copied) }
                         }
                     }, {})
-                    customItem({
-                        CodeButton(Icons.Default.Share, "Share", filled = true) {
-                            val send = Intent(Intent.ACTION_SEND).setType("text/plain")
-                            send.putExtra(Intent.EXTRA_TEXT, code)
-                            context.startActivity(Intent.createChooser(send, null))
-                        }
-                    }, {})
+                    link?.let {
+                        customItem({
+                            CodeButton(Icons.Default.Share, "Share", filled = true) {
+                                val send = Intent(Intent.ACTION_SEND).setType("text/plain")
+                                send.putExtra(Intent.EXTRA_TEXT, link)
+                                context.startActivity(Intent.createChooser(send, null))
+                            }
+                        }, {})
+                    }
                 }
             }
             TextButton(create, Modifier.align(Alignment.CenterHorizontally)) { Text("New Code") }

@@ -17,6 +17,7 @@ import cc.thro.throcc.core.CoreException
 import cc.thro.throcc.core.CoreState
 import cc.thro.throcc.core.Event
 import cc.thro.throcc.core.IdentityExport
+import cc.thro.throcc.core.Invite
 import cc.thro.throcc.core.KnownServer
 import cc.thro.throcc.core.Listener
 import cc.thro.throcc.core.Palette
@@ -30,6 +31,7 @@ import cc.thro.throcc.core.connectionNotice
 import cc.thro.throcc.core.customThemeName
 import cc.thro.throcc.core.isIdentityExport
 import cc.thro.throcc.core.maxExportBytes
+import cc.thro.throcc.core.parseInviteLink
 import cc.thro.throcc.core.permissionsOf
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
@@ -195,6 +197,13 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
     var addingNeedsInvite by mutableStateOf(false)
         private set
 
+    /** The invite code the Add Server page starts with. */
+    var addingCode by mutableStateOf("")
+        private set
+
+    /** An invite link opened before onboarding was through, filled in once it is. */
+    private var pendingInvite: Invite? = null
+
     /** The identity export the export pages show, while they are open. */
     var export by mutableStateOf<IdentityExport?>(null)
 
@@ -355,6 +364,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
             }
             importing = null
             profile = ask { core.profile() }
+            openPendingInvite()
             loadServers()
         }
     }
@@ -378,10 +388,24 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
     }
 
     /** Opens the Add Server page, with `address` typed in, at the invite code when `needsInvite`. */
-    fun addServer(address: String = "", needsInvite: Boolean = false) {
+    fun addServer(address: String = "", needsInvite: Boolean = false, code: String = "") {
         addingAddress = address
         addingNeedsInvite = needsInvite
+        addingCode = code
         open(Screen.AddServer)
+    }
+
+    /** Fills in Add Server from the invite `link`, once onboarding is through. */
+    fun openInviteLink(link: String) {
+        pendingInvite = parseInviteLink(link) ?: return
+        openPendingInvite()
+    }
+
+    private fun openPendingInvite() {
+        val invite = pendingInvite ?: return
+        if (profile == null) return
+        pendingInvite = null
+        addServer(invite.address, needsInvite = true, code = invite.code)
     }
 
     /** Signs in again where the last sign-in failed. */
@@ -482,6 +506,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
         scope.launch {
             val saved = ask { core.setProfile(Profile(name, picture)) } != null
             profile = ask { core.profile() }
+            openPendingInvite()
             if (saved) stack.remove(Screen.Profile)
         }
     }
@@ -661,6 +686,10 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
                 addingNeedsInvite = true
                 listOf(Screen.AddServer)
             }
+            "invitelink" -> {
+                openInviteLink("https://thro.cc/join#owls.thro.cc+K7Q-M2XPD")
+                emptyList()
+            }
             "rooms", "room", "blocked", "person", "personblocked", "reconnect", "elsewhere", "share", "sharefull" ->
                 listOf(Screen.Rooms)
             "settings" -> listOf(Screen.Settings)
@@ -689,7 +718,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
                 stack += listOf(Screen.Settings, Screen.Profile, shown)
             }
         }
-        if (name in ONBOARDING_SAMPLES + listOf("servers", "addserver", "addserverinvite", "pinmismatch", "identitymissing")) return
+        if (name in ONBOARDING_SAMPLES + listOf("servers", "addserver", "addserverinvite", "invitelink", "pinmismatch", "identitymissing")) return
         scope.launch {
             signIn("owls.thro.cc", null)
             if (name in listOf("room", "blocked", "person", "personblocked", "share", "sharefull")) {
