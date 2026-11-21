@@ -45,7 +45,9 @@ enum class Screen {
     ExportQr, ExportCode,
 
     /** Our room, which a narrow window shows in front of the pages. It is never on the model's stack. */
-    Room,
+    Room;
+
+    val isExport get() = this == ExportQr || this == ExportCode
 }
 
 /** How saving the server's name and picture went. */
@@ -57,11 +59,9 @@ sealed interface ServerSave {
 
 /** Why signing in to a server failed where the user has a choice to make. */
 sealed interface SignInProblem {
-    val address: String
+    class KeyChanged(val address: String, val expected: ByteArray, val actual: ByteArray) : SignInProblem
 
-    class KeyChanged(override val address: String, val expected: ByteArray, val actual: ByteArray) : SignInProblem
-
-    data class IdentityMissing(override val address: String, val invite: String?) : SignInProblem
+    data class IdentityMissing(val address: String, val invite: String?) : SignInProblem
 }
 
 /** How starting over with a new identity goes. */
@@ -202,6 +202,8 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
     var exportCodeQr by mutableStateOf<QrFrame?>(null)
         private set
 
+    private val exporting get() = stack.any { it.isExport }
+
     var importing by mutableStateOf<Importing?>(null)
         private set
 
@@ -277,7 +279,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
 
     fun back() {
         if (stack.size > 1) stack.removeAt(stack.lastIndex)
-        if (Screen.ExportQr !in stack && Screen.ExportCode !in stack) export = null
+        if (!exporting) dropExport()
     }
 
     /** Seals the identity under a new code for the export pages, and returns it, or null where that failed. */
@@ -294,7 +296,11 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
     }
 
     fun finishExport() {
-        stack.removeAll { it == Screen.ExportQr || it == Screen.ExportCode }
+        stack.removeAll { it.isExport }
+        dropExport()
+    }
+
+    private fun dropExport() {
         export = null
         exportCodeQr = null
     }
@@ -425,7 +431,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
                     is CoreException.Failed -> notices.trySend(failure.reason)
                     is CoreException.Cancelled -> {}
                 }
-                if (failure != null && failure !is CoreException.NeedsInvite && Screen.Rooms in stack) showPages()
+                if (failure != null && Screen.Rooms in stack) showPages()
             }
         }
     }
@@ -603,7 +609,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
     private fun showPages(vararg pages: Screen) {
         stack.removeRange(1, stack.size)
         stack += pages
-        if (Screen.ExportQr !in stack && Screen.ExportCode !in stack) export = null
+        if (!exporting) dropExport()
     }
 
     /** Signs in at `address`, and returns why that failed, if it did. */

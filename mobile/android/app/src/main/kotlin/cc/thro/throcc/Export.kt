@@ -2,6 +2,7 @@ package cc.thro.throcc
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.view.WindowManager
 import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -33,17 +34,24 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import cc.thro.throcc.core.QrFrame
 import cc.thro.throcc.core.qrFrameMillis
 import java.io.File
+import java.io.IOException
 import kotlin.math.floor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -59,22 +67,34 @@ fun ExportSection(model: AppModel) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var preparing by remember { mutableStateOf<ExportWay?>(null) }
-    val share = rememberLauncherForActivityResult(StartActivityForResult()) { model.showExportCode(scannable = false) }
+    val share = rememberLauncherForActivityResult(StartActivityForResult()) {
+        if (model.export == null) exportFile(context).delete() else model.showExportCode(scannable = false)
+    }
     val export = { way: ExportWay ->
         if (preparing == null) {
             preparing = way
             scope.launch {
-                val sealed = model.startExport()
-                when {
-                    sealed == null -> {}
-                    way == ExportWay.Qr -> model.open(Screen.ExportQr)
-                    else -> {
-                        val file = exportFile(context)
-                        withContext(Dispatchers.IO) { file.writeBytes(sealed.file()) }
-                        share.launch(Intent.createChooser(sendIntent(context, file), null))
+                try {
+                    val sealed = model.startExport()
+                    when {
+                        sealed == null -> {}
+                        way == ExportWay.Qr -> model.open(Screen.ExportQr)
+                        else -> {
+                            val file = exportFile(context)
+                            withContext(Dispatchers.IO) {
+                                file.parentFile?.mkdirs()
+                                file.writeBytes(sealed.file())
+                            }
+                            share.launch(Intent.createChooser(sendIntent(context, file), null))
+                        }
                     }
+                } catch (failure: IOException) {
+                    exportFile(context).delete()
+                    model.finishExport()
+                    model.notices.trySend(failure.localizedMessage ?: failure.toString())
+                } finally {
+                    preparing = null
                 }
-                preparing = null
             }
         }
     }
@@ -104,14 +124,18 @@ fun ExportSection(model: AppModel) {
 /** The export's QR codes, one after the other, until the user asks for its code. */
 @Composable
 fun ExportQr(model: AppModel) {
+    SecureScreen()
     val export = remember { model.export } ?: return
     var frame by remember { mutableStateOf<QrFrame?>(null) }
-    LaunchedEffect(export) {
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(export, lifecycle) {
         val millis = qrFrameMillis().toLong()
         var seq = 0u
-        while (true) {
-            frame = withContext(Dispatchers.Default) { export.frame(seq++) }
-            delay(millis)
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                frame = withContext(Dispatchers.Default) { export.frame(seq++) }
+                delay(millis)
+            }
         }
     }
     KeepScreenOn()
@@ -133,6 +157,7 @@ fun ExportQr(model: AppModel) {
 /** The code that opens the export, which the QR codes never show beside. */
 @Composable
 fun ExportCode(model: AppModel) {
+    SecureScreen()
     val export = remember { model.export } ?: return
     val code = remember(export) { export.code() }
     val context = LocalContext.current
@@ -169,19 +194,23 @@ fun ExportCode(model: AppModel) {
 @Composable
 private fun QrCode(frame: QrFrame, modifier: Modifier) {
     val width = frame.width.toInt()
+    val modules = remember(frame) {
+        val pixels = IntArray(width * width) { if (frame.dark[it]) Color.Black.toArgb() else Color.White.toArgb() }
+        Bitmap.createBitmap(pixels, width, width, Bitmap.Config.ARGB_8888).asImageBitmap()
+    }
     Canvas(modifier.clip(MaterialTheme.shapes.large).background(Color.White)) {
-        val module = floor(size.minDimension / width).coerceAtLeast(1f)
-        val origin = Offset(floor((size.width - module * width) / 2), floor((size.height - module * width) / 2))
-        val square = Size(module, module)
-        frame.dark.forEachIndexed { index, dark ->
-            if (dark) drawRect(Color.Black, origin + Offset(index % width * module, index / width * module), square)
-        }
+        val side = floor(size.minDimension / width).coerceAtLeast(1f) * width
+        drawImage(
+            modules,
+            dstOffset = IntOffset(floor((size.width - side) / 2).toInt(), floor((size.height - side) / 2).toInt()),
+            dstSize = IntSize(side.toInt(), side.toInt()),
+            filterQuality = FilterQuality.None,
+        )
     }
 }
 
 /** Where the export waits while another app takes it. The file provider shares only this folder. */
-private fun exportFile(context: Context) =
-    File(context.cacheDir, "export").apply { mkdirs() }.resolve("throcc-identity.throcc")
+private fun exportFile(context: Context) = File(context.cacheDir, "export/throcc-identity.throcc")
 
 /** Removes an export file a share left behind when the process last ended. */
 fun removeLeftoverExport(context: Context) {
@@ -193,12 +222,19 @@ private fun sendIntent(context: Context, file: File) = Intent(Intent.ACTION_SEND
     .putExtra(Intent.EXTRA_STREAM, FileProvider.getUriForFile(context, "${context.packageName}.files", file))
     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
 
-/** Keeps the window out of screenshots, recordings, casts and the recents thumbnail while shown. */
+/** Keeps the window out of screenshots, recordings, casts and the recents thumbnail while any caller is composed,
+ *  its exit transition included. */
 @Composable
-fun SecureScreen() {
+private fun SecureScreen() {
     val window = LocalActivity.current?.window ?: return
     DisposableEffect(window) {
+        composedSecureScreens++
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        onDispose { window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
+        onDispose {
+            composedSecureScreens--
+            if (composedSecureScreens == 0) window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
     }
 }
+
+private var composedSecureScreens = 0

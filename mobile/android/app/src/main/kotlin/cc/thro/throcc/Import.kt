@@ -57,6 +57,7 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import cc.thro.throcc.core.IdentityScanner
 import cc.thro.throcc.core.ScanProgress
@@ -103,15 +104,30 @@ fun ImportScan(model: AppModel) {
         refused = !it
     }
     LaunchedEffect(Unit) { if (!allowed) request.launch(Manifest.permission.CAMERA) }
+    LifecycleResumeEffect(Unit) {
+        allowed = context.allows(Manifest.permission.CAMERA)
+        onPauseOrDispose {}
+    }
     val openFile = rememberExportPicker(model)
     val scanner = remember { IdentityScanner() }
     var progress by remember { mutableStateOf<ScanProgress?>(null) }
     var finished by remember { mutableStateOf(false) }
+    var noCamera by remember { mutableStateOf(false) }
+    val problem = when {
+        noCamera -> "This device has no camera. Open the exported file instead."
+        refused && !allowed ->
+            "throcc needs the camera to scan the QR code. Allow it in the settings, or open the exported file instead."
+        else -> null
+    }
     Page(model, "Scan QR Code", model::importBack) { padding ->
         Form(padding) {
-            if (allowed) {
+            if (problem != null) {
+                Text(problem, Modifier.padding(horizontal = 16.dp), MaterialTheme.colorScheme.onSurfaceVariant)
+                FilledTonalButton(openFile, Modifier.align(Alignment.CenterHorizontally)) { Text("Open File") }
+            } else if (allowed) {
                 val square = Modifier.widthIn(max = 480.dp).fillMaxWidth().aspectRatio(1f)
-                QrScanner(square.align(Alignment.CenterHorizontally).clip(MaterialTheme.shapes.extraLarge)) { text ->
+                    .align(Alignment.CenterHorizontally).clip(MaterialTheme.shapes.extraLarge)
+                QrScanner(square, onNoCamera = { noCamera = true }) { text ->
                     if (!finished) {
                         val added = scanner.add(text)
                         progress = added
@@ -122,13 +138,6 @@ fun ImportScan(model: AppModel) {
                     }
                 }
                 ScanStatus(progress)
-            } else if (refused) {
-                Text(
-                    "throcc needs the camera to scan the QR code. Allow it in the settings, or open the exported file instead.",
-                    Modifier.padding(horizontal = 16.dp),
-                    MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                FilledTonalButton(openFile, Modifier.align(Alignment.CenterHorizontally)) { Text("Open File") }
             }
         }
     }
@@ -172,12 +181,14 @@ private fun ScanStatus(progress: ScanProgress?) {
     }
 }
 
-/** The camera, which calls `onScan` with the text of every QR code it reads while the app is in front. */
+/** The camera, which calls `onScan` with the text of every QR code it reads while the app is in front, or
+ *  `onNoCamera` where the device has none it can open. */
 @Composable
-private fun QrScanner(modifier: Modifier, onScan: (String) -> Unit) {
+private fun QrScanner(modifier: Modifier, onNoCamera: () -> Unit, onScan: (String) -> Unit) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scanned by rememberUpdatedState(onScan)
+    val missing by rememberUpdatedState(onNoCamera)
     val view = remember { PreviewView(context).apply { scaleType = PreviewView.ScaleType.FILL_CENTER } }
     DisposableEffect(lifecycleOwner) {
         val main = context.mainExecutor
@@ -199,12 +210,25 @@ private fun QrScanner(modifier: Modifier, onScan: (String) -> Unit) {
             if (texts.isNotEmpty()) main.execute { texts.forEach(scanned) }
         }
         val cameras = ProcessCameraProvider.getInstance(context)
+        var bound: ProcessCameraProvider? = null
         cameras.addListener({
-            cameras.get().bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+            try {
+                val provider = cameras.get()
+                val camera = listOf(CameraSelector.DEFAULT_BACK_CAMERA, CameraSelector.DEFAULT_FRONT_CAMERA)
+                    .firstOrNull(provider::hasCamera)
+                if (camera == null) {
+                    missing()
+                } else {
+                    provider.bindToLifecycle(lifecycleOwner, camera, preview, analysis)
+                    bound = provider
+                }
+            } catch (_: Exception) {
+                missing()
+            }
         }, main)
         onDispose {
             cameras.addListener({
-                cameras.get().unbind(preview, analysis)
+                bound?.unbind(preview, analysis)
                 decoding.shutdown()
             }, main)
         }
@@ -245,7 +269,7 @@ fun ImportCode(model: AppModel, entering: Importing.EnteringCode) {
                 keyboardActions = KeyboardActions(onDone = { submit() }),
                 singleLine = true,
             )
-            MainButton("Import", code.isNotBlank(), entering.busy, submit)
+            MainButton(if (entering.busy) "Importing…" else "Import", code.isNotBlank(), entering.busy, submit)
         }
     }
 }
