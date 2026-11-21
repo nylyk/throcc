@@ -77,7 +77,7 @@ pub struct InviteLink {
 
 const WEB_LINK: &str = "https://thro.cc/join#";
 const DESKTOP_LINK: &str = "throcc://join#";
-const MAX_ADDRESS_CHARS: usize = 255;
+const MAX_ADDRESS_BYTES: usize = 255;
 const KEPT_IN_ADDRESS: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
     .remove(b'.')
@@ -109,11 +109,8 @@ impl FromStr for InviteLink {
         let address = percent_decode_str(address)
             .decode_utf8()
             .map_err(|_| BadInviteLink)?;
-        let unfit = |c: char| c.is_whitespace() || c.is_control() || "+/\\@?#".contains(c);
-        if address.is_empty()
-            || address.chars().count() > MAX_ADDRESS_CHARS
-            || address.contains(unfit)
-        {
+        let unfit = |c: char| !c.is_ascii_graphic() || "+/\\@?#".contains(c);
+        if address.is_empty() || address.len() > MAX_ADDRESS_BYTES || address.contains(unfit) {
             return Err(BadInviteLink);
         }
         Ok(Self {
@@ -201,7 +198,11 @@ mod tests {
 
     #[test]
     fn parses_links() {
-        for address in ["voice.example.com", "[2001:db8::1]:8476", "grüße.example"] {
+        for address in [
+            "voice.example.com",
+            "[2001:db8::1]:8476",
+            "xn--gre-6ka8i.example",
+        ] {
             let link = link(address);
             assert_eq!(link.to_string().parse::<InviteLink>(), Ok(link));
         }
@@ -220,6 +221,8 @@ mod tests {
             "https://thro.cc/join#a%20b+K7Q-M2XPD",
             "https://thro.cc/join#a%2Fb+K7Q-M2XPD",
             "https://thro.cc/join#%FF+K7Q-M2XPD",
+            "https://thro.cc/join#gr%C3%BC%C3%9Fe.example+K7Q-M2XPD",
+            "https://thro.cc/join#a%E2%80%AEb+K7Q-M2XPD",
             "https://example.com/join#voice.example.com+K7Q-M2XPD",
             "throcc://other#voice.example.com+K7Q-M2XPD",
         ] {
