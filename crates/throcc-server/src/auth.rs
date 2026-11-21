@@ -127,14 +127,16 @@ async fn take_profile(
         debug!(user = row.id.0, "refusing a sign-in's profile: {reason}");
         return Err(BAD_PROFILE);
     }
-    let signed = identity::verify_address(
-        &row.pubkey,
-        &shared.fingerprint.0,
-        row.id,
-        &address.address,
-        &address.sig,
-    );
-    if !valid_address(&address.address) || signed.is_err() {
+    if !valid_address(&address.address)
+        || identity::verify_address(
+            &row.pubkey,
+            &shared.fingerprint.0,
+            row.id,
+            &address.address,
+            &address.sig,
+        )
+        .is_err()
+    {
         debug!(user = row.id.0, "refusing a sign-in's address");
         return Err(BAD_PROFILE);
     }

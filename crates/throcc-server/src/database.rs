@@ -380,7 +380,8 @@ impl Database {
         )?;
         let signed_at = newest.map_or(now as i64, |newest| (now as i64).max(newest + 1));
         tx.execute(
-            "INSERT INTO addresses (user, address, sig, signed_at) VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO addresses (user, address, sig, signed_at)
+             SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM users WHERE id = ?1)
              ON CONFLICT (user, address) DO UPDATE SET sig = excluded.sig, signed_at = excluded.signed_at",
             params![user.0 as i64, address.address, address.sig.as_slice(), signed_at],
         )?;
@@ -623,26 +624,22 @@ impl Database {
         let row = self
             .conn
             .query_row(
-                "SELECT name, avatar_hash FROM server_profile WHERE id = 0",
+                "SELECT p.name, p.avatar_hash, substr(b.bytes, 1, 3) FROM server_profile p
+                 LEFT JOIN blobs b ON b.hash = p.avatar_hash WHERE p.id = 0",
                 [],
                 |r| {
                     Ok((
                         r.get::<_, Option<String>>(0)?,
                         r.get::<_, Option<Vec<u8>>>(1)?,
+                        r.get::<_, Option<Vec<u8>>>(2)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((name, avatar)) = row else {
+        let Some((name, avatar, avatar_start)) = row else {
             return Ok(ServerProfile::default());
         };
-        let avatar = match hash_column(avatar) {
-            Some(hash) => self
-                .blob(&hash)?
-                .is_some_and(|bytes| is_jpeg(&bytes))
-                .then_some(hash),
-            None => None,
-        };
+        let avatar = hash_column(avatar).filter(|_| avatar_start.is_some_and(|b| is_jpeg(&b)));
         Ok(ServerProfile { name, avatar })
     }
 
@@ -836,6 +833,8 @@ mod tests {
         assert_eq!(db.signed_addresses(teo).unwrap()[0].address, "late");
 
         db.remove_users(&[mara]).unwrap();
+        assert!(db.signed_addresses(mara).unwrap().is_empty());
+        db.keep_address(mara, &signed("after", 3), 600).unwrap();
         assert!(db.signed_addresses(mara).unwrap().is_empty());
     }
 
