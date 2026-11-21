@@ -1,6 +1,6 @@
 # throcc-crypto
 
-The cryptography of enrollment, sign-in and end-to-end media encryption. It does no I/O.
+The cryptography of enrollment, sign-in, end-to-end media encryption and identity transfer. It does no I/O.
 
 | Module | Holds |
 | --- | --- |

@@ -31,5 +31,5 @@ proptest.workspace = true
 rand_core.workspace = true
 ring.workspace = true
 # Runs the media, HPKE and transfer tests in `cargo test -p throcc-crypto` too. Dev-dependency features
-# reach only test builds, so the server still builds this crate without `media`.
+# reach only test builds, so the server still builds this crate without `media` or `transfer`.
 throcc-crypto = { workspace = true, features = ["media", "transfer"] }

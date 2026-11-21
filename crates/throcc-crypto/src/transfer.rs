@@ -1,4 +1,4 @@
-use std::fmt;
+use std::fmt::{self, Write};
 
 use aes_gcm::aead::{AeadInOut, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce, Tag};
@@ -7,7 +7,7 @@ use zeroize::Zeroizing;
 
 use crate::identity::random;
 
-/// What every sealed transfer starts with: the format and its version.
+/// Every sealed transfer starts with these bytes, which name the format and its version.
 const MAGIC: &[u8; 16] = b"throcc/identity1";
 const SALT_BYTES: usize = 16;
 const NONCE_BYTES: usize = 12;
@@ -41,12 +41,12 @@ impl TransferCode {
         Self(u64::from_be_bytes(random()) >> (64 - CODE_BITS))
     }
 
-    /// The code in `typed`, ignoring case, spaces and dashes, and reading O as 0 and I or L
+    /// The code in `typed`, ignoring case, whitespace and dashes, and reading O as 0 and I or L
     /// as 1. None unless it is exactly 12 digits.
     pub fn parse(typed: &str) -> Option<Self> {
         let mut value = 0u64;
         let mut digits = 0;
-        for c in typed.chars().filter(|c| !matches!(c, ' ' | '-')) {
+        for c in typed.chars().filter(|c| !c.is_whitespace() && *c != '-') {
             let c = match c.to_ascii_uppercase() {
                 'O' => '0',
                 'I' | 'L' => '1',
@@ -71,7 +71,7 @@ impl fmt::Display for TransferCode {
             }
             let shift = 5 * (CODE_CHARS - 1 - i);
             let digit = CODE_DIGITS[((self.0 >> shift) & 31) as usize];
-            write!(f, "{}", char::from(digit))?;
+            f.write_char(char::from(digit))?;
         }
         Ok(())
     }
@@ -88,7 +88,7 @@ impl fmt::Debug for TransferCode {
 pub fn seal(code: &TransferCode, plaintext: &[u8]) -> Vec<u8> {
     let salt: [u8; SALT_BYTES] = random();
     let nonce: [u8; NONCE_BYTES] = random();
-    let mut sealed = Vec::with_capacity(HEADER_BYTES + plaintext.len() + TAG_BYTES);
+    let mut sealed = Vec::with_capacity(plaintext.len() + OVERHEAD_BYTES);
     sealed.extend_from_slice(MAGIC);
     sealed.extend_from_slice(&salt);
     sealed.extend_from_slice(&nonce);
@@ -110,7 +110,7 @@ pub fn open(code: &TransferCode, sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>, Tr
     let (body, tag) = rest.split_at(rest.len() - TAG_BYTES);
     let salt: [u8; SALT_BYTES] = header[MAGIC.len()..][..SALT_BYTES].try_into().unwrap();
     let nonce: [u8; NONCE_BYTES] = header[MAGIC.len() + SALT_BYTES..].try_into().unwrap();
-    let tag = Tag::try_from(tag).map_err(|_| TransferError::NotATransfer)?;
+    let tag = Tag::try_from(tag).unwrap();
     let mut plaintext = Zeroizing::new(body.to_vec());
     cipher(code, &salt)
         .decrypt_inout_detached(
@@ -219,6 +219,10 @@ mod tests {
         assert_eq!(
             TransferCode::parse("o1lI-0000-0000"),
             TransferCode::parse("0111-0000-0000")
+        );
+        assert_eq!(
+            TransferCode::parse("\t0000\u{a0}0000-0000\n"),
+            TransferCode::parse("0000-0000-0000")
         );
         assert_eq!(TransferCode::parse("0000-0000-000"), None);
         assert_eq!(TransferCode::parse("0000-0000-00000"), None);
