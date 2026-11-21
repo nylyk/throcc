@@ -891,7 +891,7 @@ fn identity_still_missing(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyEl
                         if running { "Starting Over…" } else { "Start Over" },
                     )
                     .disabled(running)
-                    .on_click(cx.listener(|app, _, _, cx| app.start_over(cx))),
+                    .on_click(cx.listener(|app, _, window, cx| app.start_over(window, cx))),
                 ),
         )
         .into_any_element()

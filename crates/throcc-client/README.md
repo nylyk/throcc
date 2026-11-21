@@ -5,7 +5,7 @@ The desktop app, built with gpui and gpui-component on top of `throcc-client-cor
 | Module | Holds |
 | --- | --- |
 | `main.rs` | Arguments, the saved settings, the audio thread and window setup. Without an audio thread the app doesn't start. `throcc://join#` invite links arrive as an argument, as a macOS open-URL event, or from a later launch, and fill in Add Server |
-| `single_instance.rs` | One running instance on Linux and Windows: a later launch hands its link, if any, over a local socket or named pipe and exits, since a second instance that signed in would kick the first. macOS keeps one instance itself |
+| `single_instance.rs` | One running instance on Linux and Windows: a later launch hands its link, if any, over a local socket or named pipe, served only by our own user, and exits, since a second instance that signed in would kick the first. macOS keeps one instance itself |
 | `assets.rs` | The Lucide icons plus the mascot drawings embedded from `assets/mascot` |
 | `app.rs` | `ThroccApp`: the current screen and dialog, form inputs, and every action. It owns the settings, kept whole to `settings.json` as it changes, and the audio thread, which runs from start to exit with or without a server and is handed to each session it connects. `show_sample` lists the mock screens |
 | `app/transfer.rs` | Exporting our identity from the profile page, as QR codes cycling in a dialog or a saved file, with the code shown only after, and importing a file at onboarding |

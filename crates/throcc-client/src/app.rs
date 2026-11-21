@@ -1978,7 +1978,7 @@ impl ThroccApp {
 
     /// Forgets every known server and starts a new identity, as the human chose to after the
     /// keychain lost the old one, unless the keychain holds it again by now.
-    pub fn start_over(&mut self, cx: &mut Context<Self>) {
+    pub fn start_over(&mut self, window: &Window, cx: &mut Context<Self>) {
         if self.start_over == StartOver::Running {
             return;
         }
@@ -1993,14 +1993,17 @@ impl ThroccApp {
         let starting = cx
             .background_executor()
             .spawn(async { Keystore::start_over().map(|(_, started)| started) });
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let started = starting.await;
-            this.update(cx, |app, cx| {
+            this.update_in(cx, |app, window, cx| {
                 app.reload_known_servers();
                 app.start_over = match started {
                     Ok(started) => StartOver::Done(started),
                     Err(e) => StartOver::Failed(format!("Couldn’t start over: {e:#}")),
                 };
+                if let Some(link) = app.pending_invite.take() {
+                    app.open_invite(link, window, cx);
+                }
                 cx.notify();
             })
             .ok();

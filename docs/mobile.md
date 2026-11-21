@@ -153,7 +153,7 @@ Pictures are JPEG only, which keeps the payload small: a 128 px JPEG is around 6
 
 ## Invite links
 
-- Links are `https://thro.cc/join#<address+code>`, such as `https://thro.cc/join#voice.example.com:8476+K7Q-M2XPD`. The address is percent-encoded outside the unreserved characters and `:`, so an IPv6 address reads `%5B2001:db8::1%5D:8476`; `+` never appears in an address, so it splits the two. `throcc_proto::invite::InviteLink` reads and makes them, and the web page applies the same rules. The secret stays in the fragment, which browsers never send.
+- Links are `https://thro.cc/join#<address+code>`, such as `https://thro.cc/join#voice.example.com:8476+K7Q-M2XPD`. The address is printable ASCII, so an internationalized name goes in its punycode form, and it is percent-encoded outside the unreserved characters and `:`, so an IPv6 address reads `%5B2001:db8::1%5D:8476`; `+` never appears in an address, so it splits the two. `throcc_proto::invite::InviteLink` reads and makes them, and the web page applies the same rules. The secret stays in the fragment, which browsers never send.
 - The mobile apps open them as verified links: Android App Links through `/.well-known/assetlinks.json`, iOS Universal Links through `apple-app-site-association`, both on thro.cc. No other app can claim them, unlike a custom scheme.
 - On desktop, `thro.cc/join` is a static page that opens `throcc://join#...` and otherwise offers downloads. It has a strict CSP and no third-party scripts, because anything running on it can read the fragment.
 - Verified links don't open the app from in-app browsers or pasted URLs. On a phone, the page then shows the address and code with copy buttons, and store links.
