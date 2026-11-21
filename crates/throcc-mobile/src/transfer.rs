@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use throcc_client_core::fountain::Collector;
-use throcc_client_core::transfer::{self, Export, ImportError, QrCode};
+use throcc_client_core::transfer::{self, Export, QrCode};
 
 use crate::{Core, CoreError, lock};
 
@@ -128,13 +128,14 @@ impl Core {
     /// with its servers and people, and keeps its profile. Refused once servers know this
     /// device's own identity. The mock only opens it. It blocks for about a second.
     pub fn import_identity(&self, file: Vec<u8>, code: String) -> Result<(), CoreError> {
-        let opened = transfer::open(&file, &code).map_err(failed)?;
+        let opened = transfer::open(&file, &code).map_err(anyhow::Error::from)?;
+        let _switching = lock(&self.switching);
         let profile = if self.mock {
             opened.profile()
         } else {
             opened
                 .apply(&self.verified, &self.blocked)
-                .map_err(failed)?
+                .map_err(anyhow::Error::from)?
         };
         if let Some(profile) = profile {
             self.change_settings(|settings| settings.profile = Some(profile));
@@ -159,10 +160,4 @@ pub fn max_export_bytes() -> u64 {
 #[uniffi::export]
 pub fn qr_frame_millis() -> u32 {
     transfer::FRAME_INTERVAL.as_millis() as u32
-}
-
-fn failed(error: ImportError) -> CoreError {
-    CoreError::Failed {
-        reason: error.to_string(),
-    }
 }
