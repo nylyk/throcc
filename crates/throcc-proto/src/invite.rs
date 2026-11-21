@@ -1,6 +1,8 @@
 use std::fmt;
 use std::str::FromStr;
 
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
+
 const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 pub const ID_CHARS: usize = 3;
 pub const SECRET_CHARS: usize = 5;
@@ -66,6 +68,61 @@ impl fmt::Debug for InviteCode {
     }
 }
 
+/// An invite link such as `https://thro.cc/join#voice.example.com+K7Q-M2XPD`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InviteLink {
+    pub address: String,
+    pub code: InviteCode,
+}
+
+const WEB_LINK: &str = "https://thro.cc/join#";
+const DESKTOP_LINK: &str = "throcc://join#";
+const MAX_ADDRESS_CHARS: usize = 255;
+const KEPT_IN_ADDRESS: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~')
+    .remove(b':');
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error("an invite link looks like https://thro.cc/join#voice.example.com+K7Q-M2XPD")]
+pub struct BadInviteLink;
+
+impl fmt::Display for InviteLink {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let address = utf8_percent_encode(&self.address, KEPT_IN_ADDRESS);
+        write!(f, "{WEB_LINK}{address}+{}", self.code)
+    }
+}
+
+impl FromStr for InviteLink {
+    type Err = BadInviteLink;
+
+    /// Parses a web link or the `throcc://join#` link the web page hands to desktop clients.
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let fragment = [WEB_LINK, DESKTOP_LINK]
+            .iter()
+            .find_map(|prefix| input.trim().strip_prefix(prefix))
+            .ok_or(BadInviteLink)?;
+        let (address, code) = fragment.rsplit_once('+').ok_or(BadInviteLink)?;
+        let address = percent_decode_str(address)
+            .decode_utf8()
+            .map_err(|_| BadInviteLink)?;
+        let unfit = |c: char| c.is_whitespace() || c.is_control() || "+/\\@?#".contains(c);
+        if address.is_empty()
+            || address.chars().count() > MAX_ADDRESS_CHARS
+            || address.contains(unfit)
+        {
+            return Err(BadInviteLink);
+        }
+        Ok(Self {
+            address: address.into_owned(),
+            code: code.parse().map_err(|_| BadInviteLink)?,
+        })
+    }
+}
+
 /// Formats partial input for a code field: normalized characters with the dash inserted.
 pub fn format_partial(input: &str) -> String {
     let mut chars = normalize(input);
@@ -121,6 +178,53 @@ mod tests {
         assert_eq!(format_partial("k7q"), "K7Q");
         assert_eq!(format_partial("k7qm"), "K7Q-M");
         assert_eq!(format_partial("k7q-m2xpdzz"), "K7Q-M2XPD");
+    }
+
+    fn link(address: &str) -> InviteLink {
+        InviteLink {
+            address: address.to_owned(),
+            code: "K7Q-M2XPD".parse().unwrap(),
+        }
+    }
+
+    #[test]
+    fn formats_links() {
+        assert_eq!(
+            link("voice.example.com:8476").to_string(),
+            "https://thro.cc/join#voice.example.com:8476+K7Q-M2XPD"
+        );
+        assert_eq!(
+            link("[2001:db8::1]:8476").to_string(),
+            "https://thro.cc/join#%5B2001:db8::1%5D:8476+K7Q-M2XPD"
+        );
+    }
+
+    #[test]
+    fn parses_links() {
+        for address in ["voice.example.com", "[2001:db8::1]:8476", "grüße.example"] {
+            let link = link(address);
+            assert_eq!(link.to_string().parse::<InviteLink>(), Ok(link));
+        }
+        assert_eq!(
+            "throcc://join#voice.example.com+k7qm2xpd".parse(),
+            Ok(link("voice.example.com"))
+        );
+    }
+
+    #[test]
+    fn rejects_bad_links() {
+        for bad in [
+            "https://thro.cc/join#voice.example.com",
+            "https://thro.cc/join#+K7Q-M2XPD",
+            "https://thro.cc/join#voice.example.com+K7Q",
+            "https://thro.cc/join#a%20b+K7Q-M2XPD",
+            "https://thro.cc/join#a%2Fb+K7Q-M2XPD",
+            "https://thro.cc/join#%FF+K7Q-M2XPD",
+            "https://example.com/join#voice.example.com+K7Q-M2XPD",
+            "throcc://other#voice.example.com+K7Q-M2XPD",
+        ] {
+            assert_eq!(bad.parse::<InviteLink>(), Err(BadInviteLink), "{bad}");
+        }
     }
 
     #[test]

@@ -10,7 +10,7 @@ The wire types that the server and clients share. It is plain data and pure func
 | `frame.rs` | The 13-byte media header, its flags and the datagram size budget |
 | `ids.rs` | `UserId`, `RoomId`, `MediaId`, `Epoch`, `Hash` and `Role` |
 | `permissions.rs` | What each role may do to which other roles. The server enforces it; clients offer only what it allows |
-| `invite.rs` | Invite codes such as `K7Q-M2XPD` in Crockford base32 |
+| `invite.rs` | Invite codes such as `K7Q-M2XPD` in Crockford base32, and the invite links that carry one with its server address |
 | `fingerprint.rs` | Server and identity fingerprints (SHA-256 of an SPKI) |
 | `transport.rs` | QUIC settings both sides use, and the connection close codes |
 | `limits.rs` | The limits both sides hold to: 30 people and 5 screen shares in a room, 50 rooms and 250 people signed in on a server, with room for 10 admins past that, server addresses up to 255 bytes and the newest 8 signed addresses per account. The server enforces them; clients refuse a server that goes past them |

@@ -8196,6 +8196,7 @@ dependencies = [
 name = "throcc-proto"
 version = "0.1.0"
 dependencies = [
+ "percent-encoding",
  "postcard",
  "proptest",
  "serde",
