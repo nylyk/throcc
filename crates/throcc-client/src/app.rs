@@ -31,9 +31,10 @@ use throcc_client_core::state::{
 use throcc_client_core::theme as core_theme;
 use throcc_client_core::verified::VerifiedStore;
 use throcc_proto::ids::{Hash, Role, RoomId, UserId};
-use throcc_proto::invite::{self, InviteCode};
+use throcc_proto::invite::{self, InviteCode, InviteLink};
 use throcc_proto::messages::User;
 use throcc_proto::{Fingerprint, permissions};
+use tokio::sync::mpsc::UnboundedReceiver;
 
 mod transfer;
 
@@ -472,6 +473,8 @@ pub struct ThroccApp {
     pub join_error: Option<String>,
     /// Whether adding a server asks for an invite code, as its server doesn't know us.
     pub needs_invite: bool,
+    /// An invite link opened before onboarding was through, filled in once it is.
+    pending_invite: Option<InviteLink>,
     pub start_over: StartOver,
     pub exporting: Option<Exporting>,
     /// Whether an export is being sealed, which may wait on a keychain prompt.
@@ -651,6 +654,7 @@ impl ThroccApp {
             sign_ins: SignIns::default(),
             join_error: None,
             needs_invite: false,
+            pending_invite: None,
             start_over: StartOver::NotStarted,
             exporting: None,
             preparing_export: false,
@@ -1688,6 +1692,11 @@ impl ThroccApp {
             _ => {}
         }
         self.screen = screen;
+        if screen == Screen::Join
+            && let Some(link) = self.pending_invite.take()
+        {
+            self.open_invite(link, window, cx);
+        }
         cx.notify();
     }
 
@@ -1919,6 +1928,45 @@ impl ThroccApp {
         set_field(&self.address, address, false, window, cx);
         set_field(&self.code, "", true, window, cx);
         self.set_dialog(Some(Dialog::AddServer), cx);
+    }
+
+    /// Opens each link handed to this instance, and comes to the front for each later launch.
+    pub fn receive_links(
+        &mut self,
+        mut links: UnboundedReceiver<Option<String>>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn_in(window, async move |this, cx| {
+            while let Some(link) = links.recv().await {
+                this.update_in(cx, |app, window, cx| {
+                    window.activate_window();
+                    cx.activate(true);
+                    if let Some(link) = link {
+                        app.open_invite_link(&link, window, cx);
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Fills in Add Server from an invite `link`, once onboarding is through.
+    pub fn open_invite_link(&mut self, link: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match link.parse() {
+            Ok(link) => self.open_invite(link, window, cx),
+            Err(e) => tracing::warn!("ignored a link: {e}"),
+        }
+    }
+
+    fn open_invite(&mut self, link: InviteLink, window: &mut Window, cx: &mut Context<Self>) {
+        if self.screen == Screen::Onboarding || self.start_over == StartOver::Running {
+            self.pending_invite = Some(link);
+            return;
+        }
+        self.ask_for_invite(&link.address, window, cx);
+        set_field(&self.code, link.code.to_string(), true, window, cx);
     }
 
     /// Looks for the identity again after the keychain seemed to have lost it, as the human

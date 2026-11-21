@@ -8,6 +8,8 @@ mod hotkey;
 mod idle_inhibit;
 mod keep_display_awake;
 mod popout;
+#[cfg(any(target_os = "linux", windows))]
+mod single_instance;
 mod theme;
 mod updates;
 mod video;
@@ -43,6 +45,19 @@ fn main() {
         })
         .unwrap_or(size(px(1280.), px(800.)));
     let screen = value_of("--screen");
+    let launch_link = args
+        .iter()
+        .skip(1)
+        .find(|a| a.starts_with("throcc://"))
+        .cloned();
+    let (handed, links) = tokio::sync::mpsc::unbounded_channel();
+    #[cfg(any(target_os = "linux", windows))]
+    if !mock && !single_instance::claim(launch_link.as_deref(), handed.clone()) {
+        return;
+    }
+    if let Some(link) = launch_link {
+        handed.send(Some(link)).ok();
+    }
     let (mut settings, settings_problem) = if mock {
         let mut settings = Settings::default();
         settings.appearance.translucent_sidebar = Some(false);
@@ -60,47 +75,51 @@ fn main() {
             std::process::exit(1);
         }
     };
-    gpui_platform::application()
-        .with_assets(assets::Assets)
-        .run(move |cx: &mut App| {
-            gpui_component::init(cx);
-            theme::apply(&settings.appearance, cx);
-            app::bind_keys(cx);
-            let bounds = Bounds::centered(None, window_size, cx);
-            let options = common::app_titlebar(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(720.), px(480.))),
-                    ..Default::default()
-                },
-                point(px(8.), (theme::HEADER_HEIGHT - px(14.)) / 2.),
-                true,
-            );
-            let opened = cx.open_window(options, |window, cx| {
-                window.set_window_title("throcc");
-                let view = cx.new(|cx| {
-                    app::ThroccApp::new(mock, settings, settings_problem, audio, window, cx)
-                });
-                if let Some(screen) = &screen {
-                    view.update(cx, |app, cx| app.show_sample(screen, window, cx));
-                }
-                cx.new(|cx| Root::new(view, window, cx))
-            });
-            match opened {
-                Ok(main_window) => {
-                    let main_window = main_window.window_id();
-                    cx.on_window_closed(move |cx, closed| {
-                        if closed == main_window {
-                            cx.quit();
-                        }
-                    })
-                    .detach();
-                }
-                Err(e) => {
-                    eprintln!("could not open a window: {e}");
-                    cx.quit();
-                }
+    let application = gpui_platform::application().with_assets(assets::Assets);
+    application.on_open_urls(move |urls| {
+        for url in urls {
+            handed.send(Some(url)).ok();
+        }
+    });
+    application.run(move |cx: &mut App| {
+        gpui_component::init(cx);
+        theme::apply(&settings.appearance, cx);
+        app::bind_keys(cx);
+        let bounds = Bounds::centered(None, window_size, cx);
+        let options = common::app_titlebar(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(720.), px(480.))),
+                ..Default::default()
+            },
+            point(px(8.), (theme::HEADER_HEIGHT - px(14.)) / 2.),
+            true,
+        );
+        let opened = cx.open_window(options, |window, cx| {
+            window.set_window_title("throcc");
+            let view = cx
+                .new(|cx| app::ThroccApp::new(mock, settings, settings_problem, audio, window, cx));
+            if let Some(screen) = &screen {
+                view.update(cx, |app, cx| app.show_sample(screen, window, cx));
             }
-            cx.activate(true);
+            view.update(cx, |app, cx| app.receive_links(links, window, cx));
+            cx.new(|cx| Root::new(view, window, cx))
         });
+        match opened {
+            Ok(main_window) => {
+                let main_window = main_window.window_id();
+                cx.on_window_closed(move |cx, closed| {
+                    if closed == main_window {
+                        cx.quit();
+                    }
+                })
+                .detach();
+            }
+            Err(e) => {
+                eprintln!("could not open a window: {e}");
+                cx.quit();
+            }
+        }
+        cx.activate(true);
+    });
 }

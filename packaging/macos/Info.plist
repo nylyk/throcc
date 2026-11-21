@@ -22,6 +22,17 @@
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>cc.thro.throcc</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>throcc</string>
+            </array>
+        </dict>
+    </array>
     <key>NSMicrophoneUsageDescription</key>
     <string>throcc sends your voice to the people in your room.</string>
 </dict>

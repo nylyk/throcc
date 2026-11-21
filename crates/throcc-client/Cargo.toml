@@ -43,6 +43,7 @@ objc2-foundation.workspace = true
 raw-window-handle.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+tokio = { workspace = true, features = ["io-util"] }
 windows.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

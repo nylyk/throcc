@@ -30,6 +30,12 @@ Type: files; Name: "{app}\*.dll"
 [Files]
 Source: "{#Build}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 
+[Registry]
+Root: HKA; Subkey: "Software\Classes\throcc"; ValueType: string; ValueData: "URL:throcc"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\throcc"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\throcc\DefaultIcon"; ValueType: string; ValueData: "{app}\throcc.exe,0"
+Root: HKA; Subkey: "Software\Classes\throcc\shell\open\command"; ValueType: string; ValueData: """{app}\throcc.exe"" ""%1"""
+
 [Icons]
 Name: "{autoprograms}\throcc"; Filename: "{app}\throcc.exe"
 

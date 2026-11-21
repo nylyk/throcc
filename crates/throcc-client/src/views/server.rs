@@ -7,6 +7,7 @@ use gpui_component::input::Input;
 use throcc_client_core::client::UiCommand;
 use throcc_client_core::state::KeyTrust;
 use throcc_proto::ids::Role;
+use throcc_proto::invite::InviteLink;
 use throcc_proto::{Fingerprint, permissions};
 
 use super::common::{
@@ -172,6 +173,13 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let pictures = app.pictures_of_people(cx);
     let role = app.state.role;
     let invite = app.invite.clone();
+    let link = invite.as_ref().and_then(|code| {
+        let link = InviteLink {
+            address: app.connected_server()?.address.clone(),
+            code: code.parse().ok()?,
+        };
+        Some(link.to_string())
+    });
     let users = app.users.clone();
     let name_of = |id| users.iter().find(|u| u.id == id).map(|u| u.name.clone());
     let invite_card = card()
@@ -184,6 +192,7 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                 .as_ref()
                 .map(|code| mono(code.clone()).typeset(theme::TITLE_1)),
         )
+        .children(link.clone().map(|link| caption(link).truncate()))
         .children(invite.is_some().then(|| {
             caption(match role.and_then(permissions::invite_cap) {
                 Some(cap) => format!("Single use, expires in 24 hours. You can make {cap} a day."),
@@ -198,6 +207,13 @@ fn members(app: &mut ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
                     secondary("copy-invite", "Copy").on_click(cx.listener(move |_, _, _, cx| {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.clone()));
                     }))
+                }))
+                .children(link.map(|link| {
+                    secondary("copy-invite-link", "Copy Link").on_click(cx.listener(
+                        move |_, _, _, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(link.clone()));
+                        },
+                    ))
                 }))
                 .child(
                     primary(
