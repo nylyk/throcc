@@ -50,7 +50,9 @@ impl ThroccApp {
                 format!("Couldn’t export your identity: {e:#}")
             });
             let shown = match export {
-                Ok(export) if to_file => save_export(&this, cx, export).await,
+                Ok(export) if to_file => save_export(&this, cx, &export)
+                    .await
+                    .map(|saved| saved.then_some((export, true))),
                 Ok(export) => Ok(Some((export, false))),
                 Err(problem) => Err(problem),
             };
@@ -225,12 +227,13 @@ impl ThroccApp {
     }
 }
 
-/// Asks where to save `export`, then writes it there. `None` when the user cancelled.
+/// Asks where to save `export`, then writes it there unless our screen is shared by then.
+/// `false` when nothing was written.
 async fn save_export(
     this: &gpui::WeakEntity<ThroccApp>,
     cx: &mut gpui::AsyncApp,
-    export: Arc<Export>,
-) -> Result<Option<(Arc<Export>, bool)>, String> {
+    export: &Export,
+) -> Result<bool, String> {
     let chosen = this
         .update(cx, |_, cx| {
             let home = std::env::home_dir().unwrap_or_default();
@@ -238,14 +241,20 @@ async fn save_export(
         })
         .map_err(|e| e.to_string())?;
     let Ok(Ok(Some(path))) = chosen.await else {
-        return Ok(None);
+        return Ok(false);
     };
+    if this
+        .update(cx, |app, cx| app.refuse_export_while_sharing(cx))
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(false);
+    }
     let sealed = export.sealed().to_vec();
     cx.background_executor()
         .spawn(async move { std::fs::write(&path, sealed) })
         .await
         .map_err(|e| format!("Couldn’t save the export: {e}"))?;
-    Ok(Some((export, true)))
+    Ok(true)
 }
 
 /// The file at `path`, or `None` when it is larger than any export.

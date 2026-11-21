@@ -746,39 +746,35 @@ fn export_identity(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let Some(exporting) = &app.exporting else {
         return div().into_any_element();
     };
-    if let Some(code_qr) = exporting.code_qr.clone() {
-        return body("Scan This Code on the New Device")
+    if let (None, Some(qr)) = (&exporting.code_qr, exporting.qr.clone()) {
+        return body("Scan with the New Device")
+            .child(description("On the new device, choose Import from Another Device and scan this QR code. Once it’s done, choose Next."))
+            .child(div().flex().justify_center().child(qr_code(qr)))
+            .child(
+                actions("Cancel", cx).child(
+                    primary("show-export-code", "Next")
+                        .on_click(cx.listener(|app, _, _, cx| app.show_export_code(cx))),
+                ),
+            )
+            .into_any_element();
+    }
+    let code = mono(exporting.export.code());
+    let code_step = match exporting.code_qr.clone() {
+        Some(code_qr) => body("Scan This Code on the New Device")
             .child(div().flex().justify_center().child(qr_code(code_qr)))
             .child(
                 div()
                     .flex()
                     .justify_center()
-                    .child(mono(exporting.export.code()).typeset(theme::TITLE_1)),
-            )
-            .child(description(
-                "The code unlocks the export. Do not share it with anyone else.",
-            ))
-            .child(div().flex().justify_end().child(close_button("Done", cx)))
-            .into_any_element();
-    }
-    let Some(qr) = exporting.qr.clone() else {
-        return body("Type This Code on the New Device")
-            .child(mono(exporting.export.code()).typeset(theme::LARGE_TITLE))
-            .child(description(
-                "The code unlocks the export. Do not share it with anyone else.",
-            ))
-            .child(div().flex().justify_end().child(close_button("Done", cx)))
-            .into_any_element();
-    };
-    body("Scan with the New Device")
-        .child(description("On the new device, choose Import from Another Device and scan this QR code. Once it’s done, choose Next."))
-        .child(div().flex().justify_center().child(qr_code(qr)))
-        .child(
-            actions("Cancel", cx).child(
-                primary("show-export-code", "Next")
-                    .on_click(cx.listener(|app, _, _, cx| app.show_export_code(cx))),
+                    .child(code.typeset(theme::TITLE_1)),
             ),
-        )
+        None => body("Type This Code on the New Device").child(code.typeset(theme::LARGE_TITLE)),
+    };
+    code_step
+        .child(description(
+            "The code unlocks the export. Do not share it with anyone else.",
+        ))
+        .child(div().flex().justify_end().child(close_button("Done", cx)))
         .into_any_element()
 }
 

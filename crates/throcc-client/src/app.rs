@@ -804,7 +804,7 @@ impl ThroccApp {
         self.client = Some(client);
         self.joining = false;
         self.join_error = None;
-        self.dialog = None;
+        self.set_dialog(None, cx);
         if self.join_asked_in_settings || !matches!(self.screen, Screen::Settings(_)) {
             self.screen = Screen::Main;
             window.focus(&self.root_focus, cx);
@@ -841,7 +841,7 @@ impl ThroccApp {
                 if let Some(Dialog::RoomPassword { room, .. }) = self.dialog
                     && self.state.current.as_ref().is_some_and(|c| c.room == room)
                 {
-                    self.dialog = None;
+                    self.set_dialog(None, cx);
                 }
                 self.close_unwatched_popouts(cx);
                 self.sync_keep_display_awake(window, cx);
@@ -1356,9 +1356,9 @@ impl ThroccApp {
         }
     }
 
-    fn show_identity_missing(&mut self) {
+    fn show_identity_missing(&mut self, cx: &mut Context<Self>) {
         self.start_over = StartOver::NotStarted;
-        self.dialog = Some(Dialog::IdentityMissing);
+        self.set_dialog(Some(Dialog::IdentityMissing), cx);
     }
 
     /// Opens `user`'s profile, or the person menu at `position` for someone blocked.
@@ -1378,13 +1378,13 @@ impl ThroccApp {
 
     /// Opens `user`'s profile, or our own when `user` is us.
     pub fn open_profile(&mut self, user: UserId, cx: &mut Context<Self>) {
-        self.dialog = Some(if self.state.me == Some(user) {
+        let profile = if self.state.me == Some(user) {
             Dialog::OwnProfile
         } else {
             Dialog::Profile(SafetyCheck::new(user))
-        });
+        };
+        self.set_dialog(Some(profile), cx);
         self.follow_presented_key();
-        cx.notify();
     }
 
     /// Lets the user mark the person in the profile again, now comparing the number
@@ -1656,10 +1656,12 @@ impl ThroccApp {
         match screen {
             Screen::Onboarding => {
                 self.profile_form.reset();
+                self.transfer_problem = None;
                 set_field(&self.name, "", true, window, cx);
             }
             Screen::Settings(SettingsPage::Profile) => {
                 self.profile_form.reset();
+                self.transfer_problem = None;
                 let name = self.settings.profile.as_ref().map(|p| p.name.clone());
                 set_field(&self.name, name.unwrap_or_default(), false, window, cx);
             }
@@ -1822,9 +1824,13 @@ impl ThroccApp {
             }
         };
         if self.client.is_some() {
-            let dialog = self.dialog.take();
+            let kept = (
+                self.dialog.take(),
+                self.exporting.take(),
+                self.importing.take(),
+            );
             self.disconnect(window, cx);
-            self.dialog = dialog;
+            (self.dialog, self.exporting, self.importing) = kept;
         }
         if self.mock {
             let client = MockClient::at(&address, self.verified.clone(), self.blocked.clone());
@@ -1880,13 +1886,16 @@ impl ThroccApp {
                             app.joining = false;
                             match e.pin_mismatch() {
                                 Some((expected, actual)) => {
-                                    app.dialog = Some(Dialog::PinMismatch {
-                                        address: address.clone(),
-                                        expected,
-                                        actual,
-                                    });
+                                    app.set_dialog(
+                                        Some(Dialog::PinMismatch {
+                                            address: address.clone(),
+                                            expected,
+                                            actual,
+                                        }),
+                                        cx,
+                                    );
                                 }
-                                None if e.identity_missing() => app.show_identity_missing(),
+                                None if e.identity_missing() => app.show_identity_missing(cx),
                                 None if e.needs_invite() => {
                                     app.ask_for_invite(&address, window, cx)
                                 }
@@ -1967,7 +1976,7 @@ impl ThroccApp {
         self.keep_display_awake = None;
         self.invite = None;
         self.users.clear();
-        self.dialog = None;
+        self.set_dialog(None, cx);
         self.person_menu = None;
         self.focus = None;
         self.preview_self = false;
@@ -2027,11 +2036,11 @@ impl ThroccApp {
     /// welcome, join, joinfailed, lost, personmenu, addserver, removeserver, room, testpattern,
     /// unwatched, alone, emptylobby, focus, fullscreen, popout, slow, slowpopout, slowfullscreen,
     /// lagging, share, connection, person, personverified, personchanged, keychange, ownprofile,
-    /// addserverinvite, pinmismatch, settings, appearance, verified, blocked, blockedmenu, blockedpeople, exportqr,
-    /// exportcode, exportcodeqr, importcode, about,
-    /// update, reconnect, elsewhere, newroom, editroom, roompassword, deleteroom, profile,
-    /// profileerror, server, keys, members, invites, removeuser, leaveserver, identitymissing,
-    /// identityback or startedover. Any other name leaves the lobby.
+    /// addserverinvite, pinmismatch, settings, appearance, verified, blocked, blockedmenu,
+    /// blockedpeople, exportqr, exportcode, exportcodeqr, importcode, about, update, reconnect,
+    /// elsewhere, newroom, editroom, roompassword, deleteroom, profile, profileerror, server,
+    /// keys, members, invites, removeuser, leaveserver, identitymissing, identityback or
+    /// startedover. Any other name leaves the lobby.
     pub fn show_sample(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         let room = RoomId(1);
         let joined = |app: &mut Self| {
@@ -2316,11 +2325,10 @@ impl ThroccApp {
                 self.settings.profile = None;
                 self.profile_avatar = None;
                 self.show_screen(Screen::Onboarding, window, cx);
-                let file = throcc_client_core::transfer::sample_export()
-                    .sealed()
-                    .to_vec();
                 self.importing = Some(Importing {
-                    file: file.into(),
+                    file: throcc_client_core::transfer::sample_export()
+                        .sealed()
+                        .into(),
                     running: false,
                     error: Some(throcc_client_core::transfer::ImportError::WrongCode.to_string()),
                 });
@@ -2329,17 +2337,17 @@ impl ThroccApp {
             }
             "identitymissing" => {
                 offline(self);
-                self.show_identity_missing();
+                self.show_identity_missing(cx);
             }
             "identityback" => {
                 offline(self);
-                self.show_identity_missing();
+                self.show_identity_missing(cx);
                 self.start_over = StartOver::Done(StartedOver::Recovered);
             }
             "startedover" => {
                 offline(self);
                 self.known_servers.clear();
-                self.show_identity_missing();
+                self.show_identity_missing(cx);
                 self.start_over = StartOver::Done(StartedOver::NewIdentity);
             }
             _ => {}
