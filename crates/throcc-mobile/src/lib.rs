@@ -29,7 +29,7 @@ use throcc_client_core::state::{self as core_state, BLOCKED_NAME, State as CoreS
 use throcc_client_core::theme;
 use throcc_client_core::verified::VerifiedStore;
 use throcc_proto::ids::{Hash, UserId};
-use throcc_proto::invite::InviteCode;
+use throcc_proto::invite::{InviteCode, InviteLink};
 use throcc_proto::messages::{MAX_AVATAR_BYTES, MAX_NAME_CHARS, MAX_PASSWORD_CHARS};
 use throcc_proto::permissions;
 use tokio::sync::broadcast;
@@ -280,6 +280,13 @@ pub struct Limits {
     pub name_chars: u32,
     pub password_chars: u32,
     pub picture_bytes: u32,
+}
+
+/// The server address and invite code an invite link carries.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct Invite {
+    pub address: String,
+    pub code: String,
 }
 
 /// What a role may do on its server.
@@ -1064,6 +1071,23 @@ pub fn is_valid_password(typed: String) -> bool {
 #[uniffi::export]
 pub fn is_invite_code(typed: String) -> bool {
     parse_invite(&typed).is_ok()
+}
+
+/// The invite `link` opened, if it is one.
+#[uniffi::export]
+pub fn parse_invite_link(link: String) -> Option<Invite> {
+    let link: InviteLink = link.parse().ok()?;
+    Some(Invite {
+        address: link.address,
+        code: link.code.to_string(),
+    })
+}
+
+/// The link to share for invite `code` to the server at `address`.
+#[uniffi::export]
+pub fn invite_link(address: String, code: String) -> Option<String> {
+    let code = parse_invite(&code).ok()?;
+    Some(InviteLink { address, code }.to_string())
 }
 
 /// A key or fingerprint as groups of four hex digits.
