@@ -473,6 +473,11 @@ pub fn bare_endpoint(identity_dir: &Path, transport: quinn::TransportConfig) -> 
     quinn::Endpoint::server(config, "127.0.0.1:0".parse().unwrap()).unwrap()
 }
 
+pub fn with_jpeg_start(mut bytes: Vec<u8>) -> Vec<u8> {
+    bytes[..3].copy_from_slice(&[0xff, 0xd8, 0xff]);
+    bytes
+}
+
 /// Which way a relayed packet travels.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Toward {
@@ -480,12 +485,13 @@ pub enum Toward {
     Client,
 }
 
-/// A UDP relay in front of `server` for one client. Returns its address; it passes on each
-/// packet that `forward` accepts.
-/// Room for bursts such as a keyframe and its copy back to back: with the default buffer the
-/// kernel drops what the relay can't read in time, on top of any loss a test asks for.
+/// The relay's receive buffer holds bursts such as a keyframe and its copy back to back. With
+/// the default buffer the kernel drops what the relay can't read in time, on top of any loss a
+/// test asks for.
 const RELAY_BUFFER: usize = 4 * 1024 * 1024;
 
+/// A UDP relay in front of `server` for one client. Returns its address; it passes on each
+/// packet that `forward` accepts.
 pub async fn relay(
     server: &str,
     mut forward: impl FnMut(Toward, &[u8]) -> bool + Send + 'static,

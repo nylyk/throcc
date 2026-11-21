@@ -540,8 +540,7 @@ async fn picture_uploads_are_rate_limited() {
     let alice = admin(&server).await;
     let mut uploaded = 0;
     let last = loop {
-        let mut picture = vec![uploaded as u8; MAX_AVATAR_BYTES];
-        picture[..3].copy_from_slice(&[0xff, 0xd8, 0xff]);
+        let picture = with_jpeg_start(vec![uploaded as u8; MAX_AVATAR_BYTES]);
         match alice.request(Request::SetServerAvatar(Some(picture))).await {
             Response::Ok if uploaded < 100 => uploaded += 1,
             other => break other,
@@ -843,8 +842,7 @@ async fn a_member_who_stops_reading_pictures_stops_being_read() {
     const FETCHES: u32 = 40;
     let server = start_server();
     let alice = admin(&server).await;
-    let mut picture: Vec<u8> = (0..MAX_AVATAR_BYTES).map(|i| (i % 251) as u8).collect();
-    picture[..3].copy_from_slice(&[0xff, 0xd8, 0xff]);
+    let picture = with_jpeg_start((0..MAX_AVATAR_BYTES).map(|i| (i % 251) as u8).collect());
     let hash = Hash::of(&picture);
     let set = alice.request(Request::SetServerAvatar(Some(picture))).await;
     assert_eq!(set, Response::Ok);

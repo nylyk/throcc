@@ -25,6 +25,7 @@ use tokio::runtime::Runtime;
 
 use common::{
     ProcessLikeServer, client_as, ilse, named, share_1080p60, sharing, wait_for_state_within,
+    with_jpeg_start,
 };
 
 /// A server's address and an admin invite. It runs until the returned handle drops.
@@ -469,8 +470,7 @@ fn only_admins_name_the_server_and_everyone_sees_it() {
     let (bob, _b) = client(&address, &code);
     assert_eq!(bob.state().server.clone().unwrap().title(), "Moss Co-op");
 
-    let mut picture: Vec<u8> = (0..1500u32).map(|i| (i * 3) as u8).collect();
-    picture[..3].copy_from_slice(&[0xff, 0xd8, 0xff]);
+    let picture = with_jpeg_start((0..1500u32).map(|i| (i * 3) as u8).collect());
     alice.command(UiCommand::SetServerProfile {
         name: None,
         picture: Some(Some(picture.clone())),
@@ -502,8 +502,7 @@ fn only_admins_name_the_server_and_everyone_sees_it() {
             .is_some_and(|s| s.name.is_none() && s.avatar == Some(hash))
     });
 
-    let mut other: Vec<u8> = (0..900u32).map(|i| (i * 5) as u8).collect();
-    other[..3].copy_from_slice(&[0xff, 0xd8, 0xff]);
+    let other = with_jpeg_start((0..900u32).map(|i| (i * 5) as u8).collect());
     alice.command(UiCommand::SetServerProfile {
         name: Some(Some("Fern".into())),
         picture: Some(Some(other)),
