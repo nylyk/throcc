@@ -16,8 +16,7 @@ pub const MAX_PASSWORD_CHARS: usize = 128;
 /// Whether `address` could name a server: 1 to [`MAX_ADDRESS_BYTES`] bytes without
 /// whitespace or control characters.
 pub fn valid_address(address: &str) -> bool {
-    !address.is_empty()
-        && address.len() <= MAX_ADDRESS_BYTES
+    (1..=MAX_ADDRESS_BYTES).contains(&address.len())
         && !address.chars().any(|c| c.is_control() || c.is_whitespace())
 }
 
