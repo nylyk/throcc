@@ -184,7 +184,7 @@ private struct InvitesPage: View {
                         ShareLink(item: link) { IconLabel("Share…", symbol: "square.and.arrow.up") }
                     }
                 }
-                Button(model.invite == nil ? "Create Code" : "Create New Code") {
+                Button(model.invite == nil ? "Create Code" : "New Code") {
                     model.core.command(command: .createInvite)
                 }
             } footer: {
