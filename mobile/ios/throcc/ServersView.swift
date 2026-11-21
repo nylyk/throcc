@@ -77,14 +77,15 @@ struct AddServerView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
     @State private var address: String
-    @State private var code = ""
+    @State private var code: String
     @State private var problem: String?
     @State private var joining = false
     @State private var needsInvite: Bool
 
-    init(address: String, needsInvite: Bool) {
+    init(address: String, needsInvite: Bool, code: String) {
         _address = State(initialValue: address)
         _needsInvite = State(initialValue: needsInvite)
+        _code = State(initialValue: code)
     }
 
     var body: some View {

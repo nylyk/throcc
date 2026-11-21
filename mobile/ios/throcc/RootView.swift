@@ -44,6 +44,7 @@ struct RootView: View {
         }
         .modifier(Themed())
         .onGeometryChange(for: CGSize.self, of: \.size) { _ in Turning.screenChanged() }
+        .onOpenURL { model.open(link: $0) }
         // An iPad leaves changes made before the scene is first active off the screen.
         .task(id: scenePhase == .active) {
             if scenePhase == .active, !sampleShown, let sample {
@@ -62,7 +63,8 @@ struct RootView: View {
     @ViewBuilder
     private func content(of sheet: Sheet) -> some View {
         switch sheet {
-        case .addServer(let address, let needsInvite): AddServerView(address: address, needsInvite: needsInvite)
+        case .addServer(let address, let needsInvite, let code):
+            AddServerView(address: address, needsInvite: needsInvite, code: code)
         case .settings: SettingsView()
         case .newRoom: RoomEditor(room: nil)
         case .editRoom(let room): RoomEditor(room: room)

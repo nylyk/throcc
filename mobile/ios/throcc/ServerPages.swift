@@ -180,7 +180,9 @@ private struct InvitesPage: View {
                     } label: {
                         IconLabel("Copy", symbol: "doc.on.doc")
                     }
-                    ShareLink(item: code) { IconLabel("Share…", symbol: "square.and.arrow.up") }
+                    if let address = model.connectedAddress, let link = inviteLink(address: address, code: code) {
+                        ShareLink(item: link) { IconLabel("Share…", symbol: "square.and.arrow.up") }
+                    }
                 }
                 Button(model.invite == nil ? "Create Code" : "Create New Code") {
                     model.core.command(command: .createInvite)

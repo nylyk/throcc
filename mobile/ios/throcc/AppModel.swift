@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum Sheet: Hashable, Identifiable {
-    case addServer(address: String, needsInvite: Bool = false)
+    case addServer(address: String, needsInvite: Bool = false, code: String = "")
     case settings
     case newRoom
     case editRoom(Room)
@@ -61,7 +61,9 @@ final class AppModel {
     let core: Core
     /// Why what this install keeps couldn't be read, where it couldn't.
     let storeProblems: StoreProblems
-    private(set) var profile: Profile?
+    private(set) var profile: Profile? {
+        didSet { openPendingInvite() }
+    }
     private(set) var voice: Voice
     let themes: [ThemeChoice]
     private(set) var pickedTheme: ThemeChoice
@@ -113,6 +115,8 @@ final class AppModel {
     @ObservationIgnored private let themeSaves = DispatchQueue(label: "cc.thro.throcc.theme-saves", qos: .utility)
     /// Waits for the Custom theme's colours to rest before it saves them.
     @ObservationIgnored private var customThemeSave: Task<Void, Never>?
+    /// An invite link opened before onboarding was through, filled in once it is.
+    @ObservationIgnored private var pendingInvite: Invite?
     /// The room's sound, which only a real server has.
     @ObservationIgnored private var callAudio: CallAudio?
 
@@ -135,6 +139,19 @@ final class AppModel {
         if !mock {
             callAudio = CallAudio(core: core) { [weak self] in self?.notice = $0 }
         }
+    }
+
+    /// Fills in Add Server from the invite `link`, once onboarding is through.
+    func open(link: URL) {
+        guard let invite = parseInviteLink(link: link.absoluteString) else { return }
+        pendingInvite = invite
+        openPendingInvite()
+    }
+
+    private func openPendingInvite() {
+        guard profile != nil, let invite = pendingInvite else { return }
+        pendingInvite = nil
+        sheet = .addServer(address: invite.address, needsInvite: true, code: invite.code)
     }
 
     /// Runs `action`, and shows why it failed as a notice.
