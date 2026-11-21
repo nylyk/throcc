@@ -2,6 +2,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use throcc_proto::messages::valid_name;
 
 use crate::json_file;
@@ -100,11 +101,15 @@ impl Default for VoiceSettings {
 }
 
 impl json_file::Format for Settings {
-    const MIGRATIONS: &'static [json_file::Migration] = &[|v1| {
-        if v1.get("check_for_updates") == Some(&true.into()) {
-            v1.remove("check_for_updates");
-        }
-    }];
+    const MIGRATIONS: &'static [json_file::Migration] = &[to_v2];
+}
+
+/// Moves version 1 to 2, where an update check that is on counts as not chosen yet, since
+/// version 1 turned it on by default.
+fn to_v2(v1: &mut Map<String, Value>) {
+    if v1.get("check_for_updates") == Some(&true.into()) {
+        v1.remove("check_for_updates");
+    }
 }
 
 impl Settings {
