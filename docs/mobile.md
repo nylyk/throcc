@@ -153,14 +153,14 @@ Pictures are JPEG only, which keeps the payload small: a 128 px JPEG is around 6
 
 ## Invite links
 
-- Links are `https://thro.cc/join#<address+code>`. The secret stays in the fragment, which browsers never send.
+- Links are `https://thro.cc/join#<address+code>`, such as `https://thro.cc/join#voice.example.com:8476+K7Q-M2XPD`. The address is percent-encoded outside the unreserved characters and `:`, so an IPv6 address reads `%5B2001:db8::1%5D:8476`; `+` never appears in an address, so it splits the two. `throcc_proto::invite::InviteLink` reads and makes them, and the web page applies the same rules. The secret stays in the fragment, which browsers never send.
 - The mobile apps open them as verified links: Android App Links through `/.well-known/assetlinks.json`, iOS Universal Links through `apple-app-site-association`, both on thro.cc. No other app can claim them, unlike a custom scheme.
 - On desktop, `thro.cc/join` is a static page that opens `throcc://join#...` and otherwise offers downloads. It has a strict CSP and no third-party scripts, because anything running on it can read the fragment.
 - Verified links don't open the app from in-app browsers or pasted URLs. On a phone, the page then shows the address and code with copy buttons, and store links.
 - The desktop client registers `throcc://`: `CFBundleURLTypes` on macOS, the installer's registry entries on Windows, `x-scheme-handler/throcc` in the flatpak's desktop file.
 - The desktop client runs as a single instance. A link opened while it runs goes to the running app: macOS delivers it as an Apple event; on Windows and Linux a second process hands the link over through a local socket and exits. A second process that signed in would kick the first.
 - The desktop's create-invite dialog shows the link next to the code. Mobile shows it with the platform share sheet.
-- Opening a link fills in the join screen. It never joins without a tap.
+- Opening a link fills in the join screen: Add Server at its invite step, with the address and code. It never joins without a tap. A link opened before onboarding is through waits until it is. A server we already joined takes the invite too, which enrolls the same identity again.
 
 ## Phases
 
