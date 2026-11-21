@@ -45,6 +45,12 @@ struct RootView: View {
         .modifier(Themed())
         .onGeometryChange(for: CGSize.self, of: \.size) { _ in Turning.screenChanged() }
         .onOpenURL { model.open(link: $0) }
+        // A link scanned by the Camera or read from an NFC tag skips onOpenURL.
+        .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
+            if let link = activity.webpageURL {
+                model.open(link: link)
+            }
+        }
         // An iPad leaves changes made before the scene is first active off the screen.
         .task(id: scenePhase == .active) {
             if scenePhase == .active, !sampleShown, let sample {
