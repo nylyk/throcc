@@ -107,6 +107,7 @@ struct ShareFullscreen: View {
             if let person, let share = person.sharing {
                 ShareSurface(user: user, handle: surface)
                     .aspectRatio(CGFloat(share.aspect), contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .ignoresSafeArea()
                 Loading(user: user)
                 ShareOverlay(person: person, share: share, fullscreen: true, surface: surface, controls: $controls)
