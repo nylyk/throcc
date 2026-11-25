@@ -24,6 +24,7 @@ use objc2_core_video::CVPixelBuffer;
 use objc2_foundation::NSError;
 #[cfg(target_os = "macos")]
 use objc2_foundation::NSString;
+use throcc_video::Turn;
 use throcc_video::frame::{VideoFrame, share_size};
 
 use super::clock::{ShareClock, clock_nanos};
@@ -44,8 +45,8 @@ const RING: usize = 4;
 const AUDIO_RING: usize = 32;
 const NANOS: i128 = 1_000_000_000;
 
-/// A captured picture with its host time in nanoseconds.
-type Picture = (CFRetained<CVPixelBuffer>, i64);
+/// A captured picture with its host time in nanoseconds, and how it is turned.
+type Picture = (CFRetained<CVPixelBuffer>, i64, Turn);
 /// A captured audio buffer with its host time in nanoseconds.
 type Sound = (CFRetained<CMSampleBuffer>, i64);
 
@@ -66,6 +67,12 @@ pub struct AppleCapture {
     ended: Arc<AtomicBool>,
     /// Counts from host time, in nanoseconds.
     clock: ShareClock,
+    /// Turns sideways pictures upright, once one came.
+    #[cfg(target_os = "ios")]
+    turner: Option<throcc_video::Turner>,
+    /// The upright size of the last picture taken.
+    #[cfg(target_os = "ios")]
+    shape: Option<(usize, usize)>,
 }
 
 // SAFETY: the stream, its output and their queues are Objective-C objects ScreenCaptureKit
@@ -85,7 +92,16 @@ fn capture(
     shape: (usize, usize),
     config: CaptureConfig,
 ) -> Result<AppleCapture, CaptureError> {
-    let (width, height) = share_size(shape, (config.width, config.height));
+    // iOS can't resize a running stream and turns sideways pictures upright itself, so it
+    // captures at a size that fits the share's box either way round.
+    #[cfg(target_os = "ios")]
+    let bound = {
+        let side = config.width.max(config.height);
+        (side, side)
+    };
+    #[cfg(target_os = "macos")]
+    let bound = (config.width, config.height);
+    let (width, height) = share_size(shape, bound);
     let stream_config = SCStreamConfiguration::new();
     stream_config.set_width(width);
     stream_config.set_height(height);
@@ -143,6 +159,10 @@ fn capture(
         ended,
         // CLOCK_UPTIME_RAW is the clock mach_absolute_time counts, which the host clock is.
         clock: ShareClock::new(NANOS as i64, || clock_nanos(libc::CLOCK_UPTIME_RAW)),
+        #[cfg(target_os = "ios")]
+        turner: None,
+        #[cfg(target_os = "ios")]
+        shape: None,
     })
 }
 
@@ -235,10 +255,14 @@ impl Output {
                 if let Some(shape) = content_shape(sample) {
                     outputs.shape.store(pack_shape(shape), Ordering::Relaxed);
                 }
+                #[cfg(target_os = "ios")]
+                let turn = turn_of(sample);
+                #[cfg(target_os = "macos")]
+                let turn = Turn::Upright;
                 outputs
                     .frames
                     .try_lock()
-                    .is_ok_and(|mut frames| frames.push((picture, at)).is_ok())
+                    .is_ok_and(|mut frames| frames.push((picture, at, turn)).is_ok())
             }
             OUTPUT_AUDIO => {
                 let Some(audio) = &outputs.audio else {
@@ -295,6 +319,31 @@ fn content_shape(sample: &CMSampleBuffer) -> Option<(usize, usize)> {
         let side = |points: f64| (points * factor).round().max(0.0) as usize;
         Some((side(screen.size.width), side(screen.size.height)))
     }
+}
+
+/// How the picture of `sample` is turned, as ScreenCaptureKit tags it on the sample buffer.
+#[cfg(target_os = "ios")]
+fn turn_of(sample: &CMSampleBuffer) -> Turn {
+    use objc2_core_foundation::{CFNumber, CFNumberType};
+    // SAFETY: `sample` is live, and the key is ScreenCaptureKit's immutable static, present
+    // wherever capture runs at all.
+    let tag = unsafe {
+        objc2_core_media::CMGetAttachment(
+            sample,
+            screen_capture_kit::SCStreamFrameInfoVideoOrientation,
+            std::ptr::null_mut(),
+        )
+    };
+    let orientation = tag
+        .as_deref()
+        .and_then(|tag| tag.downcast_ref::<CFNumber>())
+        .and_then(|number| {
+            let mut value = 0i32;
+            // SAFETY: the value is read into an i32 of the size the type names.
+            unsafe { number.value(CFNumberType::SInt32Type, (&raw mut value).cast()) }
+                .then_some(value)
+        });
+    orientation.map_or(Turn::Upright, Turn::from_orientation)
 }
 
 /// A sample's presentation time on the host clock, in nanoseconds.
@@ -439,9 +488,31 @@ fn put_away(observer: usize) {
 
 impl AppleCapture {
     fn pop(&mut self) -> Option<PixelBuffer> {
-        let (buffer, at) = self.frames.pop().ok()?;
+        let (buffer, at, turn) = self.frames.pop().ok()?;
         let timestamp = self.clock.video(at)?;
-        Some(PixelBuffer { buffer, timestamp })
+        let picture = PixelBuffer { buffer, timestamp };
+        #[cfg(target_os = "ios")]
+        let picture = self.upright(picture, turn);
+        #[cfg(target_os = "macos")]
+        let _ = turn;
+        Some(picture)
+    }
+
+    /// `picture` turned upright from `turn` on the GPU, or as it is where the GPU can't.
+    #[cfg(target_os = "ios")]
+    fn upright(&mut self, picture: PixelBuffer, turn: Turn) -> PixelBuffer {
+        let turned = (turn != Turn::Upright)
+            .then(|| {
+                let turner = match &mut self.turner {
+                    Some(turner) => turner,
+                    slot => slot.insert(throcc_video::Turner::new()?),
+                };
+                turner.upright(&picture, turn)
+            })
+            .flatten();
+        let picture = turned.unwrap_or(picture);
+        self.shape = Some((picture.width(), picture.height()));
+        picture
     }
 }
 
@@ -453,6 +524,11 @@ impl Capture for AppleCapture {
     #[cfg(target_os = "macos")]
     fn shape(&self) -> Option<(usize, usize)> {
         unpack_shape(self.output.ivars().shape.load(Ordering::Relaxed))
+    }
+
+    #[cfg(target_os = "ios")]
+    fn shape(&self) -> Option<(usize, usize)> {
+        self.shape
     }
 
     #[cfg(target_os = "macos")]

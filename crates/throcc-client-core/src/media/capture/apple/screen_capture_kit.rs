@@ -40,6 +40,12 @@ unsafe extern "C-unwind" {
     ) -> bool;
 }
 
+#[cfg(target_os = "ios")]
+unsafe extern "C" {
+    /// How a frame's picture is turned, as a CGImagePropertyOrientation number.
+    pub static SCStreamFrameInfoVideoOrientation: &'static objc2_core_foundation::CFString;
+}
+
 /// `SCStreamOutputType`.
 pub const OUTPUT_SCREEN: isize = 0;
 pub const OUTPUT_AUDIO: isize = 1;

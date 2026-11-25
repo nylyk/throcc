@@ -1,13 +1,14 @@
-//! Pools of pixel buffers, and scaling pictures into another size on the GPU with black
-//! bars around them.
+//! Pools of pixel buffers, scaling pictures into another size on the GPU with black bars
+//! around them, and turning them upright.
 
 use std::ptr::NonNull;
 
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::{CVPixelBuffer, CVPixelBufferPool, kCVReturnSuccess};
 use objc2_video_toolbox::{
-    VTPixelTransferSession, VTSessionSetProperty, kVTPixelTransferPropertyKey_ScalingMode,
-    kVTScalingMode_Letterbox,
+    VTPixelRotationSession, VTPixelTransferSession, VTSessionSetProperty,
+    kVTPixelRotationPropertyKey_Rotation, kVTPixelTransferPropertyKey_ScalingMode, kVTRotation_0,
+    kVTRotation_180, kVTRotation_CCW90, kVTRotation_CW90, kVTScalingMode_Letterbox,
 };
 
 use super::{NO_ERR, PixelBuffer, attributes};
@@ -140,5 +141,113 @@ impl Fitter {
         };
         let uploaded = uploads.upload(frame)?;
         self.fit(&uploaded)
+    }
+}
+
+/// How a captured picture is turned from upright, from the orientation a capture tags it
+/// with. Mirrored orientations count as their turn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Turn {
+    #[default]
+    Upright,
+    /// Shown upright once turned a quarter clockwise.
+    Clockwise,
+    HalfTurn,
+    /// Shown upright once turned a quarter counterclockwise.
+    Counterclockwise,
+}
+
+impl Turn {
+    /// The turn of a picture ScreenCaptureKit tagged with `orientation`.
+    pub fn from_orientation(orientation: i32) -> Self {
+        // ScreenCaptureKit on iOS 27 tags the quarter turns the other way round from what
+        // CGImagePropertyOrientation defines: a picture tagged 6 is upright once turned
+        // counterclockwise.
+        match orientation {
+            3 | 4 => Self::HalfTurn,
+            5 | 6 => Self::Counterclockwise,
+            7 | 8 => Self::Clockwise,
+            _ => Self::Upright,
+        }
+    }
+
+    /// Whether the picture lies on its side, so upright it is as wide as it is tall now.
+    pub fn sideways(self) -> bool {
+        matches!(self, Self::Clockwise | Self::Counterclockwise)
+    }
+
+    /// The size of a `width`×`height` picture once upright.
+    pub fn upright_size(self, (width, height): (usize, usize)) -> (usize, usize) {
+        if self.sideways() {
+            (height, width)
+        } else {
+            (width, height)
+        }
+    }
+}
+
+/// Turns pictures upright on the GPU.
+pub struct Turner {
+    session: CFRetained<VTPixelRotationSession>,
+    /// The turn the session is set to.
+    turn: Turn,
+    /// Buffers of the size of the last upright picture.
+    target: Option<Pool>,
+}
+
+// SAFETY: the rotation session is used through `&mut self` only, one thread at a time.
+unsafe impl Send for Turner {}
+
+impl Turner {
+    pub fn new() -> Option<Self> {
+        let mut raw: *mut VTPixelRotationSession = std::ptr::null_mut();
+        // SAFETY: `raw` receives a +1 reference on success.
+        let status = unsafe { VTPixelRotationSession::create(None, NonNull::from(&mut raw)) };
+        if status != NO_ERR {
+            return None;
+        }
+        // SAFETY: a successful create returned an owned reference.
+        let session = unsafe { CFRetained::from_raw(NonNull::new(raw)?) };
+        Some(Self {
+            session,
+            turn: Turn::Upright,
+            target: None,
+        })
+    }
+
+    /// `source` turned upright from `turn`, or `None` if the GPU can't turn it.
+    pub fn upright(&mut self, source: &PixelBuffer, turn: Turn) -> Option<PixelBuffer> {
+        if turn != self.turn {
+            // SAFETY: the keys and values are VideoToolbox's immutable statics.
+            let rotation = unsafe {
+                match turn {
+                    Turn::Upright => kVTRotation_0,
+                    Turn::Clockwise => kVTRotation_CW90,
+                    Turn::HalfTurn => kVTRotation_180,
+                    Turn::Counterclockwise => kVTRotation_CCW90,
+                }
+            };
+            // SAFETY: the session is live, and the key and value are VideoToolbox's statics.
+            let status = unsafe {
+                VTSessionSetProperty(
+                    &self.session,
+                    kVTPixelRotationPropertyKey_Rotation,
+                    Some(rotation),
+                )
+            };
+            if status != NO_ERR {
+                return None;
+            }
+            self.turn = turn;
+        }
+        let size = turn.upright_size((source.width(), source.height()));
+        let target = match &mut self.target {
+            Some(pool) if pool.size() == size => pool,
+            slot => slot.insert(Pool::new(size)?),
+        };
+        let turned = target.take(source.timestamp)?;
+        // SAFETY: both buffers are live pixel buffers, the target of the upright size.
+        let status = unsafe { self.session.rotate_image(&source.buffer, &turned.buffer) };
+        (status == NO_ERR).then_some(turned)
     }
 }

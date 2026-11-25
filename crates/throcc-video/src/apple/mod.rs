@@ -15,6 +15,7 @@ mod view;
 pub use decode::Decoder;
 pub use encode::Encoder;
 pub use pixel_buffer::{FULL_RANGE_NV12, PixelBuffer};
+pub use transfer::{Turn, Turner};
 #[cfg(target_os = "ios")]
 pub use view::View;
 

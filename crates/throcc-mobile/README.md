@@ -12,6 +12,7 @@ The UniFFI layer between `throcc-client-core` and the iOS and Android apps in `m
 | `src/screen.rs` | Android: `ScreenSource`, the screen the app holds once the person agreed to share it, which `Core::share_screen` shares; `ScreenShare.surface`, a `Surface` for the encoder's input window, `ScreenShare.pushSound`, the screen's sound in 20 ms chunks, and `ScreenShare.turned`, the screen's new size when it turned, as JNI functions |
 | `src/share.rs` | `ShareChoice`, what a share asks for as the desktop's share dialog offers it: the resolutions, frame rates and bitrates, kept within what the core offers, and the bitrate as text. `Command::StartShare` shares with one after the system's picker, and `Core::can_share` says whether this device can |
 | `src/voice.rs` | `Voice`, the voice settings a phone offers (voice activation sensitivity, speech detection, noise suppression, automatic gain and the two volumes), and `MicLevel` for the level meter. `Core::set_voice` applies them to the call as a slider moves and keeps them once let go; a phone always sends by voice activation |
+| `build.rs` | Links ScreenCaptureKit weakly into the library built for an iOS device, whose capture reads its frame info, as the app does for iOS 26 |
 | `src/bin/uniffi-bindgen.rs` | The bindings generator, behind the `bindgen` feature so the libraries don't carry it |
 | `uniffi.toml` | The Kotlin package of the generated bindings and the frameworks the Swift module links |
 
