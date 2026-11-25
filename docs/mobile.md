@@ -8,11 +8,11 @@ Native iOS and Android clients on top of `throcc-client-core`. Same servers, sam
 | --- | --- |
 | Core binding | A new crate, `throcc-mobile`, exposes the core through UniFFI. The core gains no UniFFI types |
 | Frontends | iOS in Swift and SwiftUI. Android in Kotlin and Jetpack Compose with Material 3 Expressive |
-| Minimum OS | iOS 26 (Liquid Glass everywhere). Android 12, API 31 (about 78% of devices in Oct 2026) |
+| Minimum OS | iOS 26 (Liquid Glass everywhere), with sending shares from iOS 27, which brought ScreenCaptureKit. Android 12, API 31 (about 78% of devices in Oct 2026) |
 | Devices supported | Phones and tablets: iPhone and iPad, Android phones and tablets. Wide windows show two panes, such as the room list beside the room; narrow ones collapse to one |
 | Look | Native components and the system font, with system mono for keys, fingerprints, safety numbers and invite codes. The colours are the desktop's: the picked theme's eight colours, and what the apps mix from them |
 | Theme | Pickable as on desktop: the seven presets, or a Custom theme of the user's own eight colours. The default is the desktop default. The picked theme decides light or dark |
-| Features | Voice, rooms, watching shares and sending shares on both platforms. Room admin, profiles and verification as on desktop |
+| Features | Voice, rooms, watching shares and sending shares on both platforms; on iOS 26 the share button is hidden. Room admin, profiles and verification as on desktop |
 | Watching | One share at a time. Watching another stops the one before, so a phone runs one decoder and one video surface, and its link carries one share. Desktop keeps watching several |
 | Talking | Voice activity with a mute toggle. No push-to-talk. A Voice page sets the input and output volume, the sensitivity against a live level meter, speech detection, noise suppression and automatic gain; the phone picks the devices and cancels echo itself |
 | Echo | Both phones play as media, so their volume goes down to silence and Bluetooth stays in full quality, and sonora cancels the echo as on desktop |
@@ -31,7 +31,7 @@ Native iOS and Android clients on top of `throcc-client-core`. Same servers, sam
 ```
 crates/throcc-mobile/     UniFFI layer: cdylib for Android, staticlib for iOS
 crates/throcc-video/      Encoders, decoders and frames, a backend per platform
-mobile/ios/               Xcode project: app, broadcast upload extension
+mobile/ios/               Xcode project: app
 mobile/android/           Gradle project: app
 ```
 
@@ -55,7 +55,7 @@ Each one follows the existing pattern of a backend per OS behind the same type.
 6. **Video encode and capture.** Hardware HEVC, then H.264.
    - macOS: ScreenCaptureKit's pixel buffers go straight into a VideoToolbox compression session, in Rust through `objc2`. See [macOS without ffmpeg](#macos-without-ffmpeg).
    - Android: MediaProjection feeds a MediaCodec input surface directly; AudioPlaybackCapture gives system audio.
-   - iOS: a ReplayKit broadcast upload extension, Swift only to stay under its memory cap, encodes with VideoToolbox and passes access units and app audio to the main app over a Unix socket in the App Group container. The socket path must fit 104 bytes. The extension can't connect by itself: a second sign-in would kick the main app. The core gains an ingest path for these pre-encoded access units; the main app seals and sends them as usual and passes keyframe requests back. Broadcasting needs the main app in a room, which keeps it alive in the background.
+   - iOS: ScreenCaptureKit in the main app, available from iOS 27. The system's `SCContentSharingPicker` picks the whole screen or throcc alone. Its pixel buffers go into the same VideoToolbox encoder as on macOS, so the share pipeline is the desktop's, with no extension, App Group or ingest path. `capturesAudio` with `excludesCurrentProcessAudio` gives app audio without our own voice playback. iOS sets the pixel format and frame interval itself, so the encoder takes what arrives. The `screen-capture` background mode keeps capture running while another app is in front. Sharing needs the app in a room. ReplayKit's broadcast extension is deprecated in iOS 27.
 7. **Reconnects.** See [Devices](#devices). This changes desktop too.
 8. **Identity export and import.** See [Identity transfer](#identity-transfer).
 
@@ -171,8 +171,8 @@ Pictures are JPEG only, which keeps the payload small: a 128 px JPEG is around 6
 5. **Watching shares,** one at a time. First `throcc-video` with the ffmpeg backend moved in unchanged. Then the Apple backend, which decodes on iOS and replaces ffmpeg on macOS for decode and encode, then MediaCodec, dav1d and libvpx, fullscreen and rotation.
 6. **Identity transfer.** JPEG-only pictures first. Then export and file import on every client, QR import on the phones, and a security review.
 7. **Invite links.** The web page with its phone fallback and verification files, links on all five platforms, the desktop's single instance and dialog change.
-8. **Distribution.** App Store Connect upload from CI with an API key. The Android signing key in CI secrets, APK on the release. F-Droid recipe, reproducible builds, merge request to `fdroiddata`.
-9. **Sending shares.** Android first, then the iOS broadcast extension.
+8. **Sending shares.** First a device test that iOS keeps capturing while throcc is in a room in the background. Then Android, then iOS through ScreenCaptureKit.
+9. **Distribution.** App Store Connect upload from CI with an API key. The Android signing key in CI secrets, APK on the release. F-Droid recipe, reproducible builds, merge request to `fdroiddata`.
 
 From phase 3 on, the iOS and Android work in each phase can run in parallel.
 
@@ -185,6 +185,7 @@ A mobile release follows the desktop steps with its own tag. `ios-vX.Y.Z` upload
 - **F-Droid and AI.** [fdroid/admin#641](https://gitlab.com/fdroid/admin/-/issues/641) proposes an anti-feature tag for apps that use AI. Unsettled; a tag wouldn't block inclusion.
 - **Software decoding.** 1440p60 AV1 or VP9 in software may drop frames and drain battery on older phones, and on Macs before M3 for AV1.
 - **Portrait shares.** A phone share is portrait, at most 1440 tall. Desktop tiles, fullscreen and pop-outs have to handle it.
-- **iOS extension memory.** Broadcast extensions are capped at about 50 MB. Encoding stays in hardware and buffers stay small.
-- **iOS share audio.** ReplayKit's app audio may include throcc's own voice playback, which desktop keeps out of shares.
+- **iOS background capture.** One developer reports iOS 27 suspending an app that captures with ScreenCaptureKit once it leaves the screen, despite the `screen-capture` mode. throcc in a room also plays audio in the background, which may keep it alive; phase 8 tests this on a device first.
+- **iOS share audio.** One report has ScreenCaptureKit's app audio come back silent for other call apps on iOS 27.0.
+- **iOS simulator.** The simulator SDK has no ScreenCaptureKit, so sharing is tested on a device only, and the simulator build leaves it out.
 - **App Store review.** Review needs a reachable demo server and fresh single-use invites. Guideline 1.2 may need reporting on top of blocking. Background audio for voice needs a clear justification. Export compliance needs answering for the end-to-end encryption.
