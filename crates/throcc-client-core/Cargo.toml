@@ -65,9 +65,6 @@ objc2-core-media = { workspace = true, features = ["objc2", "objc2-core-audio-ty
 objc2-core-video.workspace = true
 objc2-foundation = { workspace = true, features = ["NSArray", "NSError"] }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-screencapturekit.workspace = true
-
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
 windows-core.workspace = true

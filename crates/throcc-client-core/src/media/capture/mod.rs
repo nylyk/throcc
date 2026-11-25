@@ -1,5 +1,5 @@
-#[cfg(all(screen_capture_kit, target_os = "ios"))]
-mod apple;
+#[cfg(screen_capture_kit)]
+pub(crate) mod apple;
 #[cfg(any(windows, target_os = "linux", test))]
 mod audio_ring;
 #[cfg(any(windows, screen_capture_kit, target_os = "linux", test))]
@@ -7,8 +7,6 @@ mod clock;
 mod limiter;
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "macos")]
-pub(crate) mod macos;
 #[cfg(windows)]
 mod windows;
 
@@ -36,7 +34,7 @@ pub enum CaptureError {
     Failed(String),
 }
 
-#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux"))]
 fn failed(e: impl std::fmt::Display) -> CaptureError {
     CaptureError::Failed(e.to_string())
 }
@@ -123,7 +121,7 @@ pub fn available() -> bool {
 pub fn start(config: CaptureConfig) -> Result<Box<dyn Capture>, CaptureError> {
     #[cfg(target_os = "macos")]
     {
-        macos::start(config).map(|c| Box::new(c) as Box<dyn Capture>)
+        apple::start(config).map(|c| Box::new(c) as Box<dyn Capture>)
     }
     #[cfg(target_os = "ios")]
     {

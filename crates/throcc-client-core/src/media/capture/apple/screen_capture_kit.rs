@@ -15,8 +15,8 @@ use objc2_core_media::CMTime;
 use objc2_foundation::NSArray;
 use objc2_foundation::NSError;
 
-/// iOS links ScreenCaptureKit weakly through the app's own linker flags, since iOS 26 has
-/// none.
+// iOS links ScreenCaptureKit weakly through the app's own linker flags, since iOS 26 has
+// none.
 #[cfg(target_os = "macos")]
 #[link(name = "ScreenCaptureKit", kind = "framework")]
 unsafe extern "C" {}

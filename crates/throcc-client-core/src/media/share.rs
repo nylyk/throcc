@@ -920,7 +920,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::media::capture::macos::main_display;
+    use crate::media::capture::apple::main_display;
 
     fn cpu_time() -> Duration {
         // SAFETY: getrusage only writes the struct it is given.

@@ -57,7 +57,6 @@ Each crate's `README.md` explains its modules and how they fit together. Update 
 - Signed profiles carry no freshness, so a server can replay an old one. Accepted: in our own room only key peers present a key, and elsewhere the badge means the key signed that name, not that they are online. If a protocol bump comes anyway, add a version counter that clients track per user, not a `not_after`.
 - Never weaken a security property to make a test pass. Stop and ask instead.
 - Audio and capture callbacks never block, allocate, lock, await or panic. Cross into tokio only with a bounded channel, `try_send`, drop on full and a counter.
-  The one exception is outside our code: screencapturekit's own dispatcher on macOS takes a lock and allocates before our handler runs. Our handler itself stays lock-free (`try_lock` only).
 - SFU egress never drops audio by policy, and drops video only as whole access units.
 - No GPL or AGPL dependencies. `cargo deny` enforces this.
 - Crypto, protocol and SFU changes get reviewed by a subagent that didn't write them.
