@@ -144,7 +144,8 @@ jobs:
       matrix:
         include:
           - platform: ios
-            os: macos-26
+            # Sharing links ScreenCaptureKit, which only the iOS 27 SDK has for iOS.
+            os: xcode-27
             targets: aarch64-apple-ios aarch64-apple-ios-sim
             # uniffi-bindgen builds the core for the Mac too.
             codec_targets: aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-darwin
