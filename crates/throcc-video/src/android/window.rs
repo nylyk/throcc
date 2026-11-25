@@ -31,6 +31,12 @@ impl View {
         NonNull::new(raw as usize as *mut ndk::ANativeWindow).map(Self)
     }
 
+    /// The `ANativeWindow*`, for code across a language boundary that takes a reference of
+    /// its own.
+    pub fn as_raw(&self) -> u64 {
+        self.as_ptr() as usize as u64
+    }
+
     pub(crate) fn as_ptr(&self) -> *mut ndk::ANativeWindow {
         self.0.as_ptr()
     }

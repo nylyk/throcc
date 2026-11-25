@@ -1,8 +1,16 @@
+#[cfg(target_os = "android")]
+pub mod android;
 #[cfg(screen_capture_kit)]
 pub(crate) mod apple;
 #[cfg(any(windows, target_os = "linux", test))]
 mod audio_ring;
-#[cfg(any(windows, screen_capture_kit, target_os = "linux", test))]
+#[cfg(any(
+    windows,
+    screen_capture_kit,
+    target_os = "linux",
+    target_os = "android",
+    test
+))]
 mod clock;
 mod limiter;
 #[cfg(target_os = "linux")]
@@ -16,6 +24,8 @@ use throcc_proto::frame::VIDEO_CLOCK_HZ;
 use throcc_proto::messages::ShareConfig;
 #[cfg(screen_capture_kit)]
 pub use throcc_video::PixelBuffer;
+#[cfg(target_os = "android")]
+use throcc_video::View;
 use throcc_video::frame::VideoFrame;
 #[cfg(target_os = "linux")]
 pub use throcc_video::{DmaBuf, DmaBufPlane};
@@ -83,6 +93,21 @@ pub trait Capture: Send {
     fn next_pixel_buffer(&mut self) -> Option<PixelBuffer> {
         None
     }
+    /// The size of what is shared, where the capture knows it before its first picture.
+    fn shape(&self) -> Option<(usize, usize)> {
+        None
+    }
+    /// Starts drawing what is shared into `window`, an encoder's input surface, at `size`.
+    #[cfg(target_os = "android")]
+    fn draw_into(&mut self, _window: &View, _size: (usize, usize)) -> Result<(), CaptureError> {
+        Err(CaptureError::Unsupported)
+    }
+    /// The timestamp of a picture drawn at `at`, in nanoseconds on `CLOCK_MONOTONIC`, or
+    /// `None` before the capture's zero.
+    #[cfg(target_os = "android")]
+    fn stamp(&mut self, _at: i64) -> Option<u32> {
+        None
+    }
     /// A timestamp for sending the last picture again now: on this capture's clock, and
     /// after every picture before it. `None` where the capture can't tell the time.
     fn repeat_timestamp(&mut self) -> Option<u32> {
@@ -112,7 +137,12 @@ pub fn available() -> bool {
     #[cfg(target_os = "ios")]
     let captures = cfg!(screen_capture_kit) && objc2::available!(ios = 27.0);
     #[cfg(not(target_os = "ios"))]
-    let captures = cfg!(any(target_os = "macos", windows, target_os = "linux"));
+    let captures = cfg!(any(
+        target_os = "macos",
+        windows,
+        target_os = "linux",
+        target_os = "android"
+    ));
     captures && throcc_video::ENCODES
 }
 
@@ -146,7 +176,17 @@ pub fn start(config: CaptureConfig) -> Result<Box<dyn Capture>, CaptureError> {
     {
         linux::start(config).map(|c| Box::new(c) as Box<dyn Capture>)
     }
-    #[cfg(not(any(target_os = "macos", target_os = "ios", windows, target_os = "linux")))]
+    #[cfg(target_os = "android")]
+    {
+        android::start(config).map(|c| Box::new(c) as Box<dyn Capture>)
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        windows,
+        target_os = "linux",
+        target_os = "android"
+    )))]
     {
         let _ = config;
         Err(CaptureError::Unsupported)

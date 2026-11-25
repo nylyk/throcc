@@ -143,7 +143,7 @@ private fun PersonCard(model: AppModel, person: Person, watched: Boolean, modifi
                 MutedIcon(person)
             }
             // Held empty for those not sharing, so every card has the same height.
-            val share = person.sharing.takeUnless { person.blocked }
+            val share = person.sharing.takeUnless { person.blocked || person.user == model.state.value.me }
             if (share == null) Spacer(Modifier.height(WATCH_HEIGHT)) else WatchButton(model, person, share, watched)
         }
     }
@@ -166,7 +166,7 @@ private fun WatchButton(model: AppModel, person: Person, share: Share, watched: 
     }
 }
 
-/** The mic, sound and leave controls, floating over the room. */
+/** The mic, sound, share and leave controls, floating over the room. */
 @Composable
 fun RoomControls(model: AppModel, state: CoreState) {
     val scheme = MaterialTheme.colorScheme
@@ -190,6 +190,9 @@ fun RoomControls(model: AppModel, state: CoreState) {
         }
         FilledTonalIconToggleButton(state.deafened, { model.core.command(Command.SetDeafened(it)) }, shapes, size) {
             Icon(if (state.deafened) Icons.Default.HeadsetOff else Icons.Default.Headset, "Deafen")
+        }
+        if (model.core.canShare()) {
+            ShareScreenButton(model, state.current?.sharing == true, shapes, size)
         }
         FilledIconButton(
             { model.core.command(Command.Join(null)) },

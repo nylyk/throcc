@@ -166,12 +166,17 @@ impl ShareSender {
         let capture_config = CaptureConfig::for_share(&wanted);
         let bound = (capture_config.width, capture_config.height);
         let mut frame = VideoFrame::blank(bound.0, bound.1);
-        let first = first_frame(capture.as_mut(), &mut frame);
+        let shape = capture.shape();
+        let first = if shape.is_some() {
+            None
+        } else {
+            first_frame(capture.as_mut(), &mut frame)
+        };
         let (width, height) = match first {
             Some(First::Copied) => share_size((frame.width, frame.height), bound),
             #[cfg(target_os = "linux")]
             Some(First::InGpuMemory(size)) => share_size(size, bound),
-            None => bound,
+            None => shape.map_or(bound, |shape| share_size(shape, bound)),
         };
         let encoder = Encoder::open(EncoderConfig {
             width,
@@ -180,6 +185,8 @@ impl ShareSender {
             kbps: wanted.kbps,
         })
         .map_err(|e| ShareError::Encoder(e.to_string()))?;
+        #[cfg(target_os = "android")]
+        capture.draw_into(encoder.input(), (width, height))?;
         let audio_encoder = if wanted.audio && capture.captures_audio() {
             Some(ShareAudioEncoder::new().map_err(|e| ShareError::Encoder(e.to_string()))?)
         } else {
@@ -308,6 +315,10 @@ impl Sending {
             }
             self.send_audio(&mut sound);
             self.tally.report_if_due(self.capture.dropped());
+            #[cfg(target_os = "android")]
+            if self.send_drained() {
+                continue;
+            }
             #[cfg(target_os = "linux")]
             if self.send_dmabuf() {
                 continue;
@@ -410,6 +421,18 @@ impl Sending {
         self.last = Last::PixelBuffer(picture);
         self.last_sent = Instant::now();
         match encoded {
+            Ok(units) => self.send_units(units),
+            Err(e) => warn!("encoding failed: {e}"),
+        }
+        true
+    }
+
+    /// Sends what the encoder made of the pictures drawn into its surface, waiting a moment
+    /// for them. True while the encoder runs, which takes every picture there is.
+    #[cfg(target_os = "android")]
+    fn send_drained(&mut self) -> bool {
+        let capture = &mut self.capture;
+        match self.encoder.drain(IDLE, |at| capture.stamp(at)) {
             Ok(units) => self.send_units(units),
             Err(e) => warn!("encoding failed: {e}"),
         }

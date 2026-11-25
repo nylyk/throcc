@@ -22,7 +22,7 @@ pub const UNIT_TOO_LARGE: i32 = -1;
 /// buffers; video runs ahead of the audio by that much rather than freezing.
 const OUTSTANDING: usize = 3;
 
-fn mime(codec: Codec) -> &'static CStr {
+pub(super) fn mime(codec: Codec) -> &'static CStr {
     match codec {
         Codec::H264 => c"video/avc",
         Codec::Hevc => c"video/hevc",

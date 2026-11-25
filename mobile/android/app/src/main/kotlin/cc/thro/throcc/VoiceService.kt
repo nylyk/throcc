@@ -1,11 +1,13 @@
 package cc.thro.throcc
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
@@ -13,10 +15,19 @@ import android.media.AudioAttributes
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
+import android.media.AudioFormat
 import android.media.AudioManager
+import android.media.AudioPlaybackCaptureConfiguration
+import android.media.AudioRecord
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
+import android.os.Handler
 import android.os.IBinder
+import android.os.Process
+import androidx.activity.result.ActivityResult
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.IntentCompat
 import cc.thro.throcc.core.Command
 import cc.thro.throcc.core.CoreState
 import kotlinx.coroutines.MainScope
@@ -28,6 +39,21 @@ import kotlinx.coroutines.launch
 private const val CHANNEL = "room"
 private const val NOTIFICATION = 1
 private const val LEAVE = "cc.thro.throcc.LEAVE"
+private const val SHARE = "cc.thro.throcc.SHARE"
+
+/** Has the room's service share the screen the person agreed to share with `consent`, `width`×`height` pixels at
+ *  `dpi`, with its sound if `audio`. */
+fun shareScreen(context: Context, consent: ActivityResult, width: Int, height: Int, dpi: Int, audio: Boolean) {
+    val share = Intent(context, VoiceService::class.java)
+        .setAction(SHARE)
+        .putExtra("code", consent.resultCode)
+        .putExtra("consent", consent.data)
+        .putExtra("width", width)
+        .putExtra("height", height)
+        .putExtra("dpi", dpi)
+        .putExtra("audio", audio)
+    context.startForegroundService(share)
+}
 
 /** The name of the room `state` has us in and of its server, or null outside a room. */
 private fun described(state: CoreState): Pair<String, String>? = state.liveRoom?.let { room ->
@@ -46,6 +72,9 @@ class VoiceService : Service() {
 
     /** Whether something else holds the audio, for a while as a phone call does, or for good. */
     private var interrupted = false
+
+    /** Whether the service holds a screen the person agreed to share. */
+    private var projecting = false
 
     private val focus = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
         .setAudioAttributes(
@@ -89,6 +118,10 @@ class VoiceService : Service() {
             if (withMic == null) stopSelf()
             return START_NOT_STICKY
         }
+        if (intent?.action == SHARE) {
+            share(model, intent)
+            return START_NOT_STICKY
+        }
         val granted = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         val notification = notification(described(model.state.value))
         // The system refuses the microphone type to a service started while the app is off screen.
@@ -121,7 +154,8 @@ class VoiceService : Service() {
     /** Whether the system let the service into the foreground, for the mic too where `mic` is granted. */
     private fun promote(notification: Notification, mic: Boolean): Boolean {
         val types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK or
-            if (mic) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0
+            (if (mic) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0) or
+            if (projecting) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION else 0
         return try {
             ServiceCompat.startForeground(this, NOTIFICATION, notification, types)
             true
@@ -129,6 +163,63 @@ class VoiceService : Service() {
             false
         } catch (_: SecurityException) {
             false
+        }
+    }
+
+    /** Takes the screen the `share` intent's consent gives, which the system only hands to a service in the
+     *  foreground for it, and shares it. */
+    private fun share(model: AppModel, share: Intent) {
+        val withMic = withMic ?: return
+        val consent = IntentCompat.getParcelableExtra(share, "consent", Intent::class.java) ?: return
+        projecting = true
+        val projection = if (promote(notification(described(model.state.value)), withMic)) {
+            getSystemService(MediaProjectionManager::class.java).getMediaProjection(share.getIntExtra("code", 0), consent)
+        } else {
+            null
+        }
+        if (projection == null) {
+            stopProjecting()
+            return
+        }
+        projection.registerCallback(
+            object : MediaProjection.Callback() {
+                override fun onStop() {
+                    stopProjecting()
+                    model.core.command(Command.StopShare)
+                }
+            },
+            Handler(mainLooper),
+        )
+        val sound = if (share.getBooleanExtra("audio", false)) record(projection) else null
+        val screen = SharedScreen(projection, share.getIntExtra("dpi", 0), sound)
+        model.shareScreen(screen, share.getIntExtra("width", 0), share.getIntExtra("height", 0), sound != null)
+    }
+
+    private fun stopProjecting() {
+        projecting = false
+        withMic?.let { promote(notification(described(model.state.value)), it) }
+    }
+
+    /** A recorder of what other apps play on `projection`'s screen, never our own sound, or null where the
+     *  microphone permission it needs is missing. */
+    @SuppressLint("MissingPermission")
+    private fun record(projection: MediaProjection): AudioRecord? {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return null
+        val played = AudioPlaybackCaptureConfiguration.Builder(projection)
+            .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+            .addMatchingUsage(AudioAttributes.USAGE_GAME)
+            .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+            .excludeUid(Process.myUid())
+            .build()
+        val format = AudioFormat.Builder()
+            .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
+            .setSampleRate(48_000)
+            .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
+            .build()
+        return try {
+            AudioRecord.Builder().setAudioFormat(format).setAudioPlaybackCaptureConfig(played).build()
+        } catch (_: UnsupportedOperationException) {
+            null
         }
     }
 

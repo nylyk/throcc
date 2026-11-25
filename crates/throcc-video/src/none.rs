@@ -1,12 +1,10 @@
-//! The backend of a build without one: an encoder and a decoder that never open. Android,
-//! which only decodes, takes its encoder.
+//! The backend of a build without one: an encoder and a decoder that never open.
 
 use std::convert::Infallible;
 
 use throcc_proto::messages::{Codec, Recovery};
 
 use crate::frame::VideoFrame;
-#[cfg(not(target_os = "android"))]
 use crate::{DecodeError, Frame, MaxSize, Output};
 #[cfg(target_os = "linux")]
 use crate::{DmaBuf, GpuEncoded};
@@ -64,10 +62,8 @@ pub fn tries_gpu_input_first() -> bool {
     false
 }
 
-#[cfg(not(target_os = "android"))]
 pub struct Decoder(Infallible);
 
-#[cfg(not(target_os = "android"))]
 impl Decoder {
     pub fn new(codec: Codec, _max_size: MaxSize, _output: Output) -> Result<Self, DecodeError> {
         Err(DecodeError::NoDecoder(codec))

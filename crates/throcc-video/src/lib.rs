@@ -1,6 +1,6 @@
 //! Video encoders and decoders, and the NV12 pictures between them. One [`Encoder`] and one
-//! [`Decoder`] with a backend per platform: VideoToolbox on macOS and iOS, MediaCodec for
-//! decoding on Android, ffmpeg on Linux and Windows with the `ffmpeg` feature. A build without
+//! [`Decoder`] with a backend per platform: VideoToolbox on macOS and iOS, MediaCodec on
+//! Android, ffmpeg on Linux and Windows with the `ffmpeg` feature. A build without
 //! one has an encoder and a decoder that never open.
 
 #[cfg(target_os = "linux")]
@@ -20,14 +20,14 @@ mod android;
 mod apple;
 #[cfg(ffmpeg)]
 mod ffmpeg;
-#[cfg(not(any(target_vendor = "apple", ffmpeg)))]
+#[cfg(not(any(target_vendor = "apple", target_os = "android", ffmpeg)))]
 mod none;
 
 use bytes::Bytes;
 use throcc_proto::messages::Codec;
 
 #[cfg(target_os = "android")]
-pub use android::{CodecFrame, Decoder};
+pub use android::{CodecFrame, Decoder, Encoder};
 #[cfg(target_vendor = "apple")]
 pub use apple::{Decoder, Encoder, FULL_RANGE_NV12, PixelBuffer};
 #[cfg(target_os = "linux")]
@@ -42,14 +42,14 @@ pub use ffmpeg::encode::tries_gpu_input_first;
 pub use ffmpeg::vaapi::VaError;
 #[cfg(not(any(target_vendor = "apple", target_os = "android", ffmpeg)))]
 pub use none::Decoder;
-#[cfg(not(any(target_vendor = "apple", ffmpeg)))]
+#[cfg(not(any(target_vendor = "apple", target_os = "android", ffmpeg)))]
 pub use none::Encoder;
 #[cfg(all(not(ffmpeg), target_os = "linux"))]
 pub use none::tries_gpu_input_first;
 pub use output::{Output, View};
 
 /// Whether this build encodes video, so it can share.
-pub const ENCODES: bool = cfg!(any(target_vendor = "apple", ffmpeg));
+pub const ENCODES: bool = cfg!(any(target_vendor = "apple", target_os = "android", ffmpeg));
 
 /// A picture as handed to the renderer: NV12 in memory, on Apple platforms the pixel buffer
 /// in GPU memory it was captured or decoded into, or on Android an output buffer of the codec
@@ -238,6 +238,12 @@ pub enum EncodeError {
     #[cfg(target_vendor = "apple")]
     #[error("VideoToolbox failed with {0}")]
     VideoToolbox(i32),
+    #[cfg(target_os = "android")]
+    #[error("MediaCodec failed with {0}")]
+    MediaCodec(i32),
+    #[cfg(target_os = "android")]
+    #[error("this encoder takes pictures only through its input surface")]
+    SurfaceOnly,
     #[cfg(all(ffmpeg, target_os = "linux"))]
     #[error("importing a frame in GPU memory: {0}")]
     Import(VaError),

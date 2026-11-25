@@ -52,6 +52,7 @@ objc2-audio-toolbox.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni.workspace = true
+libc.workspace = true
 ndk.workspace = true
 
 [target.'cfg(target_vendor = "apple")'.dependencies]

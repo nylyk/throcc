@@ -1,5 +1,7 @@
 mod messages;
 mod safety;
+#[cfg(target_os = "android")]
+mod screen;
 mod share;
 mod state;
 mod transfer;
@@ -38,6 +40,8 @@ use tokio::sync::broadcast::error::RecvError;
 
 pub use messages::{Command, Event, NameChange, PictureChange, User};
 pub use safety::SafetyCheck;
+#[cfg(target_os = "android")]
+pub use screen::ScreenSource;
 pub use share::{ShareChoice, ShareResolution};
 pub use state::{
     Connection, ConnectionNotice, CoreState, CurrentRoom, Health, JoinAction, KeyTrust, KeyWarning,

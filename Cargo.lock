@@ -8143,6 +8143,7 @@ name = "throcc-mobile"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "jni",
  "thiserror 2.0.21",
  "throcc-client-core",
  "throcc-proto",

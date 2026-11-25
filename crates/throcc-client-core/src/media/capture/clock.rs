@@ -74,7 +74,7 @@ impl ShareClock {
 }
 
 /// `clock` now, in nanoseconds.
-#[cfg(any(target_os = "linux", screen_capture_kit))]
+#[cfg(any(target_os = "linux", target_os = "android", screen_capture_kit))]
 pub(super) fn clock_nanos(clock: libc::clockid_t) -> i64 {
     let mut now = libc::timespec {
         tv_sec: 0,

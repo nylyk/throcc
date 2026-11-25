@@ -188,7 +188,7 @@ fun VoiceSettings(model: AppModel) {
 private fun decibels(dbfs: Float) = "${dbfs.roundToInt()} dB".replace('-', '−')
 
 @Composable
-private fun Labeled(label: String, value: String) {
+fun Labeled(label: String, value: String) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(label, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
         Text(value, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -196,7 +196,7 @@ private fun Labeled(label: String, value: String) {
 }
 
 @Composable
-private fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
     Row(
         Modifier.fillMaxWidth().toggleable(checked, role = Role.Switch, onValueChange = onChange),
         verticalAlignment = Alignment.CenterVertically,

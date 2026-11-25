@@ -23,12 +23,14 @@ import cc.thro.throcc.core.Listener
 import cc.thro.throcc.core.Palette
 import cc.thro.throcc.core.Profile
 import cc.thro.throcc.core.QrFrame
+import cc.thro.throcc.core.ScreenSource
 import cc.thro.throcc.core.StartedOver
 import cc.thro.throcc.core.User
 import cc.thro.throcc.core.VerifiedPerson
 import cc.thro.throcc.core.Voice
 import cc.thro.throcc.core.connectionNotice
 import cc.thro.throcc.core.customThemeName
+import cc.thro.throcc.core.defaultShareChoice
 import cc.thro.throcc.core.isIdentityExport
 import cc.thro.throcc.core.maxExportBytes
 import cc.thro.throcc.core.parseInviteLink
@@ -232,6 +234,11 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
 
     /** Whether the room's sound runs without the mic, which the user has not allowed. */
     var micDenied by mutableStateOf(false)
+
+    /** What our next share asks for, and whether its settings are open. */
+    var shareChoice by mutableStateOf(defaultShareChoice())
+    var shareAudio by mutableStateOf(true)
+    var shareSettings by mutableStateOf(false)
 
     /** The permissions to ask the user for. `answered` takes the answer to each list. */
     val asks = Channel<List<String>>(Channel.BUFFERED)
@@ -474,6 +481,10 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
         sound.trySend(withMic)
     }
 
+    /** Shares `screen`, `width`×`height` pixels, as [shareChoice] asks, with its sound if `audio`. */
+    fun shareScreen(screen: ScreenSource, width: Int, height: Int, audio: Boolean) =
+        core.shareScreen(screen, width.toUInt(), height.toUInt(), shareChoice, audio)
+
     fun closeAudio() {
         sound.trySend(null)
     }
@@ -690,7 +701,8 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
                 openInviteLink("https://thro.cc/join#owls.thro.cc+K7Q-M2XPD")
                 emptyList()
             }
-            "rooms", "room", "blocked", "person", "personblocked", "reconnect", "elsewhere", "share", "sharefull" ->
+            "rooms", "room", "blocked", "person", "personblocked", "reconnect", "elsewhere", "share", "sharefull",
+            "startshare", "sharing" ->
                 listOf(Screen.Rooms)
             "settings" -> listOf(Screen.Settings)
             "profile" -> listOf(Screen.Settings, Screen.Profile)
@@ -721,7 +733,7 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
         if (name in ONBOARDING_SAMPLES + listOf("servers", "addserver", "addserverinvite", "invitelink", "pinmismatch", "identitymissing")) return
         scope.launch {
             signIn("owls.thro.cc", null)
-            if (name in listOf("room", "blocked", "person", "personblocked", "share", "sharefull")) {
+            if (name in listOf("room", "blocked", "person", "personblocked", "share", "sharefull", "startshare", "sharing")) {
                 core.command(Command.Join(1u))
             }
             if (name in listOf("share", "sharefull")) core.watchOnly(4u)
@@ -734,6 +746,8 @@ class AppModel(val core: Core, val mock: Boolean, sample: String?) {
                     while (state.value.current?.watching?.contains(4u) != true) delay(20)
                     fullscreenShare = 4u
                 }
+                "startshare" -> shareSettings = true
+                "sharing" -> core.command(Command.StartShare(shareChoice, shareAudio))
                 "invites" -> core.command(Command.CreateInvite)
                 "reconnect" -> sampleConnection = Connection.AwaitingReconnect
                 "elsewhere" -> sampleConnection = Connection.SignedInElsewhere
