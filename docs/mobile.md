@@ -184,7 +184,7 @@ A mobile release follows the desktop steps with its own tag. `ios-vX.Y.Z` upload
 
 - **F-Droid and AI.** [fdroid/admin#641](https://gitlab.com/fdroid/admin/-/issues/641) proposes an anti-feature tag for apps that use AI. Unsettled; a tag wouldn't block inclusion.
 - **Software decoding.** 1440p60 AV1 or VP9 in software may drop frames and drain battery on older phones, and on Macs before M3 for AV1.
-- **Portrait shares.** A phone share is portrait, at most 1440 tall. Desktop tiles, fullscreen and pop-outs have to handle it.
+- **Portrait shares.** A phone share is portrait, at most 1440 tall. Desktop tiles, fullscreen and pop-outs have to handle it. A share turns to a new size when what is shared changes shape, so a phone on its side shares landscape; receivers restart their decoder for it.
 - **iOS share audio.** One report has ScreenCaptureKit's app audio come back silent for other call apps on iOS 27.0.
 - **iOS simulator.** The simulator SDK has no ScreenCaptureKit, so sharing is tested on a device only, and the simulator build leaves it out.
 - **App Store review.** Review needs a reachable demo server and fresh single-use invites. Guideline 1.2 may need reporting on top of blocking. Background audio for voice needs a clear justification. Export compliance needs answering for the end-to-end encryption.

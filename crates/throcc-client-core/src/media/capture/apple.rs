@@ -22,10 +22,14 @@ use objc2_core_foundation::CFRetained;
 use objc2_core_media::{CMBlockBuffer, CMSampleBuffer};
 use objc2_core_video::CVPixelBuffer;
 use objc2_foundation::NSError;
+#[cfg(target_os = "macos")]
+use objc2_foundation::NSString;
 use throcc_video::frame::{VideoFrame, share_size};
 
 use super::clock::{ShareClock, clock_nanos};
 use super::{Capture, CaptureConfig, CaptureError, PixelBuffer};
+#[cfg(target_os = "macos")]
+use super::{pack_shape, unpack_shape};
 use crate::media::audio::SAMPLE_RATE;
 use crate::media::share_audio::STEREO_FRAME;
 use screen_capture_kit::{
@@ -47,7 +51,14 @@ type Sound = (CFRetained<CMSampleBuffer>, i64);
 
 pub struct AppleCapture {
     stream: Retained<SCStream>,
-    _output: Retained<Output>,
+    /// The stream's configuration, which a turn changes the size of.
+    #[cfg(target_os = "macos")]
+    config: Retained<SCStreamConfiguration>,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(dead_code, reason = "held for as long as the stream sends to it")
+    )]
+    output: Retained<Output>,
     _queues: Vec<DispatchRetained<DispatchQueue>>,
     frames: rtrb::Consumer<Picture>,
     audio: Option<rtrb::Consumer<Sound>>,
@@ -106,6 +117,8 @@ fn capture(
         audio: audio_in,
         dropped: dropped.clone(),
         ended: ended.clone(),
+        #[cfg(target_os = "macos")]
+        shape: AtomicU64::new(0),
     });
     let stream = SCStream::init_with_filter(
         SCStream::alloc(),
@@ -120,7 +133,9 @@ fn capture(
     start_capture(&stream)?;
     Ok(AppleCapture {
         stream,
-        _output: output,
+        #[cfg(target_os = "macos")]
+        config: stream_config,
+        output,
         _queues: queues,
         frames,
         audio,
@@ -168,6 +183,9 @@ struct Outputs {
     audio: Option<Mutex<rtrb::Producer<Sound>>>,
     dropped: Arc<AtomicU64>,
     ended: Arc<AtomicBool>,
+    /// The pixel size of what the last frame shows, packed by [`pack_shape`].
+    #[cfg(target_os = "macos")]
+    shape: AtomicU64,
 }
 
 define_class!(
@@ -213,6 +231,10 @@ impl Output {
                 let Some(picture) = (unsafe { sample.image_buffer() }) else {
                     return;
                 };
+                #[cfg(target_os = "macos")]
+                if let Some(shape) = content_shape(sample) {
+                    outputs.shape.store(pack_shape(shape), Ordering::Relaxed);
+                }
                 outputs
                     .frames
                     .try_lock()
@@ -233,6 +255,45 @@ impl Output {
         if !pushed {
             outputs.dropped.fetch_add(1, Ordering::Relaxed);
         }
+    }
+}
+
+/// The pixel size of what `sample` shows, as on screen.
+#[cfg(target_os = "macos")]
+fn content_shape(sample: &CMSampleBuffer) -> Option<(usize, usize)> {
+    use objc2_core_foundation::{CFDictionary, CFNumber, CFNumberType, CGRect};
+    use screen_capture_kit::{
+        CGRectMakeWithDictionaryRepresentation, SCStreamFrameInfoScaleFactor,
+        SCStreamFrameInfoScreenRect,
+    };
+    // SAFETY: `sample` is live; its attachments are a dictionary per sample, whose screen
+    // rect is a rect's dictionary and whose scale factor is a number, as ScreenCaptureKit
+    // documents them.
+    unsafe {
+        let attachments = sample.sample_attachments_array(false)?;
+        if attachments.count() < 1 {
+            return None;
+        }
+        let info = attachments
+            .value_at_index(0)
+            .cast::<CFDictionary>()
+            .as_ref()?;
+        let key = |name: &NSString| (name as *const NSString).cast();
+        let rect = info.value(key(SCStreamFrameInfoScreenRect));
+        let mut screen = CGRect::default();
+        if rect.is_null() || !CGRectMakeWithDictionaryRepresentation(rect, &mut screen) {
+            return None;
+        }
+        let scale = info
+            .value(key(SCStreamFrameInfoScaleFactor))
+            .cast::<CFNumber>()
+            .as_ref()?;
+        let mut factor = 0.0f64;
+        if !scale.value(CFNumberType::Float64Type, (&raw mut factor).cast()) {
+            return None;
+        }
+        let side = |points: f64| (points * factor).round().max(0.0) as usize;
+        Some((side(screen.size.width), side(screen.size.height)))
     }
 }
 
@@ -387,6 +448,19 @@ impl AppleCapture {
 impl Capture for AppleCapture {
     fn repeat_timestamp(&mut self) -> Option<u32> {
         self.clock.repeat()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn shape(&self) -> Option<(usize, usize)> {
+        unpack_shape(self.output.ivars().shape.load(Ordering::Relaxed))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn reshape(&mut self, (width, height): (usize, usize)) -> Result<(), CaptureError> {
+        self.config.set_width(width);
+        self.config.set_height(height);
+        self.stream.update_configuration(&self.config, None);
+        Ok(())
     }
 
     fn next_frame(&mut self, into: &mut VideoFrame) -> bool {

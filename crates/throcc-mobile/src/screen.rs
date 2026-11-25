@@ -1,7 +1,7 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use jni::sys::{JNIEnv, jclass, jfloatArray, jlong, jobject};
+use jni::sys::{JNIEnv, jclass, jfloatArray, jint, jlong, jobject};
 use throcc_client_core::media::capture::android::{self as capture, Screen};
 use throcc_client_core::media::share_audio::STEREO_FRAME;
 
@@ -10,8 +10,9 @@ use crate::{Command, Core, ShareChoice};
 /// The screen the person agreed to share, which the Android app holds.
 #[uniffi::export(with_foreign)]
 pub trait ScreenSource: Send + Sync {
-    /// Starts drawing the screen into the `ANativeWindow` at `window`, `width`×`height`
-    /// pixels, and recording its sound when the share has audio. False if it can't.
+    /// Draws the screen into the `ANativeWindow` at `window`, `width`×`height` pixels, from
+    /// now on, and starts recording its sound when the share has audio. Called again with a
+    /// new window when the screen turned. False if it can't.
     fn show(&self, window: u64, width: u32, height: u32) -> bool;
     /// Stops drawing and recording, and gives up the screen.
     fn stop(&self);
@@ -90,4 +91,16 @@ pub unsafe extern "system" fn Java_cc_thro_throcc_ScreenShare_pushSound(
         (jni.GetFloatArrayRegion)(env, samples, 0, len, sound.as_mut_ptr());
     }
     capture::push_sound(&sound, at);
+}
+
+/// `ScreenShare.turned` in the Android app: the shared screen turned to `width`×`height`
+/// pixels.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_cc_thro_throcc_ScreenShare_turned(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    width: jint,
+    height: jint,
+) {
+    capture::turned(width.max(0) as usize, height.max(0) as usize);
 }

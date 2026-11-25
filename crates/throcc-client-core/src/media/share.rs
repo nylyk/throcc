@@ -41,6 +41,13 @@ const SELF_VIEW_EVERY: u32 = 2;
 /// whole.
 const SELF_VIEW_WIDTH: usize = 960;
 
+/// How long what is shared keeps a new shape before the share turns to it, so a window
+/// being dragged to a new size turns the share once.
+const SETTLE: Duration = Duration::from_millis(300);
+/// Turns of the share are at least this far apart, which the server's limit on share changes
+/// allows.
+const TURN_SPACING: Duration = Duration::from_secs(1);
+
 /// Forced recoveries are at least this far apart, so a link too slow for whole keyframes
 /// gets one a second rather than one every frame.
 const RECOVERY_SPACING: Duration = Duration::from_secs(1);
@@ -148,6 +155,8 @@ pub struct ShareSender {
     recover: std_mpsc::Sender<Recovery>,
     thread: Option<JoinHandle<()>>,
     pub config: ShareConfig,
+    /// The share's config whenever the share thread turned it to a new size.
+    turned: watch::Receiver<ShareConfig>,
     pub encoder: &'static str,
     /// The hardware API or software library encoding the share.
     pub engine: &'static str,
@@ -207,6 +216,7 @@ impl ShareSender {
         let stop = Arc::new(AtomicBool::new(false));
         let (recover, recover_rx) = std_mpsc::channel();
         let (self_tx, self_view) = watch::channel(None);
+        let (turns, turned) = watch::channel(config);
         let preview = Arc::new(PreviewDemand::default());
         let sending = Sending {
             stop: stop.clone(),
@@ -229,6 +239,10 @@ impl ShareSender {
             tally: Tally::new(0),
             #[cfg(screen_capture_kit)]
             pixel_buffers,
+            bound,
+            turns,
+            turning: None,
+            last_turn: Instant::now(),
         };
         let thread = std::thread::Builder::new()
             .name("throcc-share".into())
@@ -239,11 +253,21 @@ impl ShareSender {
             recover,
             thread: Some(thread),
             config,
+            turned,
             encoder: name,
             engine: encoded_by,
             self_view,
             preview,
         })
+    }
+
+    /// The share's new config, once the share thread turned it to a new size.
+    pub fn turned(&mut self) -> Option<ShareConfig> {
+        if !self.turned.has_changed().unwrap_or(false) {
+            return None;
+        }
+        self.config = *self.turned.borrow_and_update();
+        Some(self.config)
     }
 
     pub fn recover(&self, kind: Recovery) {
@@ -288,6 +312,13 @@ struct Sending {
     /// Whether captured pixel buffers go to the encoder uncopied.
     #[cfg(screen_capture_kit)]
     pixel_buffers: bool,
+    /// The box the share's size fits what is shared in.
+    bound: (usize, usize),
+    /// The share's config, sent anew whenever the share turns to a new size.
+    turns: watch::Sender<ShareConfig>,
+    /// The size the share turns to once what is shared keeps its shape, and since when.
+    turning: Option<((usize, usize), Instant)>,
+    last_turn: Instant,
 }
 
 /// Where the last picture sent is kept.
@@ -315,6 +346,7 @@ impl Sending {
             }
             self.send_audio(&mut sound);
             self.tally.report_if_due(self.capture.dropped());
+            self.follow_shape();
             #[cfg(target_os = "android")]
             if self.send_drained() {
                 continue;
@@ -437,6 +469,72 @@ impl Sending {
             Err(e) => warn!("encoding failed: {e}"),
         }
         true
+    }
+
+    /// Turns the share to the shape of what is shared once that held still a moment.
+    fn follow_shape(&mut self) {
+        let Some(shape) = self.capture.shape() else {
+            return;
+        };
+        let size = share_size(shape, self.bound);
+        let current = self.turns.borrow();
+        if size == (usize::from(current.width), usize::from(current.height)) {
+            drop(current);
+            self.turning = None;
+            return;
+        }
+        drop(current);
+        let now = Instant::now();
+        match self.turning {
+            Some((pending, since)) if pending == size => {
+                if now - since >= SETTLE && now - self.last_turn >= TURN_SPACING {
+                    self.turn(size);
+                }
+            }
+            _ => self.turning = Some((size, now)),
+        }
+    }
+
+    /// Reopens the encoder at `size`, has the capture deliver that, and announces it. A turn
+    /// that fails leaves the share as it was.
+    fn turn(&mut self, (width, height): (usize, usize)) {
+        self.turning = None;
+        self.last_turn = Instant::now();
+        let wanted = *self.turns.borrow();
+        let encoder = Encoder::open(EncoderConfig {
+            width,
+            height,
+            fps: u32::from(wanted.fps),
+            kbps: wanted.kbps,
+        });
+        let encoder = match encoder {
+            Ok(encoder) => encoder,
+            Err(e) => {
+                warn!("reopening the encoder at {width}×{height}: {e}");
+                return;
+            }
+        };
+        #[cfg(target_os = "android")]
+        let reshaped = self.capture.draw_into(encoder.input(), (width, height));
+        #[cfg(not(target_os = "android"))]
+        let reshaped = self.capture.reshape((width, height));
+        if let Err(e) = reshaped {
+            warn!("turning the capture to {width}×{height}: {e}");
+            return;
+        }
+        self.encoder = encoder;
+        #[cfg(screen_capture_kit)]
+        {
+            self.pixel_buffers = self.encoder.takes_pixel_buffers();
+        }
+        self.last = Last::Nothing;
+        self.turns.send_modify(|config| {
+            config.codec = self.encoder.codec();
+            config.recovery = self.encoder.recovery();
+            config.width = width as u16;
+            config.height = height as u16;
+        });
+        info!(width, height, encoder = self.encoder.name(), "share turned");
     }
 
     fn send_audio(&mut self, sound: &mut [f32; STEREO_FRAME]) {

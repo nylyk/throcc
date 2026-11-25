@@ -12,7 +12,7 @@ use throcc_video::View;
 use throcc_video::frame::VideoFrame;
 
 use super::clock::{ShareClock, clock_nanos};
-use super::{Capture, CaptureConfig, CaptureError};
+use super::{Capture, CaptureConfig, CaptureError, pack_shape, unpack_shape};
 use crate::media::share_audio::STEREO_FRAME;
 
 /// 20 ms buffers of the screen's sound waiting for the share thread.
@@ -21,9 +21,10 @@ const NANOS: i64 = 1_000_000_000;
 
 /// The app's side of a screen share, which holds the screen the person agreed to share.
 pub trait Screen: Send + Sync {
-    /// Starts drawing the screen into the `ANativeWindow` at `window`, `width`×`height`
-    /// pixels, and recording its sound when the share has audio. The app takes a reference
-    /// of its own to the window. False if it can't.
+    /// Draws the screen into the `ANativeWindow` at `window`, `width`×`height` pixels, from
+    /// now on, and starts recording its sound when the share has audio. Called again with a
+    /// new window when the screen turned. The app takes a reference of its own to the window.
+    /// False if it can't.
     fn show(&self, window: u64, width: u32, height: u32) -> bool;
     /// Stops drawing and recording, and gives up the screen.
     fn stop(&self);
@@ -48,6 +49,9 @@ type SoundIn = (rtrb::Producer<Sound>, Arc<AtomicU64>);
 
 static SOUND_IN: Mutex<Option<SoundIn>> = Mutex::new(None);
 
+/// The shape of the screen a share shows, as the app last told, packed by [`pack_shape`].
+static SHAPE: AtomicU64 = AtomicU64::new(0);
+
 fn lock<T>(slot: &Mutex<T>) -> MutexGuard<'_, T> {
     slot.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -62,6 +66,11 @@ pub fn offer(screen: Arc<dyn Screen>, width: usize, height: usize) {
     if let Some(old) = lock(&OFFERED).replace(offer) {
         old.screen.stop();
     }
+}
+
+/// Tells a running share that the screen turned to `width`×`height` pixels.
+pub fn turned(width: usize, height: usize) {
+    SHAPE.store(pack_shape((width, height)), Ordering::Relaxed);
 }
 
 /// Adds 20 ms of the screen's sound, whose first frame was recorded at `at`, in nanoseconds
@@ -85,7 +94,6 @@ pub fn push_sound(samples: &[f32; STEREO_FRAME], at: i64) {
 
 pub struct AndroidCapture {
     screen: Arc<dyn Screen>,
-    shape: (usize, usize),
     sound: Option<rtrb::Consumer<Sound>>,
     dropped: Arc<AtomicU64>,
     /// Counts from `CLOCK_MONOTONIC`, in nanoseconds.
@@ -95,6 +103,7 @@ pub struct AndroidCapture {
 /// Takes the screen the app offered, which it draws once the share's encoder is open.
 pub fn start(config: CaptureConfig) -> Result<AndroidCapture, CaptureError> {
     let offer = lock(&OFFERED).take().ok_or(CaptureError::Cancelled)?;
+    SHAPE.store(pack_shape(offer.shape), Ordering::Relaxed);
     let dropped = Arc::new(AtomicU64::new(0));
     let sound = config.audio.then(|| {
         let (producer, consumer) = rtrb::RingBuffer::new(AUDIO_RING);
@@ -103,7 +112,6 @@ pub fn start(config: CaptureConfig) -> Result<AndroidCapture, CaptureError> {
     });
     Ok(AndroidCapture {
         screen: offer.screen,
-        shape: offer.shape,
         sound,
         dropped,
         clock: ShareClock::new(NANOS, || clock_nanos(libc::CLOCK_MONOTONIC)),
@@ -116,7 +124,7 @@ impl Capture for AndroidCapture {
     }
 
     fn shape(&self) -> Option<(usize, usize)> {
-        Some(self.shape)
+        unpack_shape(SHAPE.load(Ordering::Relaxed))
     }
 
     fn draw_into(

@@ -11,6 +11,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.hardware.display.DisplayManager
 import android.media.AudioAttributes
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
@@ -191,8 +192,10 @@ class VoiceService : Service() {
             Handler(mainLooper),
         )
         val sound = if (share.getBooleanExtra("audio", false)) record(projection) else null
-        val screen = SharedScreen(projection, share.getIntExtra("dpi", 0), sound)
-        model.shareScreen(screen, share.getIntExtra("width", 0), share.getIntExtra("height", 0), sound != null)
+        val (width, height) = share.getIntExtra("width", 0) to share.getIntExtra("height", 0)
+        val displays = getSystemService(DisplayManager::class.java)
+        val screen = SharedScreen(projection, share.getIntExtra("dpi", 0), sound, width, height, displays)
+        model.shareScreen(screen, width, height, sound != null)
     }
 
     private fun stopProjecting() {

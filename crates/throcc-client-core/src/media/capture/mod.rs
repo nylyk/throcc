@@ -49,6 +49,22 @@ fn failed(e: impl std::fmt::Display) -> CaptureError {
     CaptureError::Failed(e.to_string())
 }
 
+/// A shape held in one atomic word: its width in the high half and its height in the low one.
+#[cfg(any(target_os = "android", target_os = "macos"))]
+fn pack_shape((width, height): (usize, usize)) -> u64 {
+    ((width as u64) << 32) | (height as u64 & u64::from(u32::MAX))
+}
+
+/// The shape [`pack_shape`] packed, or `None` for none.
+#[cfg(any(target_os = "android", target_os = "macos"))]
+fn unpack_shape(packed: u64) -> Option<(usize, usize)> {
+    let shape = (
+        (packed >> 32) as usize,
+        (packed & u64::from(u32::MAX)) as usize,
+    );
+    (shape.0 > 0 && shape.1 > 0).then_some(shape)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CaptureConfig {
     pub width: usize,
@@ -93,9 +109,14 @@ pub trait Capture: Send {
     fn next_pixel_buffer(&mut self) -> Option<PixelBuffer> {
         None
     }
-    /// The size of what is shared, where the capture knows it before its first picture.
+    /// The size of what is shared now, where the capture can tell, as soon as it can.
     fn shape(&self) -> Option<(usize, usize)> {
         None
+    }
+    /// Delivers pictures of `size` from now on, for what is shared having changed shape.
+    #[cfg(not(target_os = "android"))]
+    fn reshape(&mut self, _size: (usize, usize)) -> Result<(), CaptureError> {
+        Ok(())
     }
     /// Starts drawing what is shared into `window`, an encoder's input surface, at `size`.
     #[cfg(target_os = "android")]

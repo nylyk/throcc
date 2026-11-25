@@ -591,6 +591,7 @@ impl Session {
                 _ = levels.tick() => {
                     self.refresh_levels();
                     self.stop_ended_share().await;
+                    self.announce_turned_share().await;
                 }
                 _ = health.tick() => {
                     if went_stale(self.last_alive, SystemTime::now()) {
@@ -1918,6 +1919,18 @@ impl Session {
             .is_some_and(crate::media::share::ShareSender::ended)
         {
             self.end_share().await;
+        }
+    }
+
+    /// Tells the server our share's new size once the share turned to it.
+    async fn announce_turned_share(&mut self) {
+        let turned = self
+            .sharing
+            .as_mut()
+            .and_then(crate::media::share::ShareSender::turned);
+        if let Some(config) = turned {
+            self.media.share = Some(config);
+            self.push_media().await;
         }
     }
 

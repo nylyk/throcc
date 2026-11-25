@@ -14,12 +14,31 @@ use objc2_core_media::CMTime;
 #[cfg(all(test, target_os = "macos"))]
 use objc2_foundation::NSArray;
 use objc2_foundation::NSError;
+#[cfg(target_os = "macos")]
+use objc2_foundation::NSString;
 
 // iOS links ScreenCaptureKit weakly through the app's own linker flags, since iOS 26 has
 // none.
 #[cfg(target_os = "macos")]
 #[link(name = "ScreenCaptureKit", kind = "framework")]
 unsafe extern "C" {}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    /// Where on screen a frame's content is, in points: a CGRect as a dictionary.
+    pub static SCStreamFrameInfoScreenRect: &'static NSString;
+    /// A frame's pixels per point, as a number.
+    pub static SCStreamFrameInfoScaleFactor: &'static NSString;
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C-unwind" {
+    pub fn CGRectMakeWithDictionaryRepresentation(
+        dictionary: *const std::ffi::c_void,
+        rect: *mut CGRect,
+    ) -> bool;
+}
 
 /// `SCStreamOutputType`.
 pub const OUTPUT_SCREEN: isize = 0;
@@ -142,6 +161,14 @@ impl SCStream {
 
         #[unsafe(method(stopCaptureWithCompletionHandler:))]
         pub fn stop_capture(&self, handler: Option<&Block<dyn Fn(*mut NSError)>>);
+
+        #[cfg(target_os = "macos")]
+        #[unsafe(method(updateConfiguration:completionHandler:))]
+        pub fn update_configuration(
+            &self,
+            configuration: &SCStreamConfiguration,
+            handler: Option<&Block<dyn Fn(*mut NSError)>>,
+        );
     );
 }
 
