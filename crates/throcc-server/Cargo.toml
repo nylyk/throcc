@@ -18,6 +18,7 @@ quinn.workspace = true
 rcgen.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
+socket2.workspace = true
 arc-swap.workspace = true
 bytes.workspace = true
 rustls.workspace = true

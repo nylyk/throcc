@@ -119,6 +119,29 @@ pub struct Server {
     shared: Arc<ServerState>,
 }
 
+/// Room for a burst such as a sender's keyframe and its copy. Windows' default receive buffer
+/// holds about 50 datagrams, and Linux caps any size at `net.core.rmem_max`.
+const RECEIVE_BUFFER: usize = 4 * 1024 * 1024;
+
+/// An endpoint at `listen` as `quinn::Endpoint::server` opens one, with [`RECEIVE_BUFFER`].
+fn server_endpoint(
+    config: quinn::ServerConfig,
+    listen: SocketAddr,
+) -> std::io::Result<quinn::Endpoint> {
+    let socket = std::net::UdpSocket::bind(listen)?;
+    if let Err(e) = socket2::SockRef::from(&socket).set_recv_buffer_size(RECEIVE_BUFFER) {
+        warn!("the listener keeps its default receive buffer: {e}");
+    }
+    let runtime =
+        quinn::default_runtime().ok_or_else(|| std::io::Error::other("no async runtime found"))?;
+    quinn::Endpoint::new(
+        quinn::EndpointConfig::default(),
+        Some(config),
+        socket,
+        runtime,
+    )
+}
+
 impl Server {
     /// Binds the UDP listener. Must be called inside a tokio runtime.
     pub fn bind(config: &Config) -> Result<Self> {
@@ -136,7 +159,7 @@ impl Server {
             &identity,
             tls::transport_config(config.congestion, config.idle_timeout)?,
         )?;
-        let endpoint = quinn::Endpoint::server(server_config, config.listen)
+        let endpoint = server_endpoint(server_config, config.listen)
             .with_context(|| format!("binding {}", config.listen))?;
         let shared = Arc::new(ServerState {
             fingerprint: identity.fingerprint,

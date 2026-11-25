@@ -23,7 +23,7 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 quinn.workspace = true
 serde.workspace = true
-socket2 = "0.6.5"
+socket2.workspace = true
 throcc-crypto.workspace = true
 tempfile.workspace = true
 throcc-server = { path = "../throcc-server" }

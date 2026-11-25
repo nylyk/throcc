@@ -29,6 +29,7 @@ sonora-common-audio.workspace = true
 sonora-simd.workspace = true
 rustls.workspace = true
 rustls-webpki.workspace = true
+socket2.workspace = true
 thiserror.workspace = true
 image = { workspace = true, features = ["gif", "bmp", "webp"] }
 postcard.workspace = true

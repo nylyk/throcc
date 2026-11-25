@@ -7,6 +7,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::crypto::{CryptoProvider, verify_tls13_signature};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
+use socket2::{Domain, Protocol, Socket, Type};
 use throcc_proto::messages::valid_address;
 use throcc_proto::transport::{self, DatagramError, check_datagrams};
 use throcc_proto::{ALPN, DEFAULT_PORT, Fingerprint, SERVER_NAME};
@@ -20,6 +21,9 @@ const DATAGRAM_SEND_BUFFER: usize = 64 * 1024;
 /// Room for a largest control frame and the start of the next; the control stream is the
 /// only one, so this also bounds what a server can leave unread in us.
 const CONTROL_WINDOW: u32 = 2 * throcc_proto::framing::MAX_FRAME_BYTES as u32;
+/// Room for a burst such as a keyframe and its copy. Windows' default receive buffer holds
+/// about 50 datagrams and drops the rest of a burst.
+const RECEIVE_BUFFER: usize = 4 * 1024 * 1024;
 
 pub struct Connected {
     /// The address connected to, as the user gave it.
@@ -70,6 +74,28 @@ pub async fn connect(address: &str, pin: Option<Fingerprint>) -> Result<Connecte
     connect_with(address, config, &verifier).await
 }
 
+/// An endpoint at `bind` as `quinn::Endpoint::client` opens one, with [`RECEIVE_BUFFER`].
+fn client_endpoint(bind: SocketAddr) -> std::io::Result<quinn::Endpoint> {
+    let socket = Socket::new(Domain::for_address(bind), Type::DGRAM, Some(Protocol::UDP))?;
+    if bind.is_ipv6()
+        && let Err(e) = socket.set_only_v6(false)
+    {
+        tracing::debug!("the socket stays IPv6 only: {e}");
+    }
+    if let Err(e) = socket.set_recv_buffer_size(RECEIVE_BUFFER) {
+        tracing::debug!("the socket keeps its default receive buffer: {e}");
+    }
+    socket.bind(&bind.into())?;
+    let runtime =
+        quinn::default_runtime().ok_or_else(|| std::io::Error::other("no async runtime found"))?;
+    quinn::Endpoint::new(
+        quinn::EndpointConfig::default(),
+        None,
+        socket.into(),
+        runtime,
+    )
+}
+
 pub async fn connect_with(
     address: &str,
     config: quinn::ClientConfig,
@@ -81,8 +107,7 @@ pub async fn connect_with(
     } else {
         ([0u16; 8], 0).into()
     };
-    let mut endpoint =
-        quinn::Endpoint::client(bind).map_err(|e| ConnectError::Setup(e.to_string()))?;
+    let mut endpoint = client_endpoint(bind).map_err(|e| ConnectError::Setup(e.to_string()))?;
     endpoint.set_default_client_config(config);
 
     let connecting = endpoint
