@@ -79,6 +79,7 @@ struct RootView: View {
         case .pinMismatch(let address, let expected, let actual):
             PinMismatchView(address: address, expected: expected, actual: actual)
         case .identityMissing(let address, let code): IdentityMissingView(address: address, code: code)
+        case .shareScreen: ShareScreenSheet()
         }
     }
 }

@@ -1,5 +1,6 @@
 mod messages;
 mod safety;
+mod share;
 mod state;
 mod transfer;
 mod voice;
@@ -37,6 +38,7 @@ use tokio::sync::broadcast::error::RecvError;
 
 pub use messages::{Command, Event, NameChange, PictureChange, User};
 pub use safety::SafetyCheck;
+pub use share::{ShareChoice, ShareResolution};
 pub use state::{
     Connection, ConnectionNotice, CoreState, CurrentRoom, Health, JoinAction, KeyTrust, KeyWarning,
     NoticeAction, Person, Role, Room, Server, Share, Sound, SoundLevel,
@@ -641,6 +643,11 @@ impl Core {
 
     pub fn command(&self, command: Command) {
         self.tell_client(command.into_core());
+    }
+
+    /// Whether this device can share its screen. The mock always can.
+    pub fn can_share(&self) -> bool {
+        self.mock || throcc_client_core::media::capture::available()
     }
 
     /// Watches `user`'s share in place of any other: a phone shows one share at a time.

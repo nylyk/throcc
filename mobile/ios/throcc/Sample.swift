@@ -6,7 +6,7 @@ enum Sample: String {
     case profile, voice, settings, appearance, customtheme, verified, blockedpeople
     case server, members, invites, keys
     case reconnect, elsewhere
-    case share, sharefull
+    case share, sharefull, startshare, sharing
     case pinmismatch, identitymissing
     case exportqr, exportcode, exportcodeqr, importidentity, importscan, importcode
 
@@ -74,6 +74,12 @@ extension AppModel {
         case .share:
             await joinSampleRoom()
             core.watchOnly(user: 4)
+        case .startshare:
+            await joinSampleRoom()
+            sheet = .shareScreen
+        case .sharing:
+            await joinSampleRoom()
+            core.command(command: .startShare(choice: shareChoice, audio: shareAudio))
         case .sharefull:
             await joinSampleRoom()
             core.watchOnly(user: 4)

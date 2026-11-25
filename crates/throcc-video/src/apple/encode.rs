@@ -38,6 +38,10 @@ use crate::nal;
 use crate::software::vpx;
 use crate::{EncodeError, EncodedUnit, EncoderConfig, switches};
 
+/// `kVTInvalidSessionErr`: the session is gone, as when iOS takes the hardware encoder from
+/// an app in the background.
+const INVALID_SESSION: i32 = -12903;
+
 /// A GOP cap of this many seconds bounds how long a picture stays broken without a request.
 const GOP_SECONDS: u32 = 4;
 
@@ -50,6 +54,7 @@ const LADDER: &[Codec] = &[Codec::Hevc, Codec::H264, Codec::Vp9];
 /// its own on the GPU, with black bars around them.
 pub struct Encoder {
     backend: Backend,
+    config: EncoderConfig,
     width: usize,
     height: usize,
     idr_next: bool,
@@ -94,6 +99,7 @@ impl Encoder {
         };
         let encoder = Self {
             backend,
+            config,
             width: config.width,
             height: config.height,
             idr_next: true,
@@ -180,6 +186,35 @@ impl Encoder {
     /// the encoder's size, else scaled on the GPU first. Only VideoToolbox encoders take
     /// them.
     pub fn encode_pixel_buffer(
+        &mut self,
+        picture: &PixelBuffer,
+    ) -> Result<Vec<EncodedUnit>, EncodeError> {
+        let encoded = self.encode_pixel_buffer_once(picture);
+        if matches!(encoded, Err(EncodeError::VideoToolbox(INVALID_SESSION))) {
+            self.reopen()?;
+            return self.encode_pixel_buffer_once(picture);
+        }
+        encoded
+    }
+
+    /// Opens a new session for one the system invalidated.
+    fn reopen(&mut self) -> Result<(), EncodeError> {
+        #[allow(
+            clippy::infallible_destructuring_match,
+            reason = "only macOS has a second backend"
+        )]
+        let vt = match &mut self.backend {
+            Backend::VideoToolbox(vt) => vt,
+            #[cfg(target_os = "macos")]
+            Backend::Vpx(_) => return Ok(()),
+        };
+        *vt = VideoToolbox::open(vt.codec, self.config, true)?;
+        self.idr_next = true;
+        info!(encoder = self.name(), "video encoder reopened");
+        Ok(())
+    }
+
+    fn encode_pixel_buffer_once(
         &mut self,
         picture: &PixelBuffer,
     ) -> Result<Vec<EncodedUnit>, EncodeError> {

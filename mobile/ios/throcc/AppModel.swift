@@ -12,6 +12,7 @@ enum Sheet: Hashable, Identifiable {
     /// Signing in to the server at `address`, with the invite `code` if any, found our identity
     /// gone from the keychain.
     case identityMissing(address: String, code: String?)
+    case shareScreen
 
     var id: Self { self }
 }
@@ -97,6 +98,9 @@ final class AppModel {
     var sampleConnection: Connection?
     /// The share shown over the whole screen, if any.
     var fullscreenShare: UInt64?
+    /// What our next share asks for.
+    var shareChoice = defaultShareChoice()
+    var shareAudio = true
     @ObservationIgnored private(set) lazy var pictureInPicture = SharePictureInPicture(core: core) { [weak self] in
         self?.followSight()
     }

@@ -52,6 +52,9 @@ struct RoomView: View {
                 ToolbarItemGroup(placement: .bottomBar) {
                     MicButton()
                     SoundButton()
+                    if model.core.canShare() {
+                        ShareScreenButton()
+                    }
                     Spacer()
                     LeaveButton()
                 }
@@ -92,7 +95,7 @@ private struct PersonCard: View {
             }
             .foregroundStyle(person.blocked ? ThemeColor.muted : .text)
             // Held empty for those not sharing, so every card has the same height.
-            if let share = person.sharing, !person.blocked {
+            if let share = person.sharing, !person.blocked, person.user != model.state.me {
                 Button {
                     model.core.watchOnly(user: person.user)
                 } label: {

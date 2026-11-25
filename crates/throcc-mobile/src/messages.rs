@@ -1,8 +1,10 @@
 use throcc_client_core::client::{UiCommand, UiEvent};
+use throcc_client_core::state as core_state;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{RoomId, UserId};
 use throcc_proto::messages;
 
+use crate::share::ShareChoice;
 use crate::state::{Role, Sound, SoundLevel};
 
 /// What an app asks the core to do while connected.
@@ -79,6 +81,12 @@ pub enum Command {
     LeaveServer,
     /// Says the user is here and wants the link, as when the app comes to the foreground.
     Reconnect,
+    /// Asks the person what to share with the system's picker, then shares it.
+    StartShare {
+        choice: ShareChoice,
+        audio: bool,
+    },
+    StopShare,
 }
 
 /// What a save does to the server's name.
@@ -146,6 +154,10 @@ impl Command {
             Self::Unblock { user } => UiCommand::Unblock(UserId(user)),
             Self::LeaveServer => UiCommand::LeaveServer,
             Self::Reconnect => UiCommand::Reconnect,
+            Self::StartShare { choice, audio } => UiCommand::StartShare(
+                core_state::ShareChoice::from(choice).config(messages::Codec::Av1, audio),
+            ),
+            Self::StopShare => UiCommand::StopShare,
         }
     }
 }

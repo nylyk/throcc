@@ -2012,6 +2012,7 @@ checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
 dependencies = [
  "bitflags 2.13.2",
  "block2 0.6.2",
+ "libc",
  "objc2 0.6.5",
 ]
 
@@ -8116,9 +8117,11 @@ dependencies = [
  "ashpd",
  "async-io",
  "base64 0.22.1",
+ "block2 0.6.2",
  "bytes",
  "cpal",
  "directories",
+ "dispatch2",
  "futures-core",
  "image",
  "jni",
@@ -8126,8 +8129,13 @@ dependencies = [
  "keyring-core",
  "libc",
  "ndk",
+ "objc2 0.6.5",
  "objc2-audio-toolbox",
  "objc2-core-audio-types",
+ "objc2-core-foundation",
+ "objc2-core-media",
+ "objc2-core-video",
+ "objc2-foundation 0.3.2",
  "pipewire",
  "postcard",
  "proptest",

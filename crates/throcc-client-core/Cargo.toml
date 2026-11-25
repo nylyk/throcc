@@ -49,14 +49,23 @@ keyring-core.workspace = true
 [target.'cfg(target_os = "ios")'.dependencies]
 apple-native-keyring-store.workspace = true
 objc2-audio-toolbox.workspace = true
-objc2-core-audio-types.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni.workspace = true
 ndk.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(target_vendor = "apple")'.dependencies]
+block2.workspace = true
+dispatch2.workspace = true
 libc.workspace = true
+objc2.workspace = true
+objc2-core-audio-types.workspace = true
+objc2-core-foundation = { workspace = true, features = ["CFCGTypes", "objc2"] }
+objc2-core-media = { workspace = true, features = ["objc2", "objc2-core-audio-types"] }
+objc2-core-video.workspace = true
+objc2-foundation = { workspace = true, features = ["NSArray", "NSError"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
 screencapturekit.workspace = true
 
 [target.'cfg(windows)'.dependencies]

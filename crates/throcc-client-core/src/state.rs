@@ -603,6 +603,11 @@ impl ShareChoice {
     }
 }
 
+/// A bitrate as a share's settings show it, such as "6 Mbps".
+pub fn mbps(kbps: u32) -> String {
+    format!("{} Mbps", kbps as f32 / 1000.0)
+}
+
 fn codec_name(codec: Codec) -> &'static str {
     match codec {
         Codec::Av1 => "AV1",

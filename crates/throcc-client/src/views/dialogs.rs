@@ -14,7 +14,7 @@ use gpui_component::switch::Switch;
 use throcc_client_core::client::UiCommand;
 use throcc_client_core::keystore::StartedOver;
 use throcc_client_core::safety::SafetyCheck;
-use throcc_client_core::state::{FRAME_RATES, Resolution};
+use throcc_client_core::state::{FRAME_RATES, Resolution, mbps};
 use throcc_client_core::transfer::QrCode;
 use throcc_proto::Fingerprint;
 use throcc_proto::ids::{RoomId, UserId};
@@ -299,10 +299,6 @@ fn choices<T: Copy + PartialEq + 'static>(
         }))
 }
 
-fn mbps(kbps: u32) -> String {
-    format!("{} Mbps", kbps as f32 / 1000.0)
-}
-
 fn share(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
     let choice = app.share_choice;
     let audio = app.share_audio;
@@ -354,7 +350,7 @@ fn share(app: &ThroccApp, cx: &mut Context<ThroccApp>) -> AnyElement {
         .child(
             Switch::new("share-audio")
                 .checked(audio)
-                .label("Share computer audio")
+                .label("Share device audio")
                 .on_click(cx.listener(|app, checked: &bool, _, cx| {
                     app.share_audio = *checked;
                     cx.notify();

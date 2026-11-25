@@ -48,8 +48,8 @@ pub use none::Encoder;
 pub use none::tries_gpu_input_first;
 pub use output::{Output, View};
 
-/// Whether this build encodes video, so it can share. Phones send no shares yet.
-pub const ENCODES: bool = cfg!(any(target_vendor = "apple", ffmpeg)) && !cfg!(target_os = "ios");
+/// Whether this build encodes video, so it can share.
+pub const ENCODES: bool = cfg!(any(target_vendor = "apple", ffmpeg));
 
 /// A picture as handed to the renderer: NV12 in memory, on Apple platforms the pixel buffer
 /// in GPU memory it was captured or decoded into, or on Android an output buffer of the codec

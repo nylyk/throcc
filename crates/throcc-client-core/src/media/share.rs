@@ -15,7 +15,7 @@ use super::capture::{Capture, CaptureConfig, CaptureError, FrameLimiter};
 use super::engine::{Kind, MediaEngine, Outgoing, Received};
 use super::share_audio::{Playout, STEREO_FRAME, ShareAudioEncoder, due_frames};
 use super::video::{Picture, PreviewDemand};
-#[cfg(target_os = "macos")]
+#[cfg(screen_capture_kit)]
 use throcc_video::PixelBuffer;
 #[cfg(target_os = "linux")]
 use throcc_video::Refusal;
@@ -195,7 +195,7 @@ impl ShareSender {
         };
         let name = encoder.name();
         let encoded_by = encoder.engine();
-        #[cfg(target_os = "macos")]
+        #[cfg(screen_capture_kit)]
         let pixel_buffers = encoder.takes_pixel_buffers();
         let stop = Arc::new(AtomicBool::new(false));
         let (recover, recover_rx) = std_mpsc::channel();
@@ -220,7 +220,7 @@ impl ShareSender {
                 preview: preview.clone(),
             },
             tally: Tally::new(0),
-            #[cfg(target_os = "macos")]
+            #[cfg(screen_capture_kit)]
             pixel_buffers,
         };
         let thread = std::thread::Builder::new()
@@ -279,7 +279,7 @@ struct Sending {
     admission: Admission,
     tally: Tally,
     /// Whether captured pixel buffers go to the encoder uncopied.
-    #[cfg(target_os = "macos")]
+    #[cfg(screen_capture_kit)]
     pixel_buffers: bool,
 }
 
@@ -291,7 +291,7 @@ enum Last {
     /// In the encoder, which took it in GPU memory.
     #[cfg(target_os = "linux")]
     Gpu,
-    #[cfg(target_os = "macos")]
+    #[cfg(screen_capture_kit)]
     PixelBuffer(PixelBuffer),
 }
 
@@ -312,7 +312,7 @@ impl Sending {
             if self.send_dmabuf() {
                 continue;
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(screen_capture_kit)]
             if self.pixel_buffers && !self.unsent && self.send_pixel_buffer() {
                 continue;
             }
@@ -392,7 +392,7 @@ impl Sending {
 
     /// Encodes the next frame from the pixel buffer it was captured into, uncopied. True if
     /// there was one.
-    #[cfg(target_os = "macos")]
+    #[cfg(screen_capture_kit)]
     fn send_pixel_buffer(&mut self) -> bool {
         let Some(picture) = self.capture.next_pixel_buffer() else {
             return false;
@@ -455,7 +455,7 @@ impl Sending {
             }
             #[cfg(target_os = "linux")]
             Last::Gpu => self.encoder.encode_gpu_again(timestamp),
-            #[cfg(target_os = "macos")]
+            #[cfg(screen_capture_kit)]
             Last::PixelBuffer(picture) => {
                 let again = PixelBuffer {
                     buffer: picture.buffer.clone(),

@@ -1,6 +1,8 @@
+#[cfg(all(screen_capture_kit, target_os = "ios"))]
+mod apple;
 #[cfg(any(windows, target_os = "linux", test))]
 mod audio_ring;
-#[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
+#[cfg(any(windows, screen_capture_kit, target_os = "linux", test))]
 mod clock;
 mod limiter;
 #[cfg(target_os = "linux")]
@@ -14,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use throcc_proto::frame::VIDEO_CLOCK_HZ;
 use throcc_proto::messages::ShareConfig;
-#[cfg(target_os = "macos")]
+#[cfg(screen_capture_kit)]
 pub use throcc_video::PixelBuffer;
 use throcc_video::frame::VideoFrame;
 #[cfg(target_os = "linux")]
@@ -79,7 +81,7 @@ pub trait Capture: Send {
     fn refuse_dmabuf(&mut self, _modifier: Option<u64>) {}
     /// The oldest captured frame not yet taken, in the pixel buffer the system captured it
     /// into. Never blocks.
-    #[cfg(target_os = "macos")]
+    #[cfg(screen_capture_kit)]
     fn next_pixel_buffer(&mut self) -> Option<PixelBuffer> {
         None
     }
@@ -107,12 +109,36 @@ pub trait Capture: Send {
     }
 }
 
+/// Whether this build and device can share the screen.
+pub fn available() -> bool {
+    #[cfg(target_os = "ios")]
+    let captures = cfg!(screen_capture_kit) && objc2::available!(ios = 27.0);
+    #[cfg(not(target_os = "ios"))]
+    let captures = cfg!(any(target_os = "macos", windows, target_os = "linux"));
+    captures && throcc_video::ENCODES
+}
+
 /// Asks the person what to share with the system's own picker, then starts capturing it.
 /// Blocks until the picker closes.
 pub fn start(config: CaptureConfig) -> Result<Box<dyn Capture>, CaptureError> {
     #[cfg(target_os = "macos")]
     {
         macos::start(config).map(|c| Box::new(c) as Box<dyn Capture>)
+    }
+    #[cfg(target_os = "ios")]
+    {
+        if !available() {
+            return Err(CaptureError::Unsupported);
+        }
+        #[cfg(screen_capture_kit)]
+        {
+            apple::start(config).map(|c| Box::new(c) as Box<dyn Capture>)
+        }
+        #[cfg(not(screen_capture_kit))]
+        {
+            let _ = config;
+            Err(CaptureError::Unsupported)
+        }
     }
     #[cfg(windows)]
     {
@@ -122,7 +148,7 @@ pub fn start(config: CaptureConfig) -> Result<Box<dyn Capture>, CaptureError> {
     {
         linux::start(config).map(|c| Box::new(c) as Box<dyn Capture>)
     }
-    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "ios", windows, target_os = "linux")))]
     {
         let _ = config;
         Err(CaptureError::Unsupported)
