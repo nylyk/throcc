@@ -140,6 +140,9 @@ pub struct Encoder {
     codec: Codec,
     name: &'static str,
     backend: Backend,
+    /// The size the encoder was opened at, which pictures are fitted to.
+    shown: (usize, usize),
+    /// The size it encodes at, which pictures are stretched over from `shown`.
     width: usize,
     height: usize,
     idr_next: bool,
@@ -221,7 +224,13 @@ impl Encoder {
     /// The encoder `candidate` names, if this ffmpeg has it and it opens here.
     fn open_with(candidate: &Candidate, config: EncoderConfig) -> Option<Self> {
         let codec = AVCodec::find_encoder_by_name(candidate.name)?;
-        match open_candidate(&codec, candidate, config) {
+        let (width, height) = coded_size(candidate.codec, (config.width, config.height));
+        let coded = EncoderConfig {
+            width,
+            height,
+            ..config
+        };
+        match open_candidate(&codec, candidate, coded) {
             Ok((ctx, device)) => {
                 #[cfg(not(target_os = "linux"))]
                 drop(device);
@@ -232,8 +241,9 @@ impl Encoder {
                     codec: candidate.codec,
                     name,
                     backend: candidate.backend,
-                    width: config.width,
-                    height: config.height,
+                    shown: (config.width, config.height),
+                    width,
+                    height,
                     idr_next: true,
                     staging: None,
                     fitter: None,
@@ -351,7 +361,7 @@ impl Encoder {
     ) -> Result<GpuEncoded, EncodeError> {
         let shown = frame.shown();
         let source = (shown.width as usize, shown.height as usize);
-        let region = rectangle(fitted(source, (self.width, self.height)));
+        let region = rectangle(fitted(source, self.shown, (self.width, self.height)));
         // First, so an encoder that takes no GPU input says so rather than lacking surfaces.
         self.gpu()?;
         let surface = self.surface()?;
@@ -426,6 +436,7 @@ impl Encoder {
             Some(fitter) if fitter.source_size == source_size => fitter,
             slot => slot.insert(Fitter::new(
                 source_size,
+                self.shown,
                 (self.width, self.height),
                 self.backend.input(),
             )?),
@@ -452,10 +463,11 @@ struct Fitter {
 impl Fitter {
     fn new(
         source_size: (usize, usize),
-        target_size: (usize, usize),
+        shown: (usize, usize),
+        coded: (usize, usize),
         input: Input,
     ) -> Result<Self, EncodeError> {
-        let rectangle = fitted(source_size, target_size);
+        let rectangle = fitted(source_size, shown, coded);
         let (_, _, width, height) = rectangle;
         let scaler = SwsContext::get_context(
             source_size.0 as i32,
@@ -613,20 +625,40 @@ fn cuda_present() -> bool {
     true
 }
 
-/// The largest rectangle with the aspect ratio of `source`, centred in `target`, or all of
-/// `target` when only rounding separates their shapes, as (x, y, width, height), all even.
-fn fitted(source: (usize, usize), target: (usize, usize)) -> (usize, usize, usize, usize) {
-    let (tw, th) = target;
-    let (width, height) = fit_within(source, target);
-    if tw - width <= ROUNDING_SLACK && th - height <= ROUNDING_SLACK {
-        return (0, 0, tw & !1, th & !1);
+/// Where a `source`-sized picture lands in a frame of the `coded` size: the largest
+/// rectangle with its aspect ratio centred in `shown`, or all of `shown` when only rounding
+/// separates their shapes, stretched from `shown` over `coded`. As (x, y, width, height),
+/// all even.
+fn fitted(
+    source: (usize, usize),
+    shown: (usize, usize),
+    coded: (usize, usize),
+) -> (usize, usize, usize, usize) {
+    let (tw, th) = shown;
+    let (width, height) = fit_within(source, shown);
+    let (x, y, width, height) = if tw - width <= ROUNDING_SLACK && th - height <= ROUNDING_SLACK {
+        (0, 0, tw, th)
+    } else {
+        ((tw - width) / 2, (th - height) / 2, width, height)
+    };
+    let stretch = |v: usize, from: usize, to: usize| (v * to / from.max(1)) & !1;
+    let (left, top) = (stretch(x, tw, coded.0), stretch(y, th, coded.1));
+    let (right, bottom) = (
+        stretch(x + width, tw, coded.0),
+        stretch(y + height, th, coded.1),
+    );
+    (left, top, (right - left).max(2), (bottom - top).max(2))
+}
+
+/// The size `codec` encodes a `size` picture at. AV1 encoders pad a frame to their
+/// alignment, AMD's to 64×16, and mark the real size only in the render size decoders
+/// ignore, so AV1 encodes at the nearest aligned size instead.
+fn coded_size(codec: Codec, (width, height): (usize, usize)) -> (usize, usize) {
+    let nearest = |v: usize, step: usize| ((v + step / 2) / step * step).max(step);
+    match codec {
+        Codec::Av1 => (nearest(width, 64), nearest(height, 16)),
+        _ => (width, height),
     }
-    (
-        ((tw - width) / 2) & !1,
-        ((th - height) / 2) & !1,
-        width,
-        height,
-    )
 }
 
 /// The VADisplay of a VA-API device context.
@@ -835,12 +867,19 @@ mod tests {
 
     #[test]
     fn fitted_rectangles_are_even_centred_and_inside() {
-        assert_eq!(fitted((2560, 1440), (1920, 1080)), (0, 0, 1920, 1080));
-        assert_eq!(fitted((1000, 1000), (1280, 720)), (280, 0, 720, 720));
-        assert_eq!(fitted((3840, 1080), (1280, 720)), (0, 180, 1280, 360));
-        assert_eq!(fitted((1505, 953), (1504, 952)), (0, 0, 1504, 952));
+        let same = (1280, 720);
+        assert_eq!(
+            fitted((2560, 1440), (1920, 1080), (1920, 1080)),
+            (0, 0, 1920, 1080)
+        );
+        assert_eq!(fitted((1000, 1000), same, same), (280, 0, 720, 720));
+        assert_eq!(fitted((3840, 1080), same, same), (0, 180, 1280, 360));
+        assert_eq!(
+            fitted((1505, 953), (1504, 952), (1504, 952)),
+            (0, 0, 1504, 952)
+        );
         for source in [(1, 1), (1, 5000), (5000, 1), (641, 359), (1279, 721)] {
-            let (x, y, width, height) = fitted(source, (1280, 720));
+            let (x, y, width, height) = fitted(source, same, same);
             assert!(
                 [x, y, width, height].iter().all(|v| v % 2 == 0),
                 "{source:?}"
@@ -850,6 +889,20 @@ mod tests {
                 "{source:?}"
             );
         }
+    }
+
+    #[test]
+    fn av1_encodes_at_an_aligned_size_its_pictures_are_stretched_over() {
+        assert_eq!(coded_size(Codec::Av1, (1850, 1030)), (1856, 1024));
+        assert_eq!(coded_size(Codec::Av1, (1920, 1080)), (1920, 1088));
+        assert_eq!(coded_size(Codec::Av1, (40, 4)), (64, 16));
+        assert_eq!(coded_size(Codec::Hevc, (1850, 1030)), (1850, 1030));
+        let shown = (1850, 1030);
+        assert_eq!(fitted(shown, shown, (1856, 1024)), (0, 0, 1856, 1024));
+        assert_eq!(
+            fitted((1000, 1000), (1280, 720), (1280, 736)),
+            (280, 0, 720, 736)
+        );
     }
 
     /// Odd and unaligned sizes too: run under valgrind, this catches sws reading past the
@@ -869,7 +922,7 @@ mod tests {
             for source in sizes {
                 let mut picture = VideoFrame::blank(source.0, source.1);
                 picture.y.fill(200);
-                let mut fitter = Fitter::new(source, target, input).unwrap();
+                let mut fitter = Fitter::new(source, target, target, input).unwrap();
                 let mut frame = new_frame(target.0, target.1, input).unwrap();
                 for (plane, rows) in [(0, target.1), (1, target.1 / 2), (2, target.1 / 2)] {
                     if !frame.data[plane].is_null() {
@@ -881,7 +934,7 @@ mod tests {
                 fitter.fit(&picture, &mut frame).unwrap();
                 fitter.fit(&picture, &mut frame).unwrap();
 
-                let (x, y, width, height) = fitted(source, target);
+                let (x, y, width, height) = fitted(source, target, target);
                 let sample = |plane: usize, col: usize, row: usize| {
                     // SAFETY: every (col, row) asked for is inside the plane.
                     unsafe { *frame.data[plane].add(row * frame.linesize[plane] as usize + col) }
