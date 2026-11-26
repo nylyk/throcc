@@ -78,7 +78,7 @@ fn renderer() -> gpui_wgpu::WgpuHeadlessRenderer {
 
 #[cfg(target_os = "macos")]
 fn renderer() -> gpui_apple::metal_renderer::MetalHeadlessRenderer {
-    gpui_apple::metal_renderer::MetalHeadlessRenderer::new()
+    gpui_apple::metal_renderer::MetalHeadlessRenderer::new().expect("no Metal device")
 }
 
 fn assert_rgb(image: &image::RgbaImage, x: u32, y: u32, expected: [u8; 3]) {

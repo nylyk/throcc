@@ -2,8 +2,9 @@ use crate::metal_atlas::MetalAtlas;
 use anyhow::{Context as _, Result};
 use block2::RcBlock;
 use gpui::{
-    AtlasTextureId, Bounds, ContentMask, DevicePixels, PaintSurface, PaintedPath, PrimitiveBatch,
-    ScaledPixels, Scene, Size, quad_depth, quad_depth_scale, size,
+    AtlasTextureId, Bounds, ContentMask, Corners, DevicePixels, Nv12Frame, PaintSurface,
+    PaintedPath, PrimitiveBatch, ScaledPixels, Scene, Size, SurfaceId, SurfaceSource, quad_depth,
+    quad_depth_scale, size,
 };
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 use image::RgbaImage;
@@ -11,9 +12,10 @@ use objc2::{Message, rc::Retained, runtime::ProtocolObject};
 use objc2_core_foundation::{CFRetained, CGSize};
 use objc2_core_graphics::{CGColorSpace, kCGColorSpaceDisplayP3};
 use objc2_core_video::{
-    CVMetalTexture, CVMetalTextureCache, CVMetalTextureGetTexture, CVPixelBufferGetHeight,
-    CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
-    CVPixelBufferGetWidthOfPlane, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, kCVReturnSuccess,
+    CVMetalTexture, CVMetalTextureCache, CVMetalTextureGetTexture, CVPixelBuffer,
+    CVPixelBufferGetHeight, CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPixelFormatType,
+    CVPixelBufferGetWidth, CVPixelBufferGetWidthOfPlane,
+    kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, kCVReturnSuccess,
 };
 use objc2_foundation::{NSRange, NSString};
 #[cfg(target_os = "macos")]
@@ -24,15 +26,26 @@ use objc2_metal::{
     MTLDepthStencilDescriptor, MTLDepthStencilState, MTLDevice, MTLDrawable, MTLGPUFamily,
     MTLLibrary, MTLLoadAction, MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder,
     MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
-    MTLResourceOptions, MTLStorageMode, MTLStoreAction, MTLTexture, MTLTextureDescriptor,
-    MTLTextureUsage, MTLViewport,
+    MTLOrigin, MTLRegion, MTLResourceOptions, MTLSize, MTLStorageMode, MTLStoreAction, MTLTexture,
+    MTLTextureDescriptor, MTLTextureUsage, MTLViewport,
 };
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
-use objc2_metal::{MTLBlitCommandEncoder, MTLOrigin, MTLRegion, MTLSize};
+use objc2_metal::MTLBlitCommandEncoder;
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use parking_lot::Mutex;
 
-use std::{cell::Cell, mem, mem::MaybeUninit, ops::Range, ptr, slice, sync::Arc};
+use std::{
+    cell::Cell,
+    collections::HashMap,
+    mem,
+    mem::MaybeUninit,
+    ops::Range,
+    ptr, slice,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 #[cfg(not(feature = "runtime_shaders"))]
 const SHADERS_METALLIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/shaders.metallib"));
@@ -40,6 +53,8 @@ const SHADERS_METALLIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/shader
 const SHADERS_SOURCE_FILE: &str = include_str!(concat!(env!("OUT_DIR"), "/stitched_shaders.metal"));
 /// Metal requires the offset a buffer is bound at to be 256-byte aligned.
 const INSTANCE_BUFFER_ALIGNMENT: usize = 256;
+/// Texture slots kept per NV12 stream at most, one more than the frames in flight.
+const NV12_SLOTS: usize = 4;
 const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 
 pub type Context = Arc<Mutex<InstanceBufferPool>>;
@@ -147,6 +162,11 @@ pub struct MetalRenderer {
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
     sprite_atlas: Arc<MetalAtlas>,
     core_video_texture_cache: CFRetained<CVMetalTextureCache>,
+    nv12_streams: HashMap<SurfaceId, Nv12Stream>,
+    /// Frames encoded so far, the one being encoded included.
+    frames_encoded: u64,
+    /// The newest frame the GPU has finished.
+    frames_completed: Arc<AtomicU64>,
     /// Offscreen render target reused across `render_scene` calls when
     /// rendering headlessly without reading pixels back.
     #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
@@ -416,6 +436,9 @@ impl MetalRenderer {
             instance_buffer_pool,
             sprite_atlas,
             core_video_texture_cache,
+            nv12_streams: HashMap::new(),
+            frames_encoded: 0,
+            frames_completed: Arc::new(AtomicU64::new(0)),
             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
         })
@@ -576,6 +599,13 @@ impl MetalRenderer {
         texture: &ProtocolObject<dyn MTLTexture>,
         viewport_size: Size<DevicePixels>,
     ) -> Result<Retained<ProtocolObject<dyn MTLCommandBuffer>>> {
+        self.frames_encoded += 1;
+        let frame = self.frames_encoded;
+        self.nv12_streams.retain(|id, _| {
+            scene.surfaces.iter().any(
+                |surface| matches!(&surface.source, SurfaceSource::Nv12(nv12) if nv12.id == *id),
+            )
+        });
         let mut writer = InstanceBufferWriter::new(
             &self.device,
             &self.instance_buffer_pool,
@@ -604,11 +634,14 @@ impl MetalRenderer {
 
         let instance_buffer_pool = self.instance_buffer_pool.clone();
         let frame_resources = Cell::new(Some((writer.finish(), surface_textures)));
+        let frames_completed = self.frames_completed.clone();
+        self.core_video_texture_cache.flush(0);
         let block = RcBlock::new(
             move |_: ptr::NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
                 if let Some((instance_buffer, _surface_textures)) = frame_resources.take() {
                     instance_buffer_pool.lock().release(instance_buffer);
                 }
+                frames_completed.fetch_max(frame, Ordering::Release);
             },
         );
         // SAFETY: Metal copies the live block and invokes it once after this frame completes.
@@ -1247,10 +1280,16 @@ impl MetalRenderer {
         }
 
         command_encoder.setRenderPipelineState(&self.surfaces_pipeline_state);
-        // SAFETY: The SurfaceBounds instances match the shader layout and slot.
-        // Metal retains the buffers, and writer.finish publishes CPU writes before submission.
+        // SAFETY: The SurfaceBounds instances match the shader layout and slot, which both
+        // stages read. Metal retains the buffers, and writer.finish publishes CPU writes
+        // before submission.
         unsafe {
             command_encoder.setVertexBuffer_offset_atIndex(
+                Some(&instance_bindings.surfaces.buffer),
+                instance_bindings.surfaces.offset,
+                SurfaceInputIndex::Surfaces as usize,
+            );
+            command_encoder.setFragmentBuffer_offset_atIndex(
                 Some(&instance_bindings.surfaces.buffer),
                 instance_bindings.surfaces.offset,
                 SurfaceInputIndex::Surfaces as usize,
@@ -1258,54 +1297,19 @@ impl MetalRenderer {
         }
 
         for (index, surface) in surfaces.iter().enumerate() {
-            let image_buffer = &surface.image_buffer;
-            let texture_size = size(
-                DevicePixels::from(CVPixelBufferGetWidth(image_buffer) as i32),
-                DevicePixels::from(CVPixelBufferGetHeight(image_buffer) as i32),
-            );
-
-            let pixel_format = CVPixelBufferGetPixelFormatType(image_buffer);
-            anyhow::ensure!(
-                pixel_format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-                "unsupported surface pixel format: {pixel_format:#x}"
-            );
-
-            let plane_texture = |plane, format| -> Result<CFRetained<CVMetalTexture>> {
-                let width = CVPixelBufferGetWidthOfPlane(image_buffer, plane);
-                let height = CVPixelBufferGetHeightOfPlane(image_buffer, plane);
-                let mut texture = ptr::null_mut();
-                // SAFETY: The buffer has two planes matching these formats and dimensions, and the output pointer is writable.
-                let status = unsafe {
-                    CVMetalTextureCache::create_texture_from_image(
-                        None,
-                        &self.core_video_texture_cache,
-                        image_buffer,
-                        None,
-                        format,
-                        width,
-                        height,
-                        plane,
-                        ptr::NonNull::from(&mut texture),
-                    )
-                };
-                anyhow::ensure!(
-                    status == kCVReturnSuccess,
-                    "creating CoreVideo Metal texture for plane {plane}: status {status}"
-                );
-                let texture =
-                    ptr::NonNull::new(texture).context("retrieving CoreVideo Metal texture")?;
-                // SAFETY: The successful create call transfers ownership of this non-null texture.
-                Ok(unsafe { CFRetained::from_raw(texture) })
+            let textures = match &surface.source {
+                SurfaceSource::Surface(image_buffer) => {
+                    self.map_pixel_buffer(image_buffer, surface_textures)
+                }
+                SurfaceSource::Nv12(frame) => self.nv12_textures(frame),
             };
-            let y_texture = plane_texture(0, MTLPixelFormat::R8Unorm)?;
-            let cb_cr_texture = plane_texture(1, MTLPixelFormat::RG8Unorm)?;
-            let y_metal_texture =
-                CVMetalTextureGetTexture(&y_texture).context("retrieving luma Metal texture")?;
-            let cb_cr_metal_texture = CVMetalTextureGetTexture(&cb_cr_texture)
-                .context("retrieving chroma Metal texture")?;
+            let Some((texture_size, y_texture, cb_cr_texture)) = textures else {
+                continue;
+            };
 
-            // SAFETY: The size is copied from a live value, and both planes match their shader texture slots.
-            // The frame completion handler retains the CoreVideo wrappers until GPU reads finish.
+            // SAFETY: The size is copied from a live value, and both planes match their shader
+            // texture slots. The frame completion handler retains the CoreVideo wrappers, and
+            // an NV12 slot is not written again until the GPU finishes this frame.
             unsafe {
                 command_encoder.setVertexBytes_length_atIndex(
                     ptr::NonNull::from(&texture_size).cast(),
@@ -1313,15 +1317,14 @@ impl MetalRenderer {
                     SurfaceInputIndex::TextureSize as usize,
                 );
                 command_encoder.setFragmentTexture_atIndex(
-                    Some(&y_metal_texture),
+                    Some(&y_texture),
                     SurfaceInputIndex::YTexture as usize,
                 );
                 command_encoder.setFragmentTexture_atIndex(
-                    Some(&cb_cr_metal_texture),
+                    Some(&cb_cr_texture),
                     SurfaceInputIndex::CbCrTexture as usize,
                 );
             }
-            surface_textures.extend([y_texture, cb_cr_texture]);
 
             // SAFETY: This draws one instance within the uploaded scene's surface range.
             unsafe {
@@ -1335,6 +1338,195 @@ impl MetalRenderer {
             }
         }
         Ok(())
+    }
+
+    /// Size of a full-range NV12 pixel buffer and Metal textures over its planes, whose
+    /// CoreVideo wrappers go into `surface_textures`. `None` for other formats or a buffer
+    /// CoreVideo can't map.
+    fn map_pixel_buffer(
+        &self,
+        image_buffer: &CVPixelBuffer,
+        surface_textures: &mut Vec<CFRetained<CVMetalTexture>>,
+    ) -> Option<(Size<DevicePixels>, PlaneTexture, PlaneTexture)> {
+        if CVPixelBufferGetPixelFormatType(image_buffer)
+            != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+        {
+            return None;
+        }
+        let plane_texture = |plane, format| {
+            let mut texture = ptr::null_mut();
+            // SAFETY: The buffer has two planes matching these formats and dimensions, and the
+            // output pointer is writable.
+            let status = unsafe {
+                CVMetalTextureCache::create_texture_from_image(
+                    None,
+                    &self.core_video_texture_cache,
+                    image_buffer,
+                    None,
+                    format,
+                    CVPixelBufferGetWidthOfPlane(image_buffer, plane),
+                    CVPixelBufferGetHeightOfPlane(image_buffer, plane),
+                    plane,
+                    ptr::NonNull::from(&mut texture),
+                )
+            };
+            if status != kCVReturnSuccess {
+                return None;
+            }
+            // SAFETY: The successful create call transfers ownership of this non-null texture.
+            Some(unsafe { CFRetained::<CVMetalTexture>::from_raw(ptr::NonNull::new(texture)?) })
+        };
+        let y = plane_texture(0, MTLPixelFormat::R8Unorm)?;
+        let cb_cr = plane_texture(1, MTLPixelFormat::RG8Unorm)?;
+        let y_texture = CVMetalTextureGetTexture(&y)?;
+        let cb_cr_texture = CVMetalTextureGetTexture(&cb_cr)?;
+        surface_textures.extend([y, cb_cr]);
+        let buffer_size = size(
+            DevicePixels::from(CVPixelBufferGetWidth(image_buffer) as i32),
+            DevicePixels::from(CVPixelBufferGetHeight(image_buffer) as i32),
+        );
+        Some((buffer_size, y_texture, cb_cr_texture))
+    }
+
+    /// Size of `frame` and the Y and CbCr textures holding it, uploaded into a slot the GPU is
+    /// done reading when the frame is new. `None` for an empty frame or too short planes.
+    fn nv12_textures(
+        &mut self,
+        frame: &Nv12Frame,
+    ) -> Option<(Size<DevicePixels>, PlaneTexture, PlaneTexture)> {
+        if frame.width == 0 || frame.height == 0 {
+            return None;
+        }
+        let (y, cb_cr) = frame.planes()?;
+        let frame_size = (frame.width, frame.height);
+        let chroma = frame.chroma_size();
+        let completed = self.frames_completed.load(Ordering::Acquire);
+        let shared_storage = cfg!(target_os = "ios") || self.is_apple_gpu;
+        let stream = self
+            .nv12_streams
+            .entry(frame.id)
+            .or_insert_with(|| Nv12Stream::new(frame_size));
+        if stream.size != frame_size {
+            *stream = Nv12Stream::new(frame_size);
+        }
+        let shown = match stream.shown {
+            Some((generation, slot)) if generation == frame.generation => slot,
+            _ => {
+                let free = stream
+                    .slots
+                    .iter()
+                    .position(|slot| slot.read_in <= completed);
+                let slot = match free {
+                    Some(free) => free,
+                    None if stream.slots.len() < NV12_SLOTS => {
+                        stream.slots.push(Nv12Slot {
+                            y: new_plane_texture(
+                                &self.device,
+                                frame_size,
+                                MTLPixelFormat::R8Unorm,
+                                shared_storage,
+                            )?,
+                            cb_cr: new_plane_texture(
+                                &self.device,
+                                chroma,
+                                MTLPixelFormat::RG8Unorm,
+                                shared_storage,
+                            )?,
+                            read_in: 0,
+                        });
+                        stream.slots.len() - 1
+                    }
+                    None => stream
+                        .slots
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, slot)| slot.read_in)
+                        .map(|(index, _)| index)?,
+                };
+                upload_plane(&stream.slots[slot].y, frame_size, 1, y);
+                upload_plane(&stream.slots[slot].cb_cr, chroma, 2, cb_cr);
+                stream.shown = Some((frame.generation, slot));
+                slot
+            }
+        };
+        let slot = &mut stream.slots[shown];
+        slot.read_in = self.frames_encoded;
+        let texture_size = size(
+            DevicePixels(frame.width as i32),
+            DevicePixels(frame.height as i32),
+        );
+        Some((texture_size, slot.y.clone(), slot.cb_cr.clone()))
+    }
+}
+
+type PlaneTexture = Retained<ProtocolObject<dyn MTLTexture>>;
+
+/// The textures of one NV12 stream. A new frame goes into a slot no frame in flight reads.
+struct Nv12Stream {
+    size: (u32, u32),
+    slots: Vec<Nv12Slot>,
+    /// The generation of the frame uploaded last, and the slot holding it.
+    shown: Option<(u64, usize)>,
+}
+
+impl Nv12Stream {
+    fn new(size: (u32, u32)) -> Self {
+        Self {
+            size,
+            slots: Vec::new(),
+            shown: None,
+        }
+    }
+}
+
+struct Nv12Slot {
+    y: PlaneTexture,
+    cb_cr: PlaneTexture,
+    /// The last frame encoded to read this slot.
+    read_in: u64,
+}
+
+fn new_plane_texture(
+    device: &ProtocolObject<dyn MTLDevice>,
+    (width, height): (u32, u32),
+    format: MTLPixelFormat,
+    shared_storage: bool,
+) -> Option<PlaneTexture> {
+    let descriptor = MTLTextureDescriptor::new();
+    // SAFETY: The dimensions are a non-empty frame's, and this descriptor creates a 2D texture.
+    unsafe {
+        descriptor.setWidth(width as usize);
+        descriptor.setHeight(height as usize);
+    }
+    descriptor.setPixelFormat(format);
+    descriptor.setUsage(MTLTextureUsage::ShaderRead);
+    descriptor.setStorageMode(if shared_storage {
+        MTLStorageMode::Shared
+    } else {
+        MTLStorageMode::Managed
+    });
+    device.newTextureWithDescriptor(&descriptor)
+}
+
+/// Writes `bytes`, rows of `width` pixels of `bytes_per_pixel` each, over all of `texture`.
+fn upload_plane(texture: &PlaneTexture, (width, height): (u32, u32), bytes_per_pixel: u32, bytes: &[u8]) {
+    let region = MTLRegion {
+        origin: MTLOrigin { x: 0, y: 0, z: 0 },
+        size: MTLSize {
+            width: width as usize,
+            height: height as usize,
+            depth: 1,
+        },
+    };
+    // SAFETY: `Nv12Frame::planes` cut `bytes` to exactly `height` rows of `width` pixels,
+    // which is the texture's size, and no frame in flight reads this CPU-accessible texture.
+    unsafe {
+        texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+            region,
+            0,
+            ptr::NonNull::from(bytes).cast(),
+            (width * bytes_per_pixel) as usize,
+        );
     }
 }
 
@@ -1497,11 +1689,13 @@ fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<I
         surfaces: writer.write_iter(scene.surfaces.iter().map(|surface| SurfaceBounds {
             bounds: surface.bounds,
             content_mask: surface.content_mask,
+            corner_radii: surface.corner_radii,
         }))?,
         native_views: writer.write_iter(scene.native_views.iter().map(|native_view| {
             SurfaceBounds {
                 bounds: native_view.bounds,
                 content_mask: native_view.content_mask,
+                corner_radii: Corners::default(),
             }
         }))?,
     })
@@ -1695,6 +1889,7 @@ enum PathTileInputIndex {
 pub struct SurfaceBounds {
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
+    pub corner_radii: Corners<ScaledPixels>,
 }
 
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
@@ -1846,7 +2041,8 @@ mod tests {
             order: 0,
             bounds,
             content_mask: ContentMask { bounds },
-            image_buffer: image_buffer.clone(),
+            corner_radii: Default::default(),
+            source: SurfaceSource::Surface(image_buffer.clone()),
         });
         drop(image_buffer);
         scene.finish();

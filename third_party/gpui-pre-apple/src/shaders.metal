@@ -922,11 +922,13 @@ fragment float4 path_tile_fragment(
 struct SurfaceVertexOutput {
   float4 position [[position]];
   float2 texture_position;
+  uint surface_id [[flat]];
 };
 
 struct SurfaceFragmentInput {
   float4 position [[position]];
   float2 texture_position;
+  uint surface_id [[flat]];
 };
 
 vertex SurfaceVertexOutput surface_vertex(
@@ -947,25 +949,33 @@ vertex SurfaceVertexOutput surface_vertex(
   float2 texture_position = clipped.unit_vertex;
   return SurfaceVertexOutput{
       device_position,
-      texture_position};
+      texture_position,
+      surface_id};
 }
 
 fragment float4 surface_fragment(SurfaceFragmentInput input [[stage_in]],
+                                 constant SurfaceBounds *surfaces
+                                 [[buffer(SurfaceInputIndex_Surfaces)]],
                                  texture2d<float> y_texture
                                  [[texture(SurfaceInputIndex_YTexture)]],
                                  texture2d<float> cb_cr_texture
                                  [[texture(SurfaceInputIndex_CbCrTexture)]]) {
   constexpr sampler texture_sampler(mag_filter::linear, min_filter::linear);
+  // Full-range BT.709 with chroma centred on 128, as throcc captures and encodes.
   const float4x4 ycbcrToRGBTransform =
       float4x4(float4(+1.0000f, +1.0000f, +1.0000f, +0.0000f),
-               float4(+0.0000f, -0.3441f, +1.7720f, +0.0000f),
-               float4(+1.4020f, -0.7141f, +0.0000f, +0.0000f),
-               float4(-0.7010f, +0.5291f, -0.8860f, +1.0000f));
+               float4(+0.0000f, -0.1873f, +1.8556f, +0.0000f),
+               float4(+1.5748f, -0.4681f, +0.0000f, +0.0000f),
+               float4(-0.7905f, +0.3290f, -0.9314f, +1.0000f));
   float4 ycbcr = float4(
       y_texture.sample(texture_sampler, input.texture_position).r,
       cb_cr_texture.sample(texture_sampler, input.texture_position).rg, 1.0);
 
-  return ycbcrToRGBTransform * ycbcr;
+  SurfaceBounds surface = surfaces[input.surface_id];
+  float3 color = saturate((ycbcrToRGBTransform * ycbcr).rgb);
+  float distance =
+      quad_sdf(input.position.xy, surface.bounds, surface.corner_radii);
+  return float4(color, saturate(0.5 - distance));
 }
 
 struct NativeViewVertexOutput {

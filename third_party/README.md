@@ -2,9 +2,9 @@
 
 Crates we carry patches on, wired in through `[patch.crates-io]` in the workspace `Cargo.toml`.
 
-## gpui-pre, gpui-pre-apple, gpui-pre-wgpu, gpui-pre-windows 0.3.10
+## gpui-pre, gpui-pre-apple, gpui-pre-wgpu, gpui-pre-windows 0.3.14
 
-Apache-2.0, a crates.io republish of zed-industries/zed@08cbb88. Each directory started as an
+Apache-2.0, a crates.io republish of zed-industries/zed@f126950. Each directory started as an
 exact copy of the published crate, so `git log -p third_party/` shows only our changes.
 
 Changes, all for drawing received screen shares as NV12 instead of converting every frame to
@@ -23,18 +23,16 @@ BGRA on the UI thread:
 - **gpui-pre-windows:** `draw_surfaces`, an empty stub, draws each surface with a new
   `surface_vertex`/`surface_fragment` pair in `shaders.hlsl` (registered in `build.rs` for the
   release-mode fxc build): an R8 Y and an R8G8 CbCr texture per stream, written with
-  `UpdateSubresource` only for a new generation, sampled through a clamping sampler, with the
-  same content-mask clipping and `quad_sdf` rounding as polychrome sprites. A lost device drops
-  the textures.
+  `UpdateSubresource` only for a new generation, sampled through a clamping sampler, clipped to
+  the content mask with `clip_to_mask` and rounded with `quad_sdf` like polychrome sprites. A
+  lost device drops the textures.
 - **gpui-pre-apple:** `draw_surfaces` also draws `Nv12Frame`s: each stream keeps up to four
   slots of an R8 Y and an RG8 CbCr texture, and a new generation is written with
   `replace_region` into a slot no frame still on the GPU reads, so frames in flight never
   tear. Streams missing from a scene drop theirs. `SurfaceBounds` carries the corner radii,
-  and `surface_fragment`, which `CVPixelBuffer`s share, uses full-range BT.709 and rounds
-  corners with `quad_sdf`. The CoreVideo textures a frame reads from `CVPixelBuffer`s are
-  held until the GPU finishes that frame, so a capture or decoder pool can't reuse a buffer
-  still being drawn. A pixel buffer in any other format, or one CoreVideo can't map, is skipped
-  instead of panicking.
+  square for native views, and `surface_fragment`, which `CVPixelBuffer`s share, uses
+  full-range BT.709 and rounds corners with `quad_sdf`. A pixel buffer in any other format, or
+  one CoreVideo can't map, is skipped instead of failing the frame.
 
 One more change, in **gpui-pre:** `App::hide_cursor_until_mouse_moves` makes public what every
 platform already does when typing hides the cursor, so a share's cursor can go with its
