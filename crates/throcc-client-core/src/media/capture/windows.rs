@@ -98,6 +98,8 @@ pub struct WinCapture {
     device: IDirect3DDevice,
     pool: Direct3D11CaptureFramePool,
     pool_size: SizeInt32,
+    /// The size of what the last frame converted shows.
+    shape: Option<(usize, usize)>,
     session: GraphicsCaptureSession,
     arrived: i64,
     item: GraphicsCaptureItem,
@@ -197,6 +199,7 @@ fn capture(item: &GraphicsCaptureItem, config: CaptureConfig) -> windows::core::
         device,
         pool,
         pool_size: size,
+        shape: None,
         session,
         arrived,
         item: item.clone(),
@@ -291,6 +294,22 @@ impl Capture for WinCapture {
         self.clock.repeat()
     }
 
+    fn shape(&self) -> Option<(usize, usize)> {
+        self.shape
+    }
+
+    fn reshape(&mut self, (width, height): (usize, usize)) -> Result<(), CaptureError> {
+        let converter = &self.converter;
+        self.converter = Converter::new(
+            converter.device.clone(),
+            converter.input,
+            (width as u32, height as u32),
+            converter.fps,
+        )
+        .map_err(failed)?;
+        Ok(())
+    }
+
     fn next_frame(&mut self, into: &mut VideoFrame) -> bool {
         let Ok((frame, time)) = self.frames.pop() else {
             return false;
@@ -362,10 +381,13 @@ impl WinCapture {
         self.converter.read_back(into)?;
         frame.Close().ok();
 
-        if content != self.pool_size && content.Width > 0 && content.Height > 0 {
-            self.pool
-                .Recreate(&self.device, POOL_FORMAT, POOL_BUFFERS, content)?;
-            self.pool_size = content;
+        if content.Width > 0 && content.Height > 0 {
+            self.shape = Some((content.Width as usize, content.Height as usize));
+            if content != self.pool_size {
+                self.pool
+                    .Recreate(&self.device, POOL_FORMAT, POOL_BUFFERS, content)?;
+                self.pool_size = content;
+            }
         }
         Ok(())
     }
