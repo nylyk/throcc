@@ -1,9 +1,9 @@
 [package]
 name = "gpui-pre"
-version = "0.3.10"
+version = "0.3.14"
 edition = { workspace = true }
 authors = ["Nathan Sobo <nathan@zed.dev>"]
-description = "Zed's GPU-accelerated UI framework (gpui-pre snapshot of zed@08cbb88)"
+description = "Zed's GPU-accelerated UI framework (gpui-pre snapshot of zed@f126950)"
 repository = "https://github.com/zed-industries/zed"
 publish = true
 license = "Apache-2.0"
@@ -20,7 +20,7 @@ ignored-paths = ["src/_ownership_and_data_flow.rs", "benches/focus_cleanup.rs"]
 [package.metadata.gpui-pre]
 zed-crate = "gpui"
 zed-version = "0.2.2"
-zed-rev = "08cbb88a152c3751a43e853425a70e9f631a5918"
+zed-rev = "f126950f9d3b62666f97437ae5d4ccac2272c4db"
 
 [lib]
 path = "src/gpui.rs"
@@ -29,6 +29,7 @@ name = "gpui"
 [features]
 default = ["font-kit", "wayland", "x11", "windows-manifest"]
 test-support = [
+    "bench_metrics?/test-support",
     "collections/test-support",
     "http_client/test-support",
     "wayland",
@@ -66,7 +67,6 @@ bitflags = { workspace = true }
 collections = { workspace = true }
 bench_metrics = { workspace = true, optional = true }
 criterion = { workspace = true, optional = true }
-ctor = { workspace = true }
 derive_more = { workspace = true, features = ["add", "add_assign", "mul", "mul_assign", "not"] }
 etagere = { workspace = true }
 futures = { workspace = true }
@@ -74,6 +74,7 @@ futures-concurrency = { workspace = true, optional = true }
 gpui_macros = { workspace = true }
 gpui_shared_string = { workspace = true }
 http_client = { workspace = true }
+icu_segmenter = { workspace = true }
 image = { workspace = true }
 inventory = { workspace = true }
 itertools = { workspace = true }
@@ -112,12 +113,14 @@ taffy = { workspace = true, features = [
     "content_size",
 ] }
 thiserror = { workspace = true }
+unicode-segmentation = { workspace = true }
 gpui_util = { workspace = true }
 hdrhistogram = { workspace = true, optional = true }
 waker-fn = "1.2.0"
-lyon = "1.0"
+lyon_path = "1.0.19"
 pin-project = "1.1.10"
 spin = { workspace = true }
+tiny-skia-path = "0.11"
 url = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 web-time = { workspace = true, optional = true }
@@ -170,6 +173,14 @@ windows = { workspace = true, features = [
 
 [lints]
 workspace = true
+
+[[example]]
+name = "native_view"
+path = "examples/native_view.rs"
+
+[[example]]
+name = "native_view_appkit_field"
+path = "examples/native_view_appkit_field.rs"
 
 [[example]]
 name = "hello_world"

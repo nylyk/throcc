@@ -54,13 +54,13 @@ wayland-client.workspace = true
 wayland-protocols.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-gpui-wgpu = { package = "gpui-pre-wgpu", version = "=0.3.10", features = ["test-support"] }
+gpui-wgpu = { package = "gpui-pre-wgpu", version = "=0.3.14", features = ["test-support"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-gpui-apple = { package = "gpui-pre-apple", version = "=0.3.10", features = ["test-support"] }
+gpui-apple = { package = "gpui-pre-apple", version = "=0.3.14", features = ["test-support"] }
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]
-gpui-windows = { package = "gpui-pre-windows", version = "=0.3.10", features = ["test-support"] }
+gpui-windows = { package = "gpui-pre-windows", version = "=0.3.14", features = ["test-support"] }
 
 [[test]]
 name = "surface_windows"
