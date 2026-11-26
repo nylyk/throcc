@@ -182,7 +182,10 @@ impl Previews {
         timestamp: u32,
         width: usize,
     ) -> Result<VideoFrame, EncodeError> {
-        let source = (imported.size.0 as usize, imported.size.1 as usize);
+        let source = (
+            imported.shown.width as usize,
+            imported.shown.height as usize,
+        );
         let size = share_size(source, (width, width));
         let pool = match &mut self.pool {
             Some((made, pool)) if *made == size => pool,
@@ -346,7 +349,8 @@ impl Encoder {
         frame: &DmaBuf,
         preview_width: Option<usize>,
     ) -> Result<GpuEncoded, EncodeError> {
-        let source = (frame.width as usize, frame.height as usize);
+        let shown = frame.shown();
+        let source = (shown.width as usize, shown.height as usize);
         let region = rectangle(fitted(source, (self.width, self.height)));
         // First, so an encoder that takes no GPU input says so rather than lacking surfaces.
         self.gpu()?;

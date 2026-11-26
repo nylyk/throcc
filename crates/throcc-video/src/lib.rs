@@ -31,7 +31,7 @@ pub use android::{CodecFrame, Decoder, Encoder};
 #[cfg(target_vendor = "apple")]
 pub use apple::{Decoder, Encoder, FULL_RANGE_NV12, PixelBuffer, Turn, Turner};
 #[cfg(target_os = "linux")]
-pub use dmabuf::{DmaBuf, DmaBufPlane, MAX_PLANES};
+pub use dmabuf::{DmaBuf, DmaBufPlane, MAX_PLANES, Region};
 #[cfg(ffmpeg)]
 pub use ffmpeg::decode::Decoder;
 #[cfg(ffmpeg)]

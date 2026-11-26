@@ -618,9 +618,10 @@ fn first_frame(capture: &mut dyn Capture, into: &mut VideoFrame) -> Option<First
     while Instant::now() < deadline {
         #[cfg(target_os = "linux")]
         if let Some(frame) = capture.next_dmabuf() {
+            let shown = frame.shown();
             return Some(First::InGpuMemory((
-                frame.width as usize,
-                frame.height as usize,
+                shown.width as usize,
+                shown.height as usize,
             )));
         }
         if capture.next_frame(into) {

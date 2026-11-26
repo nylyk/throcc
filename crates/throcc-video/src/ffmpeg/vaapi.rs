@@ -1,7 +1,7 @@
 use std::ffi::{c_int, c_uint, c_void};
 use std::os::fd::AsRawFd;
 
-use crate::DmaBuf;
+use crate::{DmaBuf, Region};
 
 pub type Display = *mut c_void;
 pub type SurfaceId = c_uint;
@@ -242,6 +242,7 @@ pub(crate) fn export(
         fourcc: layer.drm_format,
         modifier: descriptor.objects[0].drm_format_modifier,
         planes,
+        crop: None,
         timestamp: 0,
     })
 }
@@ -392,23 +393,23 @@ impl Vpp {
         Ok(Surface {
             vpp: self,
             id,
-            size: (frame.width, frame.height),
+            shown: frame.shown(),
         })
     }
 
-    /// Draws all of `source` into `region` of `target`, painting the rest of `target`
-    /// black, and waits for the GPU to finish.
+    /// Draws the shown part of `source` into `region` of `target`, painting the rest of
+    /// `target` black, and waits for the GPU to finish.
     pub fn convert(
         &self,
         source: &Surface<'_>,
         target: SurfaceId,
         region: Rectangle,
     ) -> Result<(), VaError> {
-        let whole = Rectangle {
-            x: 0,
-            y: 0,
-            width: source.size.0 as u16,
-            height: source.size.1 as u16,
+        let shown = Rectangle {
+            x: source.shown.x as i16,
+            y: source.shown.y as i16,
+            width: source.shown.width as u16,
+            height: source.shown.height as u16,
         };
         let full_range_bt709 = ColorProperties {
             color_range: RANGE_FULL,
@@ -419,7 +420,7 @@ impl Vpp {
         };
         let mut parameters = PipelineParameters {
             surface: source.id,
-            surface_region: &whole,
+            surface_region: &shown,
             surface_color_standard: COLOR_STANDARD_SRGB,
             output_region: &region,
             output_background_color: BLACK,
@@ -479,8 +480,8 @@ impl Drop for Vpp {
 pub struct Surface<'a> {
     vpp: &'a Vpp,
     id: SurfaceId,
-    /// Width and height of the imported picture.
-    pub size: (u32, u32),
+    /// The part of the imported picture that is drawn.
+    pub shown: Region,
 }
 
 impl Drop for Surface<'_> {

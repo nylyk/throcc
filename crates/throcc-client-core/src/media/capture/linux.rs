@@ -39,7 +39,7 @@ use pw::spa::utils::{
 };
 use pw::stream::{Stream, StreamBox, StreamFlags};
 use throcc_video::frame::{VideoFrame, copy_nv12, resize, rgb_to_nv12};
-use throcc_video::{DmaBuf, DmaBufPlane, MAX_PLANES};
+use throcc_video::{DmaBuf, DmaBufPlane, MAX_PLANES, Region};
 use tracing::warn;
 
 use super::clock::{ShareClock, clock_nanos};
@@ -214,6 +214,8 @@ pub(super) struct PipeWireCapture {
     audio: Option<DesktopAudio>,
     /// Counts from CLOCK_MONOTONIC, in nanoseconds, which PipeWire's times are on too.
     clock: ShareClock,
+    /// The size of what the last frame taken shows.
+    shape: Option<(usize, usize)>,
 }
 
 impl PipeWireCapture {
@@ -260,6 +262,7 @@ impl PipeWireCapture {
             audio,
             // CLOCK_MONOTONIC is the clock PipeWire's audio times are on.
             clock: ShareClock::new(NANOS, || clock_nanos(libc::CLOCK_MONOTONIC)),
+            shape: None,
         })
     }
 
@@ -336,6 +339,8 @@ impl Capture for PipeWireCapture {
                 self.control.send(Control::Return(held.lease)).ok();
                 continue;
             };
+            let shown = held.frame.shown();
+            self.shape = Some((shown.width as usize, shown.height as usize));
             let held = self.current.insert(held);
             held.frame.timestamp = timestamp;
             return Some(&held.frame);
@@ -345,6 +350,10 @@ impl Capture for PipeWireCapture {
 
     fn current_dmabuf(&self) -> Option<&DmaBuf> {
         self.current.as_ref().map(|held| &held.frame)
+    }
+
+    fn shape(&self) -> Option<(usize, usize)> {
+        self.shape
     }
 
     fn refuse_dmabuf(&mut self, modifier: Option<u64>) {
@@ -364,6 +373,7 @@ impl Capture for PipeWireCapture {
             if let Some((picture, timestamp)) = stamped {
                 convert(&slot.bytes, &picture, into);
                 into.timestamp = timestamp;
+                self.shape = Some((into.width, into.height));
             }
             if slot.bytes.len() < slot.needed {
                 slot.bytes.resize(slot.needed, 0);
@@ -452,6 +462,7 @@ fn run(
         shared: serialize(buffers_param(
             (1 << spa::sys::SPA_DATA_MemPtr) | (1 << spa::sys::SPA_DATA_MemFd),
         ))?,
+        crop: serialize(crop_param())?,
     };
     let offers = if throcc_video::tries_gpu_input_first() {
         dmabuf_offers(egl::dmabuf_modifiers)
@@ -706,16 +717,34 @@ fn data_types(types: i32) -> Value {
     )))
 }
 
+/// Asks for the crop a producer marks on each buffer, as GNOME does around a shared window.
+fn crop_param() -> Object {
+    spa::pod::object!(
+        SpaTypes::ObjectParamMeta,
+        ParamType::Meta,
+        Property::new(
+            spa::sys::SPA_PARAM_META_type,
+            Value::Id(Id(spa::sys::SPA_META_VideoCrop))
+        ),
+        Property::new(
+            spa::sys::SPA_PARAM_META_size,
+            Value::Int(size_of::<spa::sys::spa_meta_region>() as i32)
+        ),
+    )
+}
+
 fn serialize(object: Object) -> Result<Vec<u8>, CaptureError> {
     PodSerializer::serialize(Cursor::new(Vec::new()), &Value::Object(object))
         .map(|(bytes, _)| bytes.into_inner())
         .map_err(|e| CaptureError::Failed(format!("PipeWire parameters: {e:?}")))
 }
 
-/// The Buffers parameter for each kind of negotiated format, serialized ahead of time.
+/// The Buffers parameter for each kind of negotiated format, and the crop's Meta
+/// parameter, serialized ahead of time.
 struct Buffers {
     dmabuf: Vec<u8>,
     shared: Vec<u8>,
+    crop: Vec<u8>,
 }
 
 struct StreamState {
@@ -741,10 +770,12 @@ impl StreamState {
             return false;
         };
         let at = clock_nanos(libc::CLOCK_MONOTONIC);
+        // SAFETY: as above.
+        let crop = unsafe { marked_crop(buffer) }.and_then(|region| crop_within(region, layout));
         let in_gpu_memory = datas.first().is_some_and(|d| d.type_() == DataType::DmaBuf);
         let lent = match layout.drm {
             Some(drm) if in_gpu_memory => {
-                let frame = dmabuf_of(datas, layout, drm);
+                let frame = dmabuf_of(datas, layout, drm, crop);
                 let Some((frame, lease)) = frame.zip(self.lent.lend(buffer)) else {
                     self.dropped.fetch_add(1, Ordering::Relaxed);
                     self.spare = Some(slot);
@@ -756,7 +787,12 @@ impl StreamState {
             _ => {
                 match copy_buffer(datas, layout, &mut slot) {
                     Copied::Planes(planes) => {
-                        slot.picture = Some(Picture { layout, planes, at });
+                        slot.picture = Some(Picture {
+                            layout,
+                            planes,
+                            crop,
+                            at,
+                        });
                     }
                     Copied::TooSmall => {
                         slot.picture = None;
@@ -798,7 +834,7 @@ unsafe fn datas<'a>(buffer: NonNull<pw::sys::pw_buffer>) -> &'a mut [Data] {
 
 /// The planes of a buffer in GPU memory, with their file descriptors duplicated so they
 /// outlive the buffer's removal from the stream.
-fn dmabuf_of(datas: &[Data], layout: Layout, drm: Drm) -> Option<DmaBuf> {
+fn dmabuf_of(datas: &[Data], layout: Layout, drm: Drm, crop: Option<Region>) -> Option<DmaBuf> {
     let mut planes = [const { None }; MAX_PLANES];
     let dmabufs = datas.iter().filter(|d| d.type_() == DataType::DmaBuf);
     for (data, plane) in dmabufs.zip(&mut planes) {
@@ -820,8 +856,47 @@ fn dmabuf_of(datas: &[Data], layout: Layout, drm: Drm) -> Option<DmaBuf> {
         fourcc: drm.fourcc,
         modifier: drm.modifier,
         planes,
+        crop,
         timestamp: 0,
     })
+}
+
+/// The crop region the producer marked on `buffer`, if any.
+///
+/// # Safety
+/// `buffer` must be dequeued from a stream and not queued back during the call.
+unsafe fn marked_crop(buffer: NonNull<pw::sys::pw_buffer>) -> Option<spa::sys::spa_region> {
+    // SAFETY: a dequeued pw_buffer points at a spa_buffer whose metas, when present, hold
+    // data of the size each one states, which the lookup checks against the region's.
+    unsafe {
+        let buffer = buffer.as_ref().buffer;
+        if buffer.is_null() {
+            return None;
+        }
+        let meta = spa::sys::spa_buffer_find_meta_data(
+            buffer,
+            spa::sys::SPA_META_VideoCrop,
+            size_of::<spa::sys::spa_meta_region>(),
+        );
+        Some(meta.cast::<spa::sys::spa_meta_region>().as_ref()?.region)
+    }
+}
+
+/// `region` as a crop of a `layout`-sized picture: `None` when it covers all of it, is empty
+/// or reaches outside it.
+fn crop_within(region: spa::sys::spa_region, layout: Layout) -> Option<Region> {
+    let crop = Region {
+        x: u32::try_from(region.position.x).ok()?,
+        y: u32::try_from(region.position.y).ok()?,
+        width: region.size.width,
+        height: region.size.height,
+    };
+    let right = usize::try_from(crop.x.checked_add(crop.width)?).ok()?;
+    let bottom = usize::try_from(crop.y.checked_add(crop.height)?).ok()?;
+    let inside =
+        crop.width > 0 && crop.height > 0 && right <= layout.width && bottom <= layout.height;
+    let whole = (right, bottom) == (layout.width, layout.height) && (crop.x, crop.y) == (0, 0);
+    (inside && !whole).then_some(crop)
 }
 
 fn duplicate(fd: RawFd) -> Option<OwnedFd> {
@@ -898,8 +973,8 @@ fn on_param_changed(
         Some(_) => &buffers.dmabuf,
         None => &buffers.shared,
     };
-    if let Some(buffers) = Pod::from_bytes(chosen) {
-        stream.update_params(&mut [buffers]).ok();
+    if let Some((chosen, crop)) = Pod::from_bytes(chosen).zip(Pod::from_bytes(&buffers.crop)) {
+        stream.update_params(&mut [chosen, crop]).ok();
     }
 }
 
@@ -1033,6 +1108,8 @@ const fn fourcc(code: &[u8; 4]) -> u32 {
 struct Picture {
     layout: Layout,
     planes: [Plane; 2],
+    /// The part of the picture that holds what is shared, where the producer marked one.
+    crop: Option<Region>,
     /// CLOCK_MONOTONIC when the picture was taken from the stream, in nanoseconds.
     at: i64,
 }
@@ -1097,18 +1174,31 @@ enum Format {
     Rgb,
 }
 
+/// Converts the part of `picture` that shows what is shared into `into`.
 fn convert(bytes: &[u8], picture: &Picture, into: &mut VideoFrame) {
-    let Layout {
-        format,
-        width,
-        height,
-        ..
-    } = picture.layout;
-    let [y, uv] = picture
-        .planes
-        .map(|plane| (bytes.get(plane.offset..).unwrap_or_default(), plane.stride));
+    let Layout { format, .. } = picture.layout;
+    let shown = picture.crop.unwrap_or(Region {
+        x: 0,
+        y: 0,
+        width: picture.layout.width as u32,
+        height: picture.layout.height as u32,
+    });
+    let (width, height) = (shown.width as usize, shown.height as usize);
+    let (left, top, pixel_bytes) = match format {
+        Format::Nv12 => (shown.x as usize & !1, shown.y as usize & !1, 1),
+        Format::Bgr | Format::Rgb => (shown.x as usize, shown.y as usize, 4),
+    };
+    let from_row = |plane: Plane, row: usize| {
+        let start = plane
+            .offset
+            .saturating_add(row.saturating_mul(plane.stride))
+            .saturating_add(left.saturating_mul(pixel_bytes));
+        (bytes.get(start..).unwrap_or_default(), plane.stride)
+    };
+    let [luma, chroma] = picture.planes;
+    let y = from_row(luma, top);
     match format {
-        Format::Nv12 => copy_nv12(into, y, uv, (width, height)),
+        Format::Nv12 => copy_nv12(into, y, from_row(chroma, top / 2), (width, height)),
         Format::Bgr => {
             resize(into, width, height);
             rgb_to_nv12(y.0, y.1, into, |[b, g, r, _]| [r, g, b]);
@@ -1154,6 +1244,7 @@ mod tests {
                 drm: None,
             },
             planes,
+            crop: None,
             at: 7,
         }
     }
@@ -1226,6 +1317,85 @@ mod tests {
         assert_eq!((frame.width, frame.height), (4, 3));
         assert_eq!(frame.y, [0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23]);
         assert_eq!(frame.uv, [100, 101, 102, 103, 110, 111, 112, 113]);
+    }
+
+    #[test]
+    fn only_the_crop_of_a_picture_is_converted() {
+        let (width, height, stride) = (4, 4, 6);
+        let mut bytes = Vec::new();
+        for row in 0..height {
+            bytes.extend((0..stride).map(|col| (row * 10 + col) as u8));
+        }
+        let uv_at = bytes.len();
+        for row in 0..2 {
+            bytes.extend((0..stride).map(|col| (100 + row * 10 + col) as u8));
+        }
+        let planes = [
+            Plane { offset: 0, stride },
+            Plane {
+                offset: uv_at,
+                stride,
+            },
+        ];
+        let mut nv12 = picture(Format::Nv12, width, height, planes);
+        nv12.crop = Some(Region {
+            x: 2,
+            y: 2,
+            width: 2,
+            height: 2,
+        });
+        let mut frame = VideoFrame::blank(1280, 720);
+        convert(&bytes, &nv12, &mut frame);
+        assert_eq!((frame.width, frame.height), (2, 2));
+        assert_eq!(frame.y, [22, 23, 32, 33]);
+        assert_eq!(frame.uv, [112, 113]);
+
+        let mut bgrx = Vec::new();
+        for _ in 0..2 {
+            bgrx.extend([[0, 0, 0, 0], [0, 0, 0, 0], [255; 4], [255; 4]].concat());
+        }
+        let plane = Plane {
+            offset: 0,
+            stride: 16,
+        };
+        let mut right = picture(Format::Bgr, 4, 2, [plane, plane]);
+        right.crop = Some(Region {
+            x: 2,
+            y: 0,
+            width: 2,
+            height: 2,
+        });
+        convert(&bgrx, &right, &mut frame);
+        assert_eq!((frame.width, frame.height), (2, 2));
+        assert!(frame.y.iter().all(|&y| y == 255), "{:?}", frame.y);
+    }
+
+    #[test]
+    fn a_crop_is_kept_only_inside_and_short_of_the_whole_picture() {
+        let layout = Layout {
+            format: Format::Bgr,
+            width: 1920,
+            height: 1080,
+            drm: None,
+        };
+        let region = |x, y, width, height| spa::sys::spa_region {
+            position: spa::sys::spa_point { x, y },
+            size: spa::sys::spa_rectangle { width, height },
+        };
+        assert_eq!(
+            crop_within(region(10, 20, 800, 600), layout),
+            Some(Region {
+                x: 10,
+                y: 20,
+                width: 800,
+                height: 600
+            })
+        );
+        assert_eq!(crop_within(region(0, 0, 1920, 1080), layout), None);
+        assert_eq!(crop_within(region(0, 0, 0, 600), layout), None);
+        assert_eq!(crop_within(region(-1, 0, 800, 600), layout), None);
+        assert_eq!(crop_within(region(1200, 0, 800, 600), layout), None);
+        assert_eq!(crop_within(region(0, 0, u32::MAX, 600), layout), None);
     }
 
     #[test]
