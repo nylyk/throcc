@@ -749,7 +749,7 @@ pub fn receive(
             let mut replaced: Option<Arc<Frame>> = None;
             let mut asks = KeyframeAsks::default();
             // Set while the decoder lacks the references anything but a keyframe needs.
-            let mut awaiting_keyframe = false;
+            let mut awaiting_keyframe = true;
             // Units taken from the channel to be decoded before any still in it.
             let mut queued: VecDeque<Received> = VecDeque::new();
             let mut oversized: u64 = 0;
