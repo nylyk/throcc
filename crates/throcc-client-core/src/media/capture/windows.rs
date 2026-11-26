@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use throcc_video::frame::{VideoFrame, copy_nv12, share_size};
+use throcc_video::frame::{ROUNDING_SLACK, VideoFrame, copy_nv12, share_size};
 use windows::Foundation::{TimeSpan, TypedEventHandler};
 use windows::Graphics::Capture::{
     Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureAccess,
@@ -620,7 +620,8 @@ fn nv12_texture(
     texture.ok_or_else(|| windows::core::Error::from(E_POINTER))
 }
 
-/// The largest rectangle with the aspect ratio of `source`, centred in `target`.
+/// The largest rectangle with the aspect ratio of `source`, centred in `target`, or all of
+/// `target` when only rounding separates their shapes.
 fn fit(source: (u32, u32), target: (u32, u32)) -> RECT {
     let (sw, sh) = (u64::from(source.0.max(1)), u64::from(source.1.max(1)));
     let (tw, th) = (u64::from(target.0), u64::from(target.1));
@@ -628,6 +629,12 @@ fn fit(source: (u32, u32), target: (u32, u32)) -> RECT {
         (tw, tw * sh / sw)
     } else {
         (th * sw / sh, th)
+    };
+    let slack = ROUNDING_SLACK as u64;
+    let (w, h) = if tw - w <= slack && th - h <= slack {
+        (tw, th)
+    } else {
+        (w, h)
     };
     let (left, top) = ((tw - w) / 2, (th - h) / 2);
     RECT {
@@ -917,6 +924,11 @@ mod tests {
         assert_eq!(
             (same.left, same.top, same.right, same.bottom),
             (0, 0, 1920, 1080)
+        );
+        let rounded = fit((1505, 953), (1504, 952));
+        assert_eq!(
+            (rounded.left, rounded.top, rounded.right, rounded.bottom),
+            (0, 0, 1504, 952)
         );
     }
 

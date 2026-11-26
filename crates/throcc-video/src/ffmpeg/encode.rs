@@ -16,7 +16,7 @@ use super::decode::to_nv12;
 use super::vaapi::{self, Rectangle, Vpp};
 #[cfg(target_os = "linux")]
 use crate::frame::share_size;
-use crate::frame::{VideoFrame, fit_within};
+use crate::frame::{ROUNDING_SLACK, VideoFrame, fit_within};
 #[cfg(target_os = "linux")]
 use crate::{DmaBuf, GpuEncoded};
 use crate::{EncodeError, EncodedUnit, EncoderConfig, switches};
@@ -613,11 +613,14 @@ fn cuda_present() -> bool {
     true
 }
 
-/// The largest rectangle with the aspect ratio of `source`, centred in `target`, as
-/// (x, y, width, height), all even.
+/// The largest rectangle with the aspect ratio of `source`, centred in `target`, or all of
+/// `target` when only rounding separates their shapes, as (x, y, width, height), all even.
 fn fitted(source: (usize, usize), target: (usize, usize)) -> (usize, usize, usize, usize) {
     let (tw, th) = target;
     let (width, height) = fit_within(source, target);
+    if tw - width <= ROUNDING_SLACK && th - height <= ROUNDING_SLACK {
+        return (0, 0, tw & !1, th & !1);
+    }
     (
         ((tw - width) / 2) & !1,
         ((th - height) / 2) & !1,
@@ -835,6 +838,7 @@ mod tests {
         assert_eq!(fitted((2560, 1440), (1920, 1080)), (0, 0, 1920, 1080));
         assert_eq!(fitted((1000, 1000), (1280, 720)), (280, 0, 720, 720));
         assert_eq!(fitted((3840, 1080), (1280, 720)), (0, 180, 1280, 360));
+        assert_eq!(fitted((1505, 953), (1504, 952)), (0, 0, 1504, 952));
         for source in [(1, 1), (1, 5000), (5000, 1), (641, 359), (1279, 721)] {
             let (x, y, width, height) = fitted(source, (1280, 720));
             assert!(

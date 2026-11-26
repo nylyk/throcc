@@ -302,6 +302,10 @@ pub fn fit_within(source: (usize, usize), bound: (usize, usize)) -> (usize, usiz
     (even(width).min(bw & !1), even(height).min(bh & !1))
 }
 
+/// Pixels a fitted picture may fall short of its target on each side from rounding alone.
+/// A picture that close fills the target, stretched by at most that much.
+pub const ROUNDING_SLACK: usize = 2;
+
 /// The size a share of a `source`-sized screen is encoded at: its own aspect ratio, fitted
 /// in `bound` and never larger than the source.
 pub fn share_size(source: (usize, usize), bound: (usize, usize)) -> (usize, usize) {
