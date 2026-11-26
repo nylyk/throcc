@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::task::{Context, Waker};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use ashpd::desktop::screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType};
 use ashpd::desktop::{PersistMode, ResponseError, Session};
@@ -60,6 +61,8 @@ const DMABUF_FORMATS: [(VideoFormat, u32); 4] = [
     (VideoFormat::RGBA, fourcc(b"AB24")),
 ];
 const MAX_SIDE: u32 = 8192;
+/// How long a newly negotiated format may go without a frame before the stream restarts.
+const FORMAT_FRAME_WAIT: Duration = Duration::from_millis(500);
 const NANOS: i64 = 1_000_000_000;
 
 /// Shows the portal's picker and reads the stream it shares.
@@ -239,6 +242,7 @@ impl PipeWireCapture {
                 spare: None,
                 dropped: counted,
                 lent: Rc::default(),
+                format_since: Rc::default(),
             };
             run(node, fd, config, state, stopped, control_rx, ready)
         })?;
@@ -470,6 +474,7 @@ fn run(
         Vec::new()
     };
     let lent = state.lent.clone();
+    let format_since = state.format_since.clone();
     let _listener = stream
         .add_local_listener_with_user_data(state)
         .state_changed(move |_, _, _, new| {
@@ -522,6 +527,26 @@ fn run(
             }
         }
     });
+    let restart = mainloop.loop_().add_timer(move |_| {
+        if format_since
+            .get()
+            .is_none_or(|since| since.elapsed() < FORMAT_FRAME_WAIT)
+        {
+            return;
+        }
+        format_since.set(None);
+        warn!("no frame since the screen capture's format changed; restarting it");
+        // SAFETY: this timer is removed when `restart` drops, before `stream`.
+        let stream = unsafe { raw.as_ref() };
+        // xdg-desktop-portal-hyprland stops asking for frames after the compositor fails
+        // one, as it does when a window is resized mid-copy, until its stream restarts.
+        stream.set_active(false).ok();
+        stream.set_active(true).ok();
+    });
+    restart
+        .update_timer(Some(FORMAT_FRAME_WAIT), Some(FORMAT_FRAME_WAIT))
+        .into_sync_result()
+        .map_err(failed)?;
     ready.send(Ok(())).ok();
     mainloop.run();
     Ok(())
@@ -754,6 +779,8 @@ struct StreamState {
     spare: Option<Slot>,
     dropped: Arc<AtomicU64>,
     lent: Rc<Lent>,
+    /// When the current format was negotiated, until its first frame arrives.
+    format_since: Rc<Cell<Option<Instant>>>,
 }
 
 impl StreamState {
@@ -969,6 +996,7 @@ fn on_param_changed(
     let Some(layout) = state.layout else {
         return;
     };
+    state.format_since.set(Some(Instant::now()));
     let chosen = match layout.drm {
         Some(_) => &buffers.dmabuf,
         None => &buffers.shared,
@@ -993,6 +1021,7 @@ fn on_process(stream: &Stream, state: &mut StreamState) {
     let Some(buffer) = NonNull::new(unsafe { stream.dequeue_raw_buffer() }) else {
         return;
     };
+    state.format_since.set(None);
     if !state.take(buffer) {
         // SAFETY: the buffer came from this stream and is not lent.
         unsafe { stream.queue_raw_buffer(buffer.as_ptr()) };
@@ -1218,8 +1247,6 @@ fn convert(bytes: &[u8], picture: &Picture, into: &mut VideoFrame) {
     clippy::panic
 )]
 mod tests {
-    use std::time::{Duration, Instant};
-
     use super::*;
     use crate::media::audio::SAMPLE_RATE;
     use crate::media::capture::frames_within;
